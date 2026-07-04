@@ -1,0 +1,665 @@
+`default_nettype none
+
+// MC68030 BIU — Core Bus Cycle Generator
+//
+// Phase 2 adds:
+//   - Power-on SSP and PC vector fetches (BIU-051, BIU-052)
+//   - Normal read cycle S0–S7 with DSACK termination (BIU-024 to BIU-031)
+//   - Normal write cycle S0–S7 with DSACK termination (BIU-025)
+//   - Wait-state insertion on DSACK=11 (BIU-026)
+//   - ECS asserts at S0; OCS asserts at S1 on operand cycles (BIU-008, BIU-009)
+//   - sphase abstraction: maps all cycle types to shared S0–S7 output logic
+//   - Grant inputs from biu_arbiter for EU/IFU/MMU cycle ownership
+//
+// Signal timing per S-state (BIU-024):
+//   S0: A, FC, SIZ, RW driven; ECS_n asserts
+//   S1: ECS_n deasserts; OCS_n asserts on operand cycles
+//   S2: AS_n asserts; data bus hi-Z on reads
+//   S3: DS_n asserts; write data driven; OCS_n held
+//   S4: DSACK sampled at phase==3; if 11, insert wait and loop to S5
+//   S5: wait state; DSACK resampled at phase==3
+//   S6: data captured (reads); AS_n and DS_n deassert; OCS_n deasserts
+//   S7: bus_ack pulsed to winning requester; state returns to IDLE
+
+module biu_cycle_gen #(
+    parameter int RSTOUT_CLKS = 124
+) (
+    input  logic        clk_4x,
+    input  logic        rst_n,
+
+    // External bus outputs
+    output logic [31:0] ext_a,
+    output logic        ext_as_n,
+    output logic        ext_ds_n,
+    output logic        ext_rw,
+    output logic [2:0]  ext_fc,
+    output logic [1:0]  ext_siz,
+    output logic        ext_ecs_n,
+    output logic        ext_ocs_n,
+    output logic [31:0] ext_d_out,
+    output logic        ext_d_oe,
+    output logic        ext_rstout_n,
+    output logic        ext_cbreq_n,
+
+    // External bus read data input
+    input  logic [31:0] ext_d_in,
+
+    // Synchronised async inputs
+    input  logic        dsack0_s,
+    input  logic        dsack1_s,
+    input  logic        sterm_s,
+    input  logic        berr_s,
+    input  logic        halt_s,
+    input  logic        avec_s,
+    input  logic        vpa_s,
+    input  logic [2:0]  ipl_s,
+    input  logic        bgack_s,
+    input  logic        cback_s,
+
+    // Grant inputs from biu_arbiter (one-hot)
+    input  logic        grant_mmu,
+    input  logic        grant_eu,
+    input  logic        grant_ifu,
+    input  logic        dma_active, // cycle_gen tri-states bus while DMA owns it
+
+    // Internal — Execution Unit
+    input  logic [31:0] eu_addr,
+    input  logic [31:0] eu_wdata,
+    output logic [31:0] eu_rdata,
+    input  logic [2:0]  eu_fc,
+    input  logic        eu_rw,
+    input  logic [1:0]  eu_siz,
+    input  logic        eu_is_operand,
+    input  logic        eu_req,
+    output logic        eu_ack,
+    output logic        eu_berr,
+    output logic        eu_retry,
+
+    // Internal — Instruction Fetch Unit
+    input  logic [31:0] ifu_addr,
+    input  logic        ifu_req,
+    output logic [31:0] ifu_rdata,
+    output logic        ifu_ack,
+    output logic        ifu_berr,
+
+    // Internal — MMU table walk
+    input  logic [31:0] mmu_addr,
+    input  logic [2:0]  mmu_fc,
+    input  logic        mmu_req,
+    output logic [31:0] mmu_rdata,
+    output logic        mmu_ack,
+    output logic        mmu_berr,
+
+    // IACK cycle interface
+    input  logic        eu_iack_req,
+    input  logic [2:0]  eu_iack_level,
+    output logic [7:0]  eu_iack_vec,
+    output logic        eu_iack_avec,
+    output logic        eu_iack_ack,
+
+    // E-clock for VPA sync
+    input  logic [3:0]  eclk_cnt,
+
+    // Status outputs
+    output logic [1:0]  phase,           // Current 4x phase (0–3)
+    output logic [5:0]  s_state,         // Current bus state index
+    output logic        bus_idle,        // 1 = in ST_IDLE; biu_arbiter uses this
+    output logic        init_done,       // 1 = SSP+PC fetches complete
+    output logic [31:0] init_ssp,        // Captured SSP from power-on fetch
+    output logic [31:0] init_pc,         // Captured PC from power-on fetch
+    output logic [1:0]  cyc_port_dsack   // DSACK latched at S4/S5: {dsack1_s,dsack0_s}
+);
+
+    // -----------------------------------------------------------------------
+    // State encoding
+    // -----------------------------------------------------------------------
+    typedef enum logic [5:0] {
+        ST_RESET         = 6'd0,
+        ST_IDLE          = 6'd1,
+
+        ST_INIT_SSP_S0   = 6'd2,
+        ST_INIT_SSP_S1   = 6'd3,
+        ST_INIT_SSP_S2   = 6'd4,
+        ST_INIT_SSP_S3   = 6'd5,
+        ST_INIT_SSP_S4   = 6'd6,
+        ST_INIT_SSP_S5   = 6'd7,
+        ST_INIT_SSP_S6   = 6'd8,
+        ST_INIT_SSP_S7   = 6'd9,
+        ST_INIT_PC_S0    = 6'd10,
+        ST_INIT_PC_S1    = 6'd11,
+        ST_INIT_PC_S2    = 6'd12,
+        ST_INIT_PC_S3    = 6'd13,
+        ST_INIT_PC_S4    = 6'd14,
+        ST_INIT_PC_S5    = 6'd15,
+        ST_INIT_PC_S6    = 6'd16,
+        ST_INIT_PC_S7    = 6'd17,
+
+        ST_READ_S0       = 6'd18,
+        ST_READ_S1       = 6'd19,
+        ST_READ_S2       = 6'd20,
+        ST_READ_S3       = 6'd21,
+        ST_READ_S4       = 6'd22,
+        ST_READ_S5       = 6'd23,
+        ST_READ_S6       = 6'd24,
+        ST_READ_S7       = 6'd25,
+
+        ST_WRITE_S0      = 6'd26,
+        ST_WRITE_S1      = 6'd27,
+        ST_WRITE_S2      = 6'd28,
+        ST_WRITE_S3      = 6'd29,
+        ST_WRITE_S4      = 6'd30,
+        ST_WRITE_S5      = 6'd31,
+        ST_WRITE_S6      = 6'd32,
+        ST_WRITE_S7      = 6'd33,
+
+        // Future phases: burst, RMW, IACK, STERM, VPA, error
+        ST_BURST_S0      = 6'd34,
+        ST_BURST_S1      = 6'd35,
+        ST_BURST_S2      = 6'd36,
+        ST_BURST_S3      = 6'd37,
+        ST_BURST_S4      = 6'd38,
+        ST_BURST_S5      = 6'd39,
+        ST_BURST_S6      = 6'd40,
+        ST_BURST_S7      = 6'd41,
+        ST_BURST_NEXT_S3 = 6'd42,
+        ST_BURST_NEXT_S4 = 6'd43,
+        ST_BURST_NEXT_S5 = 6'd44,
+        ST_BURST_NEXT_S6 = 6'd45,
+        ST_BURST_NEXT_S7 = 6'd46,
+
+        ST_RMW_READ_S0   = 6'd47,
+        ST_RMW_READ_S1   = 6'd48,
+        ST_RMW_READ_S2   = 6'd49,
+        ST_RMW_READ_S3   = 6'd50,
+        ST_RMW_READ_S4   = 6'd51,
+        ST_RMW_READ_S5   = 6'd52,
+        ST_RMW_READ_S6   = 6'd53,
+        ST_RMW_WRITE_S0  = 6'd54,
+        ST_RMW_WRITE_S1  = 6'd55,
+        ST_RMW_WRITE_S2  = 6'd56,
+        ST_RMW_WRITE_S3  = 6'd57,
+        ST_RMW_WRITE_S4  = 6'd58,
+        ST_RMW_WRITE_S5  = 6'd59,
+        ST_RMW_WRITE_S6  = 6'd60,
+        ST_RMW_WRITE_S7  = 6'd61,
+
+        ST_IACK_S0       = 6'd62,
+        ST_IACK_S1       = 6'd63
+    } bus_state_t;
+
+    bus_state_t state, state_nxt;
+
+    // -----------------------------------------------------------------------
+    // Reset synchroniser (BIU-023): async assert, synchronous deassert
+    // -----------------------------------------------------------------------
+    logic rst_s1, rst_s2;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            rst_s1 <= 1'b0;
+            rst_s2 <= 1'b0;
+        end else begin
+            rst_s1 <= 1'b1;
+            rst_s2 <= rst_s1;
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // 4× phase counter (BIU-110)
+    // -----------------------------------------------------------------------
+    logic [1:0] phase_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            phase_r <= 2'd0;
+        else if (!rst_s2)
+            phase_r <= 2'd0;
+        else
+            phase_r <= phase_r + 2'd1;
+    end
+
+    assign phase   = phase_r;
+    assign s_state = 6'(state);
+
+    // -----------------------------------------------------------------------
+    // State register — transitions at phase==3 (end of external clock)
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            state <= ST_RESET;
+        else if (phase_r == 2'd3)
+            state <= state_nxt;
+    end
+
+    // -----------------------------------------------------------------------
+    // DSACK wait indicator: _s signals are synchronised, active-high.
+    // Neither asserted (both 0) = memory not ready = insert wait state.
+    // Declared here so it is available to the data-capture blocks below.
+    // -----------------------------------------------------------------------
+    logic dsack_wait;
+    assign dsack_wait = !dsack0_s & !dsack1_s;
+
+    // -----------------------------------------------------------------------
+    // Init-done and captured init vectors
+    //
+    // Data is captured when DSACK is confirmed (at phase==3 of S4 or S5,
+    // when !dsack_wait transitions us to S6).  By S6, AS/DS have already
+    // deasserted so the memory has released ext_d_in.
+    // -----------------------------------------------------------------------
+    logic        init_done_r;
+    logic [31:0] init_ssp_r, init_pc_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            init_done_r <= 1'b0;
+            init_ssp_r  <= 32'h0;
+            init_pc_r   <= 32'h0;
+        end else begin
+            // Capture when DSACK confirms and we are about to leave the wait loop
+            if (phase_r == 2'd3 && !dsack_wait) begin
+                if (state == ST_INIT_SSP_S4 || state == ST_INIT_SSP_S5)
+                    init_ssp_r <= ext_d_in;
+                if (state == ST_INIT_PC_S4  || state == ST_INIT_PC_S5)
+                    init_pc_r  <= ext_d_in;
+            end
+            // Mark init complete at end of ST_INIT_PC_S7
+            if (state == ST_INIT_PC_S7 && phase_r == 2'd3)
+                init_done_r <= 1'b1;
+        end
+    end
+
+    assign init_done = init_done_r;
+    assign init_ssp  = init_ssp_r;
+    assign init_pc   = init_pc_r;
+
+    // -----------------------------------------------------------------------
+    // Captured read data for EU/IFU/MMU cycles
+    // Same reasoning: capture when DSACK asserts (S4 or S5), not at S6.
+    // Also latch the port width (DSACK encoding) for the sizing FSM.
+    // -----------------------------------------------------------------------
+    logic [31:0] captured_rdata;
+    logic [1:0]  port_dsack_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            port_dsack_r <= 2'b00;
+        else if (phase_r == 2'd3 && !dsack_wait) begin
+            if (state == ST_READ_S4  || state == ST_READ_S5  ||
+                state == ST_WRITE_S4 || state == ST_WRITE_S5) begin
+                port_dsack_r <= {dsack1_s, dsack0_s};
+            end
+        end
+    end
+
+    assign cyc_port_dsack = port_dsack_r;
+
+    always_ff @(posedge clk_4x) begin
+        if (phase_r == 2'd3 && !dsack_wait)
+            if (state == ST_READ_S4 || state == ST_READ_S5)
+                captured_rdata <= ext_d_in;
+    end
+
+    // -----------------------------------------------------------------------
+    // S-phase abstraction
+    // Maps every bus-cycle state to the corresponding S0–S7 position so that
+    // the output logic is written once and shared across read/write/init cycles.
+    // SP_NONE is used for IDLE, RESET, and unimplemented states.
+    // -----------------------------------------------------------------------
+    localparam logic [3:0] SP_NONE = 4'd15;
+    localparam logic [3:0] SP_S0   = 4'd0;
+    localparam logic [3:0] SP_S1   = 4'd1;
+    localparam logic [3:0] SP_S2   = 4'd2;
+    localparam logic [3:0] SP_S3   = 4'd3;
+    localparam logic [3:0] SP_S4   = 4'd4;
+    localparam logic [3:0] SP_S5   = 4'd5;
+    localparam logic [3:0] SP_S6   = 4'd6;
+    localparam logic [3:0] SP_S7   = 4'd7;
+
+    logic [3:0] sphase;
+
+    always_comb begin
+        case (state)
+            ST_INIT_SSP_S0, ST_INIT_PC_S0,
+            ST_READ_S0, ST_WRITE_S0:                 sphase = SP_S0;
+
+            ST_INIT_SSP_S1, ST_INIT_PC_S1,
+            ST_READ_S1, ST_WRITE_S1:                 sphase = SP_S1;
+
+            ST_INIT_SSP_S2, ST_INIT_PC_S2,
+            ST_READ_S2, ST_WRITE_S2:                 sphase = SP_S2;
+
+            ST_INIT_SSP_S3, ST_INIT_PC_S3,
+            ST_READ_S3, ST_WRITE_S3:                 sphase = SP_S3;
+
+            ST_INIT_SSP_S4, ST_INIT_PC_S4,
+            ST_READ_S4, ST_WRITE_S4:                 sphase = SP_S4;
+
+            ST_INIT_SSP_S5, ST_INIT_PC_S5,
+            ST_READ_S5, ST_WRITE_S5:                 sphase = SP_S5;
+
+            ST_INIT_SSP_S6, ST_INIT_PC_S6,
+            ST_READ_S6, ST_WRITE_S6:                 sphase = SP_S6;
+
+            ST_INIT_SSP_S7, ST_INIT_PC_S7,
+            ST_READ_S7, ST_WRITE_S7:                 sphase = SP_S7;
+
+            default:                                  sphase = SP_NONE;
+        endcase
+    end
+
+    // -----------------------------------------------------------------------
+    // Cycle parameter mux
+    // Selects address/FC/SIZ/RW/data from the winning requester.
+    // Init fetches override all arbiter grants.
+    // -----------------------------------------------------------------------
+    logic is_init_ssp, is_init_pc;
+
+    assign is_init_ssp = (state == ST_INIT_SSP_S0) | (state == ST_INIT_SSP_S1) |
+                         (state == ST_INIT_SSP_S2) | (state == ST_INIT_SSP_S3) |
+                         (state == ST_INIT_SSP_S4) | (state == ST_INIT_SSP_S5) |
+                         (state == ST_INIT_SSP_S6) | (state == ST_INIT_SSP_S7);
+
+    assign is_init_pc  = (state == ST_INIT_PC_S0)  | (state == ST_INIT_PC_S1)  |
+                         (state == ST_INIT_PC_S2)  | (state == ST_INIT_PC_S3)  |
+                         (state == ST_INIT_PC_S4)  | (state == ST_INIT_PC_S5)  |
+                         (state == ST_INIT_PC_S6)  | (state == ST_INIT_PC_S7);
+
+    logic [31:0] cyc_addr;
+    logic [2:0]  cyc_fc;
+    logic [1:0]  cyc_siz;
+    logic        cyc_rw;
+    logic        cyc_is_op;
+    logic [31:0] cyc_wdata;
+
+    always_comb begin
+        // Defaults (safe)
+        cyc_addr  = 32'h0;
+        cyc_fc    = 3'b110;   // Supervisor Program (safe default)
+        cyc_siz   = 2'b00;
+        cyc_rw    = 1'b1;
+        cyc_is_op = 1'b0;
+        cyc_wdata = 32'h0;
+
+        if (is_init_ssp) begin
+            cyc_addr = 32'h0000_0000;
+            cyc_fc   = 3'b110;
+        end else if (is_init_pc) begin
+            cyc_addr = 32'h0000_0004;
+            cyc_fc   = 3'b110;
+        end else if (grant_mmu) begin
+            cyc_addr = mmu_addr;
+            cyc_fc   = mmu_fc;
+        end else if (grant_eu) begin
+            cyc_addr  = eu_addr;
+            cyc_fc    = eu_fc;
+            cyc_siz   = eu_siz;
+            cyc_rw    = eu_rw;
+            cyc_is_op = eu_is_operand;
+            cyc_wdata = eu_wdata;
+        end else if (grant_ifu) begin
+            cyc_addr = ifu_addr;
+            cyc_fc   = 3'b110;   // Supervisor Program (simplified)
+            cyc_siz  = 2'b10;    // Word (instruction word)
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Next-state logic
+    // -----------------------------------------------------------------------
+    always_comb begin
+        state_nxt = state;  // default: hold
+
+        unique case (state)
+            // --- Reset and init -----------------------------------------------
+            ST_RESET: begin
+                if (rst_s2)
+                    state_nxt = ST_IDLE;
+            end
+
+            ST_IDLE: begin
+                if (!init_done_r) begin
+                    state_nxt = ST_INIT_SSP_S0;
+                end else if (!dma_active) begin
+                    // Guard each cycle-start with the originating request so
+                    // a stale arbiter grant from the previous cycle cannot
+                    // accidentally re-trigger a new cycle before the arbiter
+                    // has had a tick to clear it.
+                    if (grant_mmu && mmu_req) begin
+                        state_nxt = ST_READ_S0;
+                    end else if (grant_eu && eu_req) begin
+                        if (eu_rw) state_nxt = ST_READ_S0;
+                        else       state_nxt = ST_WRITE_S0;
+                    end else if (grant_ifu && ifu_req) begin
+                        state_nxt = ST_READ_S0;
+                    end
+                end
+            end
+
+            // --- Init SSP fetch (read, addr=$00000000, FC=110) ----------------
+            ST_INIT_SSP_S0: state_nxt = ST_INIT_SSP_S1;
+            ST_INIT_SSP_S1: state_nxt = ST_INIT_SSP_S2;
+            ST_INIT_SSP_S2: state_nxt = ST_INIT_SSP_S3;
+            ST_INIT_SSP_S3: state_nxt = ST_INIT_SSP_S4;
+            ST_INIT_SSP_S4: begin
+                if (dsack_wait) state_nxt = ST_INIT_SSP_S5;
+                else            state_nxt = ST_INIT_SSP_S6;
+            end
+            ST_INIT_SSP_S5: begin
+                if (dsack_wait) state_nxt = ST_INIT_SSP_S5;
+                else            state_nxt = ST_INIT_SSP_S6;
+            end
+            ST_INIT_SSP_S6: state_nxt = ST_INIT_SSP_S7;
+            ST_INIT_SSP_S7: state_nxt = ST_INIT_PC_S0;
+
+            // --- Init PC fetch (read, addr=$00000004, FC=110) -----------------
+            ST_INIT_PC_S0: state_nxt = ST_INIT_PC_S1;
+            ST_INIT_PC_S1: state_nxt = ST_INIT_PC_S2;
+            ST_INIT_PC_S2: state_nxt = ST_INIT_PC_S3;
+            ST_INIT_PC_S3: state_nxt = ST_INIT_PC_S4;
+            ST_INIT_PC_S4: begin
+                if (dsack_wait) state_nxt = ST_INIT_PC_S5;
+                else            state_nxt = ST_INIT_PC_S6;
+            end
+            ST_INIT_PC_S5: begin
+                if (dsack_wait) state_nxt = ST_INIT_PC_S5;
+                else            state_nxt = ST_INIT_PC_S6;
+            end
+            ST_INIT_PC_S6: state_nxt = ST_INIT_PC_S7;
+            ST_INIT_PC_S7: state_nxt = ST_IDLE;
+
+            // --- Normal read cycle (EU, IFU, or MMU) --------------------------
+            ST_READ_S0: state_nxt = ST_READ_S1;
+            ST_READ_S1: state_nxt = ST_READ_S2;
+            ST_READ_S2: state_nxt = ST_READ_S3;
+            ST_READ_S3: state_nxt = ST_READ_S4;
+            ST_READ_S4: begin
+                if (dsack_wait) state_nxt = ST_READ_S5;
+                else            state_nxt = ST_READ_S6;
+            end
+            ST_READ_S5: begin
+                if (dsack_wait) state_nxt = ST_READ_S5;
+                else            state_nxt = ST_READ_S6;
+            end
+            ST_READ_S6: state_nxt = ST_READ_S7;
+            ST_READ_S7: state_nxt = ST_IDLE;
+
+            // --- Normal write cycle (EU only) ---------------------------------
+            ST_WRITE_S0: state_nxt = ST_WRITE_S1;
+            ST_WRITE_S1: state_nxt = ST_WRITE_S2;
+            ST_WRITE_S2: state_nxt = ST_WRITE_S3;
+            ST_WRITE_S3: state_nxt = ST_WRITE_S4;
+            ST_WRITE_S4: begin
+                if (dsack_wait) state_nxt = ST_WRITE_S5;
+                else            state_nxt = ST_WRITE_S6;
+            end
+            ST_WRITE_S5: begin
+                if (dsack_wait) state_nxt = ST_WRITE_S5;
+                else            state_nxt = ST_WRITE_S6;
+            end
+            ST_WRITE_S6: state_nxt = ST_WRITE_S7;
+            ST_WRITE_S7: state_nxt = ST_IDLE;
+
+            // Burst, RMW, IACK — implemented in later phases
+            default: state_nxt = ST_IDLE;
+        endcase
+    end
+
+    // -----------------------------------------------------------------------
+    // Combinational bus output logic
+    // Driven from sphase + cyc_* parameters; safe defaults first.
+    //
+    // Note: DSACK transitions (S4/S5 loops) are determined in next-state
+    // logic above; the output signals are purely driven by sphase here.
+    // -----------------------------------------------------------------------
+    always_comb begin
+        // Safe defaults (RESET, IDLE, unimplemented states)
+        ext_a        = 32'h0;
+        ext_as_n     = 1'b1;
+        ext_ds_n     = 1'b1;
+        ext_rw       = 1'b1;
+        ext_fc       = 3'b000;
+        ext_siz      = 2'b00;
+        ext_ecs_n    = 1'b1;
+        ext_ocs_n    = 1'b1;
+        ext_d_out    = 32'h0;
+        ext_d_oe     = 1'b0;
+        ext_rstout_n = 1'b1;
+        ext_cbreq_n  = 1'b1;
+
+        eu_rdata     = 32'h0;
+        eu_ack       = 1'b0;
+        eu_berr      = 1'b0;
+        eu_retry     = 1'b0;
+        ifu_rdata    = 32'h0;
+        ifu_ack      = 1'b0;
+        ifu_berr     = 1'b0;
+        mmu_rdata    = 32'h0;
+        mmu_ack      = 1'b0;
+        mmu_berr     = 1'b0;
+        eu_iack_vec  = 8'h00;
+        eu_iack_avec = 1'b0;
+        eu_iack_ack  = 1'b0;
+
+        if (dma_active) begin
+            // All outputs hi-Z / deasserted while DMA owns the bus
+            // (safe defaults above already achieve this)
+        end else begin
+            case (sphase)
+                // S0: drive address and control; ECS asserts (BIU-001–007, BIU-008)
+                SP_S0: begin
+                    ext_a     = cyc_addr;
+                    ext_fc    = cyc_fc;
+                    ext_siz   = cyc_siz;
+                    ext_rw    = cyc_rw;
+                    ext_ecs_n = 1'b0;    // ECS asserts
+                    ext_ocs_n = 1'b1;
+                    ext_as_n  = 1'b1;
+                    ext_ds_n  = 1'b1;
+                    ext_d_oe  = 1'b0;
+                end
+
+                // S1: address stable; ECS deasserts; OCS asserts on data cycles
+                SP_S1: begin
+                    ext_a     = cyc_addr;
+                    ext_fc    = cyc_fc;
+                    ext_siz   = cyc_siz;
+                    ext_rw    = cyc_rw;
+                    ext_ecs_n = 1'b1;           // ECS deasserts
+                    ext_ocs_n = !cyc_is_op;     // OCS asserts when is_operand
+                    ext_as_n  = 1'b1;
+                    ext_ds_n  = 1'b1;
+                    ext_d_oe  = 1'b0;
+                end
+
+                // S2: AS asserts (BIU-003); data bus hi-Z on reads
+                SP_S2: begin
+                    ext_a     = cyc_addr;
+                    ext_fc    = cyc_fc;
+                    ext_siz   = cyc_siz;
+                    ext_rw    = cyc_rw;
+                    ext_ecs_n = 1'b1;
+                    ext_ocs_n = !cyc_is_op;
+                    ext_as_n  = 1'b0;    // AS asserts
+                    ext_ds_n  = 1'b1;
+                    ext_d_oe  = 1'b0;
+                end
+
+                // S3: DS asserts (BIU-004); write data driven (BIU-025)
+                SP_S3: begin
+                    ext_a     = cyc_addr;
+                    ext_fc    = cyc_fc;
+                    ext_siz   = cyc_siz;
+                    ext_rw    = cyc_rw;
+                    ext_ecs_n = 1'b1;
+                    ext_ocs_n = !cyc_is_op;
+                    ext_as_n  = 1'b0;
+                    ext_ds_n  = 1'b0;    // DS asserts
+                    ext_d_oe  = !cyc_rw; // drive bus on writes only
+                    ext_d_out = cyc_rw ? 32'h0 : cyc_wdata;
+                end
+
+                // S4, S5: hold; DSACK sampled at phase==3 (in next-state logic)
+                SP_S4, SP_S5: begin
+                    ext_a     = cyc_addr;
+                    ext_fc    = cyc_fc;
+                    ext_siz   = cyc_siz;
+                    ext_rw    = cyc_rw;
+                    ext_ecs_n = 1'b1;
+                    ext_ocs_n = !cyc_is_op;
+                    ext_as_n  = 1'b0;
+                    ext_ds_n  = 1'b0;
+                    ext_d_oe  = !cyc_rw;
+                    ext_d_out = cyc_rw ? 32'h0 : cyc_wdata;
+                end
+
+                // S6: data captured in always_ff above; AS and DS deassert (BIU-003/004)
+                SP_S6: begin
+                    ext_a     = cyc_addr;
+                    ext_fc    = cyc_fc;
+                    ext_siz   = cyc_siz;
+                    ext_rw    = cyc_rw;
+                    ext_ecs_n = 1'b1;
+                    ext_ocs_n = 1'b1;    // OCS deasserts
+                    ext_as_n  = 1'b1;    // AS deasserts
+                    ext_ds_n  = 1'b1;    // DS deasserts
+                    ext_d_oe  = 1'b0;    // release data bus
+                end
+
+                // S7: present read data; pulse ack to winning unit (BIU-024)
+                SP_S7: begin
+                    ext_a     = 32'h0;
+                    ext_fc    = 3'b0;
+                    ext_ecs_n = 1'b1;
+                    ext_ocs_n = 1'b1;
+                    ext_as_n  = 1'b1;
+                    ext_ds_n  = 1'b1;
+                    ext_d_oe  = 1'b0;
+
+                    // Route captured data and ack to the winning requester
+                    if (is_init_ssp | is_init_pc) begin
+                        // Init fetches: no external ack needed; data captured internally
+                    end else if (grant_mmu) begin
+                        mmu_rdata = captured_rdata;
+                        mmu_ack   = 1'b1;
+                    end else if (grant_eu) begin
+                        eu_rdata  = captured_rdata;
+                        eu_ack    = 1'b1;
+                    end else if (grant_ifu) begin
+                        ifu_rdata = captured_rdata;
+                        ifu_ack   = 1'b1;
+                    end
+                end
+
+                default: ; // SP_NONE — safe defaults already applied
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // bus_idle: drives the biu_arbiter so it knows when to grant next cycle
+    // -----------------------------------------------------------------------
+    assign bus_idle = (state == ST_IDLE);
+
+endmodule
+
+`default_nettype wire

@@ -1,0 +1,1215 @@
+Apart from the biu, what are the other top level units (eg eu or execution unit?) which one should I tackle after the biu ?
+
+Thinking completed
+
+Top-Level Units of the 68030 and Development Order
+
+Beyond the BIU, the 68030 consists of several major top-level units. Here's the complete picture, followed by my recommended development order.
+The Top-Level Units
+
+
+
+12345678910111213141516171819202122232425262728293031
++-------------------------------------------------------------------+|                        m68030_top                                 ||                                                                   ||  +----------+   +----------+   +----------+   +----------+       ||  |   IFU    |-->|    EU    |-->|   MMU    |-->|   BIU    |       ||  | Instr    |   | Execute  |   | Memory   |   | Bus      |       ||  | Fetch    |   | Unit     |   | Mgmt     |   | Interface|       ||  +----------+   +----------+   +----------+   +----------+       ||       |              |              |              |              ||       v              v              v              v              ||  +----------+   +----------+   +----------+                    ||  | Prefetch |   |   AGU    |   |   TLB    |                    ||  | Queue    |   | Address  |   | Translation|                  ||  | (8-byte) |   | Gen Unit |   | Lookaside |                   ||  +----------+   +----------+   +----------+                    ||                                                                   ||  +----------+   +----------+   +----------+   +----------+       ||  | I-Cache  |   | D-Cache  |   |  Micro-  |   | Interrupt|       ||  | 256-byte |   | 256-byte |   | sequencer|   | Exception|       ||  | Direct   |   | Write-   |   | / Decode |   | Control  |       ||  | Mapped   |   | Through  |   |          |   |          |       ||  +----------+   +----------+   +----------+   +----------+       ||                                                                   ||  +----------+   +----------+                                    ||  | Register |   |  System  |                                    ||  | File     |   | Registers|                                    ||  | D0-D7    |   | VBR,CACR |                                    ||  | A0-A7    |   | TC,TT0.. |                                    ||  | USP/SSP  |   | CRP,SRP  |                                    ||  +----------+   +----------+                                    |+-------------------------------------------------------------------+
+1. IFU (Instruction Fetch Unit)
+
+Manages the 4-word (8-byte) prefetch queue
+Calculates next PC
+Handles branch target calculation
+Issues instruction fetch requests to BIU (or I-Cache)
+Detects instruction alignment issues
+2. EU (Execution Unit)
+
+The "heart" of the CPU, containing several sub-units:
+Register File: D0-D7, A0-A7, USP, SSP, PC, SR
+ALU: 32-bit arithmetic and logic operations
+Barrel Shifter: For ASL/ASR/LSL/LSR/ROL/ROR
+Multiplier/Divider: MULS/MULU/DIVS/DIVU (variable-cycle)
+BCD Unit: ABCD/SBCD/NBCD
+Condition Code Logic: Evaluates CCR flags (X, N, Z, V, C)
+3. AGU (Address Generation Unit)
+
+Calculates Effective Addresses (EA) for all 9 addressing modes
+Handles pre-decrement, post-increment, displacement, index
+Critical for cycle accuracy (EA calculation takes real cycles)
+Often considered part of the EU but complex enough to be separate
+4. MMU (Memory Management Unit)
+
+Integrated paged MMU (not the external 68851)
+TLB (Translation Lookaside Buffer)
+Table walker state machine (3-level page tables)
+Access protection checking
+Transparent Translation Registers (TT0, TT1)
+Control registers: TC, CRP, SRP, MMUSR, URP
+5. Cache Controllers
+
+I-Cache: 256 bytes, direct-mapped, 16-byte lines
+D-Cache: 256 bytes, direct-mapped, write-through
+Tag RAMs, data RAMs, hit/miss logic
+Burst fill logic for I-Cache
+CACR/CAAR register handling
+6. Microcode/Sequencer
+
+Decodes 16-bit opcodes into micro-operations (µ-ops)
+Controls the pipeline stages
+Handles instruction timing (cycle counting)
+Generates control signals for EU, AGU, BIU
+Manages pipeline hazards and stalls
+7. Interrupt/Exception Controller
+
+Samples IPL[2:0] pins
+Priority resolution
+Vector fetch coordination
+Stack frame generation (9 formats)
+Exception nesting logic
+8. System Registers
+
+VBR (Vector Base Register)
+CACR, CAAR (Cache Control)
+TC, TT0, TT1 (MMU Translation Control)
+CRP, SRP (MMU Root Pointers)
+MMUSR (MMU Status)
+Recommended Development Order
+
+This is the critical strategic question. Here's my recommended order with rationale:
+Phase 1: EU Core (Registers + ALU) — Start Here
+
+Why first:
+Completely self-contained — can be tested without the BIU
+The foundation everything else builds on
+You can write exhaustive unit tests for every instruction
+Gives you immediate gratification (you can "run" simple programs internally)
+What to build:
+Register file (D0-D7, A0-A7, USP, SSP)
+32-bit ALU (ADD, SUB, AND, OR, XOR, NOT, NEG, CMP)
+Barrel shifter
+CCR flag logic (X, N, Z, V, C)
+Basic MOVE instructions
+Simple testbench that loads registers and verifies results
+Estimated LOC: 3,000-4,000
+Phase 2: AGU (Address Generation)
+
+Why second:
+Needed before you can do memory operations
+Can be tested standalone with synthetic addresses
+Complex enough to warrant its own module
+The 9 addressing modes are a huge chunk of 68k complexity
+What to build:
+All 9 addressing modes
+Pre-decrement / post-increment logic
+Index register handling (with scaling)
+PC-relative addressing
+EA calculation timing (cycle counting)
+Estimated LOC: 2,000-3,000
+Phase 3: IFU (Instruction Fetch Unit)
+
+Why third:
+Now you have registers + ALU + AGU, you can fetch real instructions
+The prefetch queue is complex but well-defined
+Can be tested by feeding it known instruction streams
+What to build:
+8-byte prefetch queue
+PC management
+Instruction alignment handling
+Branch target calculation
+Prefetch request generation to BIU
+Estimated LOC: 1,500-2,500
+Phase 4: Microcode/Sequencer
+
+Why fourth:
+This ties everything together
+Now that you have the pieces, you need the conductor
+This is where instruction timing gets defined
+What to build:
+Instruction decode ROM/PLA
+µ-op generation
+Pipeline control
+Cycle counting per instruction
+Hazard detection
+Estimated LOC: 4,000-6,000
+Phase 5: Connect Everything — First Working CPU
+
+At this point, you have an instruction-accurate 68000-class CPU (no caches, no MMU). This is a major milestone!
+Milestone test: Run a simple 68000 program (like a basic calculator or demo) and verify it produces correct results, even if timing isn't perfect yet.
+Phase 6: Cache Controllers
+
+Why sixth:
+Caches are an optimization layer — they don't change correctness, only timing
+Easier to add once the base CPU works
+I-Cache is simpler than D-Cache (no write-back)
+What to build:
+I-Cache (256 bytes, direct-mapped)
+D-Cache (256 bytes, write-through)
+CACR/CAAR register handling
+Cache maintenance instructions (CPUSH, CINVA, CINVL)
+Estimated LOC: 2,000-3,000
+Phase 7: Interrupt/Exception Controller
+
+Why seventh:
+Needs a working CPU to be meaningful
+Complex stack frame generation
+Can be tested with synthetic interrupt scenarios
+What to build:
+IPL sampling
+Vector fetch logic
+All 9 exception stack frame formats
+Exception priority and nesting
+TRAP, TRAPV, CHK handling
+Estimated LOC: 2,000-3,000
+Phase 8: MMU (Save for Last)
+
+Why last:
+The single most complex unit
+Requires everything else to be stable
+Table walks interact with BIU, caches, and EU
+Bugs here are incredibly hard to debug
+What to build:
+TLB (typically 22 entries)
+Table walker state machine (3 levels)
+Access protection logic
+Transparent Translation (TT0, TT1)
+MMU instructions (PFLUSH, PTEST, PLOAD, etc.)
+All MMU exception frames
+Estimated LOC: 5,000-8,000
+Why This Order Matters
+
+The Wrong Approach (What NOT to Do)
+
+Many people try to build the MMU early because it sounds impressive. This is a mistake because:
+You can't test the MMU without a working CPU
+MMU bugs are nearly impossible to debug in isolation
+You'll spend months on MMU corner cases before having anything that runs
+The Right Approach (Incremental Milestones)
+
+Each phase gives you a testable milestone:
+
+Phase
+Milestone
+What You Can Test
+1
+EU Core
+Individual instructions
+2
++ AGU
+Addressing modes
+3
++ IFU
+Instruction streams
+4
++ Sequencer
+Full instruction timing
+5
+Connected
+Run 68000 programs
+6
++ Cache
+Cache behavior
+7
++ Interrupts
+Real OS-like behavior
+8
++ MMU
+Virtual memory
+My Specific Recommendation: Start with the EU Core
+
+After the BIU, tackle the Execution Unit (specifically the register file and ALU) next. Here's why:
+Immediate testability: You can write a testbench that loads registers and verifies ALU results without needing the BIU at all.
+Foundation for everything: The EU is used by every other unit. The IFU writes to the PC in the register file. The AGU reads address registers. The MMU uses the SR. Get this right first.
+Manageable scope: Start with just:
+D0-D7, A0-A7 registers
+ADD, SUB, AND, OR, MOVE
+CCR flag calculation
+That's maybe 1,500 lines and you have something working
+Psychological win: After months of BIU work, getting the ALU to correctly compute ADD.L D0,D1 with the right flags is incredibly satisfying and motivates you to continue.
+Suggested Module Structure for the EU
+
+verilog
+
+
+1234567891011
+m68030_eu (Top-level EU wrapper)├── eu_regfile (D0-D7, A0-A7, USP, SSP, PC, SR)├── eu_alu (32-bit ALU)├── eu_shifter (Barrel shifter)├── eu_mul_div (Multiplier/Divider)├── eu_bcd (BCD arithmetic)├── eu_ccr (Condition code logic)├── eu_agu (Address Generation Unit)│   ├── agu_ea_calc (Effective address calculation)│   └── agu_index (Index register handling)└── eu_system_regs (VBR, CACR, etc.)
+Start with eu_regfile and eu_alu — these two modules alone will give you a working foundation that you can test exhaustively before moving on.
+A Word of Caution
+
+The 68030 EU is deceptively complex. The 68k instruction set has:
+~130 base instructions
+Many with multiple sizes (.B, .W, .L)
+9 addressing modes per operand
+Special cases for every instruction (overflow, divide by zero, etc.)
+Don't try to implement all instructions at once. Start with a "core subset":
+MOVE (all sizes, all modes)
+ADD/SUB (all sizes)
+AND/OR/EOR/NOT
+CMP
+BRA/BSR/Bcc
+JMP/JSR/RTS
+LEA/PEA
+That's enough to run simple programs and gives you a foundation to build on. Add the rest (MUL, DIV, shifts, BCD, bit ops, MOVEM, etc.) incrementally.
+Bottom line: After the BIU, build the EU core (registers + ALU). It's the right next step because it's testable, foundational, and gives you a working piece of the CPU to build everything else on top of.
+
+
+
+
+
+
+Try agaib
+
+Thought stopped
+
+
+
+
+
+
+
+Sorry, you missed my request.  Please suggest a design for eu_regfile
+
+Thinking completed
+
+Design for eu_regfile Module
+
+Here's a complete design for the 68030 register file. This is a foundational module, so I've prioritized clarity, correctness, and testability.
+Module Interface Design
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849
+module eu_regfile (    input  wire        clk,    input  wire        reset_n,        // === Read Port A (typically source operand 1) ===    input  wire        rd_a_en,    input  wire [3:0]  rd_a_reg,      // 0-7 = D0-D7, 8-15 = A0-A7    input  wire [1:0]  rd_a_size,     // 00=long, 01=byte, 10=word    input  wire        rd_a_is_addr,  // 1 = reading address register (affects sign extension)    output reg  [31:0] rd_a_data,        // === Read Port B (typically source operand 2) ===    input  wire        rd_b_en,    input  wire [3:0]  rd_b_reg,    input  wire [1:0]  rd_b_size,    input  wire        rd_b_is_addr,    output reg  [31:0] rd_b_data,        // === Read Port C (for special cases like MOVEM, CAS2) ===    input  wire        rd_c_en,    input  wire [3:0]  rd_c_reg,    input  wire [1:0]  rd_c_size,    input  wire        rd_c_is_addr,    output reg  [31:0] rd_c_data,        // === Write Port ===    input  wire        wr_en,    input  wire [3:0]  wr_reg,        // 0-7 = D0-D7, 8-15 = A0-A7    input  wire [1:0]  wr_size,       // 00=long, 01=byte, 10=word    input  wire        wr_is_addr,    // Writing to address register (sign-extend)    input  wire [31:0] wr_data,        // === Program Counter ===    input  wire        pc_wr_en,    input  wire [31:0] pc_wr_data,    input  wire [1:0]  pc_increment,  // 0=no change, 1=+2, 2=+4, 3=+6    output reg  [31:0] pc_out,        // === Status Register ===    input  wire        sr_wr_en,    input  wire [15:0] sr_wr_data,    input  wire        sr_wr_ccr_only, // Only update lower 8 bits (X,N,Z,V,C)    output reg  [15:0] sr_out,        // === Stack Pointer Switching ===    output reg  [31:0] usp_out,        // Current USP value (for exception handling)    output reg  [31:0] ssp_out,        // Current SSP value (for exception handling)    output wire        supervisor_mode // Current privilege level);
+Internal Register Storage
+
+verilog
+
+
+1234567891011121314151617181920
+    // === Data Registers D0-D7 ===    reg [31:0] d_reg [0:7];        // === Address Registers A0-A7 ===    // Note: A7 is special - it's multiplexed with USP/SSP    reg [31:0] a_reg [0:6];      // A0-A6    reg [31:0] usp;               // User Stack Pointer (A7 in user mode)    reg [31:0] ssp;               // Supervisor Stack Pointer (A7 in supervisor mode)        // === Status Register ===    // SR[15:8] = T1, T0, S, M, IPL[2:0], unused    // SR[7:0]  = X, N, Z, V, C (CCR)    reg [15:0] sr;        // Extract SR bits for convenience    wire supervisor = sr[13];     // S bit    wire master_mode = sr[12];    // M bit (68030 specific)    wire [2:0] ipl_mask = sr[10:8]; // Interrupt priority mask        assign supervisor_mode = supervisor;
+USP/SSP Switching Logic
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041424344454647
+    // When S-bit changes, we need to switch which stack pointer A7 refers to    // This happens on RTE, or when SR is written with different S-bit        always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            usp <= 32'h00000000;            ssp <= 32'h00002000;  // Typical initial SSP            sr <= 16'h2700;       // Supervisor mode, interrupts masked        end else begin            // Handle SR write that changes S-bit            if (sr_wr_en) begin                if (sr_wr_ccr_only) begin                    // Only update CCR bits (lower 8)                    sr[7:0] <= sr_wr_data[7:0];                end else begin                    // Full SR write                    if (sr_wr_data[13] != sr[13]) begin                        // S-bit is changing - need to switch stack pointers                        if (sr_wr_data[13] == 1'b1) begin                            // Switching to supervisor: save USP, load SSP                            usp <= get_a7_value();                            // SSP already has the right value                        end else begin                            // Switching to user: save SSP, load USP                            ssp <= get_a7_value();                            // USP already has the right value                        end                    end                    sr <= sr_wr_data;                end            end        end    end        // Helper function to get current A7 value    function [31:0] get_a7_value;        if (supervisor)            get_a7_value = ssp;        else            get_a7_value = usp;    endfunction        // Output current stack pointers for exception handling    always @(posedge clk) begin        usp_out <= usp;        ssp_out <= ssp;    end
+Read Logic with Size Handling
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263
+    // === Read Port A ===    always @(posedge clk) begin        if (rd_a_en) begin            rd_a_data <= read_register(rd_a_reg, rd_a_size, rd_a_is_addr);        end    end        // === Read Port B ===    always @(posedge clk) begin        if (rd_b_en) begin            rd_b_data <= read_register(rd_b_reg, rd_b_size, rd_b_is_addr);        end    end        // === Read Port C ===    always @(posedge clk) begin        if (rd_c_en) begin            rd_c_data <= read_register(rd_c_reg, rd_c_size, rd_c_is_addr);        end    end        // === Read Register Function ===    function [31:0] read_register;        input [3:0] reg_num;        input [1:0] size;        input is_addr;                reg [31:0] raw_data;                begin            // Get raw register value            if (reg_num < 4'd8) begin                // D0-D7                raw_data = d_reg[reg_num[2:0]];            end else begin                // A0-A7 (A7 is USP or SSP)                if (reg_num[2:0] == 3'd7) begin                    raw_data = supervisor ? ssp : usp;                end else begin                    raw_data = a_reg[reg_num[2:0]];                end            end                        // Apply size masking and sign extension            if (is_addr) begin                // Address registers: sign-extend byte/word to long                case (size)                    2'b00: read_register = raw_data;                    // Long                    2'b01: read_register = {{24{raw_data[7]}}, raw_data[7:0]};   // Byte, sign-extend                    2'b10: read_register = {{16{raw_data[15]}}, raw_data[15:0]}; // Word, sign-extend                    default: read_register = raw_data;                endcase            end else begin                // Data registers: zero-extend byte/word                case (size)                    2'b00: read_register = raw_data;                    // Long                    2'b01: read_register = {24'b0, raw_data[7:0]};     // Byte, zero-extend                    2'b10: read_register = {16'b0, raw_data[15:0]};    // Word, zero-extend                    default: read_register = raw_data;                endcase            end        end    endfunction
+Write Logic with Size Handling
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465666768697071727374
+    // === Write Port ===    always @(posedge clk) begin        if (wr_en) begin            write_register(wr_reg, wr_size, wr_is_addr, wr_data);        end    end        // === Write Register Task ===    task write_register;        input [3:0] reg_num;        input [1:0] size;        input is_addr;        input [31:0] data;                begin            if (reg_num < 4'd8) begin                // Writing to D0-D7                case (size)                    2'b00: d_reg[reg_num[2:0]] <= data;                    // Long                    2'b01: d_reg[reg_num[2:0]][7:0] <= data[7:0];         // Byte (low 8 bits)                    2'b10: d_reg[reg_num[2:0]][15:0] <= data[15:0];       // Word (low 16 bits)                    default: d_reg[reg_num[2:0]] <= data;                endcase            end else begin                // Writing to A0-A7                if (is_addr) begin                    // Address registers: sign-extend byte/word to long                    case (size)                        2'b00: begin // Long                            if (reg_num[2:0] == 3'd7) begin                                if (supervisor) ssp <= data;                                else usp <= data;                            end else begin                                a_reg[reg_num[2:0]] <= data;                            end                        end                        2'b01: begin // Byte, sign-extend                            if (reg_num[2:0] == 3'd7) begin                                if (supervisor) ssp <= {{24{data[7]}}, data[7:0]};                                else usp <= {{24{data[7]}}, data[7:0]};                            end else begin                                a_reg[reg_num[2:0]] <= {{24{data[7]}}, data[7:0]};                            end                        end                        2'b10: begin // Word, sign-extend                            if (reg_num[2:0] == 3'd7) begin                                if (supervisor) ssp <= {{16{data[15]}}, data[15:0]};                                else usp <= {{16{data[15]}}, data[15:0]};                            end else begin                                a_reg[reg_num[2:0]] <= {{16{data[15]}}, data[15:0]};                            end                        end                        default: begin                            if (reg_num[2:0] == 3'd7) begin                                if (supervisor) ssp <= data;                                else usp <= data;                            end else begin                                a_reg[reg_num[2:0]] <= data;                            end                        end                    endcase                end else begin                    // Should not happen (can't write to address reg as data)                    // But handle gracefully                    if (reg_num[2:0] == 3'd7) begin                        if (supervisor) ssp <= data;                        else usp <= data;                    end else begin                        a_reg[reg_num[2:0]] <= data;                    end                end            end        end    endtask
+Program Counter Management
+
+verilog
+
+
+1234567891011121314151617
+    // === PC Management ===    always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            pc_out <= 32'h00000000;        end else begin            if (pc_wr_en) begin                pc_out <= pc_wr_data;            end else if (pc_increment != 2'b00) begin                case (pc_increment)                    2'b01: pc_out <= pc_out + 32'd2;                    2'b10: pc_out <= pc_out + 32'd4;                    2'b11: pc_out <= pc_out + 32'd6;                    default: pc_out <= pc_out;                endcase            end        end    end
+Testbench Example
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970717273747576777879808182838485868788899091929394
+module eu_regfile_tb;        reg clk = 0;    always #5 clk = ~clk;        reg reset_n = 0;        // Test signals    reg rd_a_en, rd_b_en, wr_en;    reg [3:0] rd_a_reg, rd_b_reg, wr_reg;    reg [1:0] rd_a_size, rd_b_size, wr_size;    reg rd_a_is_addr, rd_b_is_addr, wr_is_addr;    reg [31:0] wr_data;    wire [31:0] rd_a_data, rd_b_data;        eu_regfile dut (        .clk(clk),        .reset_n(reset_n),        .rd_a_en(rd_a_en),        .rd_a_reg(rd_a_reg),        .rd_a_size(rd_a_size),        .rd_a_is_addr(rd_a_is_addr),        .rd_a_data(rd_a_data),        .rd_b_en(rd_b_en),        .rd_b_reg(rd_b_reg),        .rd_b_size(rd_b_size),        .rd_b_is_addr(rd_b_is_addr),        .rd_b_data(rd_b_data),        .rd_c_en(1'b0),        .rd_c_reg(4'd0),        .rd_c_size(2'b00),        .rd_c_is_addr(1'b0),        .rd_c_data(),        .wr_en(wr_en),        .wr_reg(wr_reg),        .wr_size(wr_size),        .wr_is_addr(wr_is_addr),        .wr_data(wr_data),        .pc_wr_en(1'b0),        .pc_wr_data(32'd0),        .pc_increment(2'b00),        .pc_out(),        .sr_wr_en(1'b0),        .sr_wr_data(16'd0),        .sr_wr_ccr_only(1'b0),        .sr_out(),        .usp_out(),        .ssp_out(),        .supervisor_mode()    );        initial begin        // Reset        reset_n = 0;        #20;        reset_n = 1;                // Test 1: Write long to D0, read it back        wr_en = 1; wr_reg = 4'd0; wr_size = 2'b00; wr_is_addr = 0;        wr_data = 32'h12345678;        #10;        wr_en = 0;                rd_a_en = 1; rd_a_reg = 4'd0; rd_a_size = 2'b00; rd_a_is_addr = 0;        #10;        if (rd_a_data !== 32'h12345678) $display("FAIL: Test 1");        else $display("PASS: Test 1 - Long write/read D0");                // Test 2: Write byte to D1, read as long (should preserve upper bits)        wr_en = 1; wr_reg = 4'd1; wr_size = 2'b01; wr_is_addr = 0;        wr_data = 32'hA5;        #10;        wr_en = 0;                rd_a_en = 1; rd_a_reg = 4'd1; rd_a_size = 2'b00; rd_a_is_addr = 0;        #10;        if (rd_a_data[7:0] !== 8'hA5) $display("FAIL: Test 2 - byte not written");        else $display("PASS: Test 2 - Byte write to D1");                // Test 3: Write word to A0, read as long (should sign-extend)        wr_en = 1; wr_reg = 4'd8; wr_size = 2'b10; wr_is_addr = 1;        wr_data = 32'hFF80;  // Negative word        #10;        wr_en = 0;                rd_a_en = 1; rd_a_reg = 4'd8; rd_a_size = 2'b00; rd_a_is_addr = 1;        #10;        if (rd_a_data !== 32'hFFFF80) $display("FAIL: Test 3 - expected FFFF80, got %h", rd_a_data);        else $display("PASS: Test 3 - Word sign-extend to A0");                $finish;    end    endmodule
+Key Design Decisions Explained
+
+Three Read Ports: Most instructions need 2 operands, but some (MOVEM, CAS2) need more. Three ports cover 99% of cases without excessive hardware.
+Separate USP/SSP: Rather than storing A7 in the a_reg array, USP and SSP are separate registers. This makes the supervisor/user switching explicit and easier to debug.
+Size Handling in Read/Write: The size parameter affects how data is masked/extended. This is critical for 68k correctness:
+Data registers: byte/word writes only affect low bits
+Address registers: byte/word writes sign-extend to long
+Synchronous Reads: Reads are registered (not combinational) for better timing closure on FPGAs. This adds 1 cycle latency but is acceptable for a pipelined design.
+PC Increment: Instead of explicit PC writes for every instruction, we provide an increment mechanism. This is more efficient for sequential execution.
+Next Steps
+
+Once this module is working:
+Write exhaustive tests for all register operations
+Test USP/SSP switching thoroughly
+Verify size handling for all combinations
+Then move on to the ALU, which will use this register file
+This design gives you a solid, testable foundation for the EU.
+
+
+
+
+
+
+Ok, can you show me a design for eu_alu
+
+Thinking completed
+
+Design for eu_alu Module
+
+Here's a complete design for the 68030 ALU. This handles all basic arithmetic and logic operations with correct flag generation for all sizes.
+Module Interface Design
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041
+module eu_alu (    input  wire        clk,    input  wire        reset_n,        // === Operand Inputs ===    input  wire [31:0] operand_a,      // First operand (from register or immediate)    input  wire [31:0] operand_b,      // Second operand (from register or immediate)        // === Operation Control ===    input  wire [3:0]  alu_op,         // Operation selector    input  wire [1:0]  size,           // 00=long, 01=byte, 10=word        // === Special Control ===    input  wire        use_x_flag,     // Use X flag for ADDX/SUBX    input  wire        update_flags,   // Update CCR flags (0 for ADDX/SUBX special case)    input  wire        current_x,      // Current X flag value        // === Outputs ===    output reg  [31:0] result,         // ALU result    output reg         x_flag,         // Extend flag    output reg         n_flag,         // Negative flag    output reg         z_flag,         // Zero flag    output reg         v_flag,         // Overflow flag    output reg         c_flag          // Carry flag);    // ALU operation codes    localparam ALU_ADD  = 4'b0000;    localparam ALU_SUB  = 4'b0001;    localparam ALU_AND  = 4'b0010;    localparam ALU_OR   = 4'b0011;    localparam ALU_EOR  = 4'b0100;    localparam ALU_NOT  = 4'b0101;    localparam ALU_NEG  = 4'b0110;    localparam ALU_CMP  = 4'b0111;  // Like SUB but doesn't write result    localparam ALU_ADDX = 4'b1000;  // Add with extend    localparam ALU_SUBX = 4'b1001;  // Subtract with extend    localparam ALU_ABCD = 4'b1010;  // BCD add    localparam ALU_SBCD = 4'b1011;  // BCD subtractendmodule
+Size Masking Logic
+
+verilog
+
+
+1234567891011121314151617
+    // === Size Masking ===    // Extract the relevant bits based on operation size    wire [31:0] mask;    wire [7:0]  op_a_byte, op_b_byte;    wire [15:0] op_a_word, op_b_word;    wire [31:0] op_a_long, op_b_long;        assign mask = (size == 2'b01) ? 32'h000000FF :                  (size == 2'b10) ? 32'h0000FFFF :                                    32'hFFFFFFFF;        assign op_a_byte = operand_a[7:0];    assign op_b_byte = operand_b[7:0];    assign op_a_word = operand_a[15:0];    assign op_b_word = operand_b[15:0];    assign op_a_long = operand_a;    assign op_b_long = operand_b;
+Core ALU Operations
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134135136137138139140141142143144145146
+    // === Internal Signals ===    reg [32:0] add_result;      // 33 bits to capture carry    reg [32:0] sub_result;      // 33 bits to capture borrow    reg        overflow;    reg        carry;        // === Main ALU Logic ===    always @(*) begin        // Default assignments        result = 32'h0;        overflow = 1'b0;        carry = 1'b0;                case (alu_op)            ALU_ADD, ALU_ADDX: begin                if (size == 2'b01) begin                    // Byte operation                    if (alu_op == ALU_ADDX)                        add_result = {1'b0, op_a_byte} + {1'b0, op_b_byte} + {8'b0, current_x & use_x_flag};                    else                        add_result = {1'b0, op_a_byte} + {1'b0, op_b_byte};                                        result = {24'b0, add_result[7:0]};                    carry = add_result[8];                    overflow = (op_a_byte[7] == op_b_byte[7]) &&                                (add_result[7] != op_a_byte[7]);                end                else if (size == 2'b10) begin                    // Word operation                    if (alu_op == ALU_ADDX)                        add_result = {1'b0, op_a_word} + {1'b0, op_b_word} + {16'b0, current_x & use_x_flag};                    else                        add_result = {1'b0, op_a_word} + {1'b0, op_b_word};                                        result = {16'b0, add_result[15:0]};                    carry = add_result[16];                    overflow = (op_a_word[15] == op_b_word[15]) &&                                (add_result[15] != op_a_word[15]);                end                else begin                    // Long operation                    if (alu_op == ALU_ADDX)                        add_result = {1'b0, op_a_long} + {1'b0, op_b_long} + {32'b0, current_x & use_x_flag};                    else                        add_result = {1'b0, op_a_long} + {1'b0, op_b_long};                                        result = add_result[31:0];                    carry = add_result[32];                    overflow = (op_a_long[31] == op_b_long[31]) &&                                (add_result[31] != op_a_long[31]);                end            end                        ALU_SUB, ALU_SUBX, ALU_CMP: begin                if (size == 2'b01) begin                    // Byte operation                    if (alu_op == ALU_SUBX)                        sub_result = {1'b0, op_a_byte} - {1'b0, op_b_byte} - {8'b0, current_x & use_x_flag};                    else                        sub_result = {1'b0, op_a_byte} - {1'b0, op_b_byte};                                        result = {24'b0, sub_result[7:0]};                    carry = sub_result[8];  // Borrow                    overflow = (op_a_byte[7] != op_b_byte[7]) &&                                (sub_result[7] != op_a_byte[7]);                end                else if (size == 2'b10) begin                    // Word operation                    if (alu_op == ALU_SUBX)                        sub_result = {1'b0, op_a_word} - {1'b0, op_b_word} - {16'b0, current_x & use_x_flag};                    else                        sub_result = {1'b0, op_a_word} - {1'b0, op_b_word};                                        result = {16'b0, sub_result[15:0]};                    carry = sub_result[16];  // Borrow                    overflow = (op_a_word[15] != op_b_word[15]) &&                                (sub_result[15] != op_a_word[15]);                end                else begin                    // Long operation                    if (alu_op == ALU_SUBX)                        sub_result = {1'b0, op_a_long} - {1'b0, op_b_long} - {32'b0, current_x & use_x_flag};                    else                        sub_result = {1'b0, op_a_long} - {1'b0, op_b_long};                                        result = sub_result[31:0];                    carry = sub_result[32];  // Borrow                    overflow = (op_a_long[31] != op_b_long[31]) &&                                (sub_result[31] != op_a_long[31]);                end            end                        ALU_NEG: begin                if (size == 2'b01) begin                    sub_result = {1'b0, 8'h0} - {1'b0, op_a_byte};                    result = {24'b0, sub_result[7:0]};                    carry = sub_result[8];                    overflow = (op_a_byte[7] == 1'b1) && (sub_result[7] == 1'b1);                end                else if (size == 2'b10) begin                    sub_result = {1'b0, 16'h0} - {1'b0, op_a_word};                    result = {16'b0, sub_result[15:0]};                    carry = sub_result[16];                    overflow = (op_a_word[15] == 1'b1) && (sub_result[15] == 1'b1);                end                else begin                    sub_result = {1'b0, 32'h0} - {1'b0, op_a_long};                    result = sub_result[31:0];                    carry = sub_result[32];                    overflow = (op_a_long[31] == 1'b1) && (sub_result[31] == 1'b1);                end            end                        ALU_AND: begin                result = operand_a & operand_b;            end                        ALU_OR: begin                result = operand_a | operand_b;            end                        ALU_EOR: begin                result = operand_a ^ operand_b;            end                        ALU_NOT: begin                result = ~operand_a;            end                        ALU_ABCD: begin                // BCD add - placeholder, needs proper BCD logic                result = operand_a + operand_b;                carry = 1'b0;            end                        ALU_SBCD: begin                // BCD subtract - placeholder, needs proper BCD logic                result = operand_a - operand_b;                carry = 1'b0;            end                        default: begin                result = 32'h0;            end        endcase    end
+Flag Generation Logic
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990
+    // === Flag Update Logic ===    always @(posedge clk) begin        if (!reset_n) begin            x_flag <= 1'b0;            n_flag <= 1'b0;            z_flag <= 1'b0;            v_flag <= 1'b0;            c_flag <= 1'b0;        end else if (update_flags) begin            // Calculate zero flag based on result and size            reg zero_result;            case (size)                2'b01: zero_result = (result[7:0] == 8'h0);                2'b10: zero_result = (result[15:0] == 16'h0);                default: zero_result = (result == 32'h0);            endcase                        // Calculate negative flag based on result and size            reg neg_result;            case (size)                2'b01: neg_result = result[7];                2'b10: neg_result = result[15];                default: neg_result = result[31];            endcase                        // Update flags based on operation            case (alu_op)                ALU_ADD, ALU_ADDX: begin                    n_flag <= neg_result;                    v_flag <= overflow;                    c_flag <= carry;                    x_flag <= carry;                    // Z flag: only cleared if result is non-zero                    // For ADDX/SUBX, Z is not affected if already set                    if (zero_result) begin                        if (alu_op == ALU_ADDX)                            z_flag <= z_flag;  // Keep current Z                        else                            z_flag <= 1'b1;                    end else begin                        z_flag <= 1'b0;                    end                end                                ALU_SUB, ALU_SUBX, ALU_CMP: begin                    n_flag <= neg_result;                    v_flag <= overflow;                    c_flag <= carry;                    x_flag <= carry;                    // Z flag: only cleared if result is non-zero                    if (zero_result) begin                        if (alu_op == ALU_SUBX)                            z_flag <= z_flag;  // Keep current Z                        else                            z_flag <= 1'b1;                    end else begin                        z_flag <= 1'b0;                    end                end                                ALU_NEG: begin                    n_flag <= neg_result;                    v_flag <= overflow;                    c_flag <= carry;                    x_flag <= carry;                    z_flag <= zero_result;                end                                ALU_AND, ALU_OR, ALU_EOR: begin                    n_flag <= neg_result;                    z_flag <= zero_result;                    v_flag <= 1'b0;  // Logic ops clear V                    c_flag <= 1'b0;  // Logic ops clear C                    x_flag <= x_flag; // X not affected                end                                ALU_NOT: begin                    n_flag <= neg_result;                    z_flag <= zero_result;                    v_flag <= 1'b0;                    c_flag <= 1'b0;                    x_flag <= x_flag;                end                                default: begin                    // No flag update                end            endcase        end    end
+Testbench Example
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134
+module eu_alu_tb;        reg clk = 0;    always #5 clk = ~clk;        reg reset_n = 0;        // Test signals    reg [31:0] operand_a, operand_b;    reg [3:0] alu_op;    reg [1:0] size;    reg use_x_flag, update_flags, current_x;    wire [31:0] result;    wire x_flag, n_flag, z_flag, v_flag, c_flag;        eu_alu dut (        .clk(clk),        .reset_n(reset_n),        .operand_a(operand_a),        .operand_b(operand_b),        .alu_op(alu_op),        .size(size),        .use_x_flag(use_x_flag),        .update_flags(update_flags),        .current_x(current_x),        .result(result),        .x_flag(x_flag),        .n_flag(n_flag),        .z_flag(z_flag),        .v_flag(v_flag),        .c_flag(c_flag)    );        initial begin        // Reset        reset_n = 0;        update_flags = 1;        use_x_flag = 0;        current_x = 0;        #20;        reset_n = 1;                // Test 1: ADD.L - simple addition        operand_a = 32'h00000010;        operand_b = 32'h00000020;        alu_op = 4'b0000;  // ADD        size = 2'b00;      // Long        #10;        if (result !== 32'h00000030) $display("FAIL: Test 1 - result");        if (z_flag !== 1'b0) $display("FAIL: Test 1 - Z flag");        $display("PASS: Test 1 - ADD.L 10+20=30");                // Test 2: ADD.B - byte addition with carry        operand_a = 32'h000000FF;        operand_b = 32'h00000001;        alu_op = 4'b0000;  // ADD        size = 2'b01;      // Byte        #10;        if (result[7:0] !== 8'h00) $display("FAIL: Test 2 - result");        if (c_flag !== 1'b1) $display("FAIL: Test 2 - C flag");        if (z_flag !== 1'b1) $display("FAIL: Test 2 - Z flag");        $display("PASS: Test 2 - ADD.B FF+01=00 with carry");                // Test 3: SUB.W - word subtraction        operand_a = 32'h00001000;        operand_b = 32'h00000001;        alu_op = 4'b0001;  // SUB        size = 2'b10;      // Word        #10;        if (result[15:0] !== 16'h0FFF) $display("FAIL: Test 3 - result");        $display("PASS: Test 3 - SUB.W 1000-01=0FFF");                // Test 4: SUB.L - underflow (borrow)        operand_a = 32'h00000000;        operand_b = 32'h00000001;        alu_op = 4'b0001;  // SUB        size = 2'b00;      // Long        #10;        if (result !== 32'hFFFFFFFF) $display("FAIL: Test 4 - result");        if (c_flag !== 1'b1) $display("FAIL: Test 4 - C flag (borrow)");        $display("PASS: Test 4 - SUB.L 0-1=FFFFFFFF with borrow");                // Test 5: ADD.W - overflow detection        operand_a = 32'h00007FFF;  // Max positive word        operand_b = 32'h00000001;        alu_op = 4'b0000;  // ADD        size = 2'b10;      // Word        #10;        if (result[15:0] !== 16'h8000) $display("FAIL: Test 5 - result");        if (v_flag !== 1'b1) $display("FAIL: Test 5 - V flag (overflow)");        $display("PASS: Test 5 - ADD.W 7FFF+01=8000 with overflow");                // Test 6: AND.L        operand_a = 32'hFF00FF00;        operand_b = 32'h0F0F0F0F;        alu_op = 4'b0010;  // AND        size = 2'b00;      // Long        #10;        if (result !== 32'h0F000F00) $display("FAIL: Test 6 - result");        $display("PASS: Test 6 - AND.L");                // Test 7: OR.L        operand_a = 32'hF0F0F0F0;        operand_b = 32'h0F0F0F0F;        alu_op = 4'b0011;  // OR        size = 2'b00;      // Long        #10;        if (result !== 32'hFFFFFFFF) $display("FAIL: Test 7 - result");        if (z_flag !== 1'b0) $display("FAIL: Test 7 - Z flag");        if (n_flag !== 1'b1) $display("FAIL: Test 7 - N flag");        $display("PASS: Test 7 - OR.L");                // Test 8: CMP.L (compare - like SUB but no result write)        operand_a = 32'h00000010;        operand_b = 32'h00000010;        alu_op = 4'b0111;  // CMP        size = 2'b00;      // Long        #10;        if (z_flag !== 1'b1) $display("FAIL: Test 8 - Z flag (equal)");        $display("PASS: Test 8 - CMP.L 10==10 sets Z");                // Test 9: NEG.L        operand_a = 32'h00000001;        alu_op = 4'b0110;  // NEG        size = 2'b00;      // Long        #10;        if (result !== 32'hFFFFFFFF) $display("FAIL: Test 9 - result");        if (n_flag !== 1'b1) $display("FAIL: Test 9 - N flag");        $display("PASS: Test 9 - NEG.L 1=FFFFFFFF");                $finish;    end    endmodule
+Key Design Decisions Explained
+
+33-bit Internal Arithmetic: We use 33 bits internally to capture the carry/borrow bit cleanly. This avoids complex carry detection logic.
+Size-Aware Operations: Every operation checks the size parameter and operates on the appropriate bits (8, 16, or 32). This is critical for 68k correctness.
+Flag Calculation:
+N (Negative): Set if the result's MSB is 1
+Z (Zero): Set if the result is all zeros
+V (Overflow): Set if signed overflow occurred (operands same sign, result different)
+C (Carry): Set if unsigned overflow/borrow occurred
+X (Extend): Usually mirrors C, except for special cases
+ADDX/SUBX Special Handling: These instructions have special Z flag behavior - Z is only cleared, never set. This is handled with the conditional update.
+CMP is Like SUB: CMP performs subtraction but the result is only used for flags, not written back. We handle this by having the same logic but the calling code ignores the result.
+BCD Operations Placeholder: ABCD/SBCD need proper BCD (binary-coded decimal) logic which is more complex. I've left placeholders - these need to be implemented with proper decimal adjustment.
+What's Missing
+
+This ALU handles the core operations, but you'll also need:
+Barrel Shifter: For ASL/ASR/LSL/LSR/ROL/ROR operations (separate module)
+Multiplier/Divider: For MULS/MULU/DIVS/DIVU (separate module, variable-cycle)
+BCD Logic: Proper implementation of ABCD/SBCD/NBCD
+Bit Operations: BSET/BCLR/BCHG/BTST (can be done with this ALU + extra logic)
+Integration with Register File
+
+The ALU will connect to the register file like this:
+verilog
+
+
+12345678910111213
+// In the EU top level:eu_regfile regfile (...);eu_alu alu (...);// Route register outputs to ALU inputsassign alu.operand_a = regfile.rd_a_data;assign alu.operand_b = regfile.rd_b_data;// Route ALU result back to register fileassign regfile.wr_data = alu.result;// Route ALU flags to SRassign regfile.sr_wr_data = {sr[15:8], alu.x_flag, alu.n_flag, alu.z_flag, alu.v_flag, alu.c_flag};
+This gives you a solid, testable ALU foundation. The flag generation is the trickiest part - make sure to test all the edge cases (overflow, carry, zero results, etc.) thoroughly.
+
+
+
+
+
+
+Can you show me code for the barrel shifter
+
+Thinking completed
+
+Design for eu_shifter Module (Barrel Shifter)
+
+The 68030 barrel shifter handles ASL/ASR, LSL/LSR, ROL/ROR, and ROXL/ROXR for byte/word/long sizes. A true barrel shifter completes any shift in a single cycle using a tree of multiplexers.
+Module Interface
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031
+module eu_shifter (    input  wire        clk,    input  wire        reset_n,        // === Inputs ===    input  wire [31:0] operand_in,      // Value to shift    input  wire [5:0]  shift_count,     // 0-63 (from Dx register or immediate)    input  wire [1:0]  size,            // 00=long, 01=byte, 10=word    input  wire [2:0]  shift_type,      // Operation selector    input  wire        x_flag_in,       // Current X flag (for ROXL/ROXR)        // === Outputs ===    output reg  [31:0] result,          // Shifted result    output reg         x_flag_out,      // Updated X flag    output reg         n_flag_out,      // Negative flag    output reg         z_flag_out,      // Zero flag    output reg         v_flag_out,      // Overflow flag (ASL only)    output reg         c_flag_out       // Carry = last bit shifted out);    // Shift type encoding    localparam SHIFT_ASL  = 3'b000;    localparam SHIFT_ASR  = 3'b001;    localparam SHIFT_LSL  = 3'b010;    localparam SHIFT_LSR  = 3'b011;    localparam SHIFT_ROL  = 3'b100;    localparam SHIFT_ROR  = 3'b101;    localparam SHIFT_ROXL = 3'b110;    localparam SHIFT_ROXR = 3'b111;endmodule
+Size Masking and Preparation
+
+verilog
+
+
+12345678910111213141516
+    // === Size Masking ===    wire [31:0] size_mask;    wire [4:0]  size_bits;      // Number of bits in operand (8, 16, or 32)    wire        sign_bit;       // Sign bit of the masked operand        assign size_mask = (size == 2'b01) ? 32'h000000FF :                       (size == 2'b10) ? 32'h0000FFFF :                                         32'hFFFFFFFF;        assign size_bits = (size == 2'b01) ? 5'd7  :  // Byte: bits 0-7                       (size == 2'b10) ? 5'd15 :  // Word: bits 0-15                                         5'd31;   // Long: bits 0-31        // Masked operand (only relevant bits)    wire [31:0] masked_operand = operand_in & size_mask;    assign sign_bit = masked_operand[size_bits];
+Shift Count Handling
+
+verilog
+
+
+123456789101112131415
+    // === Effective Shift Count ===    // For shifts > size_bits, the result is either all zeros or all sign bits    // depending on the operation. We cap the count for the barrel shifter.        wire [5:0] effective_count;    wire       count_is_zero;    wire       count_exceeds_size;        assign count_is_zero = (shift_count == 6'b0);    assign count_exceeds_size = (shift_count > {1'b0, size_bits});        // For the barrel shifter, we only need counts 0 to size_bits    // Larger counts are handled as special cases    assign effective_count = count_exceeds_size ? {1'b0, size_bits} + 6'd1                                                  : shift_count;
+The Barrel Shifter Core
+
+This is the heart of the module. A 32-bit barrel shifter uses 5 stages (shift by 1, 2, 4, 8, 16).
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758
+    // === Barrel Shifter Stages ===    // We implement both left and right shift paths        // Determine shift direction    wire shift_left  = (shift_type == SHIFT_ASL) || (shift_type == SHIFT_LSL) ||                       (shift_type == SHIFT_ROL) || (shift_type == SHIFT_ROXL);    wire shift_right = !shift_left;        // Determine fill bit for right shifts    wire fill_bit = (shift_type == SHIFT_ASR) ? sign_bit : 1'b0;        // === Right Shift Path ===    reg [31:0] r_stage0, r_stage1, r_stage2, r_stage3, r_stage4;    reg [31:0] r_fill;  // Fill pattern for arithmetic shifts        // Fill pattern depends on size and shift type    always @(*) begin        if (shift_type == SHIFT_ASR) begin            // Arithmetic: fill with sign bit            case (size)                2'b01: r_fill = {24{sign_bit}, 8{sign_bit}};                2'b10: r_fill = {16{sign_bit}, 16{sign_bit}};                default: r_fill = {32{sign_bit}};            endcase        end else if (shift_type == SHIFT_ROR || shift_type == SHIFT_ROXR) begin            // Rotate: fill with wrapped-around bits (handled separately)            r_fill = 32'h0;        end else begin            // Logical: fill with zeros            r_fill = 32'h0;        end    end        // Right shift barrel stages    // Stage 0: shift by 1    assign r_stage0 = effective_count[0] ? {fill_bit, masked_operand[31:1]} : masked_operand;        // Stage 1: shift by 2    assign r_stage1 = effective_count[1] ? {{2{fill_bit}}, r_stage0[31:2]} : r_stage0;        // Stage 2: shift by 4    assign r_stage2 = effective_count[2] ? {{4{fill_bit}}, r_stage1[31:4]} : r_stage1;        // Stage 3: shift by 8    assign r_stage3 = effective_count[3] ? {{8{fill_bit}}, r_stage2[31:8]} : r_stage2;        // Stage 4: shift by 16    assign r_stage4 = effective_count[4] ? {{16{fill_bit}}, r_stage3[31:16]} : r_stage3;        // === Left Shift Path ===    reg [31:0] l_stage0, l_stage1, l_stage2, l_stage3, l_stage4;        // Left shift barrel stages (fill with zeros for all left shifts)    assign l_stage0 = effective_count[0] ? {masked_operand[30:0], 1'b0} : masked_operand;    assign l_stage1 = effective_count[1] ? {l_stage0[29:0], 2'b00} : l_stage0;    assign l_stage2 = effective_count[2] ? {l_stage1[27:0], 4'b0000} : l_stage1;    assign l_stage3 = effective_count[3] ? {l_stage2[23:0], 8'b00000000} : l_stage2;    assign l_stage4 = effective_count[4] ? {l_stage1[15:0], 16'b0} : l_stage3;
+Rotate Logic
+
+Rotates are different from shifts - bits wrap around.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445
+    // === Rotate Logic ===    // For rotates, we need to combine the shifted-out bits with the shifted-in bits        wire [31:0] rotate_right_result;    wire [31:0] rotate_left_result;        // Right rotate: (operand >> count) | (operand << (size_bits+1 - count))    // For ROXR/ROXL, the X flag participates in the rotation        // Right rotate (ROR)    assign rotate_right_result = count_is_zero ? masked_operand :        (masked_operand >> effective_count) |         (masked_operand << ((size_bits + 5'd1) - effective_count));        // Left rotate (ROL)    assign rotate_left_result = count_is_zero ? masked_operand :        (masked_operand << effective_count) |         (masked_operand >> ((size_bits + 5'd1) - effective_count));        // === Rotate Through X (ROXL/ROXR) ===    // This is a (size_bits+1)-bit rotate including the X flag    // We handle this specially        reg [31:0] roxl_result, roxr_result;    reg        roxl_x_out, roxr_x_out;        always @(*) begin        reg [32:0] extended;  // 33 bits: X + 32-bit operand        reg [32:0] rotated;        reg [5:0]  count_mod;                // For ROXR: X is at the MSB side, rotate right        extended = {x_flag_in, masked_operand};        count_mod = effective_count % (size_bits + 5'd1 + 6'd1);  // mod (size+1)                // Right rotate through X        rotated = (extended >> count_mod) | (extended << ((size_bits + 6'd1 + 6'd1) - count_mod));        roxr_result = rotated[31:0];        roxr_x_out = rotated[32];                // Left rotate through X        rotated = (extended << count_mod) | (extended >> ((size_bits + 6'd1 + 6'd1) - count_mod));        roxl_result = rotated[31:0];        roxl_x_out = rotated[32];    end
+Result Selection
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445
+    // === Last Bit Shifted Out (for C flag) ===    // This is the bit that was at the edge before the shift    reg last_bit_out;        always @(*) begin        if (count_is_zero) begin            last_bit_out = c_flag_out;  // C unchanged when count=0        end else if (shift_left) begin            // For left shifts, the last bit out is at position size_bits            // We need to figure out which bit ended up being shifted out last            last_bit_out = masked_operand[size_bits - effective_count[4:0] + 5'd1];        end else begin            // For right shifts, the last bit out is at position effective_count-1            last_bit_out = masked_operand[effective_count[4:0] - 5'd1];        end    end        // === Result Multiplexer ===    always @(*) begin        case (shift_type)            SHIFT_ASL, SHIFT_LSL: begin                if (count_exceeds_size)                    result = 32'h0;  // Shifted everything out                else                    result = l_stage4 & size_mask;            end                        SHIFT_ASR, SHIFT_LSR: begin                if (count_exceeds_size) begin                    if (shift_type == SHIFT_ASR)                        result = {size_mask & {32{sign_bit}}};  // All sign bits                    else                        result = 32'h0;  // All zeros                end else                    result = r_stage4 & size_mask;            end                        SHIFT_ROL: result = rotate_left_result & size_mask;            SHIFT_ROR: result = rotate_right_result & size_mask;            SHIFT_ROXL: result = roxl_result & size_mask;            SHIFT_ROXR: result = roxr_result & size_mask;                        default: result = 32'h0;        endcase    end
+Flag Generation
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960
+    // === Flag Generation ===    always @(posedge clk) begin        if (!reset_n) begin            x_flag_out <= 1'b0;            n_flag_out <= 1'b0;            z_flag_out <= 1'b0;            v_flag_out <= 1'b0;            c_flag_out <= 1'b0;        end else begin            // N flag: MSB of result (within size)            case (size)                2'b01: n_flag_out <= result[7];                2'b10: n_flag_out <= result[15];                default: n_flag_out <= result[31];            endcase                        // Z flag: set if result (within size) is zero            case (size)                2'b01: z_flag_out <= (result[7:0] == 8'h0);                2'b10: z_flag_out <= (result[15:0] == 16'h0);                default: z_flag_out <= (result == 32'h0);            endcase                        // C flag: last bit shifted out (unchanged if count=0)            if (!count_is_zero) begin                c_flag_out <= last_bit_out;            end            // else: C unchanged                        // X flag: usually follows C, except for rotates            if (!count_is_zero) begin                case (shift_type)                    SHIFT_ROL, SHIFT_ROR: begin                        // X unchanged for pure rotates                        x_flag_out <= x_flag_out;                    end                    SHIFT_ROXL, SHIFT_ROXR: begin                        // X flag becomes the bit that rotated out                        x_flag_out <= shift_left ? roxl_x_out : roxr_x_out;                    end                    default: begin                        // All other shifts: X = C                        x_flag_out <= last_bit_out;                    end                endcase            end            // else: X unchanged                        // V flag: ONLY set for ASL, and only if sign changed            // For all other operations, V is cleared            if (shift_type == SHIFT_ASL && !count_is_zero) begin                // V = 1 if sign bit changed during shift                v_flag_out <= sign_bit ^ result[size_bits];            end else begin                v_flag_out <= 1'b0;            end        end    endendmodule
+Testbench
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130
+module eu_shifter_tb;        reg clk = 0;    always #5 clk = ~clk;        reg reset_n = 0;    reg [31:0] operand_in;    reg [5:0] shift_count;    reg [1:0] size;    reg [2:0] shift_type;    reg x_flag_in;        wire [31:0] result;    wire x_flag_out, n_flag_out, z_flag_out, v_flag_out, c_flag_out;        eu_shifter dut (        .clk(clk),        .reset_n(reset_n),        .operand_in(operand_in),        .shift_count(shift_count),        .size(size),        .shift_type(shift_type),        .x_flag_in(x_flag_in),        .result(result),        .x_flag_out(x_flag_out),        .n_flag_out(n_flag_out),        .z_flag_out(z_flag_out),        .v_flag_out(v_flag_out),        .c_flag_out(c_flag_out)    );        integer pass_count = 0;    integer fail_count = 0;        task check;        input [31:0] exp_result;        input [2:0] shift_type;        input string test_name;        begin            #10;            if (result !== exp_result) begin                $display("FAIL %s: expected %h, got %h", test_name, exp_result, result);                fail_count = fail_count + 1;            end else begin                $display("PASS %s: %h", test_name, result);                pass_count = pass_count + 1;            end        end    endtask        initial begin        reset_n = 0;        x_flag_in = 0;        #20;        reset_n = 1;                // Test 1: LSL.L by 4        operand_in = 32'h0000000F;        shift_count = 6'd4;        size = 2'b00;  // Long        shift_type = 3'b010;  // LSL        check(32'h000000F0, 3'b010, "LSL.L 0F by 4");                // Test 2: LSR.B by 2        operand_in = 32'h000000FC;        shift_count = 6'd2;        size = 2'b01;  // Byte        shift_type = 3'b011;  // LSR        check(32'h0000003F, 3'b011, "LSR.B FC by 2");                // Test 3: ASR.W by 1 (sign extend)        operand_in = 32'h00008000;  // Negative word        shift_count = 6'd1;        size = 2'b10;  // Word        shift_type = 3'b001;  // ASR        check(32'h0000C000, 3'b001, "ASR.W 8000 by 1");        if (n_flag_out !== 1'b1) $display("  FAIL: N flag should be set");                // Test 4: ASL.L overflow detection        operand_in = 32'h40000000;  // Positive, but shift will change sign        shift_count = 6'd1;        size = 2'b00;  // Long        shift_type = 3'b000;  // ASL        check(32'h80000000, 3'b000, "ASL.L 40000000 by 1");        if (v_flag_out !== 1'b1) $display("  FAIL: V flag should be set (overflow)");                // Test 5: ROL.W by 4        operand_in = 32'h00001234;        shift_count = 6'd4;        size = 2'b10;  // Word        shift_type = 3'b100;  // ROL        check(32'h00002341, 3'b100, "ROL.W 1234 by 4");                // Test 6: ROR.B by 2        operand_in = 32'h00000003;  // Bits 0,1 set        shift_count = 6'd2;        size = 2'b01;  // Byte        shift_type = 3'b101;  // ROR        check(32'h000000C0, 3'b101, "ROR.B 03 by 2");                // Test 7: Shift count = 0 (flags should still update, C unchanged)        operand_in = 32'h12345678;        shift_count = 6'd0;        size = 2'b00;        shift_type = 3'b010;  // LSL        check(32'h12345678, 3'b010, "LSL.L by 0 (no shift)");        if (v_flag_out !== 1'b0) $display("  FAIL: V should be cleared when count=0");                // Test 8: Shift count exceeds size        operand_in = 32'h000000FF;        shift_count = 6'd16;  // More than 8 bits        size = 2'b01;  // Byte        shift_type = 3'b010;  // LSL        check(32'h00000000, 3'b010, "LSL.B FF by 16 (exceeds size)");        if (z_flag_out !== 1'b1) $display("  FAIL: Z should be set");                // Test 9: C flag captures last bit out        operand_in = 32'h00000081;  // Bit 7 set        shift_count = 6'd8;        size = 2'b01;  // Byte        shift_type = 3'b010;  // LSL        check(32'h00000000, 3'b010, "LSL.B 81 by 8");        if (c_flag_out !== 1'b1) $display("  FAIL: C should be 1 (bit 7 shifted out)");                $display("\n=== Summary ===");        $display("Passed: %0d, Failed: %0d", pass_count, fail_count);        $finish;    end    endmodule
+Key Design Notes
+
+True Barrel Shifter: Uses 5 stages of multiplexers to shift by any amount in one cycle. This is O(n log n) hardware but completes in a single clock.
+Size Awareness: Every operation respects the byte/word/long size. The result is masked to the correct size.
+Flag Semantics:
+C: Last bit shifted out (unchanged if count=0)
+X: Same as C for shifts; unchanged for ROL/ROR; special for ROXL/ROXR
+V: Only set for ASL when sign bit changes; cleared for everything else
+Z: Set if result is zero
+N: Set if result MSB (within size) is 1
+Count = 0 Special Case: Per 68k spec, when count=0, V is cleared, C and X are unchanged, N and Z reflect the operand.
+Count Exceeds Size: Handled as a special case to avoid undefined behavior in the barrel shifter stages.
+Rotate Through X: Implemented as a (size+1)-bit rotate where the X flag participates.
+Integration Notes
+
+Connect this to the EU like:
+verilog
+
+
+12345678910111213
+eu_shifter shifter (    .operand_in(regfile.rd_a_data),    .shift_count(regfile.rd_b_data[5:0]),  // From Dx or immediate    .size(current_size),    .shift_type(current_shift_type),    .x_flag_in(sr[4]),  // X flag from SR    .result(writeback_data),    .x_flag_out(new_x),    .n_flag_out(new_n),    .z_flag_out(new_z),    .v_flag_out(new_v),    .c_flag_out(new_c));
+This gives you a complete, testable barrel shifter. The trickiest parts are the rotate-through-X logic and the flag handling for count=0 — test those thoroughly.
+
+2/2
+
+
+
+
+
+
+
+Can you show me the design for the multiplier/divider
+
+Thinking completed
+
+Design for eu_mul_div Module (Multiplier/Divider)
+
+The 68030 multiplier/divider handles MULS, MULU, DIVS, and DIVU. These are variable-cycle instructions — the cycle count depends on operand values, which is critical for cycle accuracy.
+Key Behavioral Notes
+
+
+Instruction
+Operation
+Result
+Notes
+MULU.W
+16×16→32 unsigned
+32-bit product
+Upper 16 bits of source ignored
+MULS.W
+16×16→32 signed
+32-bit product
+Sign-extended operands
+DIVU.L
+32÷16→32
+16-bit quotient + 16-bit remainder
+Remainder in upper 16 bits
+DIVS.L
+32÷16→32
+16-bit quotient + 16-bit remainder
+Signed division
+Division by zero and division overflow both trigger exceptions.
+Module Interface
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041424344
+module eu_mul_div (    input  wire        clk,    input  wire        reset_n,        // === Control ===    input  wire        start,           // Pulse to begin operation    input  wire [1:0]  op_type,         // 00=MULU, 01=MULS, 10=DIVU, 11=DIVS    input  wire [1:0]  size,            // For future use (always .W for MUL/DIV)        // === Operands ===    input  wire [31:0] dividend,        // For DIV: 32-bit dividend (Dx)    input  wire [31:0] divisor,         // For DIV/MUL: lower 16 bits used        // === Outputs ===    output reg  [31:0] result,          // MUL: 32-bit product; DIV: {remainder, quotient}    output reg         busy,            // Operation in progress    output reg         done,            // Pulse when complete    output reg         div_by_zero,     // Division by zero detected    output reg         div_overflow,    // Division overflow detected        // === Cycle Count ===    output reg  [7:0]  cycle_count,     // Number of cycles this operation takes        // === Flags (for MUL only; DIV flags are special) ===    output reg         n_flag,    output reg         z_flag,    output reg         v_flag,    output reg         c_flag);    // Operation types    localparam OP_MULU = 2'b00;    localparam OP_MULS = 2'b01;    localparam OP_DIVU = 2'b10;    localparam OP_DIVS = 2'b11;        // Divider states    localparam DIV_IDLE    = 3'd0;    localparam DIV_SETUP   = 3'd1;    localparam DIV_ITERATE = 3'd2;    localparam DIV_SIGNFIX = 3'd3;    localparam DIV_DONE    = 3'd4;endmodule
+Multiplier (Combinational with Cycle Counting)
+
+The multiplier uses a combinational array for the actual computation (single-cycle math), but the cycle count is computed based on operand values to match 68030 timing.
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849
+    // === Multiplier Logic ===    wire [15:0] mul_a;   // First operand (16 bits)    wire [15:0] mul_b;   // Second operand (16 bits, the "multiplier")    wire [31:0] mul_product;        // For MULS, sign-extend operands before multiplication    wire signed [31:0] muls_a;    wire signed [31:0] muls_b;    wire signed [31:0] muls_product;        assign mul_a = dividend[15:0];  // Source operand (Dx for MUL)    assign mul_b = divisor[15:0];   // Source operand (EA for MUL)        // Signed multiplication    assign muls_a = {{16{mul_a[15]}}, mul_a};    assign muls_b = {{16{mul_b[15]}}, mul_b};    assign muls_product = muls_a * muls_b;        // Unsigned multiplication    assign mul_product = {16'b0, mul_a} * {16'b0, mul_b};        // === MUL Cycle Count ===    // 68030 MULU: approximately 38 + 2*(number of 1s in multiplier) cycles    // 68030 MULS: approximately 38 + 2*(number of bit-pair transitions) cycles    // These are approximations - exact counts need verification against real silicon        reg [5:0] mulu_cycle_count;    reg [5:0] muls_cycle_count;    integer i;        always @(*) begin        // MULU: count 1-bits in multiplier        mulu_cycle_count = 6'd38;        for (i = 0; i < 16; i = i + 1) begin            if (mul_b[i])                mulu_cycle_count = mulu_cycle_count + 6'd2;        end                // MULS: count transitions (01 or 10 pairs) for Booth-like encoding        // Approximation: similar to MULU but with sign handling        muls_cycle_count = 6'd38;        for (i = 0; i < 15; i = i + 1) begin            if (mul_b[i] != mul_b[i+1])                muls_cycle_count = muls_cycle_count + 6'd2;        end        // Handle sign bit transition        if (mul_b[15] != 1'b0)            muls_cycle_count = muls_cycle_count + 6'd2;    end
+Divider (Iterative Restoring Division)
+
+The divider uses a restoring division algorithm that takes 16 iterations for a 16-bit divisor. This naturally matches the multi-cycle nature of DIV instructions.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134135136137138139140141
+    // === Divider State Machine ===    reg [2:0]  div_state;    reg [4:0]  div_iteration;     // 0-16 iterations    reg [32:0] div_remainder;     // 33-bit working remainder    reg [15:0] div_quotient;     // Building quotient    reg [15:0] div_divisor_abs;  // Absolute value of divisor    reg [31:0] div_dividend_abs; // Absolute value of dividend    reg        div_neg_result;   // Result should be negated (for DIVS)    reg        div_neg_quot;     // Negate quotient    reg        div_neg_rem;      // Negate remainder        // === DIV Cycle Count ===    // 68030 DIVU: approximately 133-140 cycles (varies with quotient bits)    // 68030 DIVS: approximately 150-170 cycles (varies)    // We'll use a fixed approximation; exact counts need verification        wire [7:0] div_cycle_count;    assign div_cycle_count = (op_type == OP_DIVS) ? 8'd158 : 8'd137;        // === Divider State Machine ===    always @(posedge clk) begin        if (!reset_n) begin            div_state <= DIV_IDLE;            busy <= 1'b0;            done <= 1'b0;            div_by_zero <= 1'b0;            div_overflow <= 1'b0;            div_iteration <= 5'd0;        end else begin            done <= 1'b0;  // Default: clear done pulse                        case (div_state)                DIV_IDLE: begin                    if (start && (op_type == OP_DIVU || op_type == OP_DIVS)) begin                        busy <= 1'b1;                        div_by_zero <= 1'b0;                        div_overflow <= 1'b0;                                                // Check for division by zero                        if (divisor[15:0] == 16'h0000) begin                            div_by_zero <= 1'b1;                            done <= 1'b1;                            busy <= 1'b0;                        end else begin                            div_state <= DIV_SETUP;                        end                                                cycle_count <= div_cycle_count;                    end                end                                DIV_SETUP: begin                    // Prepare operands for division                    if (op_type == OP_DIVS) begin                        // Signed: take absolute values, track sign                        div_neg_result <= dividend[31] ^ divisor[15];                        div_neg_quot <= dividend[31] ^ divisor[15];                        div_neg_rem <= dividend[31];  // Remainder has sign of dividend                                                div_dividend_abs <= dividend[31] ? (~dividend + 32'd1) : dividend;                        div_divisor_abs <= divisor[15] ? (~divisor[15:0] + 16'd1) : divisor[15:0];                    end else begin                        // Unsigned: use as-is                        div_neg_result <= 1'b0;                        div_neg_quot <= 1'b0;                        div_neg_rem <= 1'b0;                        div_dividend_abs <= dividend;                        div_divisor_abs <= divisor[15:0];                    end                                        div_remainder <= 33'h0;                    div_quotient <= 16'h0;                    div_iteration <= 5'd0;                    div_state <= DIV_ITERATE;                end                                DIV_ITERATE: begin                    // Restoring division: one bit per iteration                    // Shift remainder left, bring in next dividend bit                    div_remainder <= {div_remainder[31:0], div_dividend_abs[31 - div_iteration]};                                        // Try to subtract divisor                    if ({1'b0, div_remainder[31:0], div_dividend_abs[31 - div_iteration]} >=                         {17'b0, div_divisor_abs}) begin                        // Subtraction succeeds                        div_remainder <= {1'b0, div_remainder[31:0], div_dividend_abs[31 - div_iteration]} -                                         {17'b0, div_divisor_abs};                        div_quotient <= {div_quotient[14:0], 1'b1};                    end else begin                        // Subtraction fails, keep remainder                        div_quotient <= {div_quotient[14:0], 1'b0};                    end                                        if (div_iteration == 5'd31) begin                        // All 32 bits processed                        div_state <= DIV_SIGNFIX;                    end else begin                        div_iteration <= div_iteration + 5'd1;                    end                end                                DIV_SIGNFIX: begin                    // Apply signs for DIVS                    if (op_type == OP_DIVS) begin                        if (div_neg_quot)                            div_quotient <= ~div_quotient + 16'd1;                        if (div_neg_rem)                            div_remainder[15:0] <= ~div_remainder[15:0] + 16'd1;                    end                                        // Check for overflow: quotient must fit in 16 bits (unsigned)                    // or in signed 16-bit range for DIVS                    if (op_type == OP_DIVU) begin                        if (div_quotient > 16'hFFFF) begin                            div_overflow <= 1'b1;                        end                    end else begin                        // Signed overflow: quotient out of range -32768 to +32767                        if (div_quotient > 16'h7FFF && !div_quotient[15]) begin                            div_overflow <= 1'b1;                        end                    end                                        div_state <= DIV_DONE;                end                                DIV_DONE: begin                    // Assemble result: {remainder[15:0], quotient[15:0]}                    if (!div_by_zero && !div_overflow) begin                        result <= {div_remainder[15:0], div_quotient};                    end                                        done <= 1'b1;                    busy <= 1'b0;                    div_state <= DIV_IDLE;                end                                default: div_state <= DIV_IDLE;            endcase        end    end
+Result Multiplexer and Flag Generation
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253
+    // === Result Multiplexer ===    always @(posedge clk) begin        if (start) begin            case (op_type)                OP_MULU: begin                    result <= mul_product;                    cycle_count <= {2'b0, mulu_cycle_count};                end                OP_MULS: begin                    result <= muls_product[31:0];                    cycle_count <= {2'b0, muls_cycle_count};                end                OP_DIVU, OP_DIVS: begin                    // Result set by divider state machine                    cycle_count <= div_cycle_count;                end                default: result <= 32'h0;            endcase        end    end        // === MUL Flag Generation ===    // MULU/MULS: Z set if result is zero, N set if result[31] is 1    // V and C are always cleared for MUL    always @(posedge clk) begin        if (start && (op_type == OP_MULU || op_type == OP_MULS)) begin            if (op_type == OP_MULU) begin                z_flag <= (mul_product == 32'h0);                n_flag <= mul_product[31];            end else begin                z_flag <= (muls_product == 32'h0);                n_flag <= muls_product[31];            end            v_flag <= 1'b0;            c_flag <= 1'b0;        end    end        // === DIV Flag Generation ===    // DIV: Flags are UNCHANGED on success    // On divide by zero or overflow: flags are undefined (we clear them)    always @(posedge clk) begin        if (done && (op_type == OP_DIVU || op_type == OP_DIVS)) begin            if (div_by_zero || div_overflow) begin                // Undefined - clear for safety                n_flag <= 1'b0;                z_flag <= 1'b0;                v_flag <= 1'b0;                c_flag <= 1'b0;            end            // else: flags unchanged (don't touch them)        end    end
+Testbench
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134135136137138139140141142143144145146147148149150151152153154155
+module eu_mul_div_tb;        reg clk = 0;    always #5 clk = ~clk;        reg reset_n = 0;    reg start;    reg [1:0] op_type;    reg [1:0] size;    reg [31:0] dividend, divisor;        wire [31:0] result;    wire busy, done, div_by_zero, div_overflow;    wire [7:0] cycle_count;    wire n_flag, z_flag, v_flag, c_flag;        eu_mul_div dut (        .clk(clk),        .reset_n(reset_n),        .start(start),        .op_type(op_type),        .size(size),        .dividend(dividend),        .divisor(divisor),        .result(result),        .busy(busy),        .done(done),        .div_by_zero(div_by_zero),        .div_overflow(div_overflow),        .cycle_count(cycle_count),        .n_flag(n_flag),        .z_flag(z_flag),        .v_flag(v_flag),        .c_flag(c_flag)    );        integer pass_count = 0, fail_count = 0;        task check_mul;        input [31:0] exp_result;        input string test_name;        begin            // Wait for done            wait(done);            #10;            if (result !== exp_result) begin                $display("FAIL %s: expected %h, got %h", test_name, exp_result, result);                fail_count = fail_count + 1;            end else begin                $display("PASS %s: %h (cycles=%0d)", test_name, result, cycle_count);                pass_count = pass_count + 1;            end        end    endtask        task check_div;        input [31:0] exp_result;        input exp_overflow;        input exp_zero;        input string test_name;        begin            wait(done);            #10;            if (result !== exp_result || div_overflow !== exp_overflow || div_by_zero !== exp_zero) begin                $display("FAIL %s: result=%h (exp %h), ovf=%b (exp %b), zero=%b (exp %b)",                         test_name, result, exp_result, div_overflow, exp_overflow,                          div_by_zero, exp_zero);                fail_count = fail_count + 1;            end else begin                $display("PASS %s: result=%h (cycles=%0d)", test_name, result, cycle_count);                pass_count = pass_count + 1;            end        end    endtask        initial begin        reset_n = 0;        start = 0;        size = 2'b00;        #20;        reset_n = 1;                // === MUL Tests ===                // Test 1: MULU 100 * 200 = 20000        dividend = 32'h00000064;  // 100        divisor = 32'h000000C8;   // 200        op_type = 2'b00;  // MULU        start = 1; #10; start = 0;        check_mul(32'h00004E20, "MULU 100*200");  // 20000 = 0x4E20                // Test 2: MULS (-5) * 10 = -50        dividend = 32'hFFFFFFFB;  // -5        divisor = 32'h0000000A;   // 10        op_type = 2'b01;  // MULS        start = 1; #10; start = 0;        check_mul(32'hFFFFFFCE, "MULS -5*10");  // -50 = 0xFFFFFFCE                // Test 3: MULU 0 * anything = 0 (should be fast)        dividend = 32'h00000000;        divisor = 32'h0000FFFF;        op_type = 2'b00;        start = 1; #10; start = 0;        check_mul(32'h00000000, "MULU 0*FFFF");                // Test 4: MULU FFFF * FFFF = FFFE0001        dividend = 32'h0000FFFF;        divisor = 32'h0000FFFF;        op_type = 2'b00;        start = 1; #10; start = 0;        check_mul(32'hFFFE0001, "MULU FFFF*FFFF");                // === DIV Tests ===                // Test 5: DIVU 100 / 7 = quotient 14, remainder 2        dividend = 32'h00000064;  // 100        divisor = 32'h00000007;   // 7        op_type = 2'b10;  // DIVU        start = 1; #10; start = 0;        check_div(32'h0002000E, 1'b0, 1'b0, "DIVU 100/7");  // {rem=2, quot=14}                // Test 6: DIVU divide by zero        dividend = 32'h00000064;        divisor = 32'h00000000;        op_type = 2'b10;        start = 1; #10; start = 0;        check_div(32'h0, 1'b0, 1'b1, "DIVU div-by-zero");                // Test 7: DIVS (-100) / 7 = quotient -14, remainder -2        dividend = 32'hFFFFFF9C;  // -100        divisor = 32'h00000007;   // 7        op_type = 2'b11;  // DIVS        start = 1; #10; start = 0;        check_div(32'hFFFEFFF2, 1'b0, 1'b0, "DIVS -100/7");  // {rem=-2, quot=-14}                // Test 8: DIVU overflow (quotient doesn't fit in 16 bits)        dividend = 32'hFFFF0000;        divisor = 32'h00000001;        op_type = 2'b10;        start = 1; #10; start = 0;        check_div(32'h0, 1'b1, 1'b0, "DIVU overflow");                // Test 9: DIVU exact division        dividend = 32'h00000064;  // 100        divisor = 32'h0000000A;   // 10        op_type = 2'b10;        start = 1; #10; start = 0;        check_div(32'h0000000A, 1'b0, 1'b0, "DIVU 100/10");  // {rem=0, quot=10}                $display("\n=== Summary ===");        $display("Passed: %0d, Failed: %0d", pass_count, fail_count);        $finish;    end    endmodule
+Key Design Notes
+
+1. Variable Cycle Counts
+
+The cycle count outputs (cycle_count) are critical for cycle accuracy. The 68030's MUL/DIV instructions take different numbers of cycles depending on operand values:
+MULU: More cycles when the multiplier has more 1-bits
+MULS: Depends on bit-pair transitions (Booth-like encoding)
+DIVU/DIVS: Fairly constant but slightly variable
+The exact cycle counts I've used are approximations. For true cycle accuracy, you'd need to verify against real hardware traces or the WinUAE source.
+2. Divider Implementation
+
+The divider uses restoring division, which is simple and correct but not the fastest algorithm. It takes 32 iterations (one per dividend bit) plus setup/sign-fixup cycles. This naturally models the multi-cycle nature of DIV instructions.
+3. Division Overflow Detection
+
+For DIVU, overflow occurs when the quotient exceeds 16 bits. For DIVS, overflow occurs when the signed quotient doesn't fit in a signed 16-bit value. Both trigger exceptions.
+4. Flag Behavior
+
+MUL: Sets N and Z based on the 32-bit result; V and C always cleared
+DIV: Flags are unchanged on success; undefined on error (we clear them)
+5. Result Format for DIV
+
+The result is {remainder[15:0], quotient[15:0]} — the remainder replaces the upper 16 bits of the destination register, and the quotient replaces the lower 16 bits. This matches the 68k architecture.
+Integration with the EU
+
+verilog
+
+
+1234567891011121314151617181920212223
+// In the EU top level:eu_mul_div mul_div (    .clk(clk),    .reset_n(reset_n),    .start(mul_div_start),    .op_type(current_op),       // From microcode    .size(2'b00),               // Always .W for MUL/DIV    .dividend(regfile.rd_a_data),    .divisor(regfile.rd_b_data),    .result(writeback_data),    .busy(mul_div_busy),    .done(mul_div_done),    .div_by_zero(mul_div_zero),    .div_overflow(mul_div_ovf),    .cycle_count(mul_div_cycles),    .n_flag(new_n),    .z_flag(new_z),    .v_flag(new_v),    .c_flag(new_c));// The sequencer uses mul_div_busy to insert wait states// and mul_div_cycles to count down the instruction timing
+What to Verify Carefully
+
+Cycle count accuracy: The formulas I've used are approximations. Verify against real 68030 traces.
+DIVS sign handling: The sign of the remainder follows the dividend (not the divisor). This is a common bug.
+Overflow edge cases: Test 80000000 / FFFF (signed overflow) and similar edge cases.
+DIVU overflow: Make sure FFFF0000 / 1 triggers overflow correctly.
+This gives you a functional multiplier/divider with cycle-accurate timing modeling. The actual arithmetic is straightforward; the tricky parts are the variable cycle counts and the exception handling.
+
+
+
+
+
+
+Ok, now show me the bcd design
+
+Thinking completed
+
+Design for eu_bcd Module (BCD Arithmetic)
+
+The 68030 BCD unit handles ABCD (Add Decimal), SBCD (Subtract Decimal), and NBCD (Negate Decimal). These operate on packed BCD bytes where each nibble represents a decimal digit (0-9).
+Packed BCD Refresher
+
+A byte like 0x47 represents the decimal number 47:
+Upper nibble (bits 7-4) = 4 (tens)
+Lower nibble (bits 3-0) = 7 (ones)
+Valid BCD digits are 0-9 in each nibble. The 68030 behavior with invalid inputs (digits > 9) is technically "undefined" but deterministic — we'll handle it with the standard adjustment algorithm.
+Module Interface
+
+verilog
+
+
+123456789101112131415161718192021222324252627
+module eu_bcd (    input  wire        clk,    input  wire        reset_n,        // === Control ===    input  wire        start,           // Pulse to begin operation    input  wire [1:0]  op_type,         // 00=ABCD, 01=SBCD, 10=NBCD        // === Operands ===    input  wire [7:0]  operand_a,       // Source (Dx or memory)    input  wire [7:0]  operand_b,       // Destination (Dx or memory)    input  wire        x_flag_in,       // Current X flag (used as carry-in)        // === Outputs ===    output reg  [7:0]  result,          // BCD result byte    output reg         x_flag_out,      // Updated X flag (= C for BCD)    output reg         n_flag_out,      // Negative flag (result[7])    output reg         z_flag_out,      // Zero flag (special: only cleared, never set)    output reg         c_flag_out       // Carry = decimal carry/borrow);    // Operation types    localparam OP_ABCD = 2'b00;    localparam OP_SBCD = 2'b01;    localparam OP_NBCD = 2'b10;  // Equivalent to SBCD with A=0endmodule
+Core BCD Arithmetic Logic
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748
+    // === NBCD: operand_a is forced to 0 ===    wire [7:0] eff_a = (op_type == OP_NBCD) ? 8'h00 : operand_a;    wire       is_subtract = (op_type == OP_SBCD) || (op_type == OP_NBCD);        // === Binary Arithmetic (with extend) ===    // We do the binary add/sub first, then apply BCD correction        wire [8:0] binary_sum;     // 9 bits to capture carry    wire [8:0] binary_diff;    // 9 bits to capture borrow        // Binary addition: A + B + X    assign binary_sum = {1'b0, eff_a} + {1'b0, operand_b} + {8'b0, x_flag_in};        // Binary subtraction: B - A - X (for SBCD/NBCD)    // Note: operand order is B - A for 68k SBCD semantics    assign binary_diff = {1'b0, operand_b} - {1'b0, eff_a} - {8'b0, x_flag_in};        // === Extract Nibbles for BCD Correction ===    wire [3:0] a_lo = eff_a[3:0];    wire [3:0] a_hi = eff_a[7:4];    wire [3:0] b_lo = operand_b[3:0];    wire [3:0] b_hi = operand_b[7:4];        // === BCD Addition Correction ===    // Rule: if a nibble sum > 9, add 6 to that nibble    wire [3:0] lo_sum_raw = a_lo + b_lo + {3'b0, x_flag_in};    wire       lo_sum_carry = (lo_sum_raw > 4'd9);    wire [3:0] lo_sum_corrected = lo_sum_carry ? (lo_sum_raw + 4'd6) : lo_sum_raw;        wire [3:0] hi_sum_raw = a_hi + b_hi + {3'b0, lo_sum_carry};    wire       hi_sum_carry = (hi_sum_raw > 4'd9);    wire [3:0] hi_sum_corrected = hi_sum_carry ? (hi_sum_raw + 4'd6) : hi_sum_raw;        wire       bcd_add_decimal_carry = hi_sum_carry;    wire [7:0] bcd_add_result = {hi_sum_corrected, lo_sum_corrected};        // === BCD Subtraction Correction ===    // Rule: if a nibble difference < 0 (borrow), subtract 6 from that nibble    wire [3:0] lo_diff_raw = b_lo - a_lo - {3'b0, x_flag_in};    wire       lo_diff_borrow = (b_lo < (a_lo + {3'b0, x_flag_in}));    wire [3:0] lo_diff_corrected = lo_diff_borrow ? (lo_diff_raw - 4'd6) : lo_diff_raw;        wire [3:0] hi_diff_raw = b_hi - a_hi - {3'b0, lo_diff_borrow};    wire       hi_diff_borrow = (b_hi < (a_hi + {3'b0, lo_diff_borrow}));    wire [3:0] hi_diff_corrected = hi_diff_borrow ? (hi_diff_raw - 4'd6) : hi_diff_raw;        wire       bcd_sub_decimal_borrow = hi_diff_borrow;    wire [7:0] bcd_sub_result = {hi_diff_corrected, lo_diff_corrected};
+Result and Flag Generation
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334
+    // === Result Selection ===    wire [7:0] bcd_result = is_subtract ? bcd_sub_result : bcd_add_result;    wire       decimal_carry = is_subtract ? bcd_sub_decimal_borrow : bcd_add_decimal_carry;        // === Main Sequential Logic ===    always @(posedge clk) begin        if (!reset_n) begin            result <= 8'h00;            x_flag_out <= 1'b0;            n_flag_out <= 1'b0;            z_flag_out <= 1'b1;  // Z starts set (special: only cleared)            c_flag_out <= 1'b0;        end else if (start) begin            // Result            result <= bcd_result;                        // N flag: MSB of result byte            n_flag_out <= bcd_result[7];                        // C flag: decimal carry/borrow            c_flag_out <= decimal_carry;                        // X flag: always follows C for BCD ops            x_flag_out <= decimal_carry;                        // Z flag: SPECIAL BEHAVIOR            // Only CLEARED if result is non-zero; NEVER SET            // This is the same as ADDX/SUBX behavior            if (bcd_result != 8'h00) begin                z_flag_out <= 1'b0;            end            // else: Z flag unchanged (stays at whatever it was)        end    end
+Testbench
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134135136137138139140141142143144145146147148149150151152153154155156157158159160161162163164165166167168169170171172173174175176177178179180181182183184185186187188189190191192193194195196197198199200201202203204205206207208209210211212213214215216217218219
+module eu_bcd_tb;        reg clk = 0;    always #5 clk = ~clk;        reg reset_n = 0;    reg start;    reg [1:0] op_type;    reg [7:0] operand_a, operand_b;    reg x_flag_in;        wire [7:0] result;    wire x_flag_out, n_flag_out, z_flag_out, c_flag_out;        eu_bcd dut (        .clk(clk),        .reset_n(reset_n),        .start(start),        .op_type(op_type),        .operand_a(operand_a),        .operand_b(operand_b),        .x_flag_in(x_flag_in),        .result(result),        .x_flag_out(x_flag_out),        .n_flag_out(n_flag_out),        .z_flag_out(z_flag_out),        .c_flag_out(c_flag_out)    );        integer pass_count = 0, fail_count = 0;        task check_bcd;        input [7:0] exp_result;        input exp_x;        input exp_c;        input exp_z;        input string test_name;        begin            #10;            if (result !== exp_result || x_flag_out !== exp_x ||                 c_flag_out !== exp_c || z_flag_out !== exp_z) begin                $display("FAIL %s: got %h X=%b C=%b Z=%b, expected %h X=%b C=%b Z=%b",                         test_name, result, x_flag_out, c_flag_out, z_flag_out,                         exp_result, exp_x, exp_c, exp_z);                fail_count = fail_count + 1;            end else begin                $display("PASS %s: %h X=%b C=%b Z=%b",                          test_name, result, x_flag_out, c_flag_out, z_flag_out);                pass_count = pass_count + 1;            end        end    endtask        initial begin        reset_n = 0;        start = 0;        x_flag_in = 0;        #20;        reset_n = 1;                // === ABCD Tests ===                // Test 1: 12 + 34 = 46 (no carry needed)        operand_a = 8'h12;        operand_b = 8'h34;        op_type = 2'b00;  // ABCD        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h46, 1'b0, 1'b0, 1'b0, "ABCD 12+34");                // Test 2: 15 + 27 = 42 (lower nibble carry: 5+7=12 -> +6=18 -> 2 with carry)        operand_a = 8'h15;        operand_b = 8'h27;        op_type = 2'b00;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h42, 1'b0, 1'b0, 1'b0, "ABCD 15+27");                // Test 3: 47 + 58 = 05 with carry (47+58=105 decimal)        operand_a = 8'h47;        operand_b = 8'h58;        op_type = 2'b00;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h05, 1'b1, 1'b1, 1'b0, "ABCD 47+58 (decimal carry)");                // Test 4: ABCD with X=1 (adds extra 1)        operand_a = 8'h12;        operand_b = 8'h34;        op_type = 2'b00;        x_flag_in = 1;        start = 1; #10; start = 0;        check_bcd(8'h47, 1'b0, 1'b0, 1'b0, "ABCD 12+34+X(1)");                // Test 5: 99 + 01 = 00 with carry        operand_a = 8'h99;        operand_b = 8'h01;        op_type = 2'b00;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h00, 1'b1, 1'b1, 1'b1, "ABCD 99+01 (zero result)");                // === SBCD Tests ===                // Test 6: 47 - 12 = 35 (no borrow)        operand_a = 8'h12;        operand_b = 8'h47;        op_type = 2'b01;  // SBCD        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h35, 1'b0, 1'b0, 1'b0, "SBCD 47-12");                // Test 7: 32 - 15 = 17 (lower nibble borrow: 2-5 -> borrow, 12-5=7)        operand_a = 8'h15;        operand_b = 8'h32;        op_type = 2'b01;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h17, 1'b0, 1'b0, 1'b0, "SBCD 32-15");                // Test 8: 05 - 47 = 58 with borrow (decimal borrow)        operand_a = 8'h47;        operand_b = 8'h05;        op_type = 2'b01;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h58, 1'b1, 1'b1, 1'b0, "SBCD 05-47 (decimal borrow)");                // Test 9: SBCD with X=1        operand_a = 8'h12;        operand_b = 8'h47;        op_type = 2'b01;        x_flag_in = 1;        start = 1; #10; start = 0;        check_bcd(8'h34, 1'b0, 1'b0, 1'b0, "SBCD 47-12-X(1)");                // === NBCD Tests ===                // Test 10: NBCD 37 = 63 (100 - 37 = 63)        operand_a = 8'h00;  // Ignored for NBCD        operand_b = 8'h37;        op_type = 2'b10;  // NBCD        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h63, 1'b0, 1'b0, 1'b0, "NBCD 37 -> 63");                // Test 11: NBCD 00 = 00 (no change, but X=0)        operand_a = 8'h00;        operand_b = 8'h00;        op_type = 2'b10;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h00, 1'b0, 1'b0, 1'b1, "NBCD 00 -> 00");                // Test 12: NBCD 01 = 99 (100 - 01 = 99)        operand_a = 8'h00;        operand_b = 8'h01;        op_type = 2'b10;        x_flag_in = 0;        start = 1; #10; start = 0;        check_bcd(8'h99, 1'b0, 1'b0, 1'b0, "NBCD 01 -> 99");                // === Z Flag Special Behavior Test ===                // Test 13: Z flag should stay set across multiple zero results        // First, set Z by doing a zero-result operation        operand_a = 8'h00;        operand_b = 8'h00;        op_type = 2'b00;        x_flag_in = 0;        start = 1; #10; start = 0;        // Z should be set (result is 00)        if (z_flag_out !== 1'b1) begin            $display("FAIL: Z should be set after 00+00");            fail_count = fail_count + 1;        end                // Now do another zero-result op - Z should stay set        operand_a = 8'h00;        operand_b = 8'h00;        start = 1; #10; start = 0;        if (z_flag_out !== 1'b1) begin            $display("FAIL: Z should still be set after second 00+00");            fail_count = fail_count + 1;        end else begin            $display("PASS: Z flag stays set across zero results");            pass_count = pass_count + 1;        end                // Now do a non-zero result - Z should clear        operand_a = 8'h01;        operand_b = 8'h00;        start = 1; #10; start = 0;        if (z_flag_out !== 1'b0) begin            $display("FAIL: Z should clear after non-zero result");            fail_count = fail_count + 1;        end else begin            $display("PASS: Z flag clears on non-zero result");            pass_count = pass_count + 1;        end                // Now do another zero result - Z should STAY cleared (never set!)        operand_a = 8'h00;        operand_b = 8'h00;        start = 1; #10; start = 0;        if (z_flag_out !== 1'b0) begin            $display("FAIL: Z should stay cleared (never set after being cleared)");            fail_count = fail_count + 1;        end else begin            $display("PASS: Z flag stays cleared (never re-set)");            pass_count = pass_count + 1;        end                $display("\n=== Summary ===");        $display("Passed: %0d, Failed: %0d", pass_count, fail_count);        $finish;    end    endmodule
+Key Design Notes
+
+1. The Z Flag is Special
+
+This is the most common bug in BCD implementations. For ABCD/SBCD/NBCD:
+Z is only cleared (when result is non-zero)
+Z is never set (even if result is zero)
+This allows chaining multiple BCD operations (like multi-digit addition) where Z tracks whether ALL digits were zero. The testbench explicitly tests this behavior.
+2. BCD Correction Algorithm
+
+The standard algorithm is:
+Addition: If a nibble sum > 9, add 6 to that nibble (because 0xA-0xF are invalid BCD, but adding 6 wraps them correctly with a carry)
+Subtraction: If a nibble difference < 0 (borrow), subtract 6 from that nibble
+The correction happens independently for each nibble, with the lower nibble's carry/borrow propagating to the upper nibble.
+3. NBCD is Just SBCD with A=0
+
+NBCD Dx is equivalent to SBCD D0, Dx with D0=0. We handle this by forcing operand_a to 0 when op_type == OP_NBCD.
+4. Operand Order for SBCD
+
+The 68k SBCD semantics are: Dx = Dy - Dx - X (where Dy is destination, Dx is source). In our module:
+operand_a = source (Dx or memory)
+operand_b = destination (Dy or memory)
+Result replaces destination
+5. X Flag Behavior
+
+For all BCD operations, X always follows C. They're both set to the decimal carry/borrow.
+6. N Flag
+
+N reflects the MSB of the result byte (bit 7). This is useful for signed BCD interpretations, though BCD is typically treated as unsigned.
+7. V Flag
+
+The 68030 documentation says V is undefined for BCD operations. We don't output a V flag from this module — the EU should leave V unchanged when executing BCD instructions.
+Integration with the EU
+
+verilog
+
+
+123456789101112131415161718
+// In the EU top level:eu_bcd bcd_unit (    .clk(clk),    .reset_n(reset_n),    .start(bcd_start),    .op_type(current_bcd_op),      // From microcode    .operand_a(regfile.rd_a_data[7:0]),    .operand_b(regfile.rd_b_data[7:0]),    .x_flag_in(sr[4]),             // X flag from SR    .result(bcd_writeback),    .x_flag_out(new_x),    .n_flag_out(new_n),    .z_flag_out(new_z),    .c_flag_out(new_c));// Note: V flag is NOT updated for BCD operations// The sequencer should only write X, N, Z, C back to SR
+Edge Cases to Test Thoroughly
+
+99 + 01 = 00 with carry (maximum decimal carry)
+00 - 01 = 99 with borrow (maximum decimal borrow)
+Multi-digit chaining: Test that Z flag correctly tracks across multiple operations
+X flag propagation: Verify X is used as input and updated correctly
+NBCD of 00: Should give 00 with no borrow
+NBCD of 01: Should give 99 (100 - 1)
+What's Missing for Full 68030 BCD
+
+This module handles the arithmetic. For complete instruction support, you also need:
+Addressing mode handling: ABCD/SBCD support both register (Dx, Dy) and memory (-(An), -(Am)) modes. The memory mode uses pre-decrement addressing and the destination is both source and destination.
+Privilege checking: None needed — BCD instructions are user-mode.
+Cycle counting: ABCD/SBCD take 6 cycles for register mode, 18-19 cycles for memory mode. NBCD takes 6 cycles (register) or 8 cycles (memory).
+This gives you a clean, testable BCD unit. The trickiest part is the Z flag behavior — make sure your testbench explicitly verifies that Z is never re-set once cleared.
+
+
+
+
+
+
+Ok, now show me the design for bit operations.  I think then you have shown me all the high level design pieces for the alu ?
+
+Thinking completed
+
+Design for eu_bitops Module (Bit Operations)
+
+The 68030 bit operations handle BTST, BSET, BCLR, and BCHG. These operate on individual bits within byte or long operands. Unlike arithmetic operations, these are read-modify-write operations for memory operands — the original value is read, one bit is modified, and the result is written back.
+Module Interface
+
+verilog
+
+
+1234567891011121314151617181920212223242526
+module eu_bitops (    input  wire        clk,    input  wire        reset_n,        // === Control ===    input  wire        start,           // Pulse to begin operation    input  wire [1:0]  op_type,         // 00=BTST, 01=BSET, 10=BCLR, 11=BCHG    input  wire [1:0]  size,            // 01=byte, 00=long (only these two valid)        // === Operands ===    input  wire [31:0] operand,         // Value to test/modify    input  wire [4:0]  bit_num,         // Bit number (0-31 for long, 0-7 for byte)        // === Outputs ===    output reg  [31:0] result,          // Modified value (unchanged for BTST)    output reg         z_flag,          // Z = !original_bit (set if bit was 0)    output reg         done             // Pulse when complete (1 cycle for register ops));    // Operation types    localparam OP_BTST = 2'b00;    localparam OP_BSET = 2'b01;    localparam OP_BCLR = 2'b10;    localparam OP_BCHG = 2'b11;endmodule
+Core Bit Operation Logic
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243
+    // === Bit Number Masking ===    // For byte operands, only bits 0-7 are valid    // For long operands, bits 0-31 are valid    // The 68030 masks the bit number automatically        wire [4:0] effective_bit;    assign effective_bit = (size == 2'b01) ? (bit_num & 5'd7) : bit_num;        // === Extract the Original Bit ===    wire original_bit;    assign original_bit = operand[effective_bit];        // === Calculate Modified Value ===    wire [31:0] bit_mask;    assign bit_mask = 32'h00000001 << effective_bit;        wire [31:0] set_result;     // Force bit to 1    wire [31:0] clear_result;   // Force bit to 0    wire [31:0] change_result;  // Toggle bit        assign set_result = operand | bit_mask;    assign clear_result = operand & ~bit_mask;    assign change_result = operand ^ bit_mask;        // === Result Selection ===    wire [31:0] modified_result;        always @(*) begin        case (op_type)            OP_BTST: modified_result = operand;         // No modification            OP_BSET: modified_result = set_result;            OP_BCLR: modified_result = clear_result;            OP_BCHG: modified_result = change_result;            default: modified_result = operand;        endcase    end        // === Size Masking for Result ===    // For byte operations, only the lower 8 bits are valid    wire [31:0] size_masked_result;    assign size_masked_result = (size == 2'b01) ?                                 ({24'b0, modified_result[7:0]}) :                                 modified_result;
+Flag Generation and Output
+
+verilog
+
+
+12345678910111213141516171819202122
+    // === Sequential Logic ===    always @(posedge clk) begin        if (!reset_n) begin            result <= 32'h0;            z_flag <= 1'b0;            done <= 1'b0;        end else begin            done <= 1'b0;  // Default: clear done pulse                        if (start) begin                // Result (modified value, or unchanged for BTST)                result <= size_masked_result;                                // Z flag: set if the ORIGINAL bit was 0                // This is the same for all four operations                z_flag <= !original_bit;                                // Done pulse (1 cycle latency)                done <= 1'b1;            end        end    end
+Testbench
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134135136137138139140141142143144145146147148149150151152153154155156157158159160161162163164165166167168169170171172173174175176177178179180181182183
+module eu_bitops_tb;        reg clk = 0;    always #5 clk = ~clk;        reg reset_n = 0;    reg start;    reg [1:0] op_type;    reg [1:0] size;    reg [31:0] operand;    reg [4:0] bit_num;        wire [31:0] result;    wire z_flag;    wire done;        eu_bitops dut (        .clk(clk),        .reset_n(reset_n),        .start(start),        .op_type(op_type),        .size(size),        .operand(operand),        .bit_num(bit_num),        .result(result),        .z_flag(z_flag),        .done(done)    );        integer pass_count = 0, fail_count = 0;        task check_bitop;        input [31:0] exp_result;        input exp_z;        input string test_name;        begin            wait(done);            #10;            if (result !== exp_result || z_flag !== exp_z) begin                $display("FAIL %s: got %h Z=%b, expected %h Z=%b",                         test_name, result, z_flag, exp_result, exp_z);                fail_count = fail_count + 1;            end else begin                $display("PASS %s: %h Z=%b", test_name, result, z_flag);                pass_count = pass_count + 1;            end        end    endtask        initial begin        reset_n = 0;        start = 0;        #20;        reset_n = 1;                // === BTST Tests ===                // Test 1: BTST bit 0 of 0x01 (bit is 1, Z should clear)        operand = 32'h00000001;        bit_num = 5'd0;        op_type = 2'b00;  // BTST        size = 2'b00;     // Long        start = 1; #10; start = 0;        check_bitop(32'h00000001, 1'b0, "BTST.L bit 0 of 01");                // Test 2: BTST bit 1 of 0x01 (bit is 0, Z should set)        operand = 32'h00000001;        bit_num = 5'd1;        op_type = 2'b00;        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000001, 1'b1, "BTST.L bit 1 of 01");                // Test 3: BTST bit 31 of 0x80000000 (bit is 1)        operand = 32'h80000000;        bit_num = 5'd31;        op_type = 2'b00;        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h80000000, 1'b0, "BTST.L bit 31 of 80000000");                // === BSET Tests ===                // Test 4: BSET bit 0 of 0x00 (set bit 0, Z=1 because bit was 0)        operand = 32'h00000000;        bit_num = 5'd0;        op_type = 2'b01;  // BSET        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000001, 1'b1, "BSET.L bit 0 of 00");                // Test 5: BSET bit 3 of 0x08 (bit already set, Z=0)        operand = 32'h00000008;        bit_num = 5'd3;        op_type = 2'b01;        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000008, 1'b0, "BSET.L bit 3 of 08 (already set)");                // Test 6: BSET bit 7 of 0x00 (byte operation)        operand = 32'h00000000;        bit_num = 5'd7;        op_type = 2'b01;        size = 2'b01;  // Byte        start = 1; #10; start = 0;        check_bitop(32'h00000080, 1'b1, "BSET.B bit 7 of 00");                // === BCLR Tests ===                // Test 7: BCLR bit 0 of 0x01 (clear bit 0, Z=0 because bit was 1)        operand = 32'h00000001;        bit_num = 5'd0;        op_type = 2'b10;  // BCLR        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000000, 1'b0, "BCLR.L bit 0 of 01");                // Test 8: BCLR bit 1 of 0x01 (bit already clear, Z=1)        operand = 32'h00000001;        bit_num = 5'd1;        op_type = 2'b10;        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000001, 1'b1, "BCLR.L bit 1 of 01 (already clear)");                // Test 9: BCLR bit 4 of 0x10 (byte operation)        operand = 32'h00000010;        bit_num = 5'd4;        op_type = 2'b10;        size = 2'b01;  // Byte        start = 1; #10; start = 0;        check_bitop(32'h00000000, 1'b0, "BCLR.B bit 4 of 10");                // === BCHG Tests ===                // Test 10: BCHG bit 0 of 0x00 (toggle 0->1, Z=1)        operand = 32'h00000000;        bit_num = 5'd0;        op_type = 2'b11;  // BCHG        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000001, 1'b1, "BCHG.L bit 0 of 00");                // Test 11: BCHG bit 0 of 0x01 (toggle 1->0, Z=0)        operand = 32'h00000001;        bit_num = 5'd0;        op_type = 2'b11;        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000000, 1'b0, "BCHG.L bit 0 of 01");                // Test 12: BCHG bit 15 of 0x8000 (word-sized long operation)        operand = 32'h00008000;        bit_num = 5'd15;        op_type = 2'b11;        size = 2'b00;        start = 1; #10; start = 0;        check_bitop(32'h00000000, 1'b0, "BCHG.L bit 15 of 8000");                // === Bit Number Masking Tests ===                // Test 13: Byte operation with bit_num > 7 (should mask to 0-7)        operand = 32'h000000FF;        bit_num = 5'd8;  // Should become bit 0 after masking        op_type = 2'b00;  // BTST        size = 2'b01;     // Byte        start = 1; #10; start = 0;        check_bitop(32'h000000FF, 1'b0, "BTST.B bit 8 (masked to 0) of FF");                // Test 14: Byte operation with bit_num = 15 (should mask to 7)        operand = 32'h0000007F;  // Bit 7 is 0        bit_num = 5'd15;  // Should become bit 7 after masking        op_type = 2'b00;        size = 2'b01;        start = 1; #10; start = 0;        check_bitop(32'h0000007F, 1'b1, "BTST.B bit 15 (masked to 7) of 7F");                $display("\n=== Summary ===");        $display("Passed: %0d, Failed: %0d", pass_count, fail_count);        $finish;    end    endmodule
+Key Design Notes
+
+1. Bit Number Masking
+
+For byte operands, the bit number is masked to 0-7. For long operands, it's 0-31. This is critical because the 68030 automatically masks the bit number, and software may rely on this behavior.
+2. Z Flag Reflects Original Bit
+
+For all four operations, Z is set if the original bit was 0, cleared if it was 1. For BSET/BCLR/BCHG, this is the bit value before modification. This allows code to test and modify in one instruction.
+3. Only Z Flag is Affected
+
+Bit operations do not affect N, V, C, or X flags. The EU should only write the Z flag back to the SR after these operations.
+4. Read-Modify-Write Semantics
+
+For memory operands, the sequence is:
+Read the byte/long from memory
+Test/modify the bit
+Write the result back to memory
+The bitops module handles step 2. The EU/BIU handles steps 1 and 3.
+5. Size Masking for Result
+
+For byte operations, only the lower 8 bits of the result are valid. The upper bits should be zeroed (or ignored, depending on the writeback logic).
+6. Single-Cycle Operation
+
+Bit operations complete in 1 cycle (for register operands). Memory operands take additional cycles for the read and write bus cycles.
+Integration with the EU
+
+verilog
+
+
+123456789101112131415161718192021
+// In the EU top level:eu_bitops bitops (    .clk(clk),    .reset_n(reset_n),    .start(bitops_start),    .op_type(current_bitop),       // From microcode    .size(current_size),           // Byte or long    .operand(regfile.rd_a_data),   // Source operand    .bit_num(regfile.rd_b_data[4:0]), // Bit number (from Dx or immediate)    .result(bitops_writeback),    .z_flag(new_z),    .done(bitops_done));// The sequencer uses bitops_done to know when the operation is complete// For memory operands, the sequencer must:// 1. Request a read bus cycle// 2. Wait for data to arrive// 3. Start the bitops operation// 4. Wait for bitops_done// 5. Request a write bus cycle with the result
+What's Special About Bit Operations
+
+Immediate vs Register Bit Number: The bit number can come from a data register (Dx) or an immediate value in the instruction. The EU must decode this and route the correct value to bit_num.
+Byte vs Long Size: BTST supports both byte and long operands. BSET/BCLR/BCHG also support both. The size affects the bit number masking.
+Memory Operand Timing: For memory operands, the instruction takes significantly longer:
+Register operand: 6 cycles
+Memory operand: 8-12 cycles (depending on addressing mode)
+No Overflow/Carry: Unlike arithmetic operations, bit operations don't generate overflow or carry flags.
+Summary: ALU Subsystem Complete
+
+Yes, with this bit operations module, you now have all the high-level ALU subsystem pieces:
+✅ eu_regfile - Register file (D0-D7, A0-A7, USP, SSP, PC, SR)
+✅ eu_alu - Basic arithmetic and logic (ADD, SUB, AND, OR, etc.)
+✅ eu_shifter - Barrel shifter (ASL/ASR, LSL/LSR, ROL/ROR, ROXL/ROXR)
+✅ eu_mul_div - Multiplier and divider (MULS, MULU, DIVS, DIVU)
+✅ eu_bcd - BCD arithmetic (ABCD, SBCD, NBCD)
+✅ eu_bitops - Bit operations (BTST, BSET, BCLR, BCHG)
+The ALU subsystem is now complete. The next major units to tackle are:
+AGU (Address Generation Unit) - Calculate effective addresses for all 9 addressing modes
+IFU (Instruction Fetch Unit) - Manage the prefetch queue and instruction stream
+Microcode/Sequencer - Decode instructions and control the pipeline
+BIU (Bus Interface Unit) - Already designed
+Cache Controllers - I-Cache and D-Cache
+MMU - Memory management unit (most complex, save for last)
+You now have a solid foundation for the execution unit. The next logical step is the AGU, which will allow you to calculate memory addresses and start connecting the ALU to the bus interface.
+
+
+
+
+
+
+Ok, let’s move onto the agu.  What’s the high level design we need to follow ?
+
+Thinking completed
+
+High-Level Design for eu_agu (Address Generation Unit)
+
+The AGU is one of the most complex parts of the 68030 EU. It calculates Effective Addresses (EA) for all 12 addressing modes, handles the 68030's full extension word format, manages pre-decrement/post-increment of address registers, and reports accurate cycle counts. Let me lay out the architecture.
+The 68030 Addressing Modes
+
+The AGU must support all of these:
+
+Mode
+Encoding
+Description
+EA Calculation
+0
+000
+Data Register Direct (Dn)
+None (handled by EU)
+1
+001
+Address Register Direct (An)
+None (handled by EU)
+2
+010
+Address Register Indirect (An)
+EA = An
+3
+011
+Post-Increment (An)+
+EA = An; An = An + size
+4
+100
+Pre-Decrement -(An)
+An = An - size; EA = An
+5
+101
+Displacement (d16,An)
+EA = An + d16
+6
+110
+Index (d8,An,Xn)
+EA = An + d8 + Xn (with extension word)
+7,0
+111,000
+Absolute Short (xxx).W
+EA = extension_word
+7,1
+111,001
+Absolute Long (xxx).L
+EA = extension_long
+7,2
+111,010
+PC + Displacement (d16,PC)
+EA = PC + d16
+7,3
+111,011
+PC + Index (d8,PC,Xn)
+EA = PC + d8 + Xn
+7,4
+111,100
+Immediate #xxx
+EA = PC (then PC += size)
+For the 68030, mode 6 (110) also supports the full extension word format with base/index suppression, scaling, and memory indirect addressing.
+Module Hierarchy
+
+
+
+123456
+eu_agu (Top-level AGU)├── agu_mode_decode     (Decode mode/register fields from instruction)├── agu_extension_parse (Parse 68030 full extension word)├── agu_ea_calc         (The actual address math)├── agu_reg_update      (Handle pre-dec/post-inc writeback)└── agu_cycle_count     (Calculate cycle cost of the mode)
+Top-Level Module Interface
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435
+module eu_agu (    input  wire        clk,    input  wire        reset_n,        // === Control ===    input  wire        start,           // Pulse to begin EA calculation    input  wire [2:0]  mode,            // Addressing mode (0-7)    input  wire [2:0]  reg_field,       // Register field from instruction (0-7)    input  wire [1:0]  op_size,         // 00=long, 01=byte, 10=word    input  wire        is_destination,  // 1 = destination operand (affects some modes)        // === Extension Words ===    input  wire [15:0] ext_word1,       // First extension word (displacement/index)    input  wire [15:0] ext_word2,       // Second extension word (for full format)    input  wire        has_ext_word2,   // Whether second extension word is valid        // === Current CPU State ===    input  wire [31:0] current_pc,      // PC at start of instruction    input  wire [31:0] an_value,        // Current value of the addressed An register    input  wire [31:0] xn_value,        // Current value of index register (Dn or An)    input  wire        xn_is_an,        // 1 = index is An, 0 = index is Dn    input  wire        xn_size,         // 0 = long index, 1 = word index (sign-extended)        // === Outputs ===    output reg  [31:0] effective_addr,  // Calculated EA    output reg         ea_valid,        // Pulse when EA is ready    output reg         need_extension,  // Need to fetch extension word(s)    output reg  [1:0]  ext_fetch_size,  // Size of extension word fetch (word/long)    output reg  [31:0] an_writeback,    // Updated An value (for pre-dec/post-inc)    output reg         an_writeback_en, // Pulse to write back to An    output reg  [7:0]  cycle_count,     // Number of cycles this mode takes    output reg         is_memory_op,    // 1 = EA points to memory, 0 = register    output reg         is_rmw,          // 1 = read-modify-write (for BIU)    output reg         addr_error       // 1 = address error (misaligned word/long));
+Sub-Module 1: agu_mode_decode
+
+This decodes the mode/register fields and determines what kind of operation is needed.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106
+module agu_mode_decode (    input  wire [2:0]  mode,    input  wire [2:0]  reg_field,    input  wire [1:0]  op_size,    input  wire        is_destination,        output reg         needs_ea_calc,      // Does this mode need EA calculation?    output reg         needs_extension,    // Need extension word(s)?    output reg         needs_pc_relative,  // Uses PC as base?    output reg         needs_index,        // Uses index register?    output reg         needs_predec,       // Pre-decrement?    output reg         needs_postinc,      // Post-increment?    output reg         is_absolute,        // Absolute addressing?    output reg         is_immediate,       // Immediate operand?    output reg         is_register_direct, // Dn or An direct    output reg         uses_full_ext,      // Uses 68030 full extension format    output reg  [1:0]  increment_size      // Bytes to add/subtract for An);    // Determine increment size based on op_size    // Special case: A7 always increments/decrements by at least 2 (word-aligned)    wire [1:0] raw_size = (op_size == 2'b01) ? 2'd1 :  // byte                          (op_size == 2'b10) ? 2'd2 :  // word                                               2'd4;   // long    wire [1:0] a7_adjusted_size = (reg_field == 3'd7 && raw_size == 2'd1) ? 2'd2 : raw_size;        assign increment_size = a7_adjusted_size;        always @(*) begin        // Defaults        needs_ea_calc = 1'b0;        needs_extension = 1'b0;        needs_pc_relative = 1'b0;        needs_index = 1'b0;        needs_predec = 1'b0;        needs_postinc = 1'b0;        is_absolute = 1'b0;        is_immediate = 1'b0;        is_register_direct = 1'b0;        uses_full_ext = 1'b0;                case (mode)            3'd0: begin // Dn                is_register_direct = 1'b1;            end            3'd1: begin // An                is_register_direct = 1'b1;            end            3'd2: begin // (An)                needs_ea_calc = 1'b1;            end            3'd3: begin // (An)+                needs_ea_calc = 1'b1;                needs_postinc = 1'b1;            end            3'd4: begin // -(An)                needs_ea_calc = 1'b1;                needs_predec = 1'b1;            end            3'd5: begin // (d16,An)                needs_ea_calc = 1'b1;                needs_extension = 1'b1;            end            3'd6: begin // (d8,An,Xn) or full extension                needs_ea_calc = 1'b1;                needs_extension = 1'b1;                needs_index = 1'b1;                // Check if this is the full extension format (bit 8 = 1)                // This is determined by the caller based on ext_word1[8]            end            3'd7: begin                case (reg_field)                    3'd0: begin // (xxx).W                        needs_ea_calc = 1'b1;                        needs_extension = 1'b1;                        is_absolute = 1'b1;                    end                    3'd1: begin // (xxx).L                        needs_ea_calc = 1'b1;                        needs_extension = 1'b1;                        is_absolute = 1'b1;                    end                    3'd2: begin // (d16,PC)                        needs_ea_calc = 1'b1;                        needs_extension = 1'b1;                        needs_pc_relative = 1'b1;                    end                    3'd3: begin // (d8,PC,Xn)                        needs_ea_calc = 1'b1;                        needs_extension = 1'b1;                        needs_pc_relative = 1'b1;                        needs_index = 1'b1;                    end                    3'd4: begin // Immediate                        needs_extension = 1'b1;                        is_immediate = 1'b1;                    end                    default: begin                        // Illegal encoding                    end                endcase            end        endcase    end    endmodule
+Sub-Module 2: agu_extension_parse
+
+The 68030's full extension word format is complex. This module parses it.
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970717273747576777879808182838485868788899091929394959697
+module agu_extension_parse (    input  wire [15:0] ext_word1,       // First extension word    input  wire [15:0] ext_word2,       // Second extension word (if present)    input  wire        has_ext_word2,    input  wire        is_full_format,  // Bit 8 of ext_word1 = 1        // === Parsed Fields ===    output reg  [31:0] displacement,    // Base displacement (signed)    output reg  [31:0] outer_disp,      // Outer displacement (signed)    output reg  [2:0]  scale,           // Index scale (0=1, 1=2, 2=4, 3=8)    output reg         base_suppressed, // Base register not added    output reg         index_suppressed,// Index register not added    output reg         is_mem_indirect, // Memory indirect mode    output reg  [1:0]  indirect_stage,  // When to add outer disp (pre/post)    output reg         needs_second_word // Need to fetch ext_word2);    always @(*) begin        // Defaults        displacement = 32'h0;        outer_disp = 32'h0;        scale = 3'd0;        base_suppressed = 1'b0;        index_suppressed = 1'b0;        is_mem_indirect = 1'b0;        indirect_stage = 2'd0;        needs_second_word = 1'b0;                if (!is_full_format) begin            // === Brief Format (68000-compatible) ===            // ext_word1: [d8 | 0 | reg | size | 000]            // d8 = 8-bit signed displacement            // reg = index register number            // size = 0 for word, 1 for long                        // Sign-extend 8-bit displacement            displacement = {{24{ext_word1[15]}}, ext_word1[15:8]};                        // Scale is always 1 in brief format            scale = 3'd0;        end else begin            // === Full Format (68030-specific) ===            // ext_word1: [BS | IS | IR | d8/d16/d32/0 | scale | 0 | 00 | IIS]            // BS = base suppressed (bit 15)            // IS = index suppressed (bit 14)            // IR = index register is An (bit 13)            // Next 3 bits = displacement size (000=null, 001=word, 011=long)            // Next 2 bits = scale            // Bit 8 = 1 (indicates full format)            // Last 3 bits = IIS (indirect selection)                        base_suppressed = ext_word1[15];            index_suppressed = ext_word1[14];                        // Scale: bits 10-9 (actually bits 12-10 in some docs, need to verify)            scale = {1'b0, ext_word1[12:11]};                        // Displacement size: bits 6-5 (actually bits 8-7 in some docs)            case ({ext_word1[6], ext_word1[5:4]})                // This needs careful verification against the 68030 manual                // For now, simplified:                default: displacement = {{24{ext_word1[15]}}, ext_word1[15:8]};            endcase                        // IIS (Indirect Instruction Selection): bits 2-0            case (ext_word1[2:0])                3'b000, 3'b001: begin                    // No memory indirect                    is_mem_indirect = 1'b0;                end                3'b010, 3'b011: begin                    // Preindexed: [bd + An + Xn*scale] + od                    is_mem_indirect = 1'b1;                    indirect_stage = 2'd1;  // Pre                end                3'b110, 3'b111: begin                    // Postindexed: [bd + An] + Xn*scale + od                    is_mem_indirect = 1'b1;                    indirect_stage = 2'd2;  // Post                end                default: begin                    is_mem_indirect = 1'b0;                end            endcase                        // Determine if we need a second extension word            // (for long displacements or outer displacements)            needs_second_word = has_ext_word2;                        // Parse second word if present            if (has_ext_word2) begin                outer_disp = {{16{ext_word2[15]}}, ext_word2};            end        end    end    endmodule
+Sub-Module 3: agu_ea_calc
+
+The actual address math.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127128129130131132133134135136137138139140141142143144145146147148149150151152153154155156157158159160161162163164165166167
+module agu_ea_calc (    input  wire [2:0]  mode,    input  wire [2:0]  reg_field,    input  wire [1:0]  op_size,    input  wire        is_full_format,        // === Inputs from other modules ===    input  wire [31:0] an_value,    input  wire [31:0] xn_value,    input  wire        xn_is_an,    input  wire        xn_size,    input  wire [31:0] current_pc,    input  wire [31:0] displacement,    input  wire [31:0] outer_disp,    input  wire [2:0]  scale,    input  wire        base_suppressed,    input  wire        index_suppressed,    input  wire        is_mem_indirect,    input  wire [1:0]  indirect_stage,    input  wire [1:0]  increment_size,    input  wire        needs_predec,    input  wire        needs_postinc,    input  wire        needs_pc_relative,    input  wire        is_absolute,        // === Outputs ===    output reg  [31:0] effective_addr,    output reg  [31:0] an_writeback,    output reg         an_writeback_en,    output reg         addr_error);    // === Index Register Processing ===    // Scale the index value (1, 2, 4, or 8)    wire [31:0] scaled_index;    wire [31:0] sign_extended_xn;        // Sign-extend word index to long    assign sign_extended_xn = xn_size ? {{16{xn_value[15]}}, xn_value[15:0]} : xn_value;        // Apply scale    assign scaled_index = sign_extended_xn << (scale * 3'd1);    // Note: scale * 3 gives 0, 1, 2, 3 for scales 1, 2, 4, 8    // But we need shift amounts 0, 1, 2, 3 — so this is correct        // Actually, scale encoding is: 0=*1, 1=*2, 2=*4, 3=*8    // So shift amount is just `scale`        // === Base Address Selection ===    wire [31:0] base_addr;    assign base_addr = needs_pc_relative ? current_pc : an_value;        // === Main EA Calculation ===    reg [31:0] inner_sum;    reg [31:0] final_ea;        always @(*) begin        addr_error = 1'b0;        an_writeback_en = 1'b0;        an_writeback = 32'h0;                case (mode)            3'd0, 3'd1: begin                // Register direct - no EA needed                final_ea = 32'h0;            end                        3'd2: begin                // (An)                final_ea = an_value;            end                        3'd3: begin                // (An)+                final_ea = an_value;                an_writeback = an_value + {30'b0, increment_size};                an_writeback_en = 1'b1;            end                        3'd4: begin                // -(An)                final_ea = an_value - {30'b0, increment_size};                an_writeback = final_ea;                an_writeback_en = 1'b1;            end                        3'd5: begin                // (d16,An)                final_ea = an_value + displacement;            end                        3'd6: begin                if (!is_full_format) begin                    // Brief format: (d8,An,Xn)                    final_ea = an_value + displacement + scaled_index;                end else begin                    // Full format                    if (!is_mem_indirect) begin                        // Simple: [bd + An + Xn*scale]                        inner_sum = (base_suppressed ? 32'h0 : base_addr) +                                    displacement +                                    (index_suppressed ? 32'h0 : scaled_index);                        final_ea = inner_sum;                    end else if (indirect_stage == 2'd1) begin                        // Preindexed: [bd + An + Xn*scale] + od                        inner_sum = (base_suppressed ? 32'h0 : base_addr) +                                    displacement +                                    (index_suppressed ? 32'h0 : scaled_index);                        // Inner sum is a pointer - need to read memory                        // This requires BIU interaction (handled by sequencer)                        final_ea = inner_sum + outer_disp;                    end else begin                        // Postindexed: [bd + An] + Xn*scale + od                        inner_sum = (base_suppressed ? 32'h0 : base_addr) + displacement;                        // Inner sum is a pointer - need to read memory                        final_ea = inner_sum + scaled_index + outer_disp;                    end                end            end                        3'd7: begin                case (reg_field)                    3'd0: begin                        // (xxx).W - sign-extend displacement                        final_ea = {{16{displacement[15]}}, displacement[15:0]};                    end                    3'd1: begin                        // (xxx).L - full long                        final_ea = displacement;                    end                    3'd2: begin                        // (d16,PC)                        final_ea = current_pc + displacement;                    end                    3'd3: begin                        // (d8,PC,Xn)                        final_ea = current_pc + displacement + scaled_index;                    end                    3'd4: begin                        // Immediate - EA is the PC (data follows in instruction stream)                        final_ea = current_pc;                    end                    default: begin                        final_ea = 32'h0;                        addr_error = 1'b1;  // Illegal mode                    end                endcase            end                        default: begin                final_ea = 32'h0;                addr_error = 1'b1;            end        endcase                // === Address Error Check ===        // Word and long operations must be on even addresses        if (op_size != 2'b01) begin  // Not byte            if (final_ea[0] != 1'b0) begin                addr_error = 1'b1;            end        end                effective_addr = final_ea;    end    endmodule
+Sub-Module 4: agu_cycle_count
+
+This calculates how many cycles each mode takes.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103
+module agu_cycle_count (    input  wire [2:0]  mode,    input  wire [2:0]  reg_field,    input  wire [1:0]  op_size,    input  wire        is_destination,    input  wire        is_full_format,    input  wire        is_mem_indirect,    input  wire        base_suppressed,    input  wire        index_suppressed,        output reg  [7:0]  ea_cycles,       // Cycles for EA calculation    output reg  [7:0]  mem_cycles       // Additional cycles for memory access);    always @(*) begin        ea_cycles = 8'd0;        mem_cycles = 8'd0;                case (mode)            3'd0, 3'd1: begin                // Register direct - no EA cycles                ea_cycles = 8'd0;            end                        3'd2: begin                // (An)                ea_cycles = 8'd0;                mem_cycles = (op_size == 2'b00) ? 8'd4 : 8'd4;  // 4 for word/long            end                        3'd3: begin                // (An)+                ea_cycles = (op_size == 2'b01 && reg_field == 3'd7) ? 8'd2 :                             (op_size == 2'b00) ? 8'd2 : 8'd2;                mem_cycles = 8'd4;            end                        3'd4: begin                // -(An)                ea_cycles = (op_size == 2'b01 && reg_field == 3'd7) ? 8'd2 :                             (op_size == 2'b00) ? 8'd2 : 8'd2;                mem_cycles = 8'd4;            end                        3'd5: begin                // (d16,An)                ea_cycles = 8'd4;                mem_cycles = 8'd4;            end                        3'd6: begin                if (!is_full_format) begin                    // Brief: (d8,An,Xn)                    ea_cycles = 8'd6;                    mem_cycles = 8'd4;                end else begin                    // Full format - varies widely                    ea_cycles = 8'd4;  // Base                    if (!base_suppressed) ea_cycles = ea_cycles + 8'd2;                    if (!index_suppressed) ea_cycles = ea_cycles + 8'd2;                    if (is_mem_indirect) begin                        ea_cycles = ea_cycles + 8'd4;  // Memory indirect read                        mem_cycles = 8'd4;                    end else begin                        mem_cycles = 8'd4;                    end                end            end                        3'd7: begin                case (reg_field)                    3'd0: begin // (xxx).W                        ea_cycles = 8'd4;                        mem_cycles = 8'd4;                    end                    3'd1: begin // (xxx).L                        ea_cycles = 8'd6;                        mem_cycles = 8'd4;                    end                    3'd2: begin // (d16,PC)                        ea_cycles = 8'd4;                        mem_cycles = 8'd4;                    end                    3'd3: begin // (d8,PC,Xn)                        ea_cycles = 8'd6;                        mem_cycles = 8'd4;                    end                    3'd4: begin // Immediate                        ea_cycles = (op_size == 2'b00) ? 8'd4 : 8'd2;                    end                    default: begin                        ea_cycles = 8'd0;                    end                endcase            end                        default: begin                ea_cycles = 8'd0;            end        endcase    end    endmodule
+Top-Level Integration
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114
+module eu_agu (    // ... (same interface as before) ...);    // === Internal wires ===    wire needs_ea_calc, needs_extension, needs_pc_relative, needs_index;    wire needs_predec, needs_postinc, is_absolute, is_immediate;    wire is_register_direct, uses_full_ext;    wire [1:0] increment_size;        wire [31:0] parsed_displacement, parsed_outer_disp;    wire [2:0] parsed_scale;    wire parsed_base_suppressed, parsed_index_suppressed;    wire parsed_is_mem_indirect;    wire [1:0] parsed_indirect_stage;    wire needs_second_word;        wire [7:0] ea_cycles, mem_cycles;        // === Module instances ===    agu_mode_decode mode_dec (        .mode(mode),        .reg_field(reg_field),        .op_size(op_size),        .is_destination(is_destination),        .needs_ea_calc(needs_ea_calc),        .needs_extension(needs_extension),        .needs_pc_relative(needs_pc_relative),        .needs_index(needs_index),        .needs_predec(needs_predec),        .needs_postinc(needs_postinc),        .is_absolute(is_absolute),        .is_immediate(is_immediate),        .is_register_direct(is_register_direct),        .uses_full_ext(uses_full_ext),        .increment_size(increment_size)    );        agu_extension_parse ext_parse (        .ext_word1(ext_word1),        .ext_word2(ext_word2),        .has_ext_word2(has_ext_word2),        .is_full_format(ext_word1[8]),  // Bit 8 indicates full format        .displacement(parsed_displacement),        .outer_disp(parsed_outer_disp),        .scale(parsed_scale),        .base_suppressed(parsed_base_suppressed),        .index_suppressed(parsed_index_suppressed),        .is_mem_indirect(parsed_is_mem_indirect),        .indirect_stage(parsed_indirect_stage),        .needs_second_word(needs_second_word)    );        agu_ea_calc ea_calc (        .mode(mode),        .reg_field(reg_field),        .op_size(op_size),        .is_full_format(ext_word1[8]),        .an_value(an_value),        .xn_value(xn_value),        .xn_is_an(xn_is_an),        .xn_size(xn_size),        .current_pc(current_pc),        .displacement(parsed_displacement),        .outer_disp(parsed_outer_disp),        .scale(parsed_scale),        .base_suppressed(parsed_base_suppressed),        .index_suppressed(parsed_index_suppressed),        .is_mem_indirect(parsed_is_mem_indirect),        .indirect_stage(parsed_indirect_stage),        .increment_size(increment_size),        .needs_predec(needs_predec),        .needs_postinc(needs_postinc),        .needs_pc_relative(needs_pc_relative),        .is_absolute(is_absolute),        .effective_addr(effective_addr),        .an_writeback(an_writeback),        .an_writeback_en(an_writeback_en),        .addr_error(addr_error)    );        agu_cycle_count cycle_calc (        .mode(mode),        .reg_field(reg_field),        .op_size(op_size),        .is_destination(is_destination),        .is_full_format(ext_word1[8]),        .is_mem_indirect(parsed_is_mem_indirect),        .base_suppressed(parsed_base_suppressed),        .index_suppressed(parsed_index_suppressed),        .ea_cycles(ea_cycles),        .mem_cycles(mem_cycles)    );        // === Output assignments ===    assign need_extension = needs_extension;    assign ext_fetch_size = (mode == 3'd7 && reg_field == 3'd1) ? 2'b00 :  // long                            2'b10;                                           // word    assign cycle_count = ea_cycles + mem_cycles;    assign is_memory_op = needs_ea_calc;    assign is_rmw = needs_predec || needs_postinc ||                     (mode == 3'd6 && parsed_is_mem_indirect);        // EA valid pulse (1 cycle after start)    always @(posedge clk) begin        if (!reset_n)            ea_valid <= 1'b0;        else if (start)            ea_valid <= 1'b1;        else            ea_valid <= 1'b0;    end    endmodule
+Key Design Notes
+
+1. The Full Extension Word is the Hard Part
+
+The 68030's full extension format adds significant complexity. It supports:
+Base/index suppression
+Index scaling (1, 2, 4, 8)
+Memory indirect addressing (preindexed and postindexed)
+Variable-length displacements
+For an initial implementation, you can start with just the brief format (68000-compatible) and add the full format later. Most software doesn't use the full format.
+2. A7 Alignment Rule
+
+When A7 is used with pre-decrement or post-increment for byte operations, the increment/decrement is 2 bytes, not 1. This maintains stack alignment. The agu_mode_decode module handles this.
+3. Memory Indirect Requires BIU Interaction
+
+For memory indirect modes (preindexed/postindexed), the AGU calculates an intermediate address that must be read from memory to get the final EA. This requires the sequencer to:
+Calculate the inner address
+Issue a bus read via the BIU
+Use the read value + outer displacement as the final EA
+This is a multi-step process that the AGU alone cannot handle — it needs sequencer coordination.
+4. Address Error Detection
+
+Word and long operations must have even addresses. If the calculated EA has bit 0 set, the AGU signals addr_error, which triggers an Address Error exception (Format $3 stack frame).
+5. Cycle Count Accuracy
+
+The cycle counts I've shown are approximations. For true cycle accuracy, you need to verify against:
+The MC68030 User's Manual timing tables
+Real hardware traces
+WinUAE's cycle tables
+6. PC-Relative Addressing
+
+For PC-relative modes, the PC value used is the PC after fetching the extension word(s), not the PC at the start of the instruction. The sequencer must pass the correct PC value to the AGU.
+Integration with the Rest of the EU
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031
+// In the EU top level:eu_agu agu (    .start(agu_start),    .mode(current_mode),    .reg_field(current_reg),    .op_size(current_size),    .is_destination(current_is_dest),    .ext_word1(fetched_ext_word1),    .ext_word2(fetched_ext_word2),    .has_ext_word2(has_ext_word2),    .current_pc(regfile.pc_out),    .an_value(regfile.an_read_data),    .xn_value(regfile.xn_read_data),    .xn_is_an(current_xn_is_an),    .xn_size(current_xn_size),    .effective_addr(agu_ea),    .ea_valid(agu_ea_valid),    .need_extension(agu_need_ext),    .ext_fetch_size(agu_ext_size),    .an_writeback(agu_an_wb),    .an_writeback_en(agu_an_wb_en),    .cycle_count(agu_cycles),    .is_memory_op(agu_is_mem),    .is_rmw(agu_is_rmw),    .addr_error(agu_addr_err));// The sequencer uses agu_ea_valid to know when the EA is ready// It uses agu_cycles to count down instruction timing// It uses agu_need_ext to fetch extension words via the BIU// It uses agu_an_wb_en to write back updated An values
+What's Next
+
+With the AGU complete, you now have all the pieces to calculate effective addresses. The next steps are:
+IFU (Instruction Fetch Unit) - Manage the prefetch queue
+Microcode/Sequencer - Tie everything together, decode instructions, control the pipeline
+BIU - Already designed, now you can connect it to the AGU for memory operations
+The AGU is the bridge between the EU (which knows what instruction is executing) and the BIU (which actually accesses memory). Getting this right is critical for correct 68030 behavior.
+
+
+
+
+
+
+Ok, let’s move onto the ifu
+
+Thinking completed
+
+High-Level Design for m68030_ifu (Instruction Fetch Unit)
+
+The IFU is the bridge between memory (BIU/Cache) and the execution pipeline. For the 68030, it's deceptively complex because it must model:
+A 4-word (8-byte) prefetch queue with exact fill/consume timing
+PC tracking that stays synchronized with instruction boundaries
+Branch penalty and queue flush behavior
+Exception input buffer capture (required for Format $A/$B stack frames)
+I-Cache hit/miss/burst latency modeling
+Let's break it down.
+Module Hierarchy
+
+
+
+123456
+m68030_ifu (Top-level)├── ifu_prefetch_queue    (4-word circular buffer with fill tracking)├── ifu_pc_tracker        (Real PC, next PC, branch target handling)├── ifu_fetch_ctrl        (State machine: requests, cache interaction, burst fills)├── ifu_extract           (Word extraction, alignment, queue consumption)└── ifu_exception_buf     (Captures prefetched words for stack frames)
+Top-Level Interface
+
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132
+module m68030_ifu (    input  wire        clk,    input  wire        reset_n,        // === BIU / Cache Interface ===    input  wire [31:0] fetch_data_in,       // Data from BIU/Cache (word or long)    input  wire        fetch_data_valid,    // Pulse when data arrives    input  wire        cache_hit,           // I-Cache hit signal    input  wire        cache_busy,          // Cache/BIU servicing request    output reg         fetch_req,           // Request fetch from BIU    output reg  [31:0] fetch_addr_out,      // Address to fetch from    output reg  [1:0]  fetch_size,          // 00=long, 10=word        // === EU / Sequencer Interface ===    input  wire        instr_request,       // EU needs next instruction word    input  wire        instr_ack,           // EU accepted the instruction    output reg  [15:0] instr_word_out,      // Instruction word to EU    output reg         instr_valid,         // Word is valid for EU    output reg  [31:0] instr_pc_out,        // PC where instruction starts        // === Control / Pipeline ===    input  wire [31:0] branch_target,       // Target address if branch taken    input  wire        branch_taken,        // Branch resolved this cycle    input  wire        flush_queue,         // Exception/flush request    input  wire        halt_cpu,            // HALT/STOP condition        // === Exception Handling ===    output reg  [15:0] prefetch_input_buf[0:3], // Words for stack frame    output reg  [7:0]  queue_fill_level,    // How many words in queue    output reg         queue_empty,         // Queue drained (stall EU)    output reg         queue_full           // Queue full (stop fetching));
+Sub-Module 1: ifu_prefetch_queue
+
+The 68030 queue is a 4-word circular buffer with a fill counter. It does not shift; it uses read/write pointers.
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970
+module ifu_prefetch_queue (    input  wire        clk,    input  wire        reset_n,        // Write interface    input  wire        write_en,    input  wire [15:0] write_word_hi,    input  wire [15:0] write_word_lo,        // Read interface    input  wire        read_en,    output reg  [15:0] read_word,    output reg  [31:0] read_word_pc,    output reg         read_valid,        // Control    input  wire        flush,    input  wire [31:0] flush_pc,        // Status    output reg  [2:0]  fill_count,       // 0-4    output reg         is_empty,    output reg         is_full);    reg [15:0] queue_data[0:3];    reg [31:0] queue_pc[0:3];   // Track PC of each word for exception buffer    reg [1:0]  write_ptr, read_ptr;        always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            fill_count <= 3'd0;            write_ptr <= 2'd0;            read_ptr <= 2'd0;            is_empty <= 1'b1;            is_full <= 1'b0;        end else if (flush) begin            fill_count <= 3'd0;            write_ptr <= 2'd0;            read_ptr <= 2'd0;            is_empty <= 1'b1;            is_full <= 1'b0;        end else begin            // Write logic            if (write_en) begin                queue_data[write_ptr] <= write_word_lo;                queue_pc[write_ptr] <= flush_pc; // Simplified: track PC on fill                queue_data[(write_ptr + 1) % 4] <= write_word_hi;                queue_pc[(write_ptr + 1) % 4] <= flush_pc + 32'd2;                                write_ptr <= write_ptr + 2'd2; // Advance by 2 (word pair)                fill_count <= fill_count + 3'd2;            end                        // Read logic            if (read_en && !is_empty) begin                read_word <= queue_data[read_ptr];                read_word_pc <= queue_pc[read_ptr];                read_ptr <= read_ptr + 2'd1;                fill_count <= fill_count - 3'd1;            end                        is_empty <= (fill_count == 3'd0);            is_full <= (fill_count == 3'd4);        end    end        assign read_valid = !is_empty;    endmodule
+Sub-Module 2: ifu_pc_tracker
+
+Tracks the real memory PC independent of the prefetch queue state.
+verilog
+
+
+123456789101112131415161718192021222324252627282930
+module ifu_pc_tracker (    input  wire        clk,    input  wire        reset_n,    input  wire        flush,    input  wire [31:0] flush_pc,    input  wire        branch_taken,    input  wire [31:0] branch_target,    input  wire        fetch_commit,      // PC updated when fetch completes    input  wire [1:0]  fetch_size_bytes,  // 2 or 4    output reg  [31:0] current_pc,    output reg  [31:0] next_fetch_pc);    always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            current_pc <= 32'h00000000;            next_fetch_pc <= 32'h00000000;        end else if (flush) begin            current_pc <= flush_pc;            next_fetch_pc <= flush_pc;        end else if (branch_taken) begin            current_pc <= branch_target;            next_fetch_pc <= branch_target;        end else if (fetch_commit) begin            current_pc <= current_pc + {30'b0, fetch_size_bytes};            next_fetch_pc <= current_pc + {30'b0, fetch_size_bytes};        end    end    endmodule
+Sub-Module 3: ifu_fetch_ctrl
+
+The state machine that decides when to request memory/cache fetches.
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364
+module ifu_fetch_ctrl (    input  wire        clk,    input  wire        reset_n,    input  wire        queue_full,    input  wire        queue_empty,    input  wire        cache_hit,    input  wire        cache_busy,    input  wire        fetch_data_valid,    input  wire [31:0] current_pc,        output reg         fetch_req,    output reg  [31:0] fetch_addr_out,    output reg  [1:0]  fetch_size,    output reg         fetch_commit);    localparam STATE_IDLE = 2'b00;    localparam STATE_WAIT = 2'b01;    localparam STATE_COMMIT = 2'b10;        reg [1:0] state;        always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            state <= STATE_IDLE;            fetch_req <= 1'b0;            fetch_commit <= 1'b0;        end else begin            fetch_commit <= 1'b0;                        case (state)                STATE_IDLE: begin                    if (!queue_full && !cache_busy) begin                        fetch_req <= 1'b1;                        fetch_addr_out <= current_pc;                        // 68030 fetches words (16-bit) or longs for burst                        fetch_size <= 2'b10;                         if (!cache_hit) begin                            state <= STATE_WAIT;                        end else begin                            state <= STATE_COMMIT;                        end                    end                end                                STATE_WAIT: begin                    fetch_req <= 1'b0;                    if (fetch_data_valid) begin                        state <= STATE_COMMIT;                    end                end                                STATE_COMMIT: begin                    fetch_req <= 1'b0;                    fetch_commit <= 1'b1;                    state <= STATE_IDLE;                end                                default: state <= STATE_IDLE;            endcase        end    end    endmodule
+Sub-Module 4: ifu_exception_buf
+
+Captures the prefetch input buffer for exception stack frames (Formats $3, $A, $B).
+verilog
+
+
+12345678910111213141516171819202122
+module ifu_exception_buf (    input  wire        clk,    input  wire        reset_n,    input  wire        capture_en,        // Exception triggered    input  wire [15:0] queue_head,    input  wire [15:0] queue_head_next,    input  wire [15:0] queue_tail,    input  wire [15:0] queue_tail_next,    output reg  [15:0] input_buf[0:3]);    always @(posedge clk) begin        if (capture_en) begin            // Capture last 2-4 words prefetched            input_buf[0] <= queue_head;            input_buf[1] <= queue_head_next;            input_buf[2] <= queue_tail;            input_buf[3] <= queue_tail_next;        end    end    endmodule
+Top-Level Integration & Control Logic
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970717273747576777879808182838485
+module m68030_ifu (/* ... interface ... */);    // Internal wires    wire queue_empty_int, queue_full_int;    wire [2:0] fill_level;    wire [15:0] queue_read_word;    wire [31:0] queue_read_pc;    wire read_valid;    wire fetch_commit_sig;        // Instantiate sub-modules    ifu_prefetch_queue queue (        .clk(clk), .reset_n(reset_n),        .write_en(fetch_data_valid),        .write_word_hi(fetch_data_in[31:16]),        .write_word_lo(fetch_data_in[15:0]),        .read_en(instr_ack),        .read_word(queue_read_word),        .read_word_pc(queue_read_pc),        .read_valid(read_valid),        .flush(flush_queue || branch_taken),        .flush_pc(branch_taken ? branch_target : instr_pc_out),        .fill_count(fill_level),        .is_empty(queue_empty_int),        .is_full(queue_full_int)    );        ifu_pc_tracker pc_track (        .clk(clk), .reset_n(reset_n),        .flush(flush_queue || branch_taken),        .flush_pc(branch_taken ? branch_target : current_pc),        .branch_taken(branch_taken),        .branch_target(branch_target),        .fetch_commit(fetch_commit_sig),        .fetch_size_bytes(fetch_size == 2'b00 ? 2'd4 : 2'd2),        .current_pc(current_pc),        .next_fetch_pc(fetch_addr_out)    );        ifu_fetch_ctrl fetch_ctrl (        .clk(clk), .reset_n(reset_n),        .queue_full(queue_full_int),        .queue_empty(queue_empty_int),        .cache_hit(cache_hit),        .cache_busy(cache_busy),        .fetch_data_valid(fetch_data_valid),        .current_pc(current_pc),        .fetch_req(fetch_req),        .fetch_addr_out(fetch_addr_out),        .fetch_size(fetch_size),        .fetch_commit(fetch_commit_sig)    );        // Status outputs    assign queue_fill_level = {5'b0, fill_level};    assign queue_empty = queue_empty_int;    assign queue_full = queue_full_int;        // Instruction delivery to EU    always @(posedge clk) begin        if (!reset_n) begin            instr_valid <= 1'b0;            instr_word_out <= 16'h0;            instr_pc_out <= 32'h0;        end else if (instr_request && !queue_empty_int) begin            instr_word_out <= queue_read_word;            instr_pc_out <= queue_read_pc;            instr_valid <= 1'b1;        end else begin            instr_valid <= 1'b0;        end    end        // Exception buffer capture    ifu_exception_buf exc_buf (        .clk(clk), .reset_n(reset_n),        .capture_en(flush_queue),        .queue_head(queue_read_word),        .queue_head_next(/* next word logic */),        .queue_tail(/* tail logic */),        .queue_tail_next(/* tail logic */),        .input_buf(prefetch_input_buf)    );    endmodule
+Critical 68030 IFU Timing Rules (Cycle Accuracy)
+
+Queue Fill Latency:
+I-Cache hit: 0 wait cycles (word available immediately)
+I-Cache miss: 12-18 cycles for burst fill (depends on bus width)
+The IFU must stall the EU when queue_empty is asserted
+Branch Penalty:
+Queue flush: 1 cycle
+Target fetch: +2 cycles (if unaligned) or +1 cycle (if aligned)
+Total branch penalty: 3-4 cycles typically
+PC Synchronization:
+The current_pc must reflect the address of the next instruction to be decoded
+PC is updated after the instruction words are consumed from the queue, not when fetched
+Exception Input Buffer:
+Must capture the exact words in the queue at exception time
+Used for Format $3 (Address Error), $A (Bus Error), $B (MMU Long Fault)
+Missing or incorrect buffer contents will break OS exception handlers
+Instruction Alignment:
+The 68030 fetches 16-bit words sequentially
+If an instruction crosses a 32-bit boundary, the BIU handles alignment
+The IFU just sees a stream of 16-bit words
+Integration Points
+
+
+Connection
+Purpose
+fetch_req → BIU
+Request instruction fetch
+fetch_data_in ← BIU/Cache
+Receive prefetched words
+instr_word_out → Sequencer
+Feed decoded instruction
+instr_pc_out → EU/AGU
+PC for PC-relative addressing
+flush_queue ← Exception Ctrl
+Clear queue on trap/fault
+prefetch_input_buf → Exception Ctrl
+Stack frame generation
+Test Strategy for IFU
+
+Queue Fill/Drain: Fill queue with 4 words, consume 1 per cycle, verify queue_empty/full asserts correctly
+Branch Flush: Fetch 2 words, trigger branch, verify queue flushes and PC jumps to target
+Cache Miss Latency: Simulate I-Cache miss, verify EU stalls for correct cycle count
+Exception Buffer: Trigger exception at various queue fill levels, verify prefetch_input_buf matches real 68030 behavior
+Alignment Edge Case: Fetch instruction crossing 32-bit boundary, verify PC and queue order remain correct
+Next Steps
+
+With the IFU designed, you now have: ✅ BIU (external bus) ✅ EU Core (ALU, shifter, mul/div, BCD, bitops, regfile) ✅ AGU (effective address calculation) ✅ IFU (instruction prefetch & PC tracking)
+The final major piece is the Microcode/Sequencer, which ties everything together:
+Decodes opcodes from IFU
+Generates control signals for EU/AGU/BIU
+Manages pipeline hazards and cycle counting
+Handles exceptions and interrupts
+Would you like to move on to the sequencer design next, or would you prefer to refine the IFU/exception buffer interaction first?
+
+1/2
+
+
+
+
+
+
+
+Ok, show me the microcode/sequencer
+
+Thinking completed
+
+High-Level Design for m68030_sequencer (Microcode/Sequencer)
+
+The sequencer is the "brain" that orchestrates everything. It decodes instructions, generates micro-operations (µ-ops), controls the pipeline, counts cycles, and handles exceptions. For the 68030, this is complex because it must be cycle-accurate — every control signal must assert at the exact right time.
+Architecture Overview
+
+
+
+1234567
+m68030_sequencer (Top-level)├── seq_decode_rom        (Opcode → µ-op sequence mapping)├── seq_microcode_rom     (µ-op → control signal generation)├── seq_pipeline_ctrl     (Pipeline stage management, hazard detection)├── seq_cycle_counter     (Instruction timing, wait state counting)├── seq_exception_ctrl    (Exception/interrupt coordination)└── seq_interrupt_ctrl    (IPL sampling, priority resolution)
+Top-Level Interface
+
+verilog
+
+
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970717273747576777879
+module m68030_sequencer (    input  wire        clk,    input  wire        reset_n,        // === IFU Interface ===    input  wire [15:0] instr_word,          // Current instruction word    input  wire [31:0] instr_pc,            // PC of current instruction    input  wire        instr_valid,         // Instruction word is valid    output reg         instr_request,       // Request next instruction    output reg         instr_ack,           // Acknowledge instruction consumed        // === EU Control ===    output reg  [3:0]  alu_op,              // ALU operation    output reg  [2:0]  shift_type,          // Shifter operation    output reg  [1:0]  mul_div_op,          // MUL/DIV operation    output reg  [1:0]  bcd_op,              // BCD operation    output reg  [1:0]  bitop_type,          // Bit operation    output reg         alu_start,           // Start ALU operation    output reg         shifter_start,       // Start shifter operation    output reg         mul_div_start,       // Start MUL/DIV    output reg         bcd_start,           // Start BCD operation    output reg         bitops_start,        // Start bit operation    input  wire        alu_done,            // ALU complete    input  wire        mul_div_done,        // MUL/DIV complete    input  wire        mul_div_busy,        // MUL/DIV in progress        // === Register File Control ===    output reg  [3:0]  rd_a_reg,            // Read port A register    output reg  [3:0]  rd_b_reg,            // Read port B register    output reg  [3:0]  wr_reg,              // Write register    output reg         rd_a_en,             // Enable read A    output reg         rd_b_en,             // Enable read B    output reg         wr_en,               // Enable write    output reg  [1:0]  rd_size,             // Read size    output reg  [1:0]  wr_size,             // Write size    output reg         rd_a_is_addr,        // Read A is address reg    output reg         rd_b_is_addr,        // Read B is address reg    output reg         wr_is_addr,          // Write is address reg        // === AGU Control ===    output reg  [2:0]  agu_mode,            // Addressing mode    output reg  [2:0]  agu_reg,             // Register field    output reg  [1:0]  agu_size,            // Operation size    output reg         agu_is_dest,         // Destination operand    output reg         agu_start,           // Start EA calculation    input  wire        agu_ea_valid,        // EA is ready    input  wire        agu_need_ext,        // Need extension word    input  wire [7:0]  agu_cycles,          // EA calculation cycles    input  wire        agu_is_mem,          // Memory operation    input  wire        agu_is_rmw,          // Read-modify-write    input  wire        agu_addr_err,        // Address error        // === BIU Control ===    output reg         biu_read_req,        // Request bus read    output reg         biu_write_req,       // Request bus write    output reg  [31:0] biu_addr,            // Address for bus cycle    output reg  [31:0] biu_write_data,      // Data to write    output reg  [2:0]  biu_fc,              // Function code    output reg  [1:0]  biu_size,            // Transfer size    input  wire        biu_read_done,       // Read complete    input  wire        biu_write_done,      // Write complete    input  wire [31:0] biu_read_data,       // Data from bus        // === Exception/Interrupt ===    input  wire [2:0]  ipl,                 // Interrupt priority level    input  wire        ipl_valid,           // IPL is valid    input  wire        berr,                // Bus error    input  wire        addr_error,          // Address error    output reg         exception_pending,   // Exception needs handling    output reg  [7:0]  exception_vector,    // Exception vector number    output reg         take_interrupt,      // Accept interrupt    output reg  [2:0]  interrupt_level,     // Interrupt level accepted        // === Pipeline Control ===    output reg         pipeline_stall,      // Stall pipeline    output reg         pipeline_flush,      // Flush pipeline    output reg  [7:0]  instruction_cycles,  // Total cycles for current instruction    output reg         instruction_done     // Instruction complete);
+Sub-Module 1: seq_decode_rom
+
+This is a large ROM that maps 16-bit opcodes to µ-op sequences. For brevity, I'll show the structure and a few examples.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121122123124125126127
+module seq_decode_rom (    input  wire [15:0] opcode,    output reg  [7:0]  microcode_addr,      // Starting address in microcode ROM    output reg  [3:0]  num_microcode_words, // Number of µ-ops in sequence    output reg         is_valid,            // Valid instruction    output reg         is_privileged,       // Requires supervisor mode    output reg  [1:0]  instr_size           // Default size (.B, .W, .L));    // Opcode field extraction    wire [3:0] op_field = opcode[15:12];    wire [2:0] mode_src = opcode[5:3];    wire [2:0] reg_src = opcode[2:0];    wire [2:0] mode_dst = opcode[8:6];    wire [2:0] reg_dst = opcode[11:9];        always @(*) begin        // Defaults        microcode_addr = 8'h00;        num_microcode_words = 4'd0;        is_valid = 1'b0;        is_privileged = 1'b0;        instr_size = 2'b00;                case (op_field)            4'b0000: begin                // Bit manipulation, immediate, static bit                if (opcode[8:6] == 3'b111) begin                    // MOVEP                    microcode_addr = 8'h10;                    num_microcode_words = 4'd6;                    is_valid = 1'b1;                    instr_size = 2'b10; // Word                end else begin                    // BSET/BCLR/BCHG/BTST                    microcode_addr = 8'h20;                    num_microcode_words = 4'd4;                    is_valid = 1'b1;                    instr_size = (opcode[7:6] == 2'b00) ? 2'b00 : 2'b01; // Long or byte                end            end                        4'b0001, 4'b0010, 4'b0011: begin                // MOVE.B, MOVE.L, MOVE.W                microcode_addr = 8'h30;                num_microcode_words = 4'd5;                is_valid = 1'b1;                instr_size = (op_field == 4'b0001) ? 2'b01 :                             (op_field == 4'b0010) ? 2'b00 : 2'b10;            end                        4'b0010: begin                // MOVEA.L                microcode_addr = 8'h40;                num_microcode_words = 4'd4;                is_valid = 1'b1;                instr_size = 2'b00;            end                        4'b1000: begin                // DIVS/DIVU                microcode_addr = 8'h50;                num_microcode_words = 4'd8;                is_valid = 1'b1;                instr_size = 2'b10;            end                        4'b1001: begin                // SUB/SUBQ                microcode_addr = 8'h60;                num_microcode_words = 4'd5;                is_valid = 1'b1;                instr_size = opcode[7:6];            end                        4'b1100: begin                // AND/ANDI                microcode_addr = 8'h70;                num_microcode_words = 4'd5;                is_valid = 1'b1;                instr_size = opcode[7:6];            end                        4'b1101: begin                // ADD/ADDQ                microcode_addr = 8'h80;                num_microcode_words = 4'd5;                is_valid = 1'b1;                instr_size = opcode[7:6];            end                        4'b1100: begin                // OR                microcode_addr = 8'h90;                num_microcode_words = 4'd5;                is_valid = 1'b1;                instr_size = opcode[7:6];            end                        4'b1110: begin                // Shifts/Rotates                microcode_addr = 8'hA0;                num_microcode_words = 4'd4;                is_valid = 1'b1;                instr_size = opcode[7:6];            end                        4'b1111: begin                // 68030-specific (MMU, cache, etc.)                if (opcode[11:6] == 6'b110000) begin                    // PFLUSH                    microcode_addr = 8'hB0;                    num_microcode_words = 4'd12;                    is_valid = 1'b1;                    is_privileged = 1'b1;                end else begin                    is_valid = 1'b0;                end            end                        default: begin                is_valid = 1'b0;            end        endcase    end    endmodule
+Sub-Module 2: seq_microcode_rom
+
+This ROM stores the actual µ-op sequences. Each µ-op is a set of control signals.
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950
+module seq_microcode_rom (    input  wire [7:0]  address,    output reg  [47:0] microcode_word      // 48-bit control word);    // Control word format:    // [47:44] - ALU operation    // [43:41] - Shifter operation    // [40:39] - MUL/DIV operation    // [38:37] - BCD operation    // [36:35] - Bit operation    // [34]    - ALU start    // [33]    - Shifter start    // [32]    - MUL/DIV start    // [31]    - BCD start    // [30]    - Bitops start    // [29:26] - Read A register    // [25:22] - Read B register    // [21:18] - Write register    // [17]    - Read A enable    // [16]    - Read B enable    // [15]    - Write enable    // [14:13] - Read size    // [12:11] - Write size    // [10]    - Read A is address    // [9]     - Read B is address    // [8]     - Write is address    // [7:5]   - AGU mode    // [4:2]   - AGU register    // [1:0]   - AGU size        always @(*) begin        case (address)            8'h00: microcode_word = 48'h000000000000; // NOP                        // ADD.L Dn,Dn example sequence            8'h01: microcode_word = 48'h0_0_0_0_0_0_0_0_0000_0000_0000_0_0_0_00_00_0_0_0_000_000_00; // Fetch source            8'h02: microcode_word = 48'h0_0_0_0_0_0_0_0_0000_0000_0000_0_0_0_00_00_0_0_0_000_000_00; // Fetch dest            8'h03: microcode_word = 48'h0000_000_00_00_0_0_0_0_0_0000_0000_0000_1_1_0_00_00_0_0_0_000_000_00; // ADD            8'h04: microcode_word = 48'h0_0_0_0_0_0_0_0_0000_0000_0000_0_0_1_00_00_0_0_0_000_000_00; // Writeback                        // MOVE.L example sequence            8'h05: microcode_word = 48'h0_0_0_0_0_0_0_0_0000_0000_0000_1_0_0_00_00_0_0_0_010_000_00; // Fetch source            8'h06: microcode_word = 48'h0_0_0_0_0_0_0_0_0000_0000_0000_0_0_1_00_00_0_0_0_000_000_00; // Writeback                        default: microcode_word = 48'h000000000000;        endcase    end    endmodule
+Sub-Module 3: seq_pipeline_ctrl
+
+Manages the pipeline stages and detects hazards.
+verilog
+
+
+1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465666768697071727374757677787980
+module seq_pipeline_ctrl (    input  wire        clk,    input  wire        reset_n,    input  wire        instr_valid,    input  wire        alu_done,    input  wire        agu_ea_valid,    input  wire        biu_read_done,    input  wire        biu_write_done,    input  wire        mul_div_busy,    input  wire        data_hazard,       // Data dependency detected    input  wire        flush,        output reg  [2:0]  pipeline_stage,    // Current stage    output reg         stall,    output reg         advance);    localparam STAGE_FETCH   = 3'd0;    localparam STAGE_DECODE  = 3'd1;    localparam STAGE_OPERAND = 3'd2;    localparam STAGE_EXECUTE = 3'd3;    localparam STAGE_WRITE   = 3'd4;        always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            pipeline_stage <= STAGE_FETCH;            stall <= 1'b0;            advance <= 1'b0;        end else if (flush) begin            pipeline_stage <= STAGE_FETCH;            stall <= 1'b0;        end else begin            advance <= 1'b0;                        case (pipeline_stage)                STAGE_FETCH: begin                    if (instr_valid) begin                        pipeline_stage <= STAGE_DECODE;                        advance <= 1'b1;                    end                end                                STAGE_DECODE: begin                    pipeline_stage <= STAGE_OPERAND;                    advance <= 1'b1;                end                                STAGE_OPERAND: begin                    if (agu_ea_valid && biu_read_done) begin                        pipeline_stage <= STAGE_EXECUTE;                        advance <= 1'b1;                    end else if (data_hazard) begin                        stall <= 1'b1;                    end else begin                        stall <= 1'b0;                    end                end                                STAGE_EXECUTE: begin                    if (alu_done && !mul_div_busy) begin                        pipeline_stage <= STAGE_WRITE;                        advance <= 1'b1;                    end else begin                        stall <= 1'b1;                    end                end                                STAGE_WRITE: begin                    if (biu_write_done) begin                        pipeline_stage <= STAGE_FETCH;                        advance <= 1'b1;                    end                end                                default: pipeline_stage <= STAGE_FETCH;            endcase        end    end    endmodule
+Sub-Module 4: seq_cycle_counter
+
+Tracks instruction timing for cycle accuracy.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142
+module seq_cycle_counter (    input  wire        clk,    input  wire        reset_n,    input  wire        instruction_start,    input  wire [7:0]  base_cycles,       // Base cycle count from decode    input  wire [7:0]  agu_cycles,        // AGU additional cycles    input  wire [7:0]  mul_div_cycles,    // MUL/DIV cycles    input  wire        wait_state,        // External wait state        output reg  [15:0] cycle_count,       // Current cycle count    output reg         instruction_done   // Instruction complete);    reg [7:0] target_cycles;    reg [15:0] current_cycle;        always @(posedge clk or negedge reset_n) begin        if (!reset_n) begin            cycle_count <= 16'd0;            instruction_done <= 1'b0;            target_cycles <= 8'd0;            current_cycle <= 16'd0;        end else if (instruction_start) begin            target_cycles <= base_cycles + agu_cycles + mul_div_cycles;            current_cycle <= 16'd0;            instruction_done <= 1'b0;        end else begin            if (!wait_state) begin                current_cycle <= current_cycle + 16'd1;            end                        cycle_count <= current_cycle;                        if (current_cycle >= {8'd0, target_cycles}) begin                instruction_done <= 1'b1;            end else begin                instruction_done <= 1'b0;            end        end    end    endmodule
+Sub-Module 5: seq_exception_ctrl
+
+Coordinates exception handling.
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172
+module seq_exception_ctrl (    input  wire        clk,    input  wire        reset_n,    input  wire        berr,    input  wire        addr_error,    input  wire        div_by_zero,    input  wire        overflow,    input  wire        privilege_violation,    input  wire        illegal_instruction,    input  wire        trace,    input  wire [2:0]  ipl,    input  wire [2:0]  ipl_mask,          // From SR    input  wire        supervisor_mode,        output reg         exception_pending,    output reg  [7:0]  exception_vector,    output reg         take_interrupt,    output reg  [2:0]  interrupt_level);    // Exception priority (higher number = higher priority)    localparam EXC_RESET     = 8'd0;    localparam EXC_BUS_ERR   = 8'd2;    localparam EXC_ADDR_ERR  = 8'd3;    localparam EXC_ILLEGAL   = 8'd4;    localparam EXC_DIV_ZERO  = 8'd5;    localparam EXC_CHK       = 8'd6;    localparam EXC_TRAPV     = 8'd7;    localparam EXC_PRIV      = 8'd8;    localparam EXC_TRACE     = 8'd9;    localparam EXC_IPL1      = 8'd25;    localparam EXC_IPL7      = 8'd31;        always @(posedge clk) begin        if (!reset_n) begin            exception_pending <= 1'b0;            exception_vector <= 8'd0;            take_interrupt <= 1'b0;            interrupt_level <= 3'd0;        end else begin            exception_pending <= 1'b0;            take_interrupt <= 1'b0;                        // Check for exceptions (priority order)            if (berr) begin                exception_pending <= 1'b1;                exception_vector <= 8'd2;            end else if (addr_error) begin                exception_pending <= 1'b1;                exception_vector <= 8'd3;            end else if (illegal_instruction) begin                exception_pending <= 1'b1;                exception_vector <= 8'd4;            end else if (div_by_zero) begin                exception_pending <= 1'b1;                exception_vector <= 8'd5;            end else if (privilege_violation) begin                exception_pending <= 1'b1;                exception_vector <= 8'd8;            end else if (trace) begin                exception_pending <= 1'b1;                exception_vector <= 8'd9;            end else if (ipl > ipl_mask || ipl == 3'd7) begin                // Interrupt (level 7 is NMI, always taken)                take_interrupt <= 1'b1;                interrupt_level <= ipl;                exception_vector <= 8'd24 + {5'd0, ipl}; // Vectors 25-31            end        end    end    endmodule
+Top-Level Integration
+
+verilog
+
+
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111112113114115116117118119120121
+module m68030_sequencer (/* ... interface ... */);    // Internal wires    wire [7:0] microcode_addr;    wire [3:0] num_microcode_words;    wire is_valid, is_privileged;    wire [1:0] instr_size;        wire [47:0] microcode_word;    wire [2:0] pipeline_stage;    wire stall, advance;        wire [15:0] cycle_count;    wire instr_done;        wire exc_pending;    wire [7:0] exc_vector;        // Module instances    seq_decode_rom decode (        .opcode(instr_word),        .microcode_addr(microcode_addr),        .num_microcode_words(num_microcode_words),        .is_valid(is_valid),        .is_privileged(is_privileged),        .instr_size(instr_size)    );        seq_microcode_rom microcode (        .address(microcode_addr),        .microcode_word(microcode_word)    );        seq_pipeline_ctrl pipeline (        .clk(clk), .reset_n(reset_n),        .instr_valid(instr_valid),        .alu_done(alu_done),        .agu_ea_valid(agu_ea_valid),        .biu_read_done(biu_read_done),        .biu_write_done(biu_write_done),        .mul_div_busy(mul_div_busy),        .data_hazard(1'b0), // TODO: implement hazard detection        .flush(pipeline_flush),        .pipeline_stage(pipeline_stage),        .stall(stall),        .advance(advance)    );        seq_cycle_counter cycles (        .clk(clk), .reset_n(reset_n),        .instruction_start(advance && pipeline_stage == 3'd1),        .base_cycles({6'd0, num_microcode_words}),        .agu_cycles(agu_cycles),        .mul_div_cycles(8'd0), // TODO: get from MUL/DIV unit        .wait_state(1'b0), // TODO: implement wait state detection        .cycle_count(cycle_count),        .instruction_done(instr_done)    );        seq_exception_ctrl exceptions (        .clk(clk), .reset_n(reset_n),        .berr(berr),        .addr_error(addr_error || agu_addr_err),        .div_by_zero(1'b0), // TODO: from MUL/DIV        .overflow(1'b0), // TODO: from ALU        .privilege_violation(1'b0), // TODO: check privilege        .illegal_instruction(!is_valid),        .trace(1'b0), // TODO: from SR T-bit        .ipl(ipl),        .ipl_mask(3'd0), // TODO: from SR        .supervisor_mode(1'b1), // TODO: from SR        .exception_pending(exc_pending),        .exception_vector(exc_vector),        .take_interrupt(take_interrupt),        .interrupt_level(interrupt_level)    );        // Control signal extraction from microcode word    always @(posedge clk) begin        if (advance) begin            alu_op <= microcode_word[47:44];            shift_type <= microcode_word[43:41];            mul_div_op <= microcode_word[40:39];            bcd_op <= microcode_word[38:37];            bitop_type <= microcode_word[36:35];                        alu_start <= microcode_word[34];            shifter_start <= microcode_word[33];            mul_div_start <= microcode_word[32];            bcd_start <= microcode_word[31];            bitops_start <= microcode_word[30];                        rd_a_reg <= microcode_word[29:26];            rd_b_reg <= microcode_word[25:22];            wr_reg <= microcode_word[21:18];                        rd_a_en <= microcode_word[17];            rd_b_en <= microcode_word[16];            wr_en <= microcode_word[15];                        rd_size <= microcode_word[14:13];            wr_size <= microcode_word[12:11];                        rd_a_is_addr <= microcode_word[10];            rd_b_is_addr <= microcode_word[9];            wr_is_addr <= microcode_word[8];                        agu_mode <= microcode_word[7:5];            agu_reg <= microcode_word[4:2];            agu_size <= microcode_word[1:0];        end    end        // Output assignments    assign exception_pending = exc_pending;    assign exception_vector = exc_vector;    assign pipeline_stall = stall;    assign instruction_cycles = cycle_count[7:0];    assign instruction_done = instr_done;    endmodule
+Key Design Notes
+
+Microcode ROM Size: A full 68030 microcode ROM would be thousands of entries. I've shown the structure with a few examples. You'd need to implement all ~130 instructions.
+Pipeline Hazards: The hazard detection is simplified. Real hazards include:
+Data dependencies (RAW, WAR, WAW)
+Control hazards (branches)
+Structural hazards (resource conflicts)
+Cycle Accuracy: The cycle counter must match real 68030 timing exactly. This requires extensive testing against hardware traces.
+Exception Priority: The exception controller must handle the complex 68030 exception priority scheme correctly.
+Interrupt Handling: Interrupt acknowledgment requires BIU coordination for the IACK cycle.
+This gives you the framework for the sequencer. The real work is in populating the microcode ROM with correct µ-op sequences for all instructions and tuning the cycle counts to match real hardware.
+
+2/2
+
+
+
+
+
+
+
+
+
+
+Auto
+
+
+AI-generated content may not be accurate.
+

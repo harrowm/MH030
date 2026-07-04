@@ -1,0 +1,9 @@
+# Icarus Verilog compiled simulation outputs
+a.out
+*.vvp
+*.vcd
+sim/*.vvp
+sim/*.vcd
+
+# macOS
+.DS_Store
