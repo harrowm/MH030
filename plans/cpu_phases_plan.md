@@ -1,131 +1,493 @@
-# MC68030 CPU — Post-BIU Development Plan
+# MC68030 CPU — Development Plan
 
-## Status (as of Phase 33)
+## Status (as of Phase 37)
 
-Phases 23–31 complete:
-- eu_regfile (23), eu_alu (24), eu_shifter (25), eu_mul_div (26) — arithmetic units
-- eu_bcd (27), eu_bitops (28) — decimal and bit operations
-- m68030_eu wrapper (29), eu_agu (30), m68030_ifu (31) — EU wrapper and IFU
-- m68030_seq (32) — purely combinational IFU→EU glue; drain + ext_data format conversion
+### BIU — complete (Phases 1–22)
+All 8 bus cycle types, BERR/HALT/STERM/VPA, IACK, RMW, CAS2, MOVEM/MOVEP bus cycles,
+burst linefill, MOVE16 burst, biu_exc_capture (fault snapshot, SSW), m68030_biu wrapper,
+m68030_top stub. `biu_pin_driver`, `biu_config`, `biu_error_handler` stub files exist;
+see remaining phases for what still needs to be fleshed out.
 
-Integration milestone reached: IFU + SEQ + EU run a 4-instruction program end-to-end
-(CLR.L / ADDI.L / CLR.L / ADD.L) with correct RAW-hazard stalling (tb/seq_int_tb.sv).
-m68030_exc (33): exception controller complete — priority encoder, frame push FSM,
-vector fetch, new PC/SR load. All 9 frame formats structurally handled; $0/$2/$3 fully tested.
+### EU — functional subset through Phase 37
 
-The BIU (`m68030_biu`) is complete through Phase 22:
-- All 8 bus cycle types implemented and tested
-- BERR timeout watchdog, STERM, VPA/E-clock, HALT#, address errors
-- `m68030_top` wrapper with all ports wired
-- Two test suites: `tb/biu_tb.sv` (full) and `tb/top_tb.sv` (smoke)
+| Phase | Module / Feature | Status |
+|-------|-----------------|--------|
+| 23 | `eu_regfile` — D0-D7, A0-A7, USP/MSP/ISP, PC, SR, VBR | ✅ done |
+| 24 | `eu_alu` — ADD/SUB/AND/OR/EOR/NEG/CMP/CLR/TST + X variants | ✅ done |
+| 25 | `eu_shifter` — ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR | ✅ done |
+| 26 | `eu_mul_div` — MULS/MULU word+long, DIVS.W/DIVU.W | ✅ done |
+| 27 | `eu_bcd` + `eu_bitops` — ABCD/SBCD/NBCD, BTST/BCHG/BCLR/BSET | ✅ done |
+| 28–31 | `m68030_eu`, `eu_agu`, `m68030_ifu`, `m68030_seq` | ✅ done |
+| 32–35 | `m68030_exc`, `m68030_top`, `m68030_mmu` | ✅ done |
+| 36 | Non-memory instrs + branches: NOP, SWAP, EXT/EXTB, ADDQ/SUBQ, Scc, DBcc, BRA/Bcc, MOVEQ | ✅ done |
+| 37 | Memory EA reads/writes: (An), (An)+, -(An), (d16,An); MOVE, MOVEA, LEA | ✅ done |
 
-All other CPU modules (`m68030_eu`, `m68030_ifu`, `m68030_seq`, `m68030_exc`, `m68030_mmu`) are stubs.
-
----
-
-## Assessment of output2.txt (prior AI design)
-
-The prior AI produced reasonable high-level architecture with correct module decomposition and useful flag-semantics notes. Key issues that must be corrected:
-
-| Issue | Severity |
-|-------|---------|
-| Uses plain Verilog-2001 (`reg`/`wire`/`always @(*)`) — CLAUDE.md requires SystemVerilog | **Critical** |
-| Register file reads are **registered** (1-cycle latency) — needs to be **combinational** | High |
-| Barrel shifter L-stage 4 uses `l_stage1` instead of `l_stage3` (copy-paste bug) | High |
-| `r_fill` uses invalid replication syntax `{24{sign_bit}, 8{sign_bit}}` | High |
-| Divider iterates 32 times for a 16÷16 division (should be 16 iterations) | High |
-| `increment_size` is `[1:0]` but encodes 4 bytes — needs `[2:0]` | Medium |
-| `scaled_index = xn << (scale * 3'd1)` — `scale * 3'd1` is just `scale`, but expression is confusing | Low |
-| Missing 68030-specific MSP (Master Stack Pointer) and M-bit in regfile | High |
-| seq_decode_rom has duplicate `4'b0010` and `4'b1100` case arms | High |
-| seq_microcode_rom is essentially a placeholder (2 real entries) | High |
-| IFU fill/drain counter update has concurrent +2/-1 race | Medium |
-| All modules use `clk`/`reset_n` not `clk_4x`/`rst_n` | High |
-| No `generate` loops for register arrays | Medium |
-| 68030 long-multiply (MULS.L/MULU.L) and 64÷32 divide not mentioned | Medium |
-
-**Bottom line**: Use the other AI's design as a reference for module interfaces and flag semantics. Rewrite all code in SystemVerilog with our project conventions.
+**Instruction coverage after Phase 37**: ~35% of the encoding space.
+Gap summary: stack ops (no JSR/RTS), extended EA modes, MOVEM, MOVEC/MOVES,
+atomics, bounds-check, MOVEP/MOVE16 EU decode, memory-indirect EA.
 
 ---
 
-## High-Level Phase Roadmap
+## Verification Strategy: WinUAE cputest
 
-| Phase | Module | Key Output | Milestone |
-|-------|--------|-----------|-----------|
-| 23 | `eu_regfile` | D0-D7, A0-A7, USP/MSP/SSP, PC, SR | Register R/W works |
-| 24 | `eu_alu` | ADD/SUB/AND/OR/EOR/NOT/NEG/CMP/ADDX/SUBX | Arithmetic with correct flags |
-| 25 | `eu_shifter` | ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR | Barrel shift all sizes |
-| 26 | `eu_mul_div` | MULS.W/MULU.W/MULS.L/MULU.L; DIVS/DIVU | Variable-cycle mul/div |
-| 27 | `eu_bcd` | ABCD/SBCD/NBCD | BCD arithmetic |
-| 28 | `eu_bitops` | BTST/BSET/BCLR/BCHG | Single-cycle bit ops |
-| 29 | `m68030_eu` | EU wrapper integrating all above | EU compiles and passes unit tests |
-| 30 | `eu_agu` | All 9 addressing modes + 68030 full ext | EA calculation |
-| 31 | `m68030_ifu` | 4-word prefetch queue, PC tracking | Instruction stream works |
-| 32 | `m68030_seq` | Opcode decode + micro-sequencer | Simple instruction execution |
-| 33 | `m68030_exc` | Exception controller, all 9 frame formats | Exceptions work |
-| 34 | Integration | EU+IFU+BIU+SEQ+EXC wired in `m68030_top` | First program runs |
-| 35+ | MMU | TLB, table walker, PFLUSH/PTEST | Virtual memory |
+### What the tool is
 
----
+WinUAE cputest (`cputest/main.c` in the WinUAE repository) is an **Amiga OS application**
+that runs on a real Amiga or in WinUAE emulation. It:
 
-## Clock / Reset Convention
+1. Loads per-instruction test data from `.dat` files generated by the UAE CPU core reference
+2. For each test case: initialises registers + memory from the `.dat` data, executes one
+   instruction, compares resulting state (registers, CCR, memory writes, exception frames)
+   against the expected state embedded in the `.dat` file
+3. Reports mismatches to stdout
 
-All modules use:
-- `clk_4x` — 100 MHz (4× the 25 MHz external bus)
-- `rst_n` — active-low async reset
+The expected values come from WinUAE's internal UAE 68030 softcore, which has been
+validated against real hardware. Coverage: every CCR combination × every addressing
+mode × every opcode encoding.
 
-The EU runs at the same clock as the BIU. EU operations complete in multiples of 4 ticks (= 1 external bus cycle). The 4× clock gives the sequencer fine-grained control over when bus requests fire relative to S-states.
+### Why not run cputest directly on our Verilog
 
----
+The cputest binary uses Amiga OS services (AmigaDOS file I/O for `.dat` files, Amiga
+custom-chip hardware at `0xdff0xx` for timing). Running it bare-metal on our simulation
+would require implementing an Amiga OS compatibility layer — not worth it.
 
-## Module Placement
+### Practical approach: .dat replay harness
+
+The `.dat` files encode self-contained test vectors. We can use them without the binary:
 
 ```
-rtl/
-  eu_regfile.sv       Phase 23
-  eu_alu.sv           Phase 24
-  eu_shifter.sv       Phase 25
-  eu_mul_div.sv       Phase 26
-  eu_bcd.sv           Phase 27
-  eu_bitops.sv        Phase 28
-  m68030_eu.sv        Phase 29  (wrapper)
-  eu_agu.sv           Phase 30
-  m68030_ifu.sv       Phase 31
-  m68030_seq.sv       Phase 32
-  m68030_exc.sv       Phase 33
-
-tb/
-  eu_regfile_tb.sv    Phase 23
-  eu_alu_tb.sv        Phase 24
-  eu_shifter_tb.sv    Phase 25
-  eu_mul_div_tb.sv    Phase 26
-  eu_bcd_tb.sv        Phase 27
-  eu_bitops_tb.sv     Phase 28
-  eu_tb.sv            Phase 29
-  agu_tb.sv           Phase 30
-  ifu_tb.sv           Phase 31
-  cpu_tb.sv           Phase 34  (integration)
+WinUAE (68030 mode)
+  └─ cputest binary generates .dat files via UAE reference core
+       └─ Python parser reads .dat files
+            └─ Extracts: (instr_bytes, initial_state, expected_state)
+                 ├─ Feeds initial_state to Verilator simulation
+                 ├─ Injects instruction bytes into simulation memory
+                 ├─ Runs simulation until instruction retires
+                 └─ Compares actual final_state vs expected_state
 ```
+
+**Phase V: Verification infrastructure** — build this alongside Phases 38–43:
+
+| Component | Description |
+|-----------|-------------|
+| `scripts/gen_dat.sh` | Drive WinUAE headless to generate `.dat` files for each opcode group |
+| `scripts/parse_dat.py` | Parse WinUAE `.dat` binary format → JSON test vectors |
+| `scripts/run_vsim.py` | Feed test vectors to Verilator via DPI or testbench SV task |
+| `scripts/compare.py` | Diff actual vs expected; report per-test pass/fail with instruction disasm |
+| `tb/cosim_tb.sv` | Verilator-compatible testbench that exposes state inspection hooks |
+
+Three verification checkpoints gate forward progress:
+- **Checkpoint α** (after Phase 43): basic instruction set verified — BRA/Bcc, MOVE, ALU, shifts, MOVEM
+- **Checkpoint β** (after Phase 50): extended EA modes + control flow verified
+- **Checkpoint γ** (after Phase 55): near-complete instruction set; run cputest `basic/all` against WinUAE reference
 
 ---
 
-## Integration Dependencies
+## Remaining Phases — Execution Order
 
-```
-m68030_top
-├── m68030_biu      ✅ DONE (Phases 1–22)
-├── m68030_eu       ← Phases 23–29
-│   ├── eu_regfile
-│   ├── eu_alu
-│   ├── eu_shifter
-│   ├── eu_mul_div
-│   ├── eu_bcd
-│   ├── eu_bitops
-│   └── eu_agu      ← Phase 30 (touches BIU for mem indirect)
-├── m68030_ifu      ← Phase 31
-├── m68030_seq      ← Phase 32 (ties EU+IFU+BIU together)
-├── m68030_exc      ← Phase 33
-└── m68030_mmu      ← Phase 35+ (last; most complex)
-```
+Ordered by: (1) what unlocks the most subsequent instructions, (2) what enables real
+programs to run earliest, (3) BIU polish deferred until instruction set stable.
 
-See `plans/phase23_eu_regfile.md` for the immediate detailed plan.
+---
+
+### Phase 38 — BSR, JMP, JSR, RTS, RTR
+
+**Why first**: Every subroutine call uses JSR/RTS. Without these no real code runs.
+BSR is a close variant of BRA (already done); JMP/JSR add EA-mode addressing; RTS/RTR
+add stack pops. All five share the same stack infrastructure so they batch naturally.
+
+| Instruction | Action |
+|-------------|--------|
+| BSR disp | push PC to -(A7); PC ← PC + disp (word or long) |
+| JMP ea | PC ← ea |
+| JSR ea | push PC to -(A7); PC ← ea |
+| RTS | PC ← M[(A7)]; A7 += 4 |
+| RTR | CCR ← M[(A7)][7:0]; A7 += 2; PC ← M[(A7)]; A7 += 4 |
+
+**Implementation notes**:
+- BSR reuses Phase 36 branch infrastructure; only adds a memory-write stall before branching.
+- The stack push uses the existing mem_req/mem_ack mechanism from Phase 37 (-(A7) write).
+- RTS is a single memory read (A7)+ followed by a PC write.
+- RTR is two sequential memory reads; requires a 2-op stall sequence in eu_seq.
+- For JMP/JSR, start with (An) and (xxx).L EA modes; (d16,An) and PC-relative follow in Phase 40/42.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `tb/seq38_tb.sv`
+
+---
+
+### Phase 39 — LINK, UNLK
+
+**Why second**: C compilers emit LINK as the first instruction of every function prologue.
+Without it, no compiled C code can maintain a frame pointer.
+
+| Instruction | Action |
+|-------------|--------|
+| LINK An,#d16 | -(A7) ← An; An ← A7; A7 += sign_ext(d16) |
+| UNLK An | A7 ← An; An ← M[(A7)]; A7 += 4 |
+
+LINK: one memory write (push An), two An updates (An = new frame ptr, A7 += disp).
+UNLK: one memory read ((A7)+ → An), one A7 update.
+
+Files: `rtl/eu_seq.sv`, `tb/seq39_tb.sv`
+
+---
+
+### Phase 40 — Absolute EA modes: (xxx).W and (xxx).L
+
+**Why next**: Most load/store instructions in real programs use absolute addresses
+(memory-mapped I/O, globals). Phase 37 only implemented register-indirect modes.
+Absolute modes unlock MOVE, LEA, JMP, JSR, MOVEM for fixed addresses.
+
+| Mode | Ext words | EA |
+|------|-----------|----|
+| (xxx).W | 1 | sign_ext(ext_data[15:0]) |
+| (xxx).L | 2 | ext_data[31:0] |
+
+m68030_seq: set ext_count=1 or 2 for both src and dst absolute EA.
+eu_seq decode: detect f_mode=3'b111 for both load and store paths.
+Applies to: MOVE, MOVEA, LEA, ADD/SUB/CMP (ea,Dn), CLR/TST/NEG (ea), JMP, JSR.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `tb/seq40_tb.sv`
+
+---
+
+### Phase 41 — (d8,An,Xn) brief extension word
+
+**Why here**: The indexed mode is the third-most-common EA after register-indirect and
+absolute. Needed for array access, struct member access with computed offsets.
+
+EA = An + sign_ext(d8) + Xn_scaled.
+
+Extension word format (brief): [15]=D/A, [14:12]=Xn, [11]=W/L, [10:9]=scale (030), [7:0]=d8.
+
+eu_seq currently has two register read ports (rd_a=source, rd_b=base An). The index register
+Xn is a third operand. Simplest approach: add a dedicated `rd_c_sel/rd_c_data` read port
+to eu_regfile and eu_seq; compute EA = rd_b_data + rd_c_scaled + sign_ext(d8) combinationally.
+
+m68030_seq: ext_count += 1 when src or dst mode is 3'b110 (indexed).
+
+Files: `rtl/eu_regfile.sv` (add rd_c port), `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `tb/seq41_tb.sv`
+
+---
+
+### Phase 42 — PC-relative modes: (d16,PC) and (d8,PC,Xn)
+
+**Why here**: Position-independent code and ROM routines use PC-relative heavily.
+Also needed for the cputest binary itself (position-independent).
+
+| Mode | EA |
+|------|----|
+| (d16,PC) | decode_pc + sign_ext(d16) |
+| (d8,PC,Xn) | decode_pc + sign_ext(d8) + Xn_scaled |
+
+`decode_pc` is already an input to eu_seq. These are read-only EA on 68030 (cannot
+be a destination). m68030_seq: treat f_mode=3'b111 with f_reg=010 or 011 as PC-relative.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `tb/seq42_tb.sv`
+
+---
+
+### Phase 43 — MOVEM
+
+**Why here**: MOVEM is the standard way to save/restore registers at subroutine
+entry/exit and in exception handlers. Without it no real exception handler can work.
+
+BIU `biu_multiop_fsm` already handles the repeated bus cycles. EU side adds:
+- Decode register mask (16-bit list in extension word)
+- Direction (register→memory or memory→register)
+- EA (any mode; predecrement -(An) on writes, postincrement (An)+ on reads)
+- Dispatch: send {first_addr, reg_mask, direction, siz} to multiop FSM
+
+m68030_seq: ext_count += 1 for the register list extension word.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `rtl/m68030_top.sv` (wire EU→multiop), `tb/seq43_tb.sv`
+
+---
+
+**CHECKPOINT α — WinUAE verification of Phase 38–43 instructions**
+
+After Phase 43 we have a working subroutine call model, absolute + indexed EA,
+MOVEM. Run Checkpoint α: feed WinUAE `.dat` vectors for BRA/Bcc/BSR, JMP/JSR/RTS/RTR,
+LINK/UNLK, MOVE with absolute/indexed EA, MOVEM. Must pass before proceeding.
+
+---
+
+### Phase 44 — Exception stack frame EU integration
+
+**Why here**: Real programs depend on exception handlers. The BIU already captures fault
+fields in `biu_exc_capture`. The EU push sequence for formats $9/$A/$B (6/8/23 longwords)
+needs wiring. Phase 44 closes this gap so the exception controller can actually produce
+correct stack frames for bus errors and address errors.
+
+What changes:
+- `m68030_top.sv`: wire `biu_exc_capture` fault data to `m68030_exc` fault input
+- `m68030_exc.sv`: extend push FSM for $9 (12 words), $A (16 words), $B (46 words)
+- The push data comes from BIU fault capture + EU internal state snapshot
+- `eu_seq.sv` must expose: instruction PC, internal pipeline state at fault time
+
+Files: `rtl/m68030_exc.sv`, `rtl/m68030_top.sv`, `tb/exc_tb.sv`
+
+---
+
+### Phase 45 — BERR timeout watchdog
+
+**Why here**: Without a watchdog, an unresponded bus cycle hangs the simulation
+forever. Once we're running real code through Phase 43, bad addresses will occur.
+
+`biu_error_handler` (stub exists) asserts BERR internally after a configurable
+N-cycle window (parameter: default 64 internal ticks = 16 bus clocks) with no
+DSACK/STERM. Parameterized so testbenches can use N=4 for fast timeout testing.
+Also tracks retry count for BERR+HALT sequences.
+
+Files: `rtl/biu_error_handler.sv` (flesh out from stub), `tb/biu_tb.sv` (add watchdog tests)
+
+---
+
+### Phase 46 — MOVEC, MOVES
+
+MOVEC Rc,Rn / MOVEC Rn,Rc — move to/from control register.
+Control registers: VBR, CACR, CAAR, USP, SFC, DFC, ISP, MSP, TC, ITT0/1, DTT0/1, CRP, SRP.
+One extension word encodes Rc (12-bit code) + Rn.
+
+MOVES Rn,ea / MOVES ea,Rn — move with alternate function code (SFC or DFC).
+Requires BIU to use SFC or DFC instead of normal FC for that bus cycle.
+
+`eu_regfile.sv`: add SFC and DFC as readable registers (MOVEC source/destination).
+`eu_seq.sv`: decode group-F MOVEC pattern, dispatch MOVES with alternate FC.
+
+Files: `rtl/eu_seq.sv`, `rtl/eu_regfile.sv`, `tb/seq46_tb.sv`
+
+---
+
+### Phase 47 — TAS, CAS
+
+TAS ea: read byte (AS stays asserted), test Z+N from byte, set bit 7, write byte back.
+BIU RMW mode already implemented (AS stays asserted through read+write).
+EU: issue two sequential bus requests with the bus-lock signal held.
+
+CAS Dc,Du,ea: read ea into temp; compare with Dc; if equal write Du to ea, else load
+ea value into Dc. Single address RMW cycle. Complex decode but same BIU infrastructure.
+
+Files: `rtl/eu_seq.sv`, `tb/seq47_tb.sv`
+
+---
+
+### Phase 48 — CHK, CHK2, CMP2
+
+CHK ea,Dn: if Dn < 0 or Dn > ea_value → CHK exception (vector 6).
+CMP2 ea,Rn: compare Rn with [lower,upper] bounds at ea, ea+size — sets CCR only.
+CHK2 ea,Rn: same compare, but traps on out-of-bounds.
+
+CHK2/CMP2 require two sequential memory reads (lower bound at ea, upper at ea+size).
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_exc.sv` (CHK vector), `tb/seq48_tb.sv`
+
+---
+
+### Phase 49 — MOVEP decode (EU side)
+
+MOVEP Dn,(d16,An) / MOVEP (d16,An),Dn — byte-interleaved peripheral move.
+BIU `biu_multiop_fsm` already generates the alternating byte bus cycles.
+EU: decode direction, size (word=2 bytes / long=4 bytes), register numbers, displacement.
+Dispatch to multiop FSM (similar to MOVEM dispatch in Phase 43).
+
+Files: `rtl/eu_seq.sv`, `tb/seq49_tb.sv`
+
+---
+
+### Phase 50 — MOVE16 decode (EU side)
+
+Four opcode forms with different src/dst combinations:
+- MOVE16 (An)+,(xxx).L — postincrement src, absolute dst
+- MOVE16 (xxx).L,(An)+ — absolute src, postincrement dst
+- MOVE16 (An)+,(An)+ — both postincrement
+- MOVE16 (An),(An) — both indirect (no postincrement)
+
+BIU `biu_burst_ctrl` already handles the 16-byte burst.
+EU: decode which form, extract src/dst registers, dispatch to burst_ctrl.
+
+Files: `rtl/eu_seq.sv`, `tb/seq50_tb.sv`
+
+---
+
+**CHECKPOINT β — WinUAE verification of Phase 44–50 instructions**
+
+Run `.dat` vectors for: exception frames ($0/$2/$3 from exctest.dat), TAS, CAS,
+CHK, MOVEP, MOVE16. Also re-run Checkpoint α to confirm no regressions.
+
+---
+
+### Phase 51 — biu_pin_driver + biu_config final
+
+`biu_pin_driver`: tri-state D[31:0] OE management.
+- Assert OE only during write phases (S3–S6 when RW=0)
+- Release OE the cycle AS deasserts
+- Avoid bus contention: OE must be 0 before AS asserts on a read cycle
+
+`biu_config`: reset sequencing.
+- Assert RSTO for ≥512 external clock cycles on power-on (68030 spec)
+- Release address bus tri-states before data bus
+- Release control signals last
+
+These stubs already exist; the missing piece is the combinational OE logic tied to
+actual S-state transitions and the configurable RSTO counter.
+
+Files: `rtl/biu_pin_driver.sv`, `rtl/biu_config.sv`, `tb/biu_tb.sv`
+
+---
+
+### Phase 52 — FPU coprocessor bus interface
+
+FC=111 (CPU Space), A[19:16]=0010 identifies coprocessor primitives.
+A[15:13] encodes primitive type: CPI (save state), CPM (move), CPIR (restore), CPCR (condition).
+
+The 68030 acts as a bus master on these cycles; the MC68881/68882 responds as a slave.
+`biu_cycle_gen` already distinguishes FC=111 cycles; extend to drive the correct address
+pattern for each primitive type.
+
+EU side: detect `1111 cccc xx` opcode prefix (floating-point), dispatch to FPU via
+a coprocessor interface FSM that sequences the CPI/CPM/CPIR/CPCR bus cycles.
+(Full FPU arithmetic remains outside scope; this phase covers the bus protocol only.)
+
+Files: `rtl/biu_cycle_gen.sv`, `rtl/eu_seq.sv` (FPU dispatch stub), `tb/biu_tb.sv`
+
+---
+
+### Phase 53 — Memory-indirect addressing modes (030-specific)
+
+The four 030-unique modes using a full extension word with IS ≠ 0:
+- `([bd,An],Xn,od)` — postindexed: ea = M[An+bd] + Xn_scaled + od
+- `([bd,An,Xn],od)` — preindexed: ea = M[An+Xn_scaled+bd] + od
+- PC variants of both
+
+These require eu_agu to issue a mem_req for the inner pointer dereference, receive
+mem_rdata, then compute the final EA. `eu_agu.sv` already flags `full_iis` when the
+full extension word IS field signals indirect; `eu_seq` must detect this, issue the
+inner read stall, and feed mem_rdata back to eu_agu for the outer EA computation.
+
+This is the most architecturally complex remaining EA feature. It is not on the
+critical path to running normal programs (virtually no period 68030 code uses these
+modes; they were rarely used even in period OS code).
+
+Files: `rtl/eu_seq.sv`, `rtl/eu_agu.sv`, `tb/seq53_tb.sv`
+
+---
+
+### Phase 54 — MMU control instructions: PFLUSH, PTEST, PMOVE
+
+`m68030_mmu` is implemented (Phase 35). The EU decode for MMU control instructions
+is missing.
+
+- PFLUSH: flush ATC entries matching address or function code
+- PTEST level,ea,fc,An: test address translation; load result into MMUSR
+- PMOVE src,dst: read/write MMU registers (TC, CRP, SRP, MMUSR, TT0/TT1)
+
+All three decode from the `1111 0000` opcode prefix with specific sub-encodings.
+`m68030_top.sv` must wire EU→MMU control signals for these operations.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_top.sv`, `tb/mmu_tb.sv`
+
+---
+
+### Phase 55 — m68030_biu + m68030_top final integration
+
+Wire all remaining biu_* sub-modules fully into the `m68030_biu` wrapper.
+Connect all external pins:
+- 32-bit address bus (A[31:0]), 32-bit data bus (D[31:0]) tri-state
+- Control: /AS, /DS, R/W, SIZ[1:0], FC[2:0]
+- Response inputs (synchronised): /DSACK0, /DSACK1, /STERM, /BERR, /HALT
+- Bus arbitration: /BR, /BG, /BGACK
+- Interrupt: /IPL[2:0]
+- Clock, reset: CLK, /RESET, /HALT
+
+Run full top-level smoke test confirming EU + IFU + BIU + SEQ + EXC + MMU all
+cooperate across several instruction types in a single simulation.
+
+Files: `rtl/m68030_biu.sv`, `rtl/m68030_top.sv`, `tb/top_tb.sv`
+
+---
+
+**CHECKPOINT γ — WinUAE cputest near-full-binary execution**
+
+At this point the simulation is complete enough to run real 68030 machine code.
+Strategy:
+1. Extract `.dat` test vectors from WinUAE (run cputest in WinUAE 68030 mode; the
+   `.dat` files are written to disk during test generation)
+2. Python parser reads `.dat` binary format → JSON vectors
+   `(instr_bytes, initial_D[0..7], initial_A[0..7], initial_SR, expected_D/A/SR/memory)`
+3. Verilator testbench (`tb/cosim_tb.sv`) applies each vector:
+   - Pre-load registers via hierarchical DPI calls
+   - Write instruction bytes to simulation memory
+   - Run for fixed cycle budget
+   - Read back register file state via DPI
+   - Compare with expected
+4. Run the full `basic/all` cputest suite for 68030; target <10 failures per opcode group
+
+Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`, `scripts/compare.py`, `tb/cosim_tb.sv`
+
+---
+
+## Summary Table
+
+| Phase | Content | Enables |
+|-------|---------|---------|
+| **38** | JMP, JSR, BSR, RTS, RTR | Subroutine calls — any real program |
+| **39** | LINK, UNLK | C function prologues/epilogues |
+| **40** | Absolute EA (xxx).W/(xxx).L | Global variables, memory-mapped I/O |
+| **41** | (d8,An,Xn) brief indexed | Array/struct access |
+| **42** | (d16,PC), (d8,PC,Xn) PC-relative | PIC code, ROM routines |
+| **43** | MOVEM | Register save/restore, exception entry/exit |
+| **α** | Checkpoint: WinUAE Checkpoint α | |
+| **44** | Exception frame EU integration | Correct $9/$A/$B frames |
+| **45** | BERR timeout watchdog | Prevents simulation hangs |
+| **46** | MOVEC, MOVES | OS-level control register access |
+| **47** | TAS, CAS | Atomic primitives (lock-based OS) |
+| **48** | CHK, CHK2, CMP2 | Bounds-checked array access |
+| **49** | MOVEP EU decode | Byte-wide peripheral access |
+| **50** | MOVE16 EU decode | 68030-specific 16-byte burst |
+| **β** | Checkpoint: WinUAE Checkpoint β | |
+| **51** | biu_pin_driver + biu_config | Clean tri-state / reset behaviour |
+| **52** | FPU coprocessor bus interface | MC68881/68882 bus cycles |
+| **53** | Memory-indirect EA | 030-specific modes (rarely used) |
+| **54** | MMU instructions: PFLUSH/PTEST/PMOVE | MMU management code |
+| **55** | m68030_biu + m68030_top final | Fully wired top-level |
+| **γ** | Checkpoint: WinUAE cputest full suite | Pass/fail per opcode group |
+
+---
+
+## Dependency Notes
+
+- Phase 44 depends on Phase 38 (stack push infrastructure must exist for frame push)
+- Phase 45 is independent; can run concurrently with 44
+- Phases 46–50 are independent of each other; can be parallelised
+- Phase 53 (memory-indirect) depends on Phase 38 (inner dereference uses same mem_req stall)
+- Phase 55 depends on Phases 51–54 and all instruction phases complete
+- Checkpoint γ depends on Phase 55
+
+---
+
+## Key Compile Commands (current passing suites)
+
+```bash
+cd /Users/malcolm/MH030
+
+# Phase 36: non-memory EU instructions (32 checks)
+iverilog -g2012 -Wno-timescale \
+  rtl/eu_seq.sv rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv \
+  rtl/eu_bcd.sv rtl/eu_bitops.sv rtl/eu_regfile.sv rtl/m68030_eu.sv \
+  tb/seq36_tb.sv && vvp a.out
+
+# Phase 37: memory EA instructions (33 checks)
+iverilog -g2012 -Wno-timescale \
+  rtl/eu_seq.sv rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv \
+  rtl/eu_bcd.sv rtl/eu_bitops.sv rtl/eu_regfile.sv rtl/m68030_eu.sv \
+  tb/seq37_tb.sv && vvp a.out
+
+# BIU full suite (Phases 1–22)
+iverilog -g2012 -o /tmp/biu.vvp -I rtl \
+  tb/biu_tb.sv rtl/biu_eclk_gen.sv rtl/biu_cycle_gen.sv rtl/biu_arbiter.sv \
+  rtl/biu_sizing_fsm.sv rtl/biu_multiop_fsm.sv rtl/biu_cache_if.sv \
+  rtl/biu_mmu_if.sv rtl/biu_exc_capture.sv rtl/biu_byte_lane_ctrl.sv \
+  rtl/biu_config.sv rtl/biu_pin_driver.sv rtl/biu_error_handler.sv \
+  rtl/biu_burst_ctrl.sv tb/mem_model.sv && vvp /tmp/biu.vvp
+```

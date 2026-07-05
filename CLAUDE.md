@@ -114,6 +114,8 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 **Tools**: Verilator (simulation), GTKWave (waveform debug), Python (trace parser + testbench generator), ModelSim/Questa (formal assertions).
 
 **Completed phases** (do not re-implement):
+
+*BIU (Phases 1–22)*:
 1. Reset hold, phase counter, E-clock
 2. Power-on SSP/PC fetch, EU read/write S-state timing
 3. Dynamic bus sizing via DSACK (16-bit and 8-bit ports)
@@ -123,12 +125,42 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 7. Burst linefill read, MOVE16 burst write, biu_exc_capture (fault snapshot, frame format)
 8. biu_byte_lane_ctrl (write-data steering), mem_model byte-selective writes
 
-**Remaining phases**:
-9. `biu_pin_driver` — tri-state D[31:0] OE management; `biu_config` — reset sequencing and tri-state release timing
-10. Coprocessor (FPU) bus interface — FC=111 CPU Space cycles for MC68881/MC68882 (CPI/CPM/CPIR/CPCR primitives); distinguish from IACK by A[19:16]
-11. BERR timeout watchdog — `biu_error_handler` asserts BERR internally after configurable N cycles with no DSACK/STERM
-12. Exception stack frame population — BIU-side fields for formats $9/$A/$B are captured; full frame push requires EU integration
-13. `m68030_biu` wrapper + `m68030_top` stub — integrate all biu_* modules, wire external pins
+*EU and integration (Phases 23–37)*:
+23. eu_regfile — D0-D7, A0-A7, USP/MSP/ISP, PC, SR, VBR
+24. eu_alu — ADD/SUB/AND/OR/EOR/NEG/CMP/CLR/TST + X-extended variants
+25. eu_shifter — ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR, all sizes
+26. eu_mul_div — MULS.W/MULU.W/MULS.L/MULU.L, DIVS.W/DIVU.W
+27. eu_bcd — ABCD/SBCD/NBCD; eu_bitops — BTST/BCHG/BCLR/BSET
+28. m68030_eu wrapper; eu_agu — all EA modes (memory-indirect deferred)
+29. m68030_ifu — 4-word prefetch queue; m68030_seq — IFU→EU glue
+30. m68030_exc — exception controller, all 9 frame formats; m68030_top integration
+31. m68030_mmu — TLB, 3-level table walker, TT0/TT1, CRP/SRP
+36. eu_seq: non-memory instrs + branches — NOP, SWAP, EXT/EXTB, ADDQ/SUBQ, Scc, DBcc, BRA/Bcc, MOVEQ
+37. eu_seq: memory EA — (An)/(An)+/-(An)/(d16,An) for MOVE/MOVEA/LEA reads+writes
+
+**Remaining phases** — execution order (see `plans/cpu_phases_plan.md` for full specs):
+
+38. JMP, JSR, BSR, RTS, RTR — stack push/pop; enables subroutine calls
+39. LINK, UNLK — C function frame setup/teardown
+40. Absolute EA (xxx).W/(xxx).L — global variable and MMIO access
+41. (d8,An,Xn) brief indexed mode — array/struct access
+42. (d16,PC), (d8,PC,Xn) PC-relative modes — PIC/ROM code
+43. MOVEM — register list save/restore (BIU multiop_fsm already handles bus)
+→ **Checkpoint α**: WinUAE .dat vector verification for Phases 38–43
+44. Exception stack frame EU integration — formats $9/$A/$B full push sequence
+45. BERR timeout watchdog — biu_error_handler, configurable N-cycle timeout
+46. MOVEC, MOVES — control-register and alternate-FC moves
+47. TAS, CAS — atomic RMW (BIU RMW mode already done)
+48. CHK, CHK2, CMP2 — bounds checking with exception on failure
+49. MOVEP EU decode (BIU multiop_fsm already handles bus cycles)
+50. MOVE16 EU decode (BIU burst_ctrl already handles bus cycles)
+→ **Checkpoint β**: WinUAE verification for Phases 44–50
+51. biu_pin_driver + biu_config — tri-state OE management, reset sequencing
+52. FPU coprocessor bus interface — FC=111 CPU Space CPI/CPM/CPIR/CPCR cycles
+53. Memory-indirect EA ([bd,An],Xn,od) — 030-specific inner dereference (rare in practice)
+54. MMU instructions: PFLUSH, PTEST, PMOVE (MMU module done; EU decode + wiring needed)
+55. m68030_biu + m68030_top final — wire all modules, full external pin integration
+→ **Checkpoint γ**: WinUAE cputest .dat replay — full basic/all suite vs. 68030 reference
 
 ## SIZ[1:0] Encoding
 
