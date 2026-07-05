@@ -4,5 +4,8 @@ a.out
 *.vcd
 sim/
 
+# Editor artifacts
+*.bak
+
 # macOS
 .DS_Store

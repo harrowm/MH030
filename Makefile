@@ -162,9 +162,9 @@ test: compile
 run: $(SIM)/$(TEST)
 	$(VVP) $(SIM)/$(TEST)
 
-# Remove all compiled binaries and stale top-level artifacts from early phases
+# Remove all build outputs; rm -rf sim/ clears stale binaries from any prior naming scheme
 clean:
-	rm -f $(ALL_TESTS)
+	rm -rf $(SIM)
 	rm -f *.vvp *.vcd a.out
 
 $(SIM):
