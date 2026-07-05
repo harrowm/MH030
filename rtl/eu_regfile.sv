@@ -44,7 +44,12 @@ module eu_regfile (
     // Convenience outputs
     output logic        supervisor,    // SR[13]
     output logic        master_mode,   // SR[12]
-    output logic [2:0]  ipl_mask       // SR[10:8]
+    output logic [2:0]  ipl_mask,      // SR[10:8]
+
+    // Second write port — An update from (An)+ / -(An) (always longword)
+    input  logic        an_wr_en,
+    input  logic [2:0]  an_wr_sel,    // 0=A0..6=A6, 7=A7 (routes via S/M)
+    input  logic [31:0] an_wr_data
 );
 
     // -----------------------------------------------------------------------
@@ -121,7 +126,7 @@ module eu_regfile (
             end
         end
 
-        // A0-A6: byte/word writes sign-extend to 32 bits
+        // A0-A6: byte/word writes sign-extend to 32 bits; an_wr is always longword
         for (gi = 0; gi < 7; gi++) begin : g_areg
             always_ff @(posedge clk_4x or negedge rst_n) begin
                 if (!rst_n)
@@ -132,6 +137,8 @@ module eu_regfile (
                         2'b10: a_reg[gi] <= {{16{wr_data[15]}}, wr_data[15:0]};
                         default: a_reg[gi] <= wr_data;
                     endcase
+                end else if (an_wr_en && (an_wr_sel == gi[2:0])) begin
+                    a_reg[gi] <= an_wr_data;
                 end
             end
         end
@@ -147,7 +154,16 @@ module eu_regfile (
             msp_r <= 32'h0;
             sr_r  <= 16'h2700;   // supervisor, IPL=7 at reset
         end else begin
-            // A7 write (wr_sel == 15)
+            // an_wr for A7 (always longword, uses current S/M routing)
+            if (an_wr_en && (an_wr_sel == 3'b111)) begin
+                case (sr_old_sm)
+                    2'b10: isp_r <= an_wr_data;
+                    2'b11: msp_r <= an_wr_data;
+                    default: usp_r <= an_wr_data;
+                endcase
+            end
+
+            // A7 write (wr_sel == 15) — main port takes priority
             if (wr_en && (wr_sel == 4'd15)) begin
                 case (sr_old_sm)
                     2'b10: begin   // ISP active

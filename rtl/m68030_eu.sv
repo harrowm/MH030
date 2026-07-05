@@ -48,6 +48,22 @@ module m68030_eu (
     output logic        branch_taken, // combinational: taken branch this cycle
     output logic [31:0] branch_target,// combinational: branch destination
 
+    // ── Memory bus interface (to BIU via m68030_top) ─────────────────────
+    output logic        mem_req,
+    output logic        mem_rw,
+    output logic [1:0]  mem_siz,
+    output logic [2:0]  mem_fc,
+    output logic [31:0] mem_addr,
+    output logic [31:0] mem_wdata,
+    input  logic [31:0] mem_rdata,
+    input  logic        mem_ack,
+    input  logic        mem_berr,
+
+    // ── Address register update port ──────────────────────────────────────
+    output logic        an_wr_en,
+    output logic [2:0]  an_wr_sel,
+    output logic [31:0] an_wr_data,
+
     // ── Exception signals ─────────────────────────────────────────────────
     output logic        div_trap,     // divide-by-zero (m68030_exc handles)
 
@@ -190,7 +206,19 @@ module m68030_eu (
         .div_trap     (div_trap),
         .decode_pc    (decode_pc),
         .branch_taken (branch_taken),
-        .branch_target(branch_target)
+        .branch_target(branch_target),
+        .mem_req      (mem_req),
+        .mem_rw       (mem_rw),
+        .mem_siz      (mem_siz),
+        .mem_fc       (mem_fc),
+        .mem_addr     (mem_addr),
+        .mem_wdata    (mem_wdata),
+        .mem_rdata    (mem_rdata),
+        .mem_ack      (mem_ack),
+        .mem_berr     (mem_berr),
+        .an_wr_en     (an_wr_en),
+        .an_wr_sel    (an_wr_sel),
+        .an_wr_data   (an_wr_data)
     );
 
     // -----------------------------------------------------------------------
@@ -247,7 +275,10 @@ module m68030_eu (
         .isp_out     (isp_out),
         .supervisor  (supervisor),
         .master_mode (master_mode),
-        .ipl_mask    (ipl_mask)
+        .ipl_mask    (ipl_mask),
+        .an_wr_en    (an_wr_en),
+        .an_wr_sel   (an_wr_sel),
+        .an_wr_data  (an_wr_data)
     );
 
     // -----------------------------------------------------------------------

@@ -45,6 +45,9 @@ module seq36_tb;
         .div_trap      (div_trap),
         .decode_pc     (decode_pc),
         .branch_taken  (branch_taken), .branch_target (branch_target),
+        .mem_req       (), .mem_rw(), .mem_siz(), .mem_fc(), .mem_addr(), .mem_wdata(),
+        .mem_rdata     (32'h0), .mem_ack(1'b0), .mem_berr(1'b0),
+        .an_wr_en      (), .an_wr_sel(), .an_wr_data(),
         .ssp_wr_en     (1'b0),         .ssp_wr_data   (32'h0),
         .exc_sr_wr_en  (1'b0),         .exc_sr_wr_data(16'h0)
     );

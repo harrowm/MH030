@@ -113,7 +113,23 @@ module eu_seq (
     // ── Branch control ──────────────────────────────────────────────────────
     input  logic [31:0] decode_pc,    // PC of instruction at decode stage
     output logic        branch_taken, // combinational: taken branch this cycle
-    output logic [31:0] branch_target // combinational: branch destination
+    output logic [31:0] branch_target,// combinational: branch destination
+
+    // ── Memory bus interface (to BIU via m68030_eu/m68030_top) ──────────────
+    output logic        mem_req,      // request bus cycle
+    output logic        mem_rw,       // 1=read, 0=write
+    output logic [1:0]  mem_siz,      // transfer size (matches ex_siz)
+    output logic [2:0]  mem_fc,       // function code
+    output logic [31:0] mem_addr,     // effective address
+    output logic [31:0] mem_wdata,    // write data (for stores)
+    input  logic [31:0] mem_rdata,    // read data (from BIU)
+    input  logic        mem_ack,      // bus cycle complete
+    input  logic        mem_berr,     // bus error (ignored in Phase 37)
+
+    // ── Address register update port (for (An)+ and -(An)) ──────────────────
+    output logic        an_wr_en,
+    output logic [2:0]  an_wr_sel,
+    output logic [31:0] an_wr_data
 );
 
     // -----------------------------------------------------------------------
@@ -174,6 +190,10 @@ module eu_seq (
     assign f_cond  = instr_word[11:8];
     assign f_disp8 = instr_word[7:0];
 
+    // MOVE instruction (groups 1/2/3): dst_mode = instr_word[8:6] = {f_dir, f_ss}
+    logic [2:0] f_move_dst_mode;
+    assign f_move_dst_mode = {f_dir, f_ss};
+
     // ADDQ/SUBQ immediate: f_dn=000 → 8, else f_dn
     logic [31:0] f_addq_imm;
     assign f_addq_imm = (f_dn == 3'b000) ? 32'd8 : {29'h0, f_dn};
@@ -218,6 +238,18 @@ module eu_seq (
         endcase
     endfunction
 
+    // Step size for (An)+ and -(An): longword=4, word=2, byte=1 (A7→2)
+    function automatic [31:0] calc_step(
+        input logic [1:0] siz,
+        input logic       is_a7
+    );
+        case (siz)
+            2'b00:   calc_step = 32'd4;
+            2'b10:   calc_step = 32'd2;
+            default: calc_step = is_a7 ? 32'd2 : 32'd1;
+        endcase
+    endfunction
+
     // Pre-extract bit-selects used by BCD and bitops to avoid Icarus issues
     logic [7:0] rd_a_byte, rd_b_byte;
     logic [4:0] rd_a_bit_num;
@@ -254,7 +286,16 @@ module eu_seq (
     logic [31:0] dec_branch_disp;  // branch displacement (relative to PC+2)
     logic        dec_is_swap;      // SWAP Dn: swap halfwords in EX
     logic        dec_sext;         // EXT sign-extend operation
-    logic        dec_sext_from_byte; // 1=extend byte, 0=extend word  // 1 = bit_num from rd_a_data[4:0]
+    logic        dec_sext_from_byte; // 1=extend byte, 0=extend word
+    // Memory-access decode signals
+    logic        dec_is_mem_rd;   // instruction needs a memory read
+    logic        dec_is_mem_wr;   // instruction needs a memory write
+    logic        dec_is_lea;      // LEA: result is the EA itself (no bus cycle)
+    logic        dec_is_movea_w;  // MOVEA.W: sign-extend mem_rdata[15:0] in WB
+    logic [31:0] dec_ea_offset;   // EA offset: 0, +d16, or -step (for -(An))
+    logic [31:0] dec_an_delta;    // An update: +step (An)+, -step -(An), 0 otherwise
+    logic        dec_an_upd_en;   // An register needs updating
+    logic [2:0]  dec_an_upd_reg;  // which An to update (the EA register)
 
     always_comb begin
         dec_valid        = 1'b0;
@@ -288,6 +329,14 @@ module eu_seq (
         dec_is_swap        = 1'b0;
         dec_sext           = 1'b0;
         dec_sext_from_byte = 1'b0;
+        dec_is_mem_rd  = 1'b0;
+        dec_is_mem_wr  = 1'b0;
+        dec_is_lea     = 1'b0;
+        dec_is_movea_w = 1'b0;
+        dec_ea_offset  = 32'h0;
+        dec_an_delta   = 32'h0;
+        dec_an_upd_en  = 1'b0;
+        dec_an_upd_reg = 3'h0;
 
         if (instr_valid) begin
             case (f_group)
@@ -361,21 +410,146 @@ module eu_seq (
                 end
 
                 // ----------------------------------------------------------------
-                // MOVE (group by size: 0001=byte, 0010=long, 0011=word)
+                // MOVE / MOVEA (groups 1/2/3)
+                // Bit layout: [15:12]=size, [11:9]=dst_reg, [8:6]=dst_mode,
+                //             [5:3]=src_mode, [2:0]=src_reg
+                // f_dn=dst_reg, f_move_dst_mode={f_dir,f_ss}=dst_mode,
+                // f_mode=src_mode, f_reg=src_reg
                 // ----------------------------------------------------------------
                 4'h1, 4'h2, 4'h3: begin
-                    if (f_dir == 1'b0 && f_ss == 2'b00 && f_mode == 3'b000) begin
-                        // dest_mode=[8:6]=000 and src_mode=[5:3]=000
-                        dec_valid       = 1'b1;
-                        dec_unit        = UNIT_MOVE;
-                        dec_src_reg     = {1'b0, f_reg};
-                        dec_dst_reg     = {1'b0, f_dn};
+                    dec_siz         = f_move_sz;
+                    dec_x_unchanged = 1'b1;
+
+                    if (f_move_dst_mode == 3'b000) begin
+                        // ── dst = Dn ──
                         dec_dest_reg    = {1'b0, f_dn};
                         dec_writes_reg  = 1'b1;
                         dec_updates_ccr = 1'b1;
-                        dec_x_unchanged = 1'b1;
-                        dec_reads_src   = 1'b1;
-                        dec_siz         = f_move_sz;
+
+                        if (f_mode == 3'b000) begin
+                            // MOVE.B/W/L Dn,Dn — register direct
+                            dec_valid     = 1'b1;
+                            dec_unit      = UNIT_MOVE;
+                            dec_src_reg   = {1'b0, f_reg};
+                            dec_dst_reg   = {1'b0, f_dn};
+                            dec_reads_src = 1'b1;
+                        end else if (f_mode[2:1] == 2'b01 ||
+                                     f_mode == 3'b100 || f_mode == 3'b101) begin
+                            // MOVE.B/W/L (ea),Dn — memory load (modes 010/011/100/101)
+                            dec_valid      = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_unit       = UNIT_MOVE;
+                            dec_src_reg    = {1'b1, f_reg};   // An for EA base
+                            dec_dst_reg    = {1'b0, f_dn};
+                            dec_reads_src  = 1'b1;
+                            case (f_mode)
+                                3'b010: ;  // (An): offset=0 (default)
+                                3'b011: begin  // (An)+
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = calc_step(f_move_sz, f_reg==3'b111);
+                                end
+                                3'b100: begin  // -(An)
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = ~calc_step(f_move_sz, f_reg==3'b111)+32'h1;
+                                    dec_ea_offset  = dec_an_delta;
+                                end
+                                3'b101: begin  // (d16,An)
+                                    dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    dec_needs_ext = 1'b1;
+                                end
+                                default: ;
+                            endcase
+                        end
+
+                    end else if (f_move_dst_mode == 3'b001) begin
+                        // ── dst = An → MOVEA ──
+                        dec_dest_reg    = {1'b1, f_dn};
+                        dec_writes_reg  = 1'b1;
+                        dec_is_movea_w  = (f_group == 4'h3);  // MOVEA.W: sign-extend
+                        dec_siz         = 2'b00;              // always longword to An
+
+                        if (f_mode == 3'b000) begin
+                            // MOVEA Dn,An
+                            dec_valid     = 1'b1;
+                            dec_unit      = UNIT_MOVE;
+                            dec_src_reg   = {1'b0, f_reg};
+                            dec_reads_src = 1'b1;
+                            dec_sext           = (f_group == 4'h3);
+                            dec_sext_from_byte = 1'b0;
+                        end else if (f_mode == 3'b001) begin
+                            // MOVEA An,An
+                            dec_valid     = 1'b1;
+                            dec_unit      = UNIT_MOVE;
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_reads_src = 1'b1;
+                        end else if (f_mode[2:1] == 2'b01 ||
+                                     f_mode == 3'b100 || f_mode == 3'b101) begin
+                            // MOVEA (ea),An — memory load
+                            dec_valid      = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_unit       = UNIT_MOVE;
+                            dec_src_reg    = {1'b1, f_reg};
+                            dec_reads_src  = 1'b1;
+                            case (f_mode)
+                                3'b010: ;
+                                3'b011: begin
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = calc_step(f_move_sz, f_reg==3'b111);
+                                end
+                                3'b100: begin
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = ~calc_step(f_move_sz, f_reg==3'b111)+32'h1;
+                                    dec_ea_offset  = dec_an_delta;
+                                end
+                                3'b101: begin
+                                    dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    dec_needs_ext = 1'b1;
+                                end
+                                default: ;
+                            endcase
+                        end
+
+                    end else if (f_move_dst_mode[2:1] == 2'b01 ||
+                                 f_move_dst_mode == 3'b100 ||
+                                 f_move_dst_mode == 3'b101) begin
+                        // ── dst = memory; src = register (Dn or An) ──
+                        if (f_mode == 3'b000 || f_mode == 3'b001) begin
+                            dec_valid      = 1'b1;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_unit       = UNIT_MOVE;
+                            // rd_a = source register (Dn or An → write data)
+                            dec_src_reg    = (f_mode == 3'b000) ? {1'b0, f_reg}
+                                                                 : {1'b1, f_reg};
+                            // rd_b = An for EA base
+                            dec_dst_reg    = {1'b1, f_dn};
+                            dec_reads_src  = 1'b1;
+                            dec_reads_dst  = 1'b1;
+                            dec_writes_reg = 1'b0;   // no regfile write (memory dest)
+                            dec_updates_ccr = (f_mode == 3'b000);  // Dn src updates CCR
+                            case (f_move_dst_mode)
+                                3'b010: ;  // (An): offset=0
+                                3'b011: begin  // (An)+
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_dn;
+                                    dec_an_delta   = calc_step(f_move_sz, f_dn==3'b111);
+                                end
+                                3'b100: begin  // -(An)
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_dn;
+                                    dec_an_delta   = ~calc_step(f_move_sz, f_dn==3'b111)+32'h1;
+                                    dec_ea_offset  = dec_an_delta;
+                                end
+                                3'b101: begin  // (d16,An)
+                                    dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    dec_needs_ext = 1'b1;
+                                end
+                                default: ;
+                            endcase
+                        end
                     end
                 end
 
@@ -454,6 +628,23 @@ module eu_seq (
                                 dec_sext           = 1'b1;
                                 dec_sext_from_byte = f_dir;   // 0=EXT.L(word→long), 1=EXTB.L(byte→long)
                                 dec_valid          = 1'b1;
+                            end
+                        end
+                    end else if (f_dir && f_ss == 2'b11 && f_mode >= 3'b010) begin
+                        // LEA ea,An: 0100 aaa 111 mmm rrr
+                        // f_dir=1, f_ss=11 (bits[8:6]=111 when combined as dst_mode)
+                        // f_mode = EA mode (control modes only; phase 37: 010 and 101)
+                        if (f_mode == 3'b010 || f_mode == 3'b101) begin
+                            dec_valid      = 1'b1;
+                            dec_is_lea     = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};   // An for EA base → rd_a
+                            dec_reads_src  = 1'b1;
+                            dec_dest_reg   = {1'b1, f_dn};   // An destination
+                            dec_writes_reg = 1'b1;
+                            dec_siz        = 2'b00;           // longword An write
+                            if (f_mode == 3'b101) begin
+                                dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext = 1'b1;
                             end
                         end
                     end else if (instr_word == 16'h4E71) begin
@@ -782,13 +973,23 @@ module eu_seq (
     logic [31:0] wb_result;
     logic [4:0]  wb_ccr;       // {X, N, Z, V, C}
     logic        wb_move_n;    // corrected N flag for MOVE (sized MSB)
+    logic        wb_an_upd_en;
+    logic [2:0]  wb_an_upd_reg;
+    logic [31:0] wb_an_upd_new;
+    logic        wb_is_mem_rd;
+    logic        wb_is_movea_w;
 
     // -----------------------------------------------------------------------
     // Stall / hazard logic — checks both EX and WB for RAW conflicts.
     // 2 stall cycles cover EX→WB→regfile-commit latency.
+    // ex_mem_stall: EX holds a memory op waiting for BIU ack.
     // -----------------------------------------------------------------------
     logic        ex_valid, ex_writes_reg, ex_updates_ccr;
     logic [3:0]  ex_dest_reg;
+    logic        ex_is_mem_rd, ex_is_mem_wr, ex_is_lea, ex_is_movea_w;
+
+    logic ex_mem_stall;
+    assign ex_mem_stall = (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack;
 
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -801,7 +1002,8 @@ module eu_seq (
                             (ex_valid && ex_updates_ccr) ||
                             (wb_valid && wb_updates_ccr));
     assign need_ext   = dec_needs_ext && !ext_valid;
-    assign stall      = dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext);
+    // ex_mem_stall freezes the entire pipeline regardless of dec_valid
+    assign stall      = ex_mem_stall || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext));
     assign seq_busy  = stall;
     assign instr_ack = dec_valid && !stall;
 
@@ -826,6 +1028,11 @@ module eu_seq (
     logic [3:0]  ex_dbcc_cond;
     logic [31:0] ex_dbcc_disp;
     logic [31:0] ex_decode_pc;
+    // Memory-access EX signals
+    logic [31:0] ex_ea_offset;   // displacement for EA (0 or d16 or -step)
+    logic [31:0] ex_an_delta;    // An update amount
+    logic        ex_an_upd_en;
+    logic [2:0]  ex_an_upd_reg;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -840,6 +1047,17 @@ module eu_seq (
             ex_dbcc_cond      <= 4'h0;
             ex_dbcc_disp      <= 32'h0;
             ex_decode_pc      <= 32'h0;
+            ex_is_mem_rd      <= 1'b0;
+            ex_is_mem_wr      <= 1'b0;
+            ex_is_lea         <= 1'b0;
+            ex_is_movea_w     <= 1'b0;
+            ex_ea_offset      <= 32'h0;
+            ex_an_delta       <= 32'h0;
+            ex_an_upd_en      <= 1'b0;
+            ex_an_upd_reg     <= 3'h0;
+        end else if (ex_mem_stall) begin
+            // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
+            // (SystemVerilog: un-driven signals retain their current value.)
         end else if (stall) begin
             // DECODE holds; insert bubble into EX.
             ex_valid          <= 1'b0;
@@ -849,6 +1067,11 @@ module eu_seq (
             ex_sext           <= 1'b0;
             ex_sext_from_byte <= 1'b0;
             ex_is_dbcc        <= 1'b0;
+            ex_is_mem_rd      <= 1'b0;
+            ex_is_mem_wr      <= 1'b0;
+            ex_is_lea         <= 1'b0;
+            ex_is_movea_w     <= 1'b0;
+            ex_an_upd_en      <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -877,16 +1100,36 @@ module eu_seq (
             ex_dbcc_cond      <= dec_branch_cond;
             ex_dbcc_disp      <= dec_branch_disp;
             ex_decode_pc      <= decode_pc;
+            ex_is_mem_rd      <= dec_is_mem_rd;
+            ex_is_mem_wr      <= dec_is_mem_wr;
+            ex_is_lea         <= dec_is_lea;
+            ex_is_movea_w     <= dec_is_movea_w;
+            ex_ea_offset      <= dec_ea_offset;
+            ex_an_delta       <= dec_an_delta;
+            ex_an_upd_en      <= dec_an_upd_en;
+            ex_an_upd_reg     <= dec_an_upd_reg;
         end
     end
 
     // -----------------------------------------------------------------------
     // Drive functional unit inputs from EX stage + register file
+    // For memory ops: rd_a/rd_b must provide full 32-bit values (An for EA
+    // base, Dn for write data). Override siz to longword so no sign-extension.
     // -----------------------------------------------------------------------
     assign rd_a_sel = ex_src_reg;
-    assign rd_a_siz = ex_siz;
+    assign rd_a_siz = (ex_is_mem_rd || ex_is_mem_wr || ex_is_lea) ? 2'b00 : ex_siz;
     assign rd_b_sel = ex_dst_reg;
-    assign rd_b_siz = ex_siz;
+    assign rd_b_siz = ex_is_mem_wr ? 2'b00 : ex_siz;
+
+    // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
+    logic [31:0] ex_an_base;
+    assign ex_an_base = ex_is_mem_wr ? rd_b_data : rd_a_data;
+
+    logic [31:0] ex_ea;       // effective address for bus cycle or LEA result
+    assign ex_ea = ex_an_base + ex_ea_offset;
+
+    logic [31:0] ex_an_new;   // updated An value for (An)+ / -(An)
+    assign ex_an_new = ex_an_base + ex_an_delta;
 
     logic [31:0] ex_src_operand;
     assign ex_src_operand = ex_use_imm ? ex_imm : rd_a_data;
@@ -1020,33 +1263,66 @@ module eu_seq (
 
     // -----------------------------------------------------------------------
     // WB stage latch
+    // When ex_mem_stall: WB gets a bubble (don't advance).
+    // When mem_ack arrives (ex_mem_stall=0): WB captures mem_rdata for loads,
+    // ex_ea for LEA, ex_result for register ops.
     // -----------------------------------------------------------------------
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            wb_valid       <= 1'b0;
-            wb_writes_reg  <= 1'b0;
-            wb_updates_ccr <= 1'b0;
+            wb_valid        <= 1'b0;
+            wb_writes_reg   <= 1'b0;
+            wb_updates_ccr  <= 1'b0;
+            wb_an_upd_en    <= 1'b0;
+            wb_is_mem_rd    <= 1'b0;
+            wb_is_movea_w   <= 1'b0;
+        end else if (ex_mem_stall) begin
+            // Memory cycle in progress: drain WB (bubble).
+            wb_valid        <= 1'b0;
+            wb_writes_reg   <= 1'b0;
+            wb_updates_ccr  <= 1'b0;
+            wb_an_upd_en    <= 1'b0;
+            wb_is_mem_rd    <= 1'b0;
+            wb_is_movea_w   <= 1'b0;
         end else begin
-            wb_valid       <= ex_valid;
-            wb_writes_reg  <= ex_writes_reg;
-            wb_updates_ccr <= ex_updates_ccr;
-            wb_x_unchanged <= ex_x_unchanged;
-            wb_is_move     <= (ex_unit == UNIT_MOVE);
-            wb_move_n      <= ex_move_n;
-            wb_dest_reg    <= ex_dest_reg;
-            wb_siz         <= ex_siz;
-            wb_result      <= ex_result;
-            wb_ccr         <= {ex_x, ex_n, ex_z, ex_v, ex_c};
+            wb_valid        <= ex_valid;
+            wb_writes_reg   <= ex_writes_reg;
+            wb_updates_ccr  <= ex_updates_ccr;
+            wb_x_unchanged  <= ex_x_unchanged;
+            wb_is_move      <= (ex_unit == UNIT_MOVE);
+            wb_move_n       <= ex_move_n;
+            wb_dest_reg     <= ex_dest_reg;
+            wb_siz          <= ex_siz;
+            // Result selection: memory load uses mem_rdata, LEA uses EA, else ALU/MOVE
+            wb_result       <= ex_is_mem_rd ? mem_rdata
+                             : ex_is_lea    ? ex_ea
+                             :                ex_result;
+            wb_ccr          <= {ex_x, ex_n, ex_z, ex_v, ex_c};
+            wb_an_upd_en    <= ex_an_upd_en;
+            wb_an_upd_reg   <= ex_an_upd_reg;
+            wb_an_upd_new   <= ex_an_new;
+            wb_is_mem_rd    <= ex_is_mem_rd;
+            wb_is_movea_w   <= ex_is_movea_w;
         end
     end
 
     // -----------------------------------------------------------------------
     // Regfile write outputs
+    // For memory loads with MOVEA.W: sign-extend wb_result[15:0] before writing.
     // -----------------------------------------------------------------------
+    logic [31:0] wb_result_final;
+    assign wb_result_final = (wb_is_mem_rd && wb_is_movea_w)
+                           ? {{16{wb_result[15]}}, wb_result[15:0]}
+                           : wb_result;
+
     assign wr_en   = wb_valid && wb_writes_reg;
     assign wr_sel  = wb_dest_reg;
     assign wr_siz  = wb_siz;
-    assign wr_data = wb_result;
+    assign wr_data = wb_result_final;
+
+    // An update port (post/pre-increment: fires in WB alongside or instead of wr_en)
+    assign an_wr_en   = wb_valid && wb_an_upd_en;
+    assign an_wr_sel  = wb_an_upd_reg;
+    assign an_wr_data = wb_an_upd_new;
 
     // -----------------------------------------------------------------------
     // CCR / SR write outputs
@@ -1086,6 +1362,16 @@ module eu_seq (
     assign branch_taken  = dec_branch_taken | ex_dbcc_taken;
     assign branch_target = dec_branch_taken ? (decode_pc     + 32'd2 + dec_branch_disp)
                                             : (ex_decode_pc  + 32'd2 + ex_dbcc_disp);
+
+    // -----------------------------------------------------------------------
+    // Memory bus outputs — driven from EX stage when a memory op is active.
+    // -----------------------------------------------------------------------
+    assign mem_req   = ex_valid && (ex_is_mem_rd || ex_is_mem_wr);
+    assign mem_rw    = ex_is_mem_rd;     // 1=read, 0=write
+    assign mem_siz   = ex_siz;
+    assign mem_fc    = {sr_out[13], 1'b0, 1'b1};  // 001=user data, 101=supervisor data
+    assign mem_addr  = ex_ea;
+    assign mem_wdata = rd_a_data;        // Dn source for stores (rd_a_sel=Dn for stores)
 
 endmodule
 

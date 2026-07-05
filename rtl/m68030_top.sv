@@ -180,20 +180,31 @@ module m68030_top (
     logic        exc_active;
     logic [7:0]  exc_vector_num;
 
+    // EU memory bus signals (from m68030_eu)
+    logic        eu_mem_req, eu_mem_rw;
+    logic [1:0]  eu_mem_siz;
+    logic [2:0]  eu_mem_fc;
+    logic [31:0] eu_mem_addr, eu_mem_wdata;
+    logic        eu_an_wr_en;
+    logic [2:0]  eu_an_wr_sel;
+    logic [31:0] eu_an_wr_data;
+
     // ───────────────────────────────────────────────────────────────────────
-    // BIU eu_req mux — EXC takes over when exc_active
+    // BIU eu_req mux — priority: EXC > EU data > idle
+    // EXC (exception frame push) takes over the EU bus port.
+    // EU data cycles (MOVE to/from memory) use it when EXC is inactive.
     // ───────────────────────────────────────────────────────────────────────
     logic [31:0] biu_eu_addr, biu_eu_wdata;
     logic [2:0]  biu_eu_fc;
     logic        biu_eu_rw, biu_eu_req;
     logic [1:0]  biu_eu_siz;
 
-    assign biu_eu_req   = exc_active & exc_req_w;
-    assign biu_eu_addr  = exc_active ? exc_addr_w  : 32'h0;
-    assign biu_eu_wdata = exc_active ? exc_wdata_w : 32'h0;
-    assign biu_eu_fc    = 3'b101;          // supervisor data for all EXC cycles
-    assign biu_eu_rw    = exc_active ? exc_rw_w    : 1'b1;
-    assign biu_eu_siz   = exc_active ? exc_siz_w   : 2'b00;
+    assign biu_eu_req   = exc_active ? exc_req_w   : eu_mem_req;
+    assign biu_eu_addr  = exc_active ? exc_addr_w  : eu_mem_addr;
+    assign biu_eu_wdata = exc_active ? exc_wdata_w : eu_mem_wdata;
+    assign biu_eu_fc    = exc_active ? 3'b101      : eu_mem_fc;
+    assign biu_eu_rw    = exc_active ? exc_rw_w    : eu_mem_rw;
+    assign biu_eu_siz   = exc_active ? exc_siz_w   : eu_mem_siz;
     assign exc_ack_w    = eu_ack & exc_active;
     assign exc_rdata_w  = eu_rdata;
 
@@ -309,6 +320,18 @@ module m68030_top (
         .decode_pc     (ifu_decode_pc),
         .branch_taken  (eu_branch_taken),
         .branch_target (eu_branch_target),
+        .mem_req       (eu_mem_req),
+        .mem_rw        (eu_mem_rw),
+        .mem_siz       (eu_mem_siz),
+        .mem_fc        (eu_mem_fc),
+        .mem_addr      (eu_mem_addr),
+        .mem_wdata     (eu_mem_wdata),
+        .mem_rdata     (eu_ack && !exc_active ? eu_rdata : 32'h0),
+        .mem_ack       (eu_ack && !exc_active),
+        .mem_berr      (eu_berr && !exc_active),
+        .an_wr_en      (eu_an_wr_en),
+        .an_wr_sel     (eu_an_wr_sel),
+        .an_wr_data    (eu_an_wr_data),
         .vbr_wr_en     (1'b0),
         .vbr_wr_data   (32'h0),
         .vbr_out       (eu_vbr_out),

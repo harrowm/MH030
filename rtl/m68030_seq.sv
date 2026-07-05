@@ -71,13 +71,24 @@ module m68030_seq (
     assign is_branch_w = (f_group == 4'h6) && (instr_word[11:8] != 4'h1) && (f_disp8_s == 8'h00);
     assign is_branch_l = (f_group == 4'h6) && (instr_word[11:8] != 4'h1) && (f_disp8_s == 8'hFF);
 
+    // Groups 1/2/3 (MOVE/MOVEA): (d16,An) src mode = f_mode=101; dst mode = {f_dir,f_ss}=101
+    logic [2:0] f_move_dst_mode_s;
+    assign f_move_dst_mode_s = {f_dir, f_ss};  // instr_word[8:6] for MOVE dst EA
+    logic is_move_d16;
+    assign is_move_d16 = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                         ((f_mode == 3'b101) || (f_move_dst_mode_s == 3'b101));
+
+    // Group 4, LEA with (d16,An): f_dir=1, f_ss=11, f_mode=101
+    logic is_lea_d16;
+    assign is_lea_d16 = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b101);
+
     logic [1:0] ext_count;
     always_comb begin
         if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
         else if (is_branch_l)
             ext_count = 2'd2;
-        else if (is_branch_w || is_dbcc)
+        else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16)
             ext_count = 2'd1;
         else
             ext_count = 2'd0;
