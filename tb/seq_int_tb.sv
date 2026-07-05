@@ -88,6 +88,25 @@ module seq_int_tb;
     logic        supervisor, master_mode;
     logic [2:0]  ipl_mask;
     logic        div_trap;
+    logic        branch_taken;
+    logic [31:0] branch_target;
+
+    // EU memory port — zero-latency combinational ack; no memory used in this test
+    logic        mem_req, mem_rw, mem_ack, mem_berr;
+    logic [1:0]  mem_siz;
+    logic [2:0]  mem_fc;
+    logic [31:0] mem_addr, mem_wdata, mem_rdata;
+    assign mem_ack   = mem_req;
+    assign mem_berr  = 1'b0;
+    assign mem_rdata = 32'h0;
+
+    // EU An write port (output, not used here)
+    logic        an_wr_en;
+    logic [2:0]  an_wr_sel;
+    logic [31:0] an_wr_data;
+
+    // IFU decode_pc → EU decode_pc
+    logic [31:0] decode_pc;
 
     // -----------------------------------------------------------------------
     // m68030_ifu
@@ -102,7 +121,7 @@ module seq_int_tb;
         .ext_data     (ifu_ext_data),
         .instr_valid  (ifu_instr_valid),
         .ext_valid    (ifu_ext_valid),
-        .decode_pc    (),
+        .decode_pc    (decode_pc),
         .ifu_addr     (ifu_addr),
         .ifu_req      (ifu_req),
         .ifu_rdata    (ifu_rdata),
@@ -156,8 +175,27 @@ module seq_int_tb;
         .sr_out      (sr_out),
         .supervisor  (supervisor),
         .master_mode (master_mode),
-        .ipl_mask    (ipl_mask),
-        .div_trap    (div_trap)
+        .ipl_mask      (ipl_mask),
+        .div_trap      (div_trap),
+        .decode_pc     (decode_pc),
+        .branch_taken  (branch_taken),
+        .branch_target (branch_target),
+        .mem_req       (mem_req),
+        .mem_rw        (mem_rw),
+        .mem_siz       (mem_siz),
+        .mem_fc        (mem_fc),
+        .mem_addr      (mem_addr),
+        .mem_wdata     (mem_wdata),
+        .mem_rdata     (mem_rdata),
+        .mem_ack       (mem_ack),
+        .mem_berr      (mem_berr),
+        .an_wr_en      (an_wr_en),
+        .an_wr_sel     (an_wr_sel),
+        .an_wr_data    (an_wr_data),
+        .ssp_wr_en     (1'b0),
+        .ssp_wr_data   (32'h0),
+        .exc_sr_wr_en  (1'b0),
+        .exc_sr_wr_data(16'h0)
     );
 
     // -----------------------------------------------------------------------

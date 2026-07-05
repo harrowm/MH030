@@ -64,12 +64,12 @@ module m68030_seq (
     logic is_dbcc;
     assign is_dbcc = (f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b001);
 
-    // Group 0110: BRA.W/Bcc.W (disp8=0x00) needs 1; BRA.L/Bcc.L (disp8=0xFF) needs 2
+    // Group 0110: BRA/Bcc/BSR: .W (disp8=0x00) needs 1 ext; .L (disp8=0xFF) needs 2
     logic [7:0] f_disp8_s;
     assign f_disp8_s = instr_word[7:0];
     logic is_branch_w, is_branch_l;
-    assign is_branch_w = (f_group == 4'h6) && (instr_word[11:8] != 4'h1) && (f_disp8_s == 8'h00);
-    assign is_branch_l = (f_group == 4'h6) && (instr_word[11:8] != 4'h1) && (f_disp8_s == 8'hFF);
+    assign is_branch_w = (f_group == 4'h6) && (f_disp8_s == 8'h00);
+    assign is_branch_l = (f_group == 4'h6) && (f_disp8_s == 8'hFF);
 
     // Groups 1/2/3 (MOVE/MOVEA): (d16,An) src mode = f_mode=101; dst mode = {f_dir,f_ss}=101
     logic [2:0] f_move_dst_mode_s;
@@ -82,13 +82,74 @@ module m68030_seq (
     logic is_lea_d16;
     assign is_lea_d16 = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b101);
 
+    // Group 4, JSR/JMP with (d16,An): f_dir=0, f_dn=111, f_ss=10 or 11, f_mode=101
+    logic is_jsr_jmp_d16;
+    assign is_jsr_jmp_d16 = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
+                             (f_ss == 2'b10 || f_ss == 2'b11) && (f_mode == 3'b101);
+
+    // Group 4, LINK.W: f_dir=0, f_dn=111, f_ss=01, f_mode=010 — needs 1 ext word (d16)
+    logic is_link;
+    assign is_link = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
+                     (f_ss == 2'b01) && (f_mode == 3'b010);
+
+    // Phase 43: MOVEM — always exactly 1 extension word (the register mask)
+    // Supported EA modes: -(An)(100), (An)+(011), (An)(010) — no extra displacement word.
+    // MOVEM store: f_dn=100, !f_dir, f_ss[1]=1  MOVEM load: f_dn=110, !f_dir, f_ss[1]=1
+    logic is_movem;
+    assign is_movem = (f_group == 4'h4) && !f_dir && f_ss[1] &&
+                      (f_dn == 3'b100 || f_dn == 3'b110) &&
+                      (f_mode == 3'b100 || f_mode == 3'b011 || f_mode == 3'b010);
+
+    // Phase 41: brief indexed EA (d8,An,Xn) — always 1 extension word
+    logic is_move_idx_src;   // groups 1/2/3, src mode=110 (indexed)
+    assign is_move_idx_src = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                             (f_mode == 3'b110);
+    logic is_lea_idx;        // LEA (d8,An,Xn)
+    assign is_lea_idx = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b110);
+    logic is_jmp_idx;        // JMP (d8,An,Xn)
+    assign is_jmp_idx = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
+                        (f_ss == 2'b11) && (f_mode == 3'b110);
+
+    // Phase 40: absolute EA (xxx).W/(xxx).L
+    // Phase 42: PC-relative (d16,PC) and (d8,PC,Xn) also use f_mode=111
+    //   f_reg sub-type: 000=abs.W(1ext), 001=abs.L(2ext), 010=(d16,PC)(1ext), 011=(d8,PC,Xn)(1ext)
+    logic is_move_abs_src;   // groups 1/2/3, f_mode=111 (any sub-type)
+    assign is_move_abs_src = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                             (f_mode == 3'b111);
+    // dst abs: groups 1/2/3, dst_mode=111, src=Dn/An (no PC-relative destination)
+    logic is_move_abs_dst;
+    assign is_move_abs_dst = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                             ({f_dir, f_ss} == 3'b111) &&
+                             (f_mode == 3'b000 || f_mode == 3'b001);
+    // LEA/JSR/JMP with f_mode=111 (covers abs.W/L and PC-relative)
+    logic is_lea_abs;
+    assign is_lea_abs = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b111);
+    logic is_jsr_jmp_abs;
+    assign is_jsr_jmp_abs = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
+                            (f_ss == 2'b10 || f_ss == 2'b11) && (f_mode == 3'b111);
+    // abs.L (f_reg==001) needs 2 ext words; abs.W (f_reg==000) and PC-relative (010/011) need 1
+    logic is_abs_long;
+    assign is_abs_long = (is_move_abs_src  && (instr_word[2:0] == 3'b001)) ||
+                         (is_move_abs_dst  && (f_dn == 3'b001))             ||
+                         ((is_lea_abs || is_jsr_jmp_abs) && (instr_word[2:0] == 3'b001));
+    logic is_abs_short;
+    assign is_abs_short = (is_move_abs_src  && (instr_word[2:0] == 3'b000)) ||
+                          (is_move_abs_dst  && (f_dn == 3'b000))              ||
+                          ((is_lea_abs || is_jsr_jmp_abs) && (instr_word[2:0] == 3'b000));
+    // PC-relative modes: (d16,PC)=010 and (d8,PC,Xn)=011 — always 1 ext word
+    logic is_pc_rel;
+    assign is_pc_rel = (is_move_abs_src || is_lea_abs || is_jsr_jmp_abs) &&
+                       (instr_word[2:0] == 3'b010 || instr_word[2:0] == 3'b011);
+
     logic [1:0] ext_count;
     always_comb begin
         if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
-        else if (is_branch_l)
+        else if (is_branch_l || is_abs_long)
             ext_count = 2'd2;
-        else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16)
+        else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
+                 is_link || is_abs_short || is_pc_rel ||
+                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem)
             ext_count = 2'd1;
         else
             ext_count = 2'd0;

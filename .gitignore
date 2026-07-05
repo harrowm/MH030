@@ -2,8 +2,7 @@
 a.out
 *.vvp
 *.vcd
-sim/*.vvp
-sim/*.vcd
+sim/
 
 # macOS
 .DS_Store

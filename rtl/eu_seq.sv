@@ -296,6 +296,31 @@ module eu_seq (
     logic [31:0] dec_an_delta;    // An update: +step (An)+, -step -(An), 0 otherwise
     logic        dec_an_upd_en;   // An register needs updating
     logic [2:0]  dec_an_upd_reg;  // which An to update (the EA register)
+    // Phase 38: subroutine / jump instructions
+    logic        dec_is_jmp;      // JMP ea
+    logic        dec_is_jsr;      // JSR ea (push return PC then jump)
+    logic        dec_is_bsr;      // BSR disp (push return PC then relative branch)
+    logic        dec_is_rts;      // RTS (pop PC from stack)
+    logic        dec_is_rtr;      // RTR (pop CCR+PC from stack; 2 reads)
+    logic        dec_is_link;     // LINK An, #d16
+    logic        dec_is_unlk;     // UNLK An
+    // Phase 40: absolute EA
+    logic        dec_abs_ea_en;   // EA is absolute (overrides An+offset for bus cycle)
+    logic        dec_abs_jmp_en;  // branch target is absolute (for JMP/JSR abs; separate from EA)
+    logic [31:0] dec_abs_ea_val;  // pre-computed absolute address (shared by both flags)
+    logic [31:0] dec_return_pc;   // return address pushed by JSR/BSR
+    logic [31:0] dec_bsr_target;  // pre-computed BSR target = decode_pc+2+disp
+    logic [31:0] dec_jump_offset; // JMP/JSR target offset (0 for (An), d16 for (d16,An))
+    // Phase 41: brief indexed EA (d8,An,Xn)
+    logic        dec_is_idx;     // brief indexed EA mode active
+    logic        dec_xn_wl;     // Xn size: 0=word(sign-ext to 32), 1=longword
+    logic [1:0]  dec_xn_scale;  // Xn scale: 00=×1, 01=×2, 10=×4, 11=×8
+    // Phase 43: MOVEM register save/restore
+    logic        dec_is_movem;      // MOVEM instruction
+    logic        dec_movem_load;    // 1=mem→reg (load), 0=reg→mem (store)
+    logic        dec_movem_predec;  // 1=-(An) predecrement mode (store only)
+    logic        dec_movem_postinc; // 1=(An)+ post-increment mode (load only)
+    logic        dec_movem_long;    // 1=longword (f_ss[0]), 0=word
 
     always_comb begin
         dec_valid        = 1'b0;
@@ -337,6 +362,27 @@ module eu_seq (
         dec_an_delta   = 32'h0;
         dec_an_upd_en  = 1'b0;
         dec_an_upd_reg = 3'h0;
+        dec_is_jmp      = 1'b0;
+        dec_is_jsr      = 1'b0;
+        dec_is_bsr      = 1'b0;
+        dec_is_rts      = 1'b0;
+        dec_is_rtr      = 1'b0;
+        dec_is_link     = 1'b0;
+        dec_is_unlk     = 1'b0;
+        dec_abs_ea_en   = 1'b0;
+        dec_abs_jmp_en  = 1'b0;
+        dec_abs_ea_val  = 32'h0;
+        dec_return_pc   = 32'h0;
+        dec_bsr_target  = 32'h0;
+        dec_jump_offset = 32'h0;
+        dec_is_idx      = 1'b0;
+        dec_xn_wl       = 1'b0;
+        dec_xn_scale    = 2'b00;
+        dec_is_movem    = 1'b0;
+        dec_movem_load  = 1'b0;
+        dec_movem_predec  = 1'b0;
+        dec_movem_postinc = 1'b0;
+        dec_movem_long  = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -461,6 +507,45 @@ module eu_seq (
                                 end
                                 default: ;
                             endcase
+                        end else if (f_mode == 3'b111) begin
+                            // MOVE.B/W/L (special EA), Dn — abs or PC-relative source
+                            dec_valid     = 1'b1;
+                            dec_is_mem_rd = 1'b1;
+                            dec_unit      = UNIT_MOVE;
+                            dec_abs_ea_en = 1'b1;
+                            dec_needs_ext = 1'b1;
+                            case (f_reg)
+                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b001: dec_abs_ea_val = ext_data;
+                                3'b010: // (d16,PC): EA = PC+2 + sign_ext(d16)
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b011: begin // (d8,PC,Xn): EA = PC+2 + d8 + scaled(Xn)
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst = 1'b1;
+                                    dec_is_idx    = 1'b1;
+                                    dec_xn_wl     = ext_data[11];
+                                    dec_xn_scale  = ext_data[10:9];
+                                end
+                                default: ;
+                            endcase
+                        end else if (f_mode == 3'b110) begin
+                            // MOVE.B/W/L (d8,An,Xn), Dn — brief indexed source
+                            // ext[15]=DA, [14:12]=Xn_reg, [11]=WL, [10:9]=scale, [7:0]=d8
+                            dec_valid     = 1'b1;
+                            dec_is_mem_rd = 1'b1;
+                            dec_unit      = UNIT_MOVE;
+                            dec_src_reg   = {1'b1, f_reg};                    // An (base) → rd_a
+                            dec_dst_reg   = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            dec_reads_src = 1'b1;
+                            dec_reads_dst = 1'b1;
+                            dec_is_idx    = 1'b1;
+                            dec_xn_wl     = ext_data[11];
+                            dec_xn_scale  = ext_data[10:9];
+                            dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext = 1'b1;
                         end
 
                     end else if (f_move_dst_mode == 3'b001) begin
@@ -511,6 +596,43 @@ module eu_seq (
                                 end
                                 default: ;
                             endcase
+                        end else if (f_mode == 3'b111) begin
+                            // MOVEA (special EA), An — abs or PC-relative source
+                            dec_valid     = 1'b1;
+                            dec_is_mem_rd = 1'b1;
+                            dec_unit      = UNIT_MOVE;
+                            dec_abs_ea_en = 1'b1;
+                            dec_needs_ext = 1'b1;
+                            case (f_reg)
+                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b001: dec_abs_ea_val = ext_data;
+                                3'b010: dec_abs_ea_val = decode_pc + 32'd2
+                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b011: begin
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst = 1'b1;
+                                    dec_is_idx    = 1'b1;
+                                    dec_xn_wl     = ext_data[11];
+                                    dec_xn_scale  = ext_data[10:9];
+                                end
+                                default: ;
+                            endcase
+                        end else if (f_mode == 3'b110) begin
+                            // MOVEA (d8,An,Xn), An — brief indexed source
+                            dec_valid      = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_unit       = UNIT_MOVE;
+                            dec_src_reg    = {1'b1, f_reg};                    // An (base) → rd_a
+                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            dec_reads_src  = 1'b1;
+                            dec_reads_dst  = 1'b1;
+                            dec_is_idx     = 1'b1;
+                            dec_xn_wl      = ext_data[11];
+                            dec_xn_scale   = ext_data[10:9];
+                            dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext  = 1'b1;
                         end
 
                     end else if (f_move_dst_mode[2:1] == 2'b01 ||
@@ -549,6 +671,23 @@ module eu_seq (
                                 end
                                 default: ;
                             endcase
+                        end
+                    end else if (f_move_dst_mode == 3'b111) begin
+                        // ── dst = absolute address; src = Dn or An ──
+                        // f_dn encodes EA sub-type: 000=abs.W, 001=abs.L
+                        if (f_mode == 3'b000 || f_mode == 3'b001) begin
+                            dec_valid      = 1'b1;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_unit       = UNIT_MOVE;
+                            dec_src_reg    = (f_mode == 3'b000) ? {1'b0, f_reg}
+                                                                 : {1'b1, f_reg};
+                            dec_reads_src  = 1'b1;
+                            dec_abs_ea_en  = 1'b1;
+                            dec_abs_ea_val = (f_dn == 3'b001) ? ext_data
+                                           : {{16{ext_data[15]}}, ext_data[15:0]};
+                            dec_writes_reg  = 1'b0;
+                            dec_updates_ccr = (f_mode == 3'b000);
+                            dec_needs_ext   = 1'b1;
                         end
                     end
                 end
@@ -646,10 +785,235 @@ module eu_seq (
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                 dec_needs_ext = 1'b1;
                             end
+                        end else if (f_mode == 3'b111) begin
+                            // LEA (special EA), An — abs or PC-relative
+                            dec_valid      = 1'b1;
+                            dec_is_lea     = 1'b1;
+                            dec_dest_reg   = {1'b1, f_dn};
+                            dec_writes_reg = 1'b1;
+                            dec_siz        = 2'b00;
+                            dec_abs_ea_en  = 1'b1;
+                            dec_needs_ext  = 1'b1;
+                            case (f_reg)
+                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b001: dec_abs_ea_val = ext_data;
+                                3'b010: dec_abs_ea_val = decode_pc + 32'd2
+                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b011: begin
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst = 1'b1;
+                                    dec_is_idx    = 1'b1;
+                                    dec_xn_wl     = ext_data[11];
+                                    dec_xn_scale  = ext_data[10:9];
+                                end
+                                default: ;
+                            endcase
+                        end else if (f_mode == 3'b110) begin
+                            // LEA (d8,An,Xn), An — brief indexed EA
+                            dec_valid      = 1'b1;
+                            dec_is_lea     = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};                    // An (base) → rd_a
+                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            dec_reads_src  = 1'b1;
+                            dec_reads_dst  = 1'b1;
+                            dec_dest_reg   = {1'b1, f_dn};
+                            dec_writes_reg = 1'b1;
+                            dec_siz        = 2'b00;
+                            dec_is_idx     = 1'b1;
+                            dec_xn_wl      = ext_data[11];
+                            dec_xn_scale   = ext_data[10:9];
+                            dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext  = 1'b1;
                         end
+                    end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b10) begin
+                        // JSR ea: 0100 1110 10 mmm rrr — push PC to -(A7), jump to ea
+                        if (f_mode == 3'b010 || f_mode == 3'b101) begin
+                            dec_valid      = 1'b1;
+                            dec_is_jsr     = 1'b1;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};   // An (jump base) → rd_a
+                            dec_dst_reg    = {1'b1, 3'b111};  // A7 (push base) → rd_b
+                            dec_reads_src  = 1'b1;
+                            dec_reads_dst  = 1'b1;
+                            dec_siz        = 2'b00;
+                            dec_ea_offset  = 32'hFFFF_FFFC;   // A7-4 = push address
+                            dec_an_upd_en  = 1'b1;
+                            dec_an_upd_reg = 3'b111;
+                            dec_an_delta   = 32'hFFFF_FFFC;   // A7-=4
+                            dec_return_pc  = decode_pc + (f_mode == 3'b101 ? 32'd4 : 32'd2);
+                            if (f_mode == 3'b101) begin
+                                dec_jump_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext   = 1'b1;
+                            end
+                        end else if (f_mode == 3'b111) begin
+                            // JSR (special EA) — abs or PC-relative target, push return PC
+                            // (d8,PC,Xn) deferred: needs A7 + Xn + PC simultaneously
+                            dec_valid      = 1'b1;
+                            dec_is_jsr     = 1'b1;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_dst_reg    = {1'b1, 3'b111};  // A7 → rd_b for push EA
+                            dec_reads_dst  = 1'b1;
+                            dec_siz        = 2'b00;
+                            dec_ea_offset  = 32'hFFFF_FFFC;   // push at A7-4
+                            dec_an_upd_en  = 1'b1;
+                            dec_an_upd_reg = 3'b111;
+                            dec_an_delta   = 32'hFFFF_FFFC;
+                            dec_abs_jmp_en = 1'b1;
+                            dec_needs_ext  = 1'b1;
+                            case (f_reg)
+                                3'b000: begin  // abs.W
+                                    dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    dec_return_pc  = decode_pc + 32'd4;
+                                end
+                                3'b001: begin  // abs.L
+                                    dec_abs_ea_val = ext_data;
+                                    dec_return_pc  = decode_pc + 32'd6;
+                                end
+                                3'b010: begin  // (d16,PC): target = PC+2+d16; return = PC+4
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{16{ext_data[15]}}, ext_data[15:0]};
+                                    dec_return_pc  = decode_pc + 32'd4;
+                                end
+                                // 3'b011 (d8,PC,Xn) deferred — 3-register conflict
+                                default: ;
+                            endcase
+                        end
+                    end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b11) begin
+                        // JMP ea: 0100 1110 11 mmm rrr — PC ← ea (no stack change)
+                        if (f_mode == 3'b010 || f_mode == 3'b101) begin
+                            dec_valid     = 1'b1;
+                            dec_is_jmp    = 1'b1;
+                            dec_src_reg   = {1'b1, f_reg};   // An → rd_a
+                            dec_reads_src = 1'b1;
+                            dec_siz       = 2'b00;
+                            if (f_mode == 3'b101) begin
+                                dec_jump_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext   = 1'b1;
+                            end
+                        end else if (f_mode == 3'b111) begin
+                            // JMP (special EA) — abs or PC-relative target
+                            dec_valid      = 1'b1;
+                            dec_is_jmp     = 1'b1;
+                            dec_siz        = 2'b00;
+                            dec_abs_jmp_en = 1'b1;
+                            dec_needs_ext  = 1'b1;
+                            case (f_reg)
+                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b001: dec_abs_ea_val = ext_data;
+                                3'b010: dec_abs_ea_val = decode_pc + 32'd2
+                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b011: begin  // (d8,PC,Xn)
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst = 1'b1;
+                                    dec_is_idx    = 1'b1;
+                                    dec_xn_wl     = ext_data[11];
+                                    dec_xn_scale  = ext_data[10:9];
+                                end
+                                default: ;
+                            endcase
+                        end else if (f_mode == 3'b110) begin
+                            // JMP (d8,An,Xn) — brief indexed target
+                            dec_valid       = 1'b1;
+                            dec_is_jmp      = 1'b1;
+                            dec_src_reg     = {1'b1, f_reg};                    // An (base) → rd_a
+                            dec_dst_reg     = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            dec_reads_src   = 1'b1;
+                            dec_reads_dst   = 1'b1;
+                            dec_siz         = 2'b00;
+                            dec_is_idx      = 1'b1;
+                            dec_xn_wl       = ext_data[11];
+                            dec_xn_scale    = ext_data[10:9];
+                            dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext   = 1'b1;
+                        end
+                    end else if (instr_word == 16'h4E75) begin
+                        // RTS: pop PC from (A7), A7 += 4
+                        dec_valid      = 1'b1;
+                        dec_is_rts     = 1'b1;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_src_reg    = {1'b1, 3'b111};  // A7 → rd_a
+                        dec_reads_src  = 1'b1;
+                        dec_siz        = 2'b00;
+                        dec_an_upd_en  = 1'b1;
+                        dec_an_upd_reg = 3'b111;
+                        dec_an_delta   = 32'd4;
+                    end else if (instr_word == 16'h4E77) begin
+                        // RTR: pop word→CCR from (A7), A7+=2; pop longword→PC, A7+=4
+                        dec_valid     = 1'b1;
+                        dec_is_rtr    = 1'b1;
+                        dec_is_mem_rd = 1'b1;  // phase-1 read from (A7)
+                        dec_src_reg   = {1'b1, 3'b111};  // A7 → rd_a
+                        dec_reads_src = 1'b1;
+                        dec_siz       = 2'b00;  // longword for phase-2 PC read
+                    end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b010) begin
+                        // LINK.W An, #d16: 0100 1110 0101 0rrr | d16
+                        // -(A7) ← An; An ← A7-4; A7 ← (A7-4) + sign_ext(d16)
+                        dec_valid      = 1'b1;
+                        dec_is_link    = 1'b1;
+                        dec_is_mem_wr  = 1'b1;
+                        dec_src_reg    = {1'b1, f_reg};   // An (value to push) → rd_a
+                        dec_dst_reg    = {1'b1, 3'b111};  // A7 (EA base for push) → rd_b
+                        dec_reads_src  = 1'b1;
+                        dec_reads_dst  = 1'b1;
+                        dec_siz        = 2'b00;
+                        dec_ea_offset  = 32'hFFFF_FFFC;   // A7-4 = push address
+                        dec_writes_reg = 1'b1;            // An ← A7-4 in WB (wb_result=ex_ea)
+                        dec_dest_reg   = {1'b1, f_reg};   // destination = An
+                        dec_an_upd_en  = 1'b1;
+                        dec_an_upd_reg = 3'b111;          // A7 update
+                        // A7_new = A7-4 + d16 = A7 + (d16-4); -4 = 32'hFFFF_FFFC
+                        dec_an_delta   = {{16{ext_data[15]}}, ext_data[15:0]} + 32'hFFFF_FFFC;
+                        dec_needs_ext  = 1'b1;
+                    end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b011) begin
+                        // UNLK An: 0100 1110 0101 1rrr
+                        // A7 ← An; An ← M[(An)]; A7 ← An+4
+                        dec_valid      = 1'b1;
+                        dec_is_unlk    = 1'b1;
+                        dec_is_mem_rd  = 1'b1;            // read old An from M[An]
+                        dec_src_reg    = {1'b1, f_reg};   // An (frame ptr = new A7) → rd_a
+                        dec_reads_src  = 1'b1;
+                        dec_siz        = 2'b00;
+                        dec_ea_offset  = 32'h0;           // EA = An (no offset)
+                        dec_writes_reg = 1'b1;            // An ← mem_rdata in WB
+                        dec_dest_reg   = {1'b1, f_reg};   // An destination
+                        dec_an_upd_en  = 1'b1;
+                        dec_an_upd_reg = 3'b111;          // A7 ← An+4
+                        dec_an_delta   = 32'd4;
                     end else if (instr_word == 16'h4E71) begin
                         // NOP: 0100 1110 0111 0001
                         dec_valid = 1'b1;
+
+                    // ----------------------------------------------------------------
+                    // Phase 43: MOVEM — register list save/restore
+                    // Store (reg→mem): f_dn=100, !f_dir, f_ss[1]=1
+                    //   EA: -(An) f_mode=100 or (An) f_mode=010
+                    // Load (mem→reg): f_dn=110, !f_dir, f_ss[1]=1
+                    //   EA: (An)+ f_mode=011 or (An) f_mode=010
+                    // Mask always in ext_data[15:0] (1 extension word).
+                    // f_ss[0]: 0=word, 1=longword.
+                    // ----------------------------------------------------------------
+                    end else if (!f_dir && f_ss[1] &&
+                                 (f_dn == 3'b100 || f_dn == 3'b110)) begin
+                        // MOVEM store: f_dn=100  EA: -(An)(100) or (An)(010)
+                        // MOVEM load:  f_dn=110  EA: (An)+(011) or (An)(010)
+                        if ( (f_dn == 3'b110 && (f_mode == 3'b011 || f_mode == 3'b010)) ||
+                             (f_dn == 3'b100 && (f_mode == 3'b100 || f_mode == 3'b010)) ) begin
+                            dec_valid         = 1'b1;
+                            dec_is_movem      = 1'b1;
+                            dec_movem_load    = (f_dn == 3'b110);
+                            dec_movem_predec  = (f_dn == 3'b100) && (f_mode == 3'b100);
+                            dec_movem_postinc = (f_dn == 3'b110) && (f_mode == 3'b011);
+                            dec_movem_long    = f_ss[0];
+                            // rd_b reads the base An (for address computation at EX time)
+                            dec_dst_reg       = {1'b1, f_reg};
+                            dec_reads_dst     = 1'b1;
+                            dec_siz           = 2'b00;  // longword An read
+                            dec_needs_ext     = 1'b1;   // mask in first ext word
+                        end
                     end
                 end
 
@@ -704,24 +1068,47 @@ module eu_seq (
                 end
 
                 // ----------------------------------------------------------------
-                // Group 0110: BRA / Bcc (BSR f_cond=0001 not implemented)
+                // Group 0110: BRA / Bcc / BSR (f_cond=0001)
                 // ----------------------------------------------------------------
                 4'h6: begin
-                    if (f_cond != 4'h1) begin
+                    if (f_cond == 4'h1) begin
+                        // BSR: push return PC to -(A7), then branch
+                        dec_valid       = 1'b1;
+                        dec_is_bsr      = 1'b1;
+                        dec_is_mem_wr   = 1'b1;
+                        dec_dst_reg     = {1'b1, 3'b111};  // A7 → rd_b
+                        dec_reads_dst   = 1'b1;
+                        dec_siz         = 2'b00;
+                        dec_ea_offset   = 32'hFFFF_FFFC;   // -4
+                        dec_an_upd_en   = 1'b1;
+                        dec_an_upd_reg  = 3'b111;
+                        dec_an_delta    = 32'hFFFF_FFFC;   // -4
+                        if (f_disp8 == 8'h00) begin
+                            dec_needs_ext   = 1'b1;
+                            dec_branch_disp = {{16{ext_data[15]}}, ext_data[15:0]};
+                            dec_return_pc   = decode_pc + 32'd4;
+                        end else if (f_disp8 == 8'hFF) begin
+                            dec_needs_ext   = 1'b1;
+                            dec_branch_disp = ext_data;
+                            dec_return_pc   = decode_pc + 32'd6;
+                        end else begin
+                            dec_branch_disp = {{24{f_disp8[7]}}, f_disp8};
+                            dec_return_pc   = decode_pc + 32'd2;
+                        end
+                        dec_bsr_target = decode_pc + 32'd2 + dec_branch_disp;
+                    end else begin
+                        // BRA / Bcc
                         dec_valid          = 1'b1;
                         dec_is_branch      = 1'b1;
                         dec_reads_ccr      = 1'b1;
                         dec_branch_cond    = f_cond;
                         if (f_disp8 == 8'h00) begin
-                            // .W: 16-bit displacement in first ext word (low 16)
                             dec_needs_ext   = 1'b1;
                             dec_branch_disp = {{16{ext_data[15]}}, ext_data[15:0]};
                         end else if (f_disp8 == 8'hFF) begin
-                            // .L: 32-bit displacement across two ext words
                             dec_needs_ext   = 1'b1;
                             dec_branch_disp = ext_data;
                         end else begin
-                            // .B: signed 8-bit displacement in opcode word
                             dec_branch_disp = {{24{f_disp8[7]}}, f_disp8};
                         end
                     end
@@ -987,9 +1374,75 @@ module eu_seq (
     logic        ex_valid, ex_writes_reg, ex_updates_ccr;
     logic [3:0]  ex_dest_reg;
     logic        ex_is_mem_rd, ex_is_mem_wr, ex_is_lea, ex_is_movea_w;
+    // Phase 38: declared here (before stall assigns) for Icarus forward-ref safety
+    logic        ex_is_jmp, ex_is_jsr, ex_is_bsr, ex_is_rts, ex_is_rtr;
+    // Phase 39
+    logic        ex_is_link;
+    // Phase 40: absolute EA
+    logic        ex_abs_ea_en;
+    logic        ex_abs_jmp_en;
+    logic [31:0] ex_abs_ea_val;
+    // Phase 41: brief indexed EA
+    logic        ex_is_idx;
+    logic        ex_xn_wl;
+    logic [1:0]  ex_xn_scale;
+    // Phase 43: MOVEM
+    logic        ex_is_movem;
+    logic        ex_movem_load;
+    logic        ex_movem_predec;
+    logic        ex_movem_postinc;
+    logic        ex_movem_long;
 
-    logic ex_mem_stall;
-    assign ex_mem_stall = (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack;
+    // RTR two-phase read state (module-level registers; declared here for stall)
+    logic        rtr_phase_r;
+    logic [7:0]  rtr_ccr_r;
+    logic [31:0] rtr_a7_next_r;
+    // RTR completion outputs (declared here so an_wr/sr_wr assigns can use them)
+    logic        rtr_sr_wr_en;
+    logic [15:0] rtr_sr_wr_data;
+    logic        rtr_an_wr_en;
+    logic [31:0] rtr_an_wr_data;
+
+    // Phase 43: MOVEM FSM state registers
+    logic        movem_start_r;    // 1-cycle stall while waiting for An to appear in rd_b
+    logic        movem_run_r;      // MOVEM bus sequence active
+    logic        movem_load_r;     // 1=mem→reg load, 0=reg→mem store
+    logic        movem_predec_r;   // -(An) predecrement mode
+    logic        movem_postinc_r;  // (An)+ post-increment mode
+    logic        movem_long_r;     // 1=longword, 0=word
+    logic [15:0] movem_mask_r;     // remaining register mask (set bits = pending registers)
+    logic [31:0] movem_addr_r;     // current bus address
+    logic [2:0]  movem_an_r;       // base An register number for final An update
+
+    // MOVEM combinatorial signals
+    logic [3:0]  movem_bit_idx;    // lowest set bit of movem_mask_r (= current register)
+    logic [15:0] movem_next_mask;  // movem_mask_r with current bit cleared
+    logic [3:0]  movem_reg_sel;    // regfile index for current register (0-7=D0-D7, 8-15=A0-A7)
+    logic [31:0] movem_step;       // address increment per register (4 or 2)
+    logic        movem_last;       // this is the final register in the list
+    logic [31:0] movem_an_final;   // final An value to write on completion
+
+    // Priority encoder: lowest set bit in movem_mask_r (iterates MSB→LSB so last wins = LSB)
+    always_comb begin
+        movem_bit_idx = 4'd0;
+        for (int mi = 15; mi >= 0; mi--)
+            if (movem_mask_r[mi]) movem_bit_idx = 4'(unsigned'(mi));
+    end
+
+    // For predecrement: bit i → register (15-i); for others: bit i → register i
+    // This correctly maps the reversed predec mask encoding to regfile selects.
+    assign movem_reg_sel  = movem_predec_r ? (4'd15 - movem_bit_idx) : movem_bit_idx;
+    assign movem_step     = movem_long_r ? 32'd4 : 32'd2;
+    assign movem_next_mask = movem_mask_r & (movem_mask_r - 16'd1); // clear lowest set bit
+    assign movem_last     = movem_run_r && mem_ack && (movem_next_mask == 16'h0);
+    // Final An value: predec stays at current address; postinc = current + step
+    assign movem_an_final = movem_predec_r  ? movem_addr_r
+                                            : (movem_addr_r + movem_step);
+
+    logic rtr_stall, ex_mem_stall;
+    assign rtr_stall    = ex_is_rtr && !(rtr_phase_r && mem_ack);
+    assign ex_mem_stall = movem_start_r || movem_run_r ||
+                          ((ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) || rtr_stall;
 
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -1033,6 +1486,10 @@ module eu_seq (
     logic [31:0] ex_an_delta;    // An update amount
     logic        ex_an_upd_en;
     logic [2:0]  ex_an_upd_reg;
+    // Phase 38: subroutine / jump EX signals
+    logic [31:0] ex_return_pc;   // return address for JSR/BSR push
+    logic [31:0] ex_bsr_target;  // pre-computed BSR branch target
+    logic [31:0] ex_jump_offset; // JMP/JSR target offset (0 or d16)
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -1055,6 +1512,26 @@ module eu_seq (
             ex_an_delta       <= 32'h0;
             ex_an_upd_en      <= 1'b0;
             ex_an_upd_reg     <= 3'h0;
+            ex_is_jmp         <= 1'b0;
+            ex_is_jsr         <= 1'b0;
+            ex_is_bsr         <= 1'b0;
+            ex_is_rts         <= 1'b0;
+            ex_is_rtr         <= 1'b0;
+            ex_is_link        <= 1'b0;
+            ex_abs_ea_en      <= 1'b0;
+            ex_abs_jmp_en     <= 1'b0;
+            ex_abs_ea_val     <= 32'h0;
+            ex_is_idx         <= 1'b0;
+            ex_xn_wl          <= 1'b0;
+            ex_xn_scale       <= 2'b00;
+            ex_return_pc      <= 32'h0;
+            ex_bsr_target     <= 32'h0;
+            ex_jump_offset    <= 32'h0;
+            ex_is_movem       <= 1'b0;
+            ex_movem_load     <= 1'b0;
+            ex_movem_predec   <= 1'b0;
+            ex_movem_postinc  <= 1'b0;
+            ex_movem_long     <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -1072,6 +1549,20 @@ module eu_seq (
             ex_is_lea         <= 1'b0;
             ex_is_movea_w     <= 1'b0;
             ex_an_upd_en      <= 1'b0;
+            ex_is_jmp         <= 1'b0;
+            ex_is_jsr         <= 1'b0;
+            ex_is_bsr         <= 1'b0;
+            ex_is_rts         <= 1'b0;
+            ex_is_rtr         <= 1'b0;
+            ex_is_link        <= 1'b0;
+            ex_abs_ea_en      <= 1'b0;
+            ex_abs_jmp_en     <= 1'b0;
+            ex_is_idx         <= 1'b0;
+            ex_is_movem       <= 1'b0;
+            ex_movem_load     <= 1'b0;
+            ex_movem_predec   <= 1'b0;
+            ex_movem_postinc  <= 1'b0;
+            ex_movem_long     <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -1108,6 +1599,26 @@ module eu_seq (
             ex_an_delta       <= dec_an_delta;
             ex_an_upd_en      <= dec_an_upd_en;
             ex_an_upd_reg     <= dec_an_upd_reg;
+            ex_is_jmp         <= dec_is_jmp;
+            ex_is_jsr         <= dec_is_jsr;
+            ex_is_bsr         <= dec_is_bsr;
+            ex_is_rts         <= dec_is_rts;
+            ex_is_rtr         <= dec_is_rtr;
+            ex_is_link        <= dec_is_link;
+            ex_abs_ea_en      <= dec_abs_ea_en;
+            ex_abs_jmp_en     <= dec_abs_jmp_en;
+            ex_abs_ea_val     <= dec_abs_ea_val;
+            ex_is_idx         <= dec_is_idx;
+            ex_xn_wl          <= dec_xn_wl;
+            ex_xn_scale       <= dec_xn_scale;
+            ex_return_pc      <= dec_return_pc;
+            ex_bsr_target     <= dec_bsr_target;
+            ex_jump_offset    <= dec_jump_offset;
+            ex_is_movem       <= dec_is_movem;
+            ex_movem_load     <= dec_movem_load;
+            ex_movem_predec   <= dec_movem_predec;
+            ex_movem_postinc  <= dec_movem_postinc;
+            ex_movem_long     <= dec_movem_long;
         end
     end
 
@@ -1116,20 +1627,100 @@ module eu_seq (
     // For memory ops: rd_a/rd_b must provide full 32-bit values (An for EA
     // base, Dn for write data). Override siz to longword so no sign-extension.
     // -----------------------------------------------------------------------
-    assign rd_a_sel = ex_src_reg;
-    assign rd_a_siz = (ex_is_mem_rd || ex_is_mem_wr || ex_is_lea) ? 2'b00 : ex_siz;
+    // Phase 43: during MOVEM store, override rd_a_sel to read the current register to store.
+    assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel : ex_src_reg;
+    assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea) ? 2'b00 : ex_siz;
     assign rd_b_sel = ex_dst_reg;
-    assign rd_b_siz = ex_is_mem_wr ? 2'b00 : ex_siz;
+    // Phase 41: for indexed EA, rd_b carries Xn and must be read as full longword
+    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx) ? 2'b00 : ex_siz;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
     logic [31:0] ex_an_base;
     assign ex_an_base = ex_is_mem_wr ? rd_b_data : rd_a_data;
 
+    // Phase 41: brief indexed — scaled index register value added to EA and jump target
+    logic [31:0] ex_xn_val;
+    logic [31:0] ex_xn_scaled;
+    assign ex_xn_val    = ex_xn_wl ? rd_b_data : {{16{rd_b_data[15]}}, rd_b_data[15:0]};
+    assign ex_xn_scaled = ex_is_idx ? (ex_xn_val << ex_xn_scale) : 32'h0;
+
     logic [31:0] ex_ea;       // effective address for bus cycle or LEA result
-    assign ex_ea = ex_an_base + ex_ea_offset;
+    // Phase 42: ex_xn_scaled always added — zero when !ex_is_idx; handles (d8,PC,Xn)
+    // where ex_abs_ea_val = PC+2+d8 and ex_xn_scaled carries the scaled index.
+    assign ex_ea = ex_abs_ea_en ? (ex_abs_ea_val + ex_xn_scaled)
+                                : (ex_an_base + ex_ea_offset + ex_xn_scaled);
 
     logic [31:0] ex_an_new;   // updated An value for (An)+ / -(An)
     assign ex_an_new = ex_an_base + ex_an_delta;
+
+    // Phase 38: jump target = An_jump + offset (rd_a is the An base for JMP/JSR)
+    // Phase 40: absolute EA overrides; Phase 41/42: ex_xn_scaled adds index for (d8,PC,Xn)
+    logic [31:0] ex_jmp_target;
+    assign ex_jmp_target = ex_abs_jmp_en ? (ex_abs_ea_val + ex_xn_scaled)
+                                         : (rd_a_data + ex_jump_offset + ex_xn_scaled);
+
+    // RTR two-phase read state machine (placed here: ex_ea is in scope above)
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            rtr_phase_r   <= 1'b0;
+            rtr_ccr_r     <= 8'h0;
+            rtr_a7_next_r <= 32'h0;
+        end else if (ex_valid && ex_is_rtr && !rtr_phase_r && mem_ack) begin
+            rtr_phase_r   <= 1'b1;
+            rtr_ccr_r     <= mem_rdata[7:0];  // CCR from word read at (A7)
+            // Simplified: use A7+4 for PC read (real 68030 uses A7+2; fix in later phase)
+            rtr_a7_next_r <= ex_ea + 32'd4;
+        end else if (ex_valid && ex_is_rtr && rtr_phase_r && mem_ack) begin
+            rtr_phase_r   <= 1'b0;
+        end
+    end
+
+    // Phase 43: MOVEM two-phase FSM
+    //   Phase A (movem_start_r=1): MOVEM entered EX; wait one cycle so rd_b_data = An value.
+    //   Phase B (movem_run_r=1): issue one bus cycle per remaining register in movem_mask_r.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            movem_start_r   <= 1'b0;
+            movem_run_r     <= 1'b0;
+            movem_mask_r    <= 16'h0;
+            movem_addr_r    <= 32'h0;
+            movem_an_r      <= 3'h0;
+            movem_load_r    <= 1'b0;
+            movem_predec_r  <= 1'b0;
+            movem_postinc_r <= 1'b0;
+            movem_long_r    <= 1'b0;
+        end else if (!movem_start_r && !movem_run_r && instr_ack && dec_is_movem) begin
+            // DECODE accepted MOVEM: capture control bits; stall for one cycle (Phase A).
+            // rd_b_data is still from previous EX instruction here — use registered signals.
+            movem_start_r   <= 1'b1;
+            movem_mask_r    <= ext_data[15:0];  // register list mask
+            movem_load_r    <= dec_movem_load;
+            movem_predec_r  <= dec_movem_predec;
+            movem_postinc_r <= dec_movem_postinc;
+            movem_long_r    <= dec_movem_long;
+            movem_an_r      <= f_reg;           // base An register number
+        end else if (movem_start_r) begin
+            // Phase A: MOVEM is now in EX; rd_b_data = base An value.
+            // Compute initial bus address and start Phase B.
+            movem_start_r <= 1'b0;
+            movem_run_r   <= 1'b1;
+            // Predecrement: first access at An-step; post-inc/(An): first access at An.
+            if (movem_predec_r)
+                movem_addr_r <= rd_b_data - (movem_long_r ? 32'd4 : 32'd2);
+            else
+                movem_addr_r <= rd_b_data;
+        end else if (movem_run_r && mem_ack) begin
+            // Phase B: one register processed; advance to the next.
+            movem_mask_r <= movem_next_mask;
+            if (!movem_last) begin
+                if (movem_predec_r)
+                    movem_addr_r <= movem_addr_r - movem_step;
+                else
+                    movem_addr_r <= movem_addr_r + movem_step;
+            end
+            if (movem_last) movem_run_r <= 1'b0;
+        end
+    end
 
     logic [31:0] ex_src_operand;
     assign ex_src_operand = ex_use_imm ? ex_imm : rd_a_data;
@@ -1293,9 +1884,9 @@ module eu_seq (
             wb_dest_reg     <= ex_dest_reg;
             wb_siz          <= ex_siz;
             // Result selection: memory load uses mem_rdata, LEA uses EA, else ALU/MOVE
-            wb_result       <= ex_is_mem_rd ? mem_rdata
-                             : ex_is_lea    ? ex_ea
-                             :                ex_result;
+            wb_result       <= ex_is_mem_rd         ? mem_rdata
+                             : (ex_is_lea || ex_is_link) ? ex_ea
+                             :                             ex_result;
             wb_ccr          <= {ex_x, ex_n, ex_z, ex_v, ex_c};
             wb_an_upd_en    <= ex_an_upd_en;
             wb_an_upd_reg   <= ex_an_upd_reg;
@@ -1314,15 +1905,31 @@ module eu_seq (
                            ? {{16{wb_result[15]}}, wb_result[15:0]}
                            : wb_result;
 
-    assign wr_en   = wb_valid && wb_writes_reg;
-    assign wr_sel  = wb_dest_reg;
-    assign wr_siz  = wb_siz;
-    assign wr_data = wb_result_final;
+    // Phase 43: MOVEM load writes directly on each mem_ack (bypasses WB path).
+    // WB has wb_writes_reg=0 during MOVEM so no conflict.
+    logic        movem_wr_en;
+    logic [31:0] movem_wr_data;
+    assign movem_wr_en  = movem_run_r && movem_load_r && mem_ack;
+    // Word loads sign-extend to 32 bits (68030 sign-extends MOVEM.W loads).
+    assign movem_wr_data = movem_long_r ? mem_rdata
+                                        : {{16{mem_rdata[15]}}, mem_rdata[15:0]};
 
-    // An update port (post/pre-increment: fires in WB alongside or instead of wr_en)
-    assign an_wr_en   = wb_valid && wb_an_upd_en;
-    assign an_wr_sel  = wb_an_upd_reg;
-    assign an_wr_data = wb_an_upd_new;
+    assign wr_en   = movem_wr_en || (wb_valid && wb_writes_reg);
+    assign wr_sel  = movem_wr_en ? movem_reg_sel : wb_dest_reg;
+    assign wr_siz  = movem_wr_en ? 2'b00         : wb_siz;
+    assign wr_data = movem_wr_en ? movem_wr_data  : wb_result_final;
+
+    // An update port: MOVEM fires at completion; RTR fires from EX; WB handles normal.
+    logic        movem_an_wr_en;
+    assign movem_an_wr_en = movem_last && (movem_predec_r || movem_postinc_r);
+
+    assign an_wr_en   = movem_an_wr_en || rtr_an_wr_en || (wb_valid && wb_an_upd_en);
+    assign an_wr_sel  = movem_an_wr_en ? movem_an_r
+                      : rtr_an_wr_en   ? 3'b111
+                      :                  wb_an_upd_reg;
+    assign an_wr_data = movem_an_wr_en ? movem_an_final
+                      : rtr_an_wr_en   ? rtr_an_wr_data
+                      :                  wb_an_upd_new;
 
     // -----------------------------------------------------------------------
     // CCR / SR write outputs
@@ -1331,8 +1938,9 @@ module eu_seq (
     logic [4:0] final_ccr;
     assign final_ccr = wb_is_move ? {wb_ccr[4], wb_move_n, wb_ccr[2:0]} : wb_ccr;
 
-    assign sr_wr_en   = wb_valid && wb_updates_ccr;
-    assign sr_wr_data = {sr_out[15:8], 3'b000, final_ccr};
+    // SR write: RTR fires CCR update from EX (phase 2); normal WB handles others.
+    assign sr_wr_en   = rtr_sr_wr_en || (wb_valid && wb_updates_ccr);
+    assign sr_wr_data = rtr_sr_wr_en ? rtr_sr_wr_data : {sr_out[15:8], 3'b000, final_ccr};
     assign sr_ccr_only = 1'b1;
 
     // -----------------------------------------------------------------------
@@ -1359,19 +1967,55 @@ module eu_seq (
                            !eval_cc(ex_dbcc_cond, flag_n, flag_z, flag_v, flag_c) &&
                            (ex_alu_result_w != 16'hFFFF);
 
-    assign branch_taken  = dec_branch_taken | ex_dbcc_taken;
-    assign branch_target = dec_branch_taken ? (decode_pc     + 32'd2 + dec_branch_disp)
-                                            : (ex_decode_pc  + 32'd2 + ex_dbcc_disp);
+    // -----------------------------------------------------------------------
+    // Phase 38: JMP/JSR/BSR/RTS/RTR branches — decided from EX stage.
+    // JMP: fires when JMP enters EX (no memory op).
+    // JSR/BSR: fires when push (mem_ack=1) completes.
+    // RTS: fires when stack-read completes (mem_ack=1).
+    // RTR: fires after BOTH reads complete (rtr_phase_r=1 and mem_ack=1).
+    // -----------------------------------------------------------------------
+    logic ex_jmp_taken, ex_jsr_taken, ex_bsr_taken, ex_rts_taken, ex_rtr_taken;
+    assign ex_jmp_taken = ex_valid && ex_is_jmp;
+    assign ex_jsr_taken = ex_valid && ex_is_jsr && mem_ack;
+    assign ex_bsr_taken = ex_valid && ex_is_bsr && mem_ack;
+    assign ex_rts_taken = ex_valid && ex_is_rts && mem_ack;
+    assign ex_rtr_taken = ex_valid && ex_is_rtr && rtr_phase_r && mem_ack;
+
+    assign branch_taken  = dec_branch_taken | ex_dbcc_taken |
+                           ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
+                           ex_rts_taken | ex_rtr_taken;
+
+    assign branch_target = dec_branch_taken              ? (decode_pc    + 32'd2 + dec_branch_disp)
+                         : ex_dbcc_taken                 ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
+                         : ex_bsr_taken                  ? ex_bsr_target
+                         : (ex_rts_taken || ex_rtr_taken) ? mem_rdata
+                         :                                  ex_jmp_target;  // JMP or JSR
+
+    // -----------------------------------------------------------------------
+    // RTR completion: CCR write and A7 update fire directly from EX stage.
+    // Normal WB an_wr/sr_wr handles RTS, JSR, BSR stack updates.
+    // rtr_sr_wr_en/rtr_an_wr_en declared in early section for forward-ref safety.
+    // -----------------------------------------------------------------------
+    assign rtr_sr_wr_en  = ex_rtr_taken;
+    assign rtr_sr_wr_data = {sr_out[15:8], rtr_ccr_r};
+    assign rtr_an_wr_en  = ex_rtr_taken;
+    assign rtr_an_wr_data = rtr_a7_next_r + 32'd4;
 
     // -----------------------------------------------------------------------
     // Memory bus outputs — driven from EX stage when a memory op is active.
+    // RTR phase 1: word read (mem_siz=10); phase 2: longword from rtr_a7_next_r.
+    // JSR/BSR write: mem_wdata = return PC (not rd_a_data).
     // -----------------------------------------------------------------------
-    assign mem_req   = ex_valid && (ex_is_mem_rd || ex_is_mem_wr);
-    assign mem_rw    = ex_is_mem_rd;     // 1=read, 0=write
-    assign mem_siz   = ex_siz;
-    assign mem_fc    = {sr_out[13], 1'b0, 1'b1};  // 001=user data, 101=supervisor data
-    assign mem_addr  = ex_ea;
-    assign mem_wdata = rd_a_data;        // Dn source for stores (rd_a_sel=Dn for stores)
+    // Phase 43: MOVEM drives the bus directly during movem_run_r; normal path otherwise.
+    assign mem_req   = movem_run_r || (ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
+    assign mem_rw    = movem_run_r ? movem_load_r  : ex_is_mem_rd;
+    assign mem_siz   = movem_run_r ? (movem_long_r ? 2'b00 : 2'b10) :
+                       (ex_is_rtr && !rtr_phase_r) ? 2'b10 : ex_siz;
+    assign mem_fc    = {sr_out[13], 1'b0, 1'b1};
+    assign mem_addr  = movem_run_r ? movem_addr_r :
+                       (ex_is_rtr && rtr_phase_r) ? rtr_a7_next_r : ex_ea;
+    // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
+    assign mem_wdata = (ex_is_jsr || ex_is_bsr) ? ex_return_pc : rd_a_data;
 
 endmodule
 
