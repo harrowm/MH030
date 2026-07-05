@@ -376,6 +376,8 @@ module m68030_top (
         .fault_sr     (eu_sr_out),
         .fault_addr   (ifu_bus_err_addr),
         .fault_ssw    (exc_ssw),
+        .bus_err_fmt  (exc_frame_format),   // format code from biu_exc_capture
+        .fault_data   (fault_data_biu),     // DOB from biu at fault time
         // SSP
         .ssp_in       (exc_ssp_in),
         .ssp_out      (exc_ssp_out),

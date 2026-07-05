@@ -39,6 +39,8 @@ module exc_tb;
     logic [15:0] fault_sr     = 0;
     logic [31:0] fault_addr   = 0;
     logic [15:0] fault_ssw    = 0;
+    logic [3:0]  bus_err_fmt  = 4'hA;  // default = $A (bus read error)
+    logic [31:0] fault_data   = 0;     // Data Output Buffer for $9/$A/$B step 4
     logic [31:0] ssp_in       = 0, vbr_in = 0;
     logic [31:0] ssp_out;
     logic        ssp_wr_en;
@@ -140,6 +142,7 @@ module exc_tb;
             div_zero_req=0; chk_req=0; trapv_req=0;
             trap_req=0; trap_num=0;
             fault_pc=0; fault_sr=0; fault_addr=0; fault_ssw=0;
+            bus_err_fmt=4'hA; fault_data=0;
             ssp_in=0; vbr_in=0;
 
             // Pulse capture reset
@@ -387,6 +390,120 @@ module exc_tb;
             $display("FAIL EXC-8 trans_cnt=%0d (exp 5)", trans_cnt);
             fail = fail + 1;
         end else $display("PASS EXC-8 trans_cnt=5 (4 writes + 1 read)");
+
+        // ================================================================
+        // EXC-9: MMU short bus fault → format $9, 6 LW writes + 1 read = 7 trans
+        //   bus_err_fmt=$9, ssp_in=0x9000, ssp_delta=24, new_ssp=0x8FE8
+        //   fault_data = 0xD0B0_CAFE (Data Output Buffer)
+        //   fault_ssw  = 0x9ABC
+        //
+        //   step 0 @ 0x8FFC: fault_pc
+        //   step 1 @ 0x8FF8: {fmtvec,sr}  fmtvec={4'h9,2'b00,8'd2,2'b00}=0x9008
+        //   step 2 @ 0x8FF4: fault_addr
+        //   step 3 @ 0x8FF0: {fault_ssw,16'h0} = 0x9ABC_0000
+        //   step 4 @ 0x8FEC: fault_data = 0xD0B0_CAFE
+        //   step 5 @ 0x8FE8: 32'h0 (reserved)
+        //   fetch  @ vec_addr = 2*4 = 0x8 (rw=1)
+        //   ssp_out = 0x8FE8
+        // ================================================================
+        $display("--- EXC-9: MMU short bus fault format $9 ---");
+        begin_test;
+        ssp_in      = 32'h0000_9000;
+        fault_pc    = 32'h0000_8800;
+        fault_sr    = 16'h2700;
+        fault_addr  = 32'hAABB_CCDD;
+        fault_ssw   = 16'h9ABC;
+        fault_data  = 32'hD0B0_CAFE;
+        bus_err_fmt = 4'h9;          // MMU fault format
+        exc_rdata   = 32'h0000_F000;
+        bus_err_req = 1;
+        @(posedge clk_4x); #1;
+        bus_err_req = 0;
+        wait_idle;
+
+        // fmtvec = {4'h9, 2'b00, 8'd2, 2'b00} = 0x9008
+        chk32("EXC-9 push0_addr",  t_addr[0],  32'h0000_8FFC);
+        chk32("EXC-9 push0_data",  t_wdata[0], 32'h0000_8800);
+        chk32("EXC-9 push1_addr",  t_addr[1],  32'h0000_8FF8);
+        chk32("EXC-9 push1_data",  t_wdata[1], 32'h9008_2700);
+        chk32("EXC-9 push3_data",  t_wdata[3], 32'h9ABC_0000);  // {ssw,0}
+        chk32("EXC-9 push4_addr",  t_addr[4],  32'h0000_8FEC);
+        chk32("EXC-9 push4_data",  t_wdata[4], 32'hD0B0_CAFE);  // DOB
+        chk32("EXC-9 push5_data",  t_wdata[5], 32'h0000_0000);  // reserved
+        chk32("EXC-9 fetch_addr",  t_addr[6],  32'h0000_0008);  // vec 2 @ 2*4
+        chk_bit("EXC-9 fetch_rw", t_rw[6],    1'b1);
+        chk32("EXC-9 ssp_out",    last_ssp,    32'h0000_8FE8);  // 0x9000-24
+        chk32("EXC-9 new_pc",     last_new_pc, 32'h0000_F000);
+        if (trans_cnt !== 5'd7) begin
+            $display("FAIL EXC-9 trans_cnt=%0d (exp 7: 6 writes + 1 read)", trans_cnt);
+            fail = fail + 1;
+        end else $display("PASS EXC-9 trans_cnt=7");
+
+        // ================================================================
+        // EXC-10: Bus error during read → format $A, 8 LW writes + 1 read = 9 trans
+        //   Verifies DOB appears at step 4.
+        //   ssp_in=0xA000, ssp_delta=32, new_ssp=0x9FE0
+        //   step 4 addr = new_ssp + (8-1-4)*4 = 0x9FE0 + 12 = 0x9FEC
+        //   fmtvec = {4'hA,2'b00,8'd2,2'b00} = 0xA008
+        // ================================================================
+        $display("--- EXC-10: Bus read error format $A with DOB ---");
+        begin_test;
+        ssp_in      = 32'h0000_A000;
+        fault_pc    = 32'h0000_9100;
+        fault_sr    = 16'h2300;
+        fault_addr  = 32'h1234_5678;
+        fault_ssw   = 16'h8100;       // read fault SSW
+        fault_data  = 32'hBEEF_1234;  // DOB value
+        bus_err_fmt = 4'hA;           // bus read error format
+        exc_rdata   = 32'h0000_C000;
+        bus_err_req = 1;
+        @(posedge clk_4x); #1;
+        bus_err_req = 0;
+        wait_idle;
+
+        chk32("EXC-10 push1_data", t_wdata[1], 32'hA008_2300);  // fmt=$A, vec=2
+        chk32("EXC-10 push3_data", t_wdata[3], 32'h8100_0000);  // {ssw,0}
+        chk32("EXC-10 push4_addr", t_addr[4],  32'h0000_9FEC);  // 0x9FE0 + 12
+        chk32("EXC-10 push4_data", t_wdata[4], 32'hBEEF_1234);  // DOB
+        chk32("EXC-10 ssp_out",    last_ssp,   32'h0000_9FE0);  // 0xA000-32
+        if (trans_cnt !== 5'd9) begin
+            $display("FAIL EXC-10 trans_cnt=%0d (exp 9: 8 writes + 1 read)", trans_cnt);
+            fail = fail + 1;
+        end else $display("PASS EXC-10 trans_cnt=9");
+
+        // ================================================================
+        // EXC-11: Bus error during write → format $B, 23 LW writes + 1 read = 24 trans
+        //   ssp_in=0xB000, ssp_delta=92, new_ssp=0xAFA4
+        //   step 4 addr = new_ssp + (23-1-4)*4 = 0xAFA4 + 72 = 0xAFEC
+        //   fmtvec = {4'hB,2'b00,8'd2,2'b00} = 0xB008
+        // ================================================================
+        $display("--- EXC-11: Bus write error format $B ---");
+        begin_test;
+        ssp_in      = 32'h0000_B000;
+        fault_pc    = 32'h0000_A100;
+        fault_sr    = 16'h2700;
+        fault_addr  = 32'hDEAD_C0DE;
+        fault_ssw   = 16'h0041;       // write fault SSW (RW=0)
+        fault_data  = 32'h1234_ABCD;  // data that was being written
+        bus_err_fmt = 4'hB;           // bus write error format
+        exc_rdata   = 32'h0000_D000;
+        bus_err_req = 1;
+        @(posedge clk_4x); #1;
+        bus_err_req = 0;
+        wait_idle;
+
+        // 0xB000 - 92 = 0xB000 - 0x5C = 0xAFA4
+        chk32("EXC-11 push1_data", t_wdata[1], 32'hB008_2700);  // fmt=$B, vec=2
+        chk32("EXC-11 push2_data", t_wdata[2], 32'hDEAD_C0DE);  // fault_addr
+        chk32("EXC-11 push3_data", t_wdata[3], 32'h0041_0000);  // {ssw,0}
+        chk32("EXC-11 push4_data", t_wdata[4], 32'h1234_ABCD);  // DOB
+        chk32("EXC-11 push5_data", t_wdata[5], 32'h0000_0000);  // reserved
+        chk32("EXC-11 ssp_out",    last_ssp,   32'h0000_AFA4);  // 0xB000-92
+        chk32("EXC-11 new_pc",     last_new_pc, 32'h0000_D000);
+        if (trans_cnt !== 5'd24) begin
+            $display("FAIL EXC-11 trans_cnt=%0d (exp 24: 23 writes + 1 read)", trans_cnt);
+            fail = fail + 1;
+        end else $display("PASS EXC-11 trans_cnt=24");
 
         // ================================================================
         if (fail == 0)

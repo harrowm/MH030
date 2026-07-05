@@ -1,6 +1,6 @@
 `default_nettype none
 
-// MC68030 Exception Controller (Phase 33)
+// MC68030 Exception Controller (Phase 44)
 //
 // Handles all exception types, pushes the appropriate stack frame format,
 // fetches the handler vector, and loads the new PC/SR into the EU.
@@ -13,10 +13,12 @@
 // address = new_ssp + step_rem * 4.  Format $0 needs 2 writes; format $B
 // needs 23 writes.
 //
-// Formats $0 and $2 are fully populated.
-// Formats $3/$9/$A/$B push the correct number of words with the base fields
-// at the correct addresses; format-specific diagnostic words are stubbed to
-// {fault_ssw, fault_addr} for the first extra pair, zeros beyond.
+// Formats $0/$2/$3 are fully populated.
+// Formats $9/$A/$B: steps 0-3 carry the core fault snapshot; step 4 carries
+// the Data Output Buffer (DOB) captured from the BIU at fault time; steps 5+
+// are zero (internal pipeline state — stubbed until Phase 52 FPU).
+// The bus-error frame format code ($9/$A/$B) is determined by biu_exc_capture
+// and passed in via bus_err_fmt; the EU/EXC module just consumes it.
 //
 // SR after exception: T1=0, T0=0, S=1, M=0, I=preserved (or updated for
 // interrupt); CCR preserved.  Interrupt updates I[2:0] to the level taken.
@@ -47,6 +49,8 @@ module m68030_exc (
     input  logic [15:0] fault_sr,       // SR at exception entry
     input  logic [31:0] fault_addr,     // faulting bus address (bus/addr err)
     input  logic [15:0] fault_ssw,      // Special Status Word (biu_exc_capture)
+    input  logic [3:0]  bus_err_fmt,    // frame format from biu_exc_capture ($9/$A/$B)
+    input  logic [31:0] fault_data,     // Data Output Buffer at fault time (for $9/$A/$B step 4)
 
     // ── Supervisor stack pointer (EU regfile ISP or MSP) ──────────────────
     input  logic [31:0] ssp_in,
@@ -125,7 +129,7 @@ module m68030_exc (
         pend_vec    = 8'h0;
         pend_fmt    = FMT_SHORT;
         if (bus_err_req) begin
-            exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = FMT_BUS_INS;
+            exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
         end else if (addr_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_ADDR;
         end else if (int_pending) begin
@@ -173,6 +177,7 @@ module m68030_exc (
     logic [31:0] snap_pc_r;
     logic [15:0] snap_sr_r;
     logic [2:0]  snap_ipl_r;    // captured IPL for interrupt SR update
+    logic [31:0] snap_dob_r;    // Data Output Buffer snapshot (fault_data at entry)
     logic [4:0]  push_step_r;
     logic [31:0] vec_data_r;
 
@@ -225,9 +230,14 @@ module m68030_exc (
     //   step 1: {fmtvec, fault_sr}  (format/SR pair just below PC)
     //   step 2: fault_addr  (instruction address for $2/$3; fault addr for others)
     //   step 3: {fault_ssw, 16'h0}  (SSW + reserved; used by $3/$A/$B)
-    //   step 4+: zeros (remaining diagnostic words; BIU capture fills real data)
+    //   step 4: snap_dob_r (Data Output Buffer; formats $9/$A/$B only)
+    //   step 5+: zeros (internal pipeline state; stubbed until Phase 52)
     // -----------------------------------------------------------------------
     logic [31:0] push_data;
+    logic        fmt_is_fault;
+    assign fmt_is_fault = (snap_fmt_r == FMT_MMU) ||
+                          (snap_fmt_r == FMT_BUS_INS) ||
+                          (snap_fmt_r == FMT_BUS_DAT);
 
     always_comb begin
         case (push_step_r)
@@ -235,6 +245,7 @@ module m68030_exc (
             5'd1:    push_data = {fmtvec, snap_sr_r};
             5'd2:    push_data = fault_addr;
             5'd3:    push_data = {fault_ssw, 16'h0};
+            5'd4:    push_data = fmt_is_fault ? snap_dob_r : 32'h0;
             default: push_data = 32'h0;
         endcase
     end
@@ -266,6 +277,7 @@ module m68030_exc (
             snap_pc_r   <= 32'h0;
             snap_sr_r   <= 16'h0;
             snap_ipl_r  <= 3'b0;
+            snap_dob_r  <= 32'h0;
             push_step_r <= 5'd0;
             vec_data_r  <= 32'h0;
         end else begin
@@ -278,6 +290,7 @@ module m68030_exc (
                         snap_pc_r   <= fault_pc;
                         snap_sr_r   <= fault_sr;
                         snap_ipl_r  <= int_pending ? ipl_sync_l : fault_sr[10:8];
+                        snap_dob_r  <= fault_data;
                         push_step_r <= 5'd0;
                         state_r     <= EXC_PUSH;
                     end
