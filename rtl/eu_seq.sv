@@ -106,9 +106,14 @@ module eu_seq (
     input  logic [31:0] bit_result,
     input  logic        bit_z,
 
-    output logic        instr_ack,   // consumed this instruction
-    output logic        seq_busy,    // pipeline stall
-    output logic        div_trap     // divide-by-zero trap
+    output logic        instr_ack,    // consumed this instruction
+    output logic        seq_busy,     // pipeline stall
+    output logic        div_trap,     // divide-by-zero trap
+
+    // ── Branch control ──────────────────────────────────────────────────────
+    input  logic [31:0] decode_pc,    // PC of instruction at decode stage
+    output logic        branch_taken, // combinational: taken branch this cycle
+    output logic [31:0] branch_target // combinational: branch destination
 );
 
     // -----------------------------------------------------------------------
@@ -163,6 +168,16 @@ module eu_seq (
     assign f_move_sz = (instr_word[15:12] == 4'h1) ? 2'b01 :
                        (instr_word[15:12] == 4'h3) ? 2'b10 : 2'b00;
 
+    // Branch/Scc/DBcc condition [11:8]; byte displacement or MOVEQ immediate [7:0]
+    logic [3:0] f_cond;
+    logic [7:0] f_disp8;
+    assign f_cond  = instr_word[11:8];
+    assign f_disp8 = instr_word[7:0];
+
+    // ADDQ/SUBQ immediate: f_dn=000 → 8, else f_dn
+    logic [31:0] f_addq_imm;
+    assign f_addq_imm = (f_dn == 3'b000) ? 32'd8 : {29'h0, f_dn};
+
     // Standard size field → internal siz convention
     // f_ss: 00→byte(01), 01→word(10), 10→long(00)
     logic [1:0] f_siz;
@@ -177,11 +192,31 @@ module eu_seq (
     assign flag_v = sr_out[1];
     assign flag_c = sr_out[0];
 
-    // Pre-extract rd_a_data MSBs for MOVE N-flag computation
-    logic move_src_n_b, move_src_n_w, move_src_n_l;
-    assign move_src_n_b = rd_a_data[7];
-    assign move_src_n_w = rd_a_data[15];
-    assign move_src_n_l = rd_a_data[31];
+    // Condition code evaluator used by Bcc/Scc/DBcc decode and EX stages.
+    function automatic logic eval_cc(
+        input logic [3:0] cond,
+        input logic n, z, v, c
+    );
+        case (cond)
+            4'h0: eval_cc = 1'b1;
+            4'h1: eval_cc = 1'b0;
+            4'h2: eval_cc = ~c & ~z;
+            4'h3: eval_cc = c | z;
+            4'h4: eval_cc = ~c;
+            4'h5: eval_cc = c;
+            4'h6: eval_cc = ~z;
+            4'h7: eval_cc = z;
+            4'h8: eval_cc = ~v;
+            4'h9: eval_cc = v;
+            4'ha: eval_cc = ~n;
+            4'hb: eval_cc = n;
+            4'hc: eval_cc = ~(n ^ v);
+            4'hd: eval_cc = n ^ v;
+            4'he: eval_cc = ~z & ~(n ^ v);
+            4'hf: eval_cc = z | (n ^ v);
+            default: eval_cc = 1'b0;
+        endcase
+    endfunction
 
     // Pre-extract bit-selects used by BCD and bitops to avoid Icarus issues
     logic [7:0] rd_a_byte, rd_b_byte;
@@ -211,7 +246,15 @@ module eu_seq (
     logic [1:0]  dec_bcd_op;
     logic [1:0]  dec_bit_op;
     logic [4:0]  dec_bit_num;       // immediate bit number
-    logic        dec_bit_from_reg;  // 1 = bit_num from rd_a_data[4:0]
+    logic        dec_bit_from_reg;
+    logic        dec_is_branch;    // BRA/Bcc: redirects PC at decode time
+    logic        dec_is_dbcc;      // DBcc: branch decision deferred to EX stage
+    logic        dec_reads_ccr;    // stall if pending CCR write in EX or WB
+    logic [3:0]  dec_branch_cond;  // condition code for Bcc/Scc/DBcc
+    logic [31:0] dec_branch_disp;  // branch displacement (relative to PC+2)
+    logic        dec_is_swap;      // SWAP Dn: swap halfwords in EX
+    logic        dec_sext;         // EXT sign-extend operation
+    logic        dec_sext_from_byte; // 1=extend byte, 0=extend word  // 1 = bit_num from rd_a_data[4:0]
 
     always_comb begin
         dec_valid        = 1'b0;
@@ -236,7 +279,15 @@ module eu_seq (
         dec_needs_ext    = 1'b0;
         dec_reads_src    = 1'b0;
         dec_reads_dst    = 1'b0;
-        dec_shf_imm_cnt  = 6'd1;
+        dec_shf_imm_cnt    = 6'd1;
+        dec_is_branch      = 1'b0;
+        dec_is_dbcc        = 1'b0;
+        dec_reads_ccr      = 1'b0;
+        dec_branch_cond    = 4'h0;
+        dec_branch_disp    = 32'h0;
+        dec_is_swap        = 1'b0;
+        dec_sext           = 1'b0;
+        dec_sext_from_byte = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -329,34 +380,176 @@ module eu_seq (
                 end
 
                 // ----------------------------------------------------------------
-                // Group 0100: NEG/NEGX/NOT/CLR/TST
+                // Group 0100: NEG/NEGX/NOT/CLR/TST / SWAP / EXT / NOP
                 // ----------------------------------------------------------------
                 4'h4: begin
-                    if (f_mode == 3'b000 && f_ss != 2'b11) begin
+                    if (f_mode == 3'b000) begin
+                        if (f_ss != 2'b11) begin
+                            dec_siz         = f_siz;
+                            dec_dst_reg     = {1'b0, f_reg};
+                            dec_dest_reg    = {1'b0, f_reg};
+                            dec_unit        = UNIT_ALU;
+                            dec_updates_ccr = 1'b1;
+                            dec_reads_dst   = 1'b1;
+                            case (f_dn)
+                                3'b000: begin dec_alu_op=ALU_NEGX; dec_writes_reg=1'b1; dec_valid=1'b1; end
+                                3'b001: begin dec_alu_op=ALU_CLR;  dec_writes_reg=1'b1; dec_reads_dst=1'b0; dec_valid=1'b1; end
+                                3'b010: begin dec_alu_op=ALU_NEG;  dec_writes_reg=1'b1; dec_valid=1'b1; end
+                                3'b011: begin dec_alu_op=ALU_NOT;  dec_writes_reg=1'b1; dec_valid=1'b1; end
+                                3'b100: begin
+                                    if (f_ss == 2'b00) begin
+                                        // NBCD.B Dn
+                                        dec_unit        = UNIT_BCD;
+                                        dec_bcd_op      = BCD_NEG;
+                                        dec_siz         = 2'b01;
+                                        dec_writes_reg  = 1'b1;
+                                        dec_valid       = 1'b1;
+                                    end else if (f_ss == 2'b01) begin
+                                        // SWAP Dn: 0100 1000 01 000 rrr
+                                        dec_unit           = UNIT_MOVE;
+                                        dec_src_reg        = {1'b0, f_reg};
+                                        dec_dst_reg        = {1'b0, f_reg};
+                                        dec_dest_reg       = {1'b0, f_reg};
+                                        dec_siz            = 2'b00;
+                                        dec_reads_src      = 1'b1;
+                                        dec_reads_dst      = 1'b1;
+                                        dec_writes_reg     = 1'b1;
+                                        dec_updates_ccr    = 1'b1;
+                                        dec_x_unchanged    = 1'b1;
+                                        dec_is_swap        = 1'b1;
+                                        dec_valid          = 1'b1;
+                                    end else begin
+                                        // EXT.W Dn: 0100 1000 10 000 rrr (f_ss=10)
+                                        dec_unit           = UNIT_MOVE;
+                                        dec_src_reg        = {1'b0, f_reg};
+                                        dec_dst_reg        = {1'b0, f_reg};
+                                        dec_dest_reg       = {1'b0, f_reg};
+                                        dec_siz            = 2'b10;   // word write
+                                        dec_reads_src      = 1'b1;
+                                        dec_reads_dst      = 1'b1;
+                                        dec_writes_reg     = 1'b1;
+                                        dec_updates_ccr    = 1'b1;
+                                        dec_x_unchanged    = 1'b1;
+                                        dec_sext           = 1'b1;
+                                        dec_sext_from_byte = 1'b1;
+                                        dec_valid          = 1'b1;
+                                    end
+                                end
+                                3'b101: begin dec_alu_op=ALU_TST;  dec_x_unchanged=1'b1; dec_valid=1'b1; end
+                                default: ;
+                            endcase
+                        end else begin
+                            // f_ss==11, f_mode==000: EXT.L (f_dir=0) / EXTB.L (f_dir=1)
+                            if (f_dn == 3'b100) begin
+                                dec_unit           = UNIT_MOVE;
+                                dec_src_reg        = {1'b0, f_reg};
+                                dec_dst_reg        = {1'b0, f_reg};
+                                dec_dest_reg       = {1'b0, f_reg};
+                                dec_siz            = 2'b00;   // long write
+                                dec_reads_src      = 1'b1;
+                                dec_reads_dst      = 1'b1;
+                                dec_writes_reg     = 1'b1;
+                                dec_updates_ccr    = 1'b1;
+                                dec_x_unchanged    = 1'b1;
+                                dec_sext           = 1'b1;
+                                dec_sext_from_byte = f_dir;   // 0=EXT.L(word→long), 1=EXTB.L(byte→long)
+                                dec_valid          = 1'b1;
+                            end
+                        end
+                    end else if (instr_word == 16'h4E71) begin
+                        // NOP: 0100 1110 0111 0001
+                        dec_valid = 1'b1;
+                    end
+                end
+
+                // ----------------------------------------------------------------
+                // Group 0101: ADDQ / SUBQ / Scc / DBcc
+                // ----------------------------------------------------------------
+                4'h5: begin
+                    if (f_ss == 2'b11) begin
+                        dec_reads_ccr = 1'b1;
+                        if (f_mode == 3'b001) begin
+                            // DBcc Dn, d16: 0101 cccc 1100 1 rrr | disp16
+                            dec_valid          = 1'b1;
+                            dec_is_dbcc        = 1'b1;
+                            dec_needs_ext      = 1'b1;
+                            dec_branch_cond    = f_cond;
+                            dec_branch_disp    = {{16{ext_data[15]}}, ext_data[15:0]};
+                            dec_dst_reg        = {1'b0, f_reg};
+                            dec_dest_reg       = {1'b0, f_reg};
+                            dec_reads_dst      = 1'b1;
+                            dec_unit           = UNIT_ALU;
+                            dec_alu_op         = ALU_SUB;
+                            dec_siz            = 2'b10;   // word counter
+                            dec_use_imm        = 1'b1;
+                            dec_imm            = 32'h1;
+                            dec_writes_reg     = 1'b1;
+                            dec_x_unchanged    = 1'b1;
+                        end else if (f_mode == 3'b000) begin
+                            // Scc Dn: byte ← 0xFF if condition true, 0x00 false
+                            dec_valid          = 1'b1;
+                            dec_unit           = UNIT_MOVE;
+                            dec_dest_reg       = {1'b0, f_reg};
+                            dec_siz            = 2'b01;
+                            dec_writes_reg     = 1'b1;
+                            dec_x_unchanged    = 1'b1;
+                            dec_use_imm        = 1'b1;
+                            dec_imm            = eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c) ? 32'hFF : 32'h00;
+                        end
+                    end else if (f_mode == 3'b000) begin
+                        // ADDQ / SUBQ #imm3, Dn
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = f_dir ? ALU_SUB : ALU_ADD;
                         dec_siz         = f_siz;
                         dec_dst_reg     = {1'b0, f_reg};
                         dec_dest_reg    = {1'b0, f_reg};
-                        dec_unit        = UNIT_ALU;
-                        dec_updates_ccr = 1'b1;
                         dec_reads_dst   = 1'b1;
-                        case (f_dn)
-                            3'b000: begin dec_alu_op=ALU_NEGX; dec_writes_reg=1'b1; dec_valid=1'b1; end
-                            3'b001: begin dec_alu_op=ALU_CLR;  dec_writes_reg=1'b1; dec_reads_dst=1'b0; dec_valid=1'b1; end
-                            3'b010: begin dec_alu_op=ALU_NEG;  dec_writes_reg=1'b1; dec_valid=1'b1; end
-                            3'b011: begin dec_alu_op=ALU_NOT;  dec_writes_reg=1'b1; dec_valid=1'b1; end
-                            3'b100: begin
-                                // NBCD: 0100 1000 00 mmm rrr — f_ss must be 00 (byte)
-                                if (f_ss == 2'b00) begin
-                                    dec_unit        = UNIT_BCD;
-                                    dec_bcd_op      = BCD_NEG;
-                                    dec_siz         = 2'b01;   // byte
-                                    dec_writes_reg  = 1'b1;
-                                    dec_valid       = 1'b1;
-                                end
-                            end
-                            3'b101: begin dec_alu_op=ALU_TST;  dec_x_unchanged=1'b1; dec_valid=1'b1; end
-                            default: ;
-                        endcase
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_use_imm     = 1'b1;
+                        dec_imm         = f_addq_imm;
+                    end
+                end
+
+                // ----------------------------------------------------------------
+                // Group 0110: BRA / Bcc (BSR f_cond=0001 not implemented)
+                // ----------------------------------------------------------------
+                4'h6: begin
+                    if (f_cond != 4'h1) begin
+                        dec_valid          = 1'b1;
+                        dec_is_branch      = 1'b1;
+                        dec_reads_ccr      = 1'b1;
+                        dec_branch_cond    = f_cond;
+                        if (f_disp8 == 8'h00) begin
+                            // .W: 16-bit displacement in first ext word (low 16)
+                            dec_needs_ext   = 1'b1;
+                            dec_branch_disp = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else if (f_disp8 == 8'hFF) begin
+                            // .L: 32-bit displacement across two ext words
+                            dec_needs_ext   = 1'b1;
+                            dec_branch_disp = ext_data;
+                        end else begin
+                            // .B: signed 8-bit displacement in opcode word
+                            dec_branch_disp = {{24{f_disp8[7]}}, f_disp8};
+                        end
+                    end
+                end
+
+                // ----------------------------------------------------------------
+                // Group 0111: MOVEQ #d8, Dn
+                // ----------------------------------------------------------------
+                4'h7: begin
+                    if (!f_dir) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_dest_reg    = {1'b0, f_dn};
+                        dec_siz         = 2'b00;   // longword
+                        dec_use_imm     = 1'b1;
+                        dec_imm         = {{24{f_disp8[7]}}, f_disp8};
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_x_unchanged = 1'b1;
                     end
                 end
 
@@ -594,18 +787,21 @@ module eu_seq (
     // Stall / hazard logic — checks both EX and WB for RAW conflicts.
     // 2 stall cycles cover EX→WB→regfile-commit latency.
     // -----------------------------------------------------------------------
-    logic        ex_valid, ex_writes_reg;
+    logic        ex_valid, ex_writes_reg, ex_updates_ccr;
     logic [3:0]  ex_dest_reg;
 
-    logic hazard_ex, hazard_wb, need_ext, stall;
-    assign hazard_ex = ex_valid && ex_writes_reg && (
-                           (dec_reads_src && ex_dest_reg == dec_src_reg) ||
-                           (dec_reads_dst && ex_dest_reg == dec_dst_reg));
-    assign hazard_wb = wb_valid && wb_writes_reg && (
-                           (dec_reads_src && wb_dest_reg == dec_src_reg) ||
-                           (dec_reads_dst && wb_dest_reg == dec_dst_reg));
-    assign need_ext  = dec_needs_ext && !ext_valid;
-    assign stall     = dec_valid && (hazard_ex || hazard_wb || need_ext);
+    logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
+    assign hazard_ex  = ex_valid && ex_writes_reg && (
+                            (dec_reads_src && ex_dest_reg == dec_src_reg) ||
+                            (dec_reads_dst && ex_dest_reg == dec_dst_reg));
+    assign hazard_wb  = wb_valid && wb_writes_reg && (
+                            (dec_reads_src && wb_dest_reg == dec_src_reg) ||
+                            (dec_reads_dst && wb_dest_reg == dec_dst_reg));
+    assign hazard_ccr = dec_reads_ccr && (
+                            (ex_valid && ex_updates_ccr) ||
+                            (wb_valid && wb_updates_ccr));
+    assign need_ext   = dec_needs_ext && !ext_valid;
+    assign stall      = dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext);
     assign seq_busy  = stall;
     assign instr_ack = dec_valid && !stall;
 
@@ -623,41 +819,64 @@ module eu_seq (
     logic [1:0]  ex_siz;
     logic [31:0] ex_imm;
     logic        ex_use_imm, ex_use_reg_cnt;
-    logic        ex_updates_ccr, ex_x_unchanged;
+    logic        ex_x_unchanged;
     logic [5:0]  ex_shf_imm_cnt;
+    logic        ex_is_swap, ex_sext, ex_sext_from_byte;
+    logic        ex_is_dbcc;
+    logic [3:0]  ex_dbcc_cond;
+    logic [31:0] ex_dbcc_disp;
+    logic [31:0] ex_decode_pc;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            ex_valid       <= 1'b0;
-            ex_unit        <= UNIT_NONE;
-            ex_writes_reg  <= 1'b0;
-            ex_updates_ccr <= 1'b0;
+            ex_valid          <= 1'b0;
+            ex_unit           <= UNIT_NONE;
+            ex_writes_reg     <= 1'b0;
+            ex_updates_ccr    <= 1'b0;
+            ex_is_swap        <= 1'b0;
+            ex_sext           <= 1'b0;
+            ex_sext_from_byte <= 1'b0;
+            ex_is_dbcc        <= 1'b0;
+            ex_dbcc_cond      <= 4'h0;
+            ex_dbcc_disp      <= 32'h0;
+            ex_decode_pc      <= 32'h0;
         end else if (stall) begin
-            // DECODE holds; insert bubble — EX passes current content to WB this cycle.
-            ex_valid       <= 1'b0;
-            ex_writes_reg  <= 1'b0;
-            ex_updates_ccr <= 1'b0;
+            // DECODE holds; insert bubble into EX.
+            ex_valid          <= 1'b0;
+            ex_writes_reg     <= 1'b0;
+            ex_updates_ccr    <= 1'b0;
+            ex_is_swap        <= 1'b0;
+            ex_sext           <= 1'b0;
+            ex_sext_from_byte <= 1'b0;
+            ex_is_dbcc        <= 1'b0;
         end else begin
-            ex_valid        <= dec_valid;
-            ex_unit         <= dec_unit;
-            ex_alu_op       <= dec_alu_op;
-            ex_shf_op       <= dec_shf_op;
-            ex_md_op        <= dec_md_op;
-            ex_bcd_op       <= dec_bcd_op;
-            ex_bit_op       <= dec_bit_op;
-            ex_bit_num      <= dec_bit_num;
-            ex_bit_from_reg <= dec_bit_from_reg;
-            ex_src_reg      <= dec_src_reg;
-            ex_dst_reg      <= dec_dst_reg;
-            ex_dest_reg     <= dec_dest_reg;
-            ex_siz          <= dec_siz;
-            ex_imm          <= dec_imm;
-            ex_use_imm      <= dec_use_imm;
-            ex_use_reg_cnt  <= dec_use_reg_cnt;
-            ex_writes_reg   <= dec_writes_reg;
-            ex_updates_ccr  <= dec_updates_ccr;
-            ex_x_unchanged  <= dec_x_unchanged;
-            ex_shf_imm_cnt  <= dec_shf_imm_cnt;
+            ex_valid          <= dec_valid;
+            ex_unit           <= dec_unit;
+            ex_alu_op         <= dec_alu_op;
+            ex_shf_op         <= dec_shf_op;
+            ex_md_op          <= dec_md_op;
+            ex_bcd_op         <= dec_bcd_op;
+            ex_bit_op         <= dec_bit_op;
+            ex_bit_num        <= dec_bit_num;
+            ex_bit_from_reg   <= dec_bit_from_reg;
+            ex_src_reg        <= dec_src_reg;
+            ex_dst_reg        <= dec_dst_reg;
+            ex_dest_reg       <= dec_dest_reg;
+            ex_siz            <= dec_siz;
+            ex_imm            <= dec_imm;
+            ex_use_imm        <= dec_use_imm;
+            ex_use_reg_cnt    <= dec_use_reg_cnt;
+            ex_writes_reg     <= dec_writes_reg;
+            ex_updates_ccr    <= dec_updates_ccr;
+            ex_x_unchanged    <= dec_x_unchanged;
+            ex_shf_imm_cnt    <= dec_shf_imm_cnt;
+            ex_is_swap        <= dec_is_swap;
+            ex_sext           <= dec_sext;
+            ex_sext_from_byte <= dec_sext_from_byte;
+            ex_is_dbcc        <= dec_is_dbcc;
+            ex_dbcc_cond      <= dec_branch_cond;
+            ex_dbcc_disp      <= dec_branch_disp;
+            ex_decode_pc      <= decode_pc;
         end
     end
 
@@ -671,6 +890,23 @@ module eu_seq (
 
     logic [31:0] ex_src_operand;
     assign ex_src_operand = ex_use_imm ? ex_imm : rd_a_data;
+
+    // UNIT_MOVE result: SWAP swaps halfwords; EXT sign-extends; otherwise imm/reg source.
+    // Must be pre-computed assigns to avoid Icarus constant-select warnings.
+    logic [31:0] move_result_w;
+    assign move_result_w =
+        ex_is_swap       ? {rd_a_data[15:0], rd_a_data[31:16]} :
+        ex_sext          ? (ex_sext_from_byte ? {{24{rd_a_data[7]}},  rd_a_data[7:0]}
+                                              : {{16{rd_a_data[15]}}, rd_a_data[15:0]}) :
+                           ex_src_operand;
+
+    logic move_result_n_b, move_result_n_w, move_result_n_l;
+    logic move_result_z_b, move_result_z_w;
+    assign move_result_n_b = move_result_w[7];
+    assign move_result_n_w = move_result_w[15];
+    assign move_result_n_l = move_result_w[31];
+    assign move_result_z_b = (move_result_w[7:0]  == 8'h00);
+    assign move_result_z_w = (move_result_w[15:0] == 16'h00);
 
     assign alu_src   = ex_src_operand;
     assign alu_dst   = rd_b_data;
@@ -751,12 +987,13 @@ module eu_seq (
                 ex_x      = flag_x;
             end
             UNIT_MOVE: begin
-                ex_result = rd_a_data;
-                // N flag depends on size; use pre-extracted per-bit signals
-                ex_move_n = (ex_siz == 2'b01) ? move_src_n_b :
-                            (ex_siz == 2'b10) ? move_src_n_w : move_src_n_l;
+                ex_result = move_result_w;
+                ex_move_n = (ex_siz == 2'b01) ? move_result_n_b :
+                            (ex_siz == 2'b10) ? move_result_n_w : move_result_n_l;
                 ex_n      = ex_move_n;
-                ex_z      = (rd_a_data == 32'h0);
+                ex_z      = (ex_siz == 2'b01) ? move_result_z_b :
+                            (ex_siz == 2'b10) ? move_result_z_w :
+                                                (move_result_w == 32'h0);
                 ex_v      = 1'b0;
                 ex_c      = 1'b0;
                 ex_x      = flag_x;
@@ -826,6 +1063,29 @@ module eu_seq (
     // Divide-by-zero trap (combinational from EX stage)
     // -----------------------------------------------------------------------
     assign div_trap = ex_valid && (ex_unit == UNIT_DIV) && md_div_by_zero;
+
+    // -----------------------------------------------------------------------
+    // BRA/Bcc branch — decided at decode time once CCR hazards are clear.
+    // -----------------------------------------------------------------------
+    logic dec_branch_taken;
+    assign dec_branch_taken = dec_valid && !stall && dec_is_branch &&
+                              eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c);
+
+    // -----------------------------------------------------------------------
+    // DBcc branch — decided at EX stage (needs ALU result to check counter).
+    // Branch taken when: condition is FALSE AND decremented counter != 0xFFFF.
+    // -----------------------------------------------------------------------
+    logic [15:0] ex_alu_result_w;
+    assign ex_alu_result_w = alu_result[15:0];
+
+    logic ex_dbcc_taken;
+    assign ex_dbcc_taken = ex_valid && ex_is_dbcc &&
+                           !eval_cc(ex_dbcc_cond, flag_n, flag_z, flag_v, flag_c) &&
+                           (ex_alu_result_w != 16'hFFFF);
+
+    assign branch_taken  = dec_branch_taken | ex_dbcc_taken;
+    assign branch_target = dec_branch_taken ? (decode_pc     + 32'd2 + dec_branch_disp)
+                                            : (ex_decode_pc  + 32'd2 + ex_dbcc_disp);
 
 endmodule
 

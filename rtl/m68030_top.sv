@@ -198,12 +198,20 @@ module m68030_top (
     assign exc_rdata_w  = eu_rdata;
 
     // ───────────────────────────────────────────────────────────────────────
-    // PC write mux — boot > exc; both are mutual exclusive in practice
+    // Branch signals from EU
+    // ───────────────────────────────────────────────────────────────────────
+    logic        eu_branch_taken;
+    logic [31:0] eu_branch_target;
+
+    // ───────────────────────────────────────────────────────────────────────
+    // PC write mux — boot > exc > branch; exc and boot are mutually exclusive
     // ───────────────────────────────────────────────────────────────────────
     logic        pc_wr_en_common;
     logic [31:0] pc_wr_data_common;
-    assign pc_wr_en_common   = boot_pulse | exc_new_pc_wr;
-    assign pc_wr_data_common = boot_pulse ? init_pc : exc_new_pc;
+    assign pc_wr_en_common   = boot_pulse | exc_new_pc_wr | eu_branch_taken;
+    assign pc_wr_data_common = boot_pulse    ? init_pc           :
+                               exc_new_pc_wr ? exc_new_pc        :
+                                               eu_branch_target;
 
     // ───────────────────────────────────────────────────────────────────────
     // SSP write mux — boot sets init_ssp; EXC updates after frame push
@@ -298,6 +306,9 @@ module m68030_top (
         .pc_wr_en      (pc_wr_en_common),
         .pc_wr_data    (pc_wr_data_common),
         .pc_out        (eu_pc_out),
+        .decode_pc     (ifu_decode_pc),
+        .branch_taken  (eu_branch_taken),
+        .branch_target (eu_branch_target),
         .vbr_wr_en     (1'b0),
         .vbr_wr_data   (32'h0),
         .vbr_out       (eu_vbr_out),

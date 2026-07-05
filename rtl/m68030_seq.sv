@@ -56,16 +56,32 @@ module m68030_seq (
     // -----------------------------------------------------------------------
     // Extension-word count (0, 1, or 2)
     // -----------------------------------------------------------------------
-    // Group 0000, f_dir=0, Dn-direct EA: all immediate ops need extension words
+    // Group 0000, f_dir=0, Dn-direct EA: immediate ops need extension words
     logic is_imm_g0;
     assign is_imm_g0 = (f_group == 4'h0) && (!f_dir) && (f_mode == 3'b000);
 
+    // Group 0101, f_ss=11, f_mode=001: DBcc Dn, d16 needs 1 extension word
+    logic is_dbcc;
+    assign is_dbcc = (f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b001);
+
+    // Group 0110: BRA.W/Bcc.W (disp8=0x00) needs 1; BRA.L/Bcc.L (disp8=0xFF) needs 2
+    logic [7:0] f_disp8_s;
+    assign f_disp8_s = instr_word[7:0];
+    logic is_branch_w, is_branch_l;
+    assign is_branch_w = (f_group == 4'h6) && (instr_word[11:8] != 4'h1) && (f_disp8_s == 8'h00);
+    assign is_branch_l = (f_group == 4'h6) && (instr_word[11:8] != 4'h1) && (f_disp8_s == 8'hFF);
+
     logic [1:0] ext_count;
-    assign ext_count = is_imm_g0
-                       ? (((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1)
-                       : 2'd0;
-    // is_imm_g0: f_dn=100 (bit ops) → 1; f_dn≠100, f_ss=10 (long) → 2; else → 1
-    // !is_imm_g0: → 0
+    always_comb begin
+        if (is_imm_g0)
+            ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
+        else if (is_branch_l)
+            ext_count = 2'd2;
+        else if (is_branch_w || is_dbcc)
+            ext_count = 2'd1;
+        else
+            ext_count = 2'd0;
+    end
 
     // -----------------------------------------------------------------------
     // IFU drain: advance queue when EU accepts the instruction
@@ -74,8 +90,9 @@ module m68030_seq (
 
     // -----------------------------------------------------------------------
     // EU ext_data format conversion
-    //   2-ext-word (long immediate): use full 32-bit IFU word unchanged
-    //   1-ext-word (byte/word imm or bit number): first ext word in low 16 bits
+    //   2-ext-word (long imm, BRA.L): full 32-bit value unchanged
+    //   1-ext-word (byte/word imm, bit#, BRA.W, DBcc d16): first ext word in [15:0]
+    // EU reads: byte/word imm → ext_data[15:0]; long imm/BRA.L → ext_data[31:0]
     // -----------------------------------------------------------------------
     assign eu_ext_data = (ext_count == 2'd2) ? ifu_ext_data
                                               : {16'h0, ifu_ext_data[31:16]};

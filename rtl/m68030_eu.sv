@@ -43,6 +43,11 @@ module m68030_eu (
     output logic        master_mode,  // SR[12]
     output logic [2:0]  ipl_mask,     // SR[10:8]
 
+    // ── Branch signals (to IFU via top) ──────────────────────────────────
+    input  logic [31:0] decode_pc,    // PC of instruction at decode (from IFU)
+    output logic        branch_taken, // combinational: taken branch this cycle
+    output logic [31:0] branch_target,// combinational: branch destination
+
     // ── Exception signals ─────────────────────────────────────────────────
     output logic        div_trap,     // divide-by-zero (m68030_exc handles)
 
@@ -182,7 +187,10 @@ module m68030_eu (
         .bit_z        (bit_z),
         .instr_ack    (instr_ack),
         .seq_busy     (eu_busy),
-        .div_trap     (div_trap)
+        .div_trap     (div_trap),
+        .decode_pc    (decode_pc),
+        .branch_taken (branch_taken),
+        .branch_target(branch_target)
     );
 
     // -----------------------------------------------------------------------
