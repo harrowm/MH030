@@ -170,7 +170,22 @@ module eu_seq (
     output logic        isp_wr_en,
     output logic [31:0] isp_wr_data,
     output logic        msp_wr_en,
-    output logic [31:0] msp_wr_data
+    output logic [31:0] msp_wr_data,
+
+    // ── Phase 54: MMU instruction interface ──────────────────────────────────
+    output logic        eu_pflush_req,   // asserted while PFLUSH pending MMU ack
+    output logic        eu_pflush_all,   // 1=flush all (PFLUSHA), 0=selective
+    output logic [2:0]  eu_pflush_fc,    // FC for selective flush
+    output logic [31:0] eu_pflush_va,    // VA for selective flush
+    input  logic        eu_pflush_ack,   // MMU one-cycle ack
+    output logic        eu_ptest_req,    // asserted while PTEST pending MMU ack
+    output logic [31:0] eu_ptest_va,     // VA to test
+    output logic [2:0]  eu_ptest_fc,     // FC for PTEST
+    input  logic        eu_ptest_ack,    // MMU one-cycle ack
+    input  logic [15:0] eu_ptest_mmusr,  // MMUSR result (valid when ptest_ack)
+    output logic [31:0] tc_out,          // TC register → MMU
+    output logic [31:0] tt0_out,         // TT0 register → MMU
+    output logic [31:0] tt1_out          // TT1 register → MMU
 );
 
     // -----------------------------------------------------------------------
@@ -300,6 +315,15 @@ module eu_seq (
     assign rd_a_bit_num = rd_a_data[4:0];
     assign ext_bit_num  = ext_data[4:0];
 
+    // Phase 54: MMU instruction second-word field pre-extractions from ext_data[15:0]
+    logic [2:0]  mmu_op_type;    assign mmu_op_type    = ext_data[15:13]; // 001=PFLUSH,100=PTEST,010=PMOVE
+    logic [2:0]  mmu_sub_mode;   assign mmu_sub_mode   = ext_data[11:9];  // flush mode / PMOVE preg
+    logic        mmu_dr;         assign mmu_dr         = ext_data[8];     // PMOVE direction
+    logic [1:0]  mmu_fc_mode;    assign mmu_fc_mode    = ext_data[4:3];   // FC selection (PFLUSH)
+    logic [2:0]  mmu_fc_val;     assign mmu_fc_val     = ext_data[2:0];   // FC value (PFLUSH imm)
+    logic [1:0]  mmu_pt_fc_mode; assign mmu_pt_fc_mode = ext_data[3:2];   // FC mode (PTEST)
+    logic [1:0]  mmu_pt_fc_val;  assign mmu_pt_fc_val  = ext_data[1:0];   // FC value (PTEST imm)
+
     // Phase 53: full extension word field extractions from ext_data[15:0] = ext0
     // (ext_data[15:0] is the first extension word; ext_data[31:16] is the second.)
     logic        fi_is_full;  assign fi_is_full = ext_data[8];       // 0=brief, 1=full
@@ -400,6 +424,16 @@ module eu_seq (
     logic        dec_memind_is_post;  // 1=post-indexed (IS=1: Xn to outer), 0=pre-indexed
     logic [31:0] dec_memind_od;       // outer displacement
 
+    // Phase 54: MMU instruction decode signals
+    logic        dec_is_pflush;
+    logic        dec_pflush_all;
+    logic [2:0]  dec_pflush_fc;
+    logic        dec_is_ptest;
+    logic [2:0]  dec_ptest_fc;
+    logic        dec_is_pmove;
+    logic [2:0]  dec_pmove_preg;
+    logic        dec_pmove_to_mem;   // 1=register→EA (write), 0=EA→register (read)
+
     // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
     logic [31:0] ctrl_reg_rd_val;
     always_comb begin
@@ -494,6 +528,14 @@ module eu_seq (
         dec_is_memind      = 1'b0;
         dec_memind_is_post = 1'b0;
         dec_memind_od      = 32'h0;
+        dec_is_pflush      = 1'b0;
+        dec_pflush_all     = 1'b0;
+        dec_pflush_fc      = 3'b0;
+        dec_is_ptest       = 1'b0;
+        dec_ptest_fc       = 3'b0;
+        dec_is_pmove       = 1'b0;
+        dec_pmove_preg     = 3'b0;
+        dec_pmove_to_mem   = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -1704,6 +1746,62 @@ module eu_seq (
                         dec_is_fpu    = 1'b1;
                         dec_unit      = UNIT_NONE;
                         dec_needs_ext = 1'b1;   // FPU opcode always has extension word (CIR)
+                    end else if (f_dn == 3'b000) begin
+                        // MMU cpid=0: PFLUSH / PTEST / PMOVE (Phase 54)
+                        // Second word ext_data[15:13] selects operation.
+                        dec_needs_ext = 1'b1;
+                        case (mmu_op_type)
+                            3'b001: begin
+                                // PFLUSH / PFLUSHA
+                                dec_valid      = 1'b1;
+                                dec_unit       = UNIT_NONE;
+                                dec_is_pflush  = 1'b1;
+                                dec_pflush_all = (mmu_sub_mode == 3'b010);
+                                dec_pflush_fc  = (mmu_fc_mode == 2'b10)
+                                                 ? mmu_fc_val : sfc_in;
+                                if (!dec_pflush_all && f_mode == 3'b010) begin
+                                    dec_src_reg   = {1'b1, f_reg};
+                                    dec_reads_src = 1'b1;
+                                end
+                            end
+                            3'b100: begin
+                                // PTEST: VA from An-indirect EA
+                                if (f_mode == 3'b010) begin
+                                    dec_valid      = 1'b1;
+                                    dec_unit       = UNIT_NONE;
+                                    dec_is_ptest   = 1'b1;
+                                    dec_ptest_fc   = (mmu_pt_fc_mode == 2'b10)
+                                                     ? {1'b0, mmu_pt_fc_val} : sfc_in;
+                                    dec_src_reg    = {1'b1, f_reg};
+                                    dec_reads_src  = 1'b1;
+                                end
+                            end
+                            3'b010: begin
+                                // PMOVE (32-bit registers: TC/TT0/TT1/MMUSR)
+                                // Skip 64-bit CRP/SRP (mmu_sub_mode=100/110).
+                                if (f_mode == 3'b010 &&
+                                    mmu_sub_mode != 3'b100 && mmu_sub_mode != 3'b110) begin
+                                    dec_valid         = 1'b1;
+                                    dec_unit          = UNIT_NONE;
+                                    dec_is_pmove      = 1'b1;
+                                    dec_pmove_preg    = mmu_sub_mode;
+                                    dec_pmove_to_mem  = mmu_dr;
+                                    dec_siz           = 2'b00;    // longword
+                                    if (mmu_dr) begin
+                                        // dr=1: register→EA (write to memory)
+                                        dec_dst_reg   = {1'b1, f_reg};
+                                        dec_reads_dst = 1'b1;
+                                        dec_is_mem_wr = 1'b1;
+                                    end else begin
+                                        // dr=0: EA→register (read from memory)
+                                        dec_src_reg   = {1'b1, f_reg};
+                                        dec_reads_src = 1'b1;
+                                        dec_is_mem_rd = 1'b1;
+                                    end
+                                end
+                            end
+                            default: ;
+                        endcase
                     end
                 end
 
@@ -1775,6 +1873,15 @@ module eu_seq (
     logic        ex_is_memind;
     logic        ex_memind_is_post;
     logic [31:0] ex_memind_od;
+    // Phase 54: MMU instruction EX stage signals
+    logic        ex_is_pflush;
+    logic        ex_pflush_all;
+    logic [2:0]  ex_pflush_fc;
+    logic        ex_is_ptest;
+    logic [2:0]  ex_ptest_fc;
+    logic        ex_is_pmove;
+    logic [2:0]  ex_pmove_preg;
+    logic        ex_pmove_to_mem;
     logic        ex_movep_load;    // 1=load, 0=store
     logic        ex_movep_long;    // 1=longword, 0=word
     logic        ex_is_move16;     // MOVE16 in EX stage
@@ -1914,6 +2021,20 @@ module eu_seq (
     logic        fpu_run_r;        // eu_coproc_req active, waiting for ack
     logic [2:0]  fpu_prim_r;       // captured ppp = {f_dir, f_ss} for address generation
 
+    // Phase 54: MMU instruction FSM state — declared early for ex_mem_stall
+    logic        pflush_start_r, pflush_req_r;
+    logic        pflush_all_r;
+    logic [2:0]  pflush_fc_r;
+    logic [31:0] pflush_va_r;
+    logic        ptest_start_r, ptest_run_r;
+    logic [31:0] ptest_va_r;
+    logic [2:0]  ptest_fc_r;
+    // MMU control registers (internal to EU)
+    logic [31:0] tc_r   = 32'h0;
+    logic [31:0] tt0_r  = 32'h0;
+    logic [31:0] tt1_r  = 32'h0;
+    logic [15:0] mmusr_r = 16'h0;
+
     // Phase 53: memory-indirect EA FSM state — declared early for ex_mem_stall
     logic        memind_start_r;       // 1 cycle: An/Xn available in rd_a/rd_b
     logic        memind_inner_r;       // inner longword read in progress
@@ -1991,6 +2112,8 @@ module eu_seq (
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
+                          pflush_start_r || pflush_req_r ||
+                          ptest_start_r  || ptest_run_r  ||
                           cmp2_run_r || cmp2_first_ack ||
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                            !memind_start_r && !memind_inner_r && !memind_outer_r &&
@@ -2098,6 +2221,14 @@ module eu_seq (
             ex_is_memind      <= 1'b0;
             ex_memind_is_post <= 1'b0;
             ex_memind_od      <= 32'h0;
+            ex_is_pflush      <= 1'b0;
+            ex_pflush_all     <= 1'b0;
+            ex_pflush_fc      <= 3'b0;
+            ex_is_ptest       <= 1'b0;
+            ex_ptest_fc       <= 3'b0;
+            ex_is_pmove       <= 1'b0;
+            ex_pmove_preg     <= 3'b0;
+            ex_pmove_to_mem   <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -2146,6 +2277,14 @@ module eu_seq (
             ex_movec_rc       <= 12'h0;
             ex_is_moves       <= 1'b0;
             ex_moves_load     <= 1'b0;
+            ex_is_pflush      <= 1'b0;
+            ex_pflush_all     <= 1'b0;
+            ex_pflush_fc      <= 3'b0;
+            ex_is_ptest       <= 1'b0;
+            ex_ptest_fc       <= 3'b0;
+            ex_is_pmove       <= 1'b0;
+            ex_pmove_preg     <= 3'b0;
+            ex_pmove_to_mem   <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -2219,6 +2358,14 @@ module eu_seq (
             ex_is_memind      <= dec_is_memind;
             ex_memind_is_post <= dec_memind_is_post;
             ex_memind_od      <= dec_memind_od;
+            ex_is_pflush      <= dec_is_pflush;
+            ex_pflush_all     <= dec_pflush_all;
+            ex_pflush_fc      <= dec_pflush_fc;
+            ex_is_ptest       <= dec_is_ptest;
+            ex_ptest_fc       <= dec_ptest_fc;
+            ex_is_pmove       <= dec_is_pmove;
+            ex_pmove_preg     <= dec_pmove_preg;
+            ex_pmove_to_mem   <= dec_pmove_to_mem;
         end
     end
 
@@ -2591,6 +2738,74 @@ module eu_seq (
         end else if (memind_outer_r && mem_ack) begin
             memind_outer_r <= 1'b0;
         end
+    end
+
+    // -----------------------------------------------------------------------
+    // Phase 54: PFLUSH / PTEST FSM
+    // PFLUSH: start_r captures VA; req_r asserts eu_pflush_req until ack.
+    // PTEST:  start_r captures VA; run_r asserts eu_ptest_req until ack.
+    // PMOVE:  uses normal mem path (dec_is_mem_rd/wr); capture on mem_ack.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            pflush_start_r <= 1'b0; pflush_req_r <= 1'b0;
+            pflush_all_r   <= 1'b0; pflush_fc_r  <= 3'b0;
+            pflush_va_r    <= 32'h0;
+            ptest_start_r  <= 1'b0; ptest_run_r  <= 1'b0;
+            ptest_va_r     <= 32'h0; ptest_fc_r  <= 3'b0;
+            tc_r           <= 32'h0;
+            tt0_r          <= 32'h0;
+            tt1_r          <= 32'h0;
+            mmusr_r        <= 16'h0;
+        end else begin
+            // ── PFLUSH FSM ───────────────────────────────────────────────────
+            if (!pflush_start_r && !pflush_req_r && instr_ack && dec_is_pflush) begin
+                pflush_start_r <= 1'b1;
+                pflush_all_r   <= dec_pflush_all;
+                pflush_fc_r    <= dec_pflush_fc;
+            end else if (pflush_start_r) begin
+                pflush_start_r <= 1'b0;
+                pflush_req_r   <= 1'b1;
+                pflush_va_r    <= ex_ea;   // An value (0-offset An-indirect)
+            end else if (pflush_req_r && eu_pflush_ack) begin
+                pflush_req_r   <= 1'b0;
+            end
+
+            // ── PTEST FSM ────────────────────────────────────────────────────
+            if (!ptest_start_r && !ptest_run_r && instr_ack && dec_is_ptest) begin
+                ptest_start_r <= 1'b1;
+                ptest_fc_r    <= dec_ptest_fc;
+            end else if (ptest_start_r) begin
+                ptest_start_r <= 1'b0;
+                ptest_run_r   <= 1'b1;
+                ptest_va_r    <= ex_ea;
+            end else if (ptest_run_r && eu_ptest_ack) begin
+                ptest_run_r   <= 1'b0;
+                mmusr_r       <= eu_ptest_mmusr;
+            end
+
+            // ── PMOVE register capture (EA→MMU register direction) ───────────
+            if (ex_valid && ex_is_pmove && !ex_pmove_to_mem && mem_ack) begin
+                case (ex_pmove_preg)
+                    3'b010: tc_r  <= mem_rdata;
+                    3'b001: tt0_r <= mem_rdata;
+                    3'b011: tt1_r <= mem_rdata;
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    // PMOVE write-data mux (register→EA direction)
+    logic [31:0] pmove_wr_data_w;
+    always_comb begin
+        case (ex_pmove_preg)
+            3'b010:  pmove_wr_data_w = tc_r;
+            3'b001:  pmove_wr_data_w = tt0_r;
+            3'b011:  pmove_wr_data_w = tt1_r;
+            3'b000:  pmove_wr_data_w = {16'h0, mmusr_r};
+            default: pmove_wr_data_w = 32'h0;
+        endcase
     end
 
     // CHK comparison: rd_b = value checked (sign-extended by regfile to ex_siz);
@@ -3002,6 +3217,7 @@ module eu_seq (
     assign mem_wdata = tas_run_r               ? {24'h0, tas_wdata_r}
                      : movep_run_r             ? {24'h0, movep_wr_byte_w}
                      : move16_run_r            ? move16_wdata_w
+                     : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc : rd_a_data;
     // Phase 47: RMW — assert during TAS (An) read phase (not during write or cooldown).
     assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
@@ -3037,6 +3253,20 @@ module eu_seq (
     assign isp_wr_data = wb_result;
     assign msp_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h803);
     assign msp_wr_data = wb_result;
+
+    // -----------------------------------------------------------------------
+    // Phase 54: MMU instruction output assignments
+    // -----------------------------------------------------------------------
+    assign eu_pflush_req = pflush_req_r;
+    assign eu_pflush_all = pflush_all_r;
+    assign eu_pflush_fc  = pflush_fc_r;
+    assign eu_pflush_va  = pflush_va_r;
+    assign eu_ptest_req  = ptest_run_r;
+    assign eu_ptest_va   = ptest_va_r;
+    assign eu_ptest_fc   = ptest_fc_r;
+    assign tc_out        = tc_r;
+    assign tt0_out       = tt0_r;
+    assign tt1_out       = tt1_r;
 
 endmodule
 

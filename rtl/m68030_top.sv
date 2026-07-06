@@ -256,6 +256,15 @@ module m68030_top #(
     logic [15:0] mmu_mmusr;
     logic        mmu_active;
 
+    // EU ↔ MMU Phase 54 wires
+    logic        eu_pflush_req_w, eu_pflush_all_w;
+    logic [2:0]  eu_pflush_fc_w;
+    logic [31:0] eu_pflush_va_w;
+    logic        eu_ptest_req_w;
+    logic [31:0] eu_ptest_va_w;
+    logic [2:0]  eu_ptest_fc_w;
+    logic [31:0] eu_tc_w, eu_tt0_w, eu_tt1_w;
+
     // BIU ↔ MMU translation port wires
     logic [31:0] biu_mmu_va_w;
     logic [2:0]  biu_mmu_fc_w;
@@ -349,6 +358,20 @@ module m68030_top #(
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
+        // Phase 54: MMU instruction interface
+        .eu_pflush_req   (eu_pflush_req_w),
+        .eu_pflush_all   (eu_pflush_all_w),
+        .eu_pflush_fc    (eu_pflush_fc_w),
+        .eu_pflush_va    (eu_pflush_va_w),
+        .eu_pflush_ack   (mmu_pflush_ack_w),
+        .eu_ptest_req    (eu_ptest_req_w),
+        .eu_ptest_va     (eu_ptest_va_w),
+        .eu_ptest_fc     (eu_ptest_fc_w),
+        .eu_ptest_ack    (mmu_ptest_ack),
+        .eu_ptest_mmusr  (mmu_mmusr),
+        .tc_out          (eu_tc_w),
+        .tt0_out         (eu_tt0_w),
+        .tt1_out         (eu_tt1_w),
         .an_wr_en      (eu_an_wr_en),
         .an_wr_sel     (eu_an_wr_sel),
         .an_wr_data    (eu_an_wr_data),
@@ -430,7 +453,7 @@ module m68030_top #(
     m68030_mmu u_mmu (
         .clk_4x         (clk_4x),
         .rst_n          (rst_n),
-        .tc             (TC_RESET),         // EU MOVEC not implemented yet
+        .tc             (eu_tc_w),           // Phase 54: TC register from EU
         // EU translation (stub: no EU mem requests yet — Phase 30)
         .va_in          (32'h0),
         .fc_in          (3'b0),
@@ -440,16 +463,16 @@ module m68030_top #(
         .ack_out        (mmu_ack),
         .fault_out      (mmu_fault_mmu),
         .ci_out         (mmu_ci_mmu),
-        // PFLUSH (stub)
-        .pflush_req     (1'b0),
-        .pflush_all     (1'b0),
-        .pflush_fc      (3'b0),
-        .pflush_va      (32'h0),
+        // Phase 54: EU PFLUSH
+        .pflush_req     (eu_pflush_req_w),
+        .pflush_all     (eu_pflush_all_w),
+        .pflush_fc      (eu_pflush_fc_w),
+        .pflush_va      (eu_pflush_va_w),
         .pflush_ack     (mmu_pflush_ack_w),
-        // PTEST (stub)
-        .ptest_req      (1'b0),
-        .ptest_va       (32'h0),
-        .ptest_fc       (3'b0),
+        // Phase 54: EU PTEST
+        .ptest_req      (eu_ptest_req_w),
+        .ptest_va       (eu_ptest_va_w),
+        .ptest_fc       (eu_ptest_fc_w),
         .mmusr_out      (mmu_mmusr),
         .ptest_ack      (mmu_ptest_ack),
         // BIU translation port
