@@ -300,6 +300,19 @@ module eu_seq (
     assign rd_a_bit_num = rd_a_data[4:0];
     assign ext_bit_num  = ext_data[4:0];
 
+    // Phase 53: full extension word field extractions from ext_data[15:0] = ext0
+    // (ext_data[15:0] is the first extension word; ext_data[31:16] is the second.)
+    logic        fi_is_full;  assign fi_is_full = ext_data[8];       // 0=brief, 1=full
+    logic        fi_bs;       assign fi_bs      = ext_data[7];       // base suppress
+    logic        fi_is_s;     assign fi_is_s    = ext_data[6];       // index suppress
+    logic [1:0]  fi_bdsz;     assign fi_bdsz    = ext_data[5:4];     // bd size: 01=null,10=word,11=long
+    logic [2:0]  fi_iis;      assign fi_iis     = ext_data[2:0];     // I/IS: 000=none, 001-011=indirect
+    // base displacement: word in ext_data[31:16] when fi_bdsz==10; else 0
+    logic [31:0] fi_bd;       assign fi_bd      = (fi_bdsz == 2'b10) ? {{16{ext_data[31]}}, ext_data[31:16]} : 32'h0;
+    // outer displacement: word in ext_data[31:16] only when fi_bdsz==01 (null bd) and fi_iis==010
+    logic [31:0] fi_od;       assign fi_od      = (fi_iis == 3'b010 && fi_bdsz == 2'b01)
+                                                   ? {{16{ext_data[31]}}, ext_data[31:16]} : 32'h0;
+
     // -----------------------------------------------------------------------
     // DECODE stage — purely combinational
     // All instr_word bit-selects replaced with pre-extracted signals.
@@ -382,6 +395,10 @@ module eu_seq (
     logic [1:0]  dec_move16_form;   // 00=(An)+/(Am)+, 01=(An)+/abs, 10=abs/(An)+, 11=(An)/(An)
     // Phase 52: FPU coprocessor dispatch stub
     logic        dec_is_fpu;        // Group F FPU instruction (cpid=1)
+    // Phase 53: memory-indirect EA ([bd,An],Xn,od)
+    logic        dec_is_memind;       // instruction uses memory-indirect EA (full ext, fi_iis != 0)
+    logic        dec_memind_is_post;  // 1=post-indexed (IS=1: Xn to outer), 0=pre-indexed
+    logic [31:0] dec_memind_od;       // outer displacement
 
     // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
     logic [31:0] ctrl_reg_rd_val;
@@ -474,6 +491,9 @@ module eu_seq (
         dec_is_move16     = 1'b0;
         dec_move16_form   = 2'b0;
         dec_is_fpu        = 1'b0;
+        dec_is_memind      = 1'b0;
+        dec_memind_is_post = 1'b0;
+        dec_memind_od      = 32'h0;
 
         if (instr_valid) begin
             case (f_group)
@@ -701,20 +721,42 @@ module eu_seq (
                                 default: ;
                             endcase
                         end else if (f_mode == 3'b110) begin
-                            // MOVE.B/W/L (d8,An,Xn), Dn — brief indexed source
-                            // ext[15]=DA, [14:12]=Xn_reg, [11]=WL, [10:9]=scale, [7:0]=d8
-                            dec_valid     = 1'b1;
-                            dec_is_mem_rd = 1'b1;
-                            dec_unit      = UNIT_MOVE;
+                            dec_needs_ext = 1'b1;
                             dec_src_reg   = {1'b1, f_reg};                    // An (base) → rd_a
                             dec_dst_reg   = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
                             dec_reads_src = 1'b1;
                             dec_reads_dst = 1'b1;
-                            dec_is_idx    = 1'b1;
                             dec_xn_wl     = ext_data[11];
                             dec_xn_scale  = ext_data[10:9];
-                            dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
-                            dec_needs_ext = 1'b1;
+                            if (!fi_is_full) begin
+                                // BRIEF (d8,An,Xn): single extension word
+                                dec_valid     = 1'b1;
+                                dec_is_mem_rd = 1'b1;
+                                dec_unit      = UNIT_MOVE;
+                                dec_is_idx    = 1'b1;
+                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            end else if (fi_iis == 3'b000) begin
+                                // FULL, no indirection: (bd,An,Xn*SCALE) — same as brief but with bd
+                                dec_valid     = 1'b1;
+                                dec_is_mem_rd = 1'b1;
+                                dec_unit      = UNIT_MOVE;
+                                dec_is_idx    = !fi_is_s;
+                                dec_reads_dst = !fi_is_s;
+                                dec_ea_offset = fi_bd;
+                            end else begin
+                                // FULL, memory-indirect: ([bd,An],Xn,od) — Phase 53
+                                // FSM owns all bus cycles and WB (memind_wr_en); suppress
+                                // normal mem_rd path and WB to avoid spurious post-FSM read.
+                                dec_valid          = 1'b1;
+                                dec_is_mem_rd      = 1'b0;
+                                dec_writes_reg     = 1'b0;
+                                dec_unit           = UNIT_MOVE;
+                                dec_is_memind      = 1'b1;
+                                dec_memind_is_post = fi_is_s;
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s; // Xn in inner for pre-indexed
+                                dec_ea_offset      = fi_bd;
+                            end
                         end
 
                     end else if (f_move_dst_mode == 3'b001) begin
@@ -789,19 +831,42 @@ module eu_seq (
                                 default: ;
                             endcase
                         end else if (f_mode == 3'b110) begin
-                            // MOVEA (d8,An,Xn), An — brief indexed source
-                            dec_valid      = 1'b1;
-                            dec_is_mem_rd  = 1'b1;
-                            dec_unit       = UNIT_MOVE;
-                            dec_src_reg    = {1'b1, f_reg};                    // An (base) → rd_a
-                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            // MOVEA (d8/bd,An,Xn[,od]), An — brief or full extension word
+                            dec_needs_ext  = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};
+                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};
                             dec_reads_src  = 1'b1;
                             dec_reads_dst  = 1'b1;
-                            dec_is_idx     = 1'b1;
                             dec_xn_wl      = ext_data[11];
                             dec_xn_scale   = ext_data[10:9];
-                            dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
-                            dec_needs_ext  = 1'b1;
+                            if (!fi_is_full) begin
+                                // BRIEF (d8,An,Xn)
+                                dec_valid      = 1'b1;
+                                dec_is_mem_rd  = 1'b1;
+                                dec_unit       = UNIT_MOVE;
+                                dec_is_idx     = 1'b1;
+                                dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                            end else if (fi_iis == 3'b000) begin
+                                // FULL no indirection: (bd,An,Xn*SCALE)
+                                dec_valid      = 1'b1;
+                                dec_is_mem_rd  = 1'b1;
+                                dec_unit       = UNIT_MOVE;
+                                dec_is_idx     = !fi_is_s;
+                                dec_reads_dst  = !fi_is_s;
+                                dec_ea_offset  = fi_bd;
+                            end else begin
+                                // FULL memory-indirect: ([bd,An],Xn,od)
+                                // FSM owns bus cycles and WB; suppress normal mem/WB paths.
+                                dec_valid          = 1'b1;
+                                dec_is_mem_rd      = 1'b0;
+                                dec_writes_reg     = 1'b0;
+                                dec_unit           = UNIT_MOVE;
+                                dec_is_memind      = 1'b1;
+                                dec_memind_is_post = fi_is_s;
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s;
+                                dec_ea_offset      = fi_bd;
+                            end
                         end
 
                     end else if (f_move_dst_mode[2:1] == 2'b01 ||
@@ -1706,6 +1771,10 @@ module eu_seq (
     logic        ex_is_cmp2chk2;   // CMP2 or CHK2 in EX stage
     logic        ex_is_movep;      // MOVEP in EX stage
     logic        ex_is_fpu;        // FPU instruction in EX stage (Phase 52)
+    // Phase 53: memory-indirect EA state in EX
+    logic        ex_is_memind;
+    logic        ex_memind_is_post;
+    logic [31:0] ex_memind_od;
     logic        ex_movep_load;    // 1=load, 0=store
     logic        ex_movep_long;    // 1=longword, 0=word
     logic        ex_is_move16;     // MOVE16 in EX stage
@@ -1844,6 +1913,18 @@ module eu_seq (
     logic        fpu_start_r;      // one-cycle setup after instr_ack
     logic        fpu_run_r;        // eu_coproc_req active, waiting for ack
     logic [2:0]  fpu_prim_r;       // captured ppp = {f_dir, f_ss} for address generation
+
+    // Phase 53: memory-indirect EA FSM state — declared early for ex_mem_stall
+    logic        memind_start_r;       // 1 cycle: An/Xn available in rd_a/rd_b
+    logic        memind_inner_r;       // inner longword read in progress
+    logic        memind_outer_r;       // outer instruction-sized read in progress
+    logic [31:0] memind_inner_addr_r;  // inner bus address
+    logic [31:0] memind_ptr_r;         // pointer value from inner read
+    logic [31:0] memind_od_r;          // outer displacement
+    logic [31:0] memind_post_xn_r;     // scaled Xn for post-indexed outer EA
+    logic        memind_is_rd_r;       // 1=outer is a read (always true for Phase 53)
+    logic [1:0]  memind_siz_r;         // transfer size for outer read
+    logic [3:0]  memind_dest_r;        // destination register for outer read WB
     always_comb begin
         case (move16_beat_r)
             2'd0: move16_wdata_w = move16_data_r[0];
@@ -1909,8 +1990,10 @@ module eu_seq (
                           movep_start_r || movep_run_r ||
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
+                          memind_start_r || memind_inner_r || memind_outer_r ||
                           cmp2_run_r || cmp2_first_ack ||
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
+                           !memind_start_r && !memind_inner_r && !memind_outer_r &&
                            (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
                           rtr_stall;
 
@@ -2012,6 +2095,9 @@ module eu_seq (
             ex_is_move16      <= 1'b0;
             ex_move16_form    <= 2'b0;
             ex_is_fpu         <= 1'b0;
+            ex_is_memind      <= 1'b0;
+            ex_memind_is_post <= 1'b0;
+            ex_memind_od      <= 32'h0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -2053,6 +2139,9 @@ module eu_seq (
             ex_is_move16      <= 1'b0;
             ex_move16_form    <= 2'b0;
             ex_is_fpu         <= 1'b0;
+            ex_is_memind      <= 1'b0;
+            ex_memind_is_post <= 1'b0;
+            ex_memind_od      <= 32'h0;
             ex_is_movec_wr    <= 1'b0;
             ex_movec_rc       <= 12'h0;
             ex_is_moves       <= 1'b0;
@@ -2127,6 +2216,9 @@ module eu_seq (
             ex_is_move16      <= dec_is_move16;
             ex_move16_form    <= dec_move16_form;
             ex_is_fpu         <= dec_is_fpu;
+            ex_is_memind      <= dec_is_memind;
+            ex_memind_is_post <= dec_memind_is_post;
+            ex_memind_od      <= dec_memind_od;
         end
     end
 
@@ -2140,7 +2232,8 @@ module eu_seq (
     assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea) ? 2'b00 : ex_siz;
     assign rd_b_sel = ex_dst_reg;
     // Phase 41: for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
-    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2) ? 2'b00 : ex_siz;
+    // Phase 53: memind post-indexed also needs full longword Xn in rd_b (for outer EA scaling)
+    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind) ? 2'b00 : ex_siz;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
     logic [31:0] ex_an_base;
@@ -2151,6 +2244,13 @@ module eu_seq (
     logic [31:0] ex_xn_scaled;
     assign ex_xn_val    = ex_xn_wl ? rd_b_data : {{16{rd_b_data[15]}}, rd_b_data[15:0]};
     assign ex_xn_scaled = ex_is_idx ? (ex_xn_val << ex_xn_scale) : 32'h0;
+
+    // Phase 53: post-indexed memind Xn*SCALE (valid during memind_start_r when EX holds)
+    logic [31:0] memind_xn_sc_w;
+    assign memind_xn_sc_w = ex_xn_val << ex_xn_scale;  // always computed; selected by FSM
+    // Outer EA: pointer + post-indexed Xn (pre-indexed already in pointer) + od
+    logic [31:0] memind_outer_addr_w;
+    assign memind_outer_addr_w = memind_ptr_r + memind_post_xn_r + memind_od_r;
 
     logic [31:0] ex_ea;       // effective address for bus cycle or LEA result
     // Phase 42: ex_xn_scaled always added — zero when !ex_is_idx; handles (d8,PC,Xn)
@@ -2451,6 +2551,48 @@ module eu_seq (
         end
     end
 
+    // -----------------------------------------------------------------------
+    // Phase 53: memory-indirect EA FSM
+    // Sequence: start_r (1 cycle, An/Xn in rd_a/rd_b) → inner_r (longword
+    // read at inner_addr) → outer_r (instruction-sized read at outer addr).
+    // Outer address = ptr + post_xn + od.
+    // Direct WB fires on outer_r && mem_ack (bypasses WB latch like MOVEM).
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            memind_start_r     <= 1'b0;
+            memind_inner_r     <= 1'b0;
+            memind_outer_r     <= 1'b0;
+            memind_inner_addr_r <= 32'h0;
+            memind_ptr_r       <= 32'h0;
+            memind_od_r        <= 32'h0;
+            memind_post_xn_r   <= 32'h0;
+            memind_is_rd_r     <= 1'b1;
+            memind_siz_r       <= 2'b00;
+            memind_dest_r      <= 4'h0;
+        end else if (!memind_start_r && !memind_inner_r && !memind_outer_r
+                     && instr_ack && dec_is_memind) begin
+            memind_start_r <= 1'b1;
+            memind_is_rd_r <= 1'b1;   // Phase 53: memind only supports load ops
+            memind_siz_r   <= dec_siz;
+            memind_dest_r  <= dec_dest_reg;
+            memind_od_r    <= dec_memind_od;
+        end else if (memind_start_r) begin
+            // EX holds: rd_a=An (ex_ea = inner addr), rd_b=Xn (for post-indexed outer)
+            memind_start_r      <= 1'b0;
+            memind_inner_r      <= 1'b1;
+            memind_inner_addr_r <= ex_ea;
+            // Capture Xn*SCALE for post-indexed outer EA (0 if pre-indexed)
+            memind_post_xn_r    <= (ex_is_memind && ex_memind_is_post) ? memind_xn_sc_w : 32'h0;
+        end else if (memind_inner_r && mem_ack) begin
+            memind_inner_r <= 1'b0;
+            memind_outer_r <= 1'b1;
+            memind_ptr_r   <= mem_rdata;   // 32-bit pointer from inner read
+        end else if (memind_outer_r && mem_ack) begin
+            memind_outer_r <= 1'b0;
+        end
+    end
+
     // CHK comparison: rd_b = value checked (sign-extended by regfile to ex_siz);
     // upper bound: rd_a_data (register mode) or ex_imm (immediate mode).
     logic [31:0] chk_val_w, chk_ub_w;
@@ -2678,16 +2820,23 @@ module eu_seq (
                                         : {{16{mem_rdata[15]}}, mem_rdata[15:0]};
 
     // Phase 49: MOVEP load writes on last byte ack (assembles bytes into Dn).
+    // Phase 53: memind outer-read writes directly on mem_ack (bypasses WB latch).
+    logic memind_wr_en;
+    assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r;
+
     // Word MOVEP writes only [15:0] (siz=10); long writes full 32 bits (siz=00).
-    assign wr_en   = movem_wr_en || movep_wr_en || (wb_valid && wb_writes_reg);
+    assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || (wb_valid && wb_writes_reg);
     assign wr_sel  = movem_wr_en  ? movem_reg_sel
                    : movep_wr_en  ? movep_wr_sel
+                   : memind_wr_en ? memind_dest_r
                    :                wb_dest_reg;
     assign wr_siz  = movem_wr_en  ? 2'b00
                    : movep_wr_en  ? (movep_long_r ? 2'b00 : 2'b10)
+                   : memind_wr_en ? memind_siz_r
                    :                wb_siz;
     assign wr_data = movem_wr_en  ? movem_wr_data
                    : movep_wr_en  ? movep_wr_data
+                   : memind_wr_en ? mem_rdata
                    :                wb_result_final;
 
     // An update port: MOVEM fires at completion; RTR fires from EX; WB handles normal.
@@ -2719,13 +2868,28 @@ module eu_seq (
     logic [4:0] final_ccr;
     assign final_ccr = wb_is_move ? {wb_ccr[4], wb_move_n, wb_ccr[2:0]} : wb_ccr;
 
+    // Phase 53: memind outer-read CCR update (MOVE sets N/Z, clears V/C)
+    logic memind_ccr_wr_en;
+    logic [4:0] memind_ccr_w;
+    assign memind_ccr_wr_en = memind_wr_en;   // fires same cycle as the WB
+    always_comb begin
+        case (memind_siz_r)
+            2'b01: memind_ccr_w = {flag_x, mem_rdata[7],  (mem_rdata[7:0]  == 8'h0),  1'b0, 1'b0};
+            2'b10: memind_ccr_w = {flag_x, mem_rdata[15], (mem_rdata[15:0] == 16'h0), 1'b0, 1'b0};
+            default: memind_ccr_w = {flag_x, mem_rdata[31], (mem_rdata == 32'h0), 1'b0, 1'b0};
+        endcase
+    end
+
     // SR write: RTR fires CCR update from EX (phase 2); TAS (An) fires from write ack;
-    // CMP2/CHK2 fires from second-read ack (cmp2_sr_wr_en); normal WB handles all others.
-    assign sr_wr_en   = rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || (wb_valid && wb_updates_ccr);
-    assign sr_wr_data = rtr_sr_wr_en  ? rtr_sr_wr_data
-                      : tas_sr_wr_en  ? {sr_out[15:8], 3'b000, tas_ccr_r}
-                      : cmp2_sr_wr_en ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
-                      :                 {sr_out[15:8], 3'b000, final_ccr};
+    // CMP2/CHK2 fires from second-read ack (cmp2_sr_wr_en); memind fires on outer read ack;
+    // normal WB handles all others.
+    assign sr_wr_en   = rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || memind_ccr_wr_en
+                      || (wb_valid && wb_updates_ccr);
+    assign sr_wr_data = rtr_sr_wr_en      ? rtr_sr_wr_data
+                      : tas_sr_wr_en      ? {sr_out[15:8], 3'b000, tas_ccr_r}
+                      : cmp2_sr_wr_en     ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
+                      : memind_ccr_wr_en  ? {sr_out[15:8], 3'b000, memind_ccr_w}
+                      :                     {sr_out[15:8], 3'b000, final_ccr};
     assign sr_ccr_only = 1'b1;
 
     // -----------------------------------------------------------------------
@@ -2801,27 +2965,35 @@ module eu_seq (
     // Phase 50: move16_run_r drives 4 longword reads then 4 longword writes.
     // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
     assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
+                       memind_inner_r || memind_outer_r ||
                        (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
+                        !memind_start_r && !memind_inner_r && !memind_outer_r &&
                         ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
-    assign mem_rw    = movem_run_r   ? movem_load_r
-                     : tas_run_r     ? 1'b0
-                     : cmp2_run_r    ? 1'b1
-                     : movep_run_r   ? movep_load_r
-                     : move16_run_r  ? !move16_phase_r   // 0=read phase, 1=write phase
+    assign mem_rw    = movem_run_r    ? movem_load_r
+                     : tas_run_r      ? 1'b0
+                     : cmp2_run_r     ? 1'b1
+                     : movep_run_r    ? movep_load_r
+                     : move16_run_r   ? !move16_phase_r
+                     : memind_inner_r ? 1'b1        // inner: always longword read
+                     : memind_outer_r ? memind_is_rd_r
                      : ex_is_mem_rd;
-    assign mem_siz   = movem_run_r   ? (movem_long_r ? 2'b00 : 2'b10) :
-                       cmp2_run_r    ? cmp2_siz_r :
-                       movep_run_r   ? 2'b01 :
-                       move16_run_r  ? 2'b00 :   // always longword
+    assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
+                       cmp2_run_r     ? cmp2_siz_r :
+                       movep_run_r    ? 2'b01 :
+                       move16_run_r   ? 2'b00 :
+                       memind_inner_r ? 2'b00 :     // inner: longword
+                       memind_outer_r ? memind_siz_r :
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 : ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
     assign mem_fc    = (ex_is_moves && ex_moves_load)  ? sfc_in :
                        (ex_is_moves && !ex_moves_load) ? dfc_in :
                                                          {sr_out[13], 1'b0, 1'b1};
-    assign mem_addr  = movem_run_r   ? movem_addr_r :
-                       cmp2_run_r    ? cmp2_addr2_r :
-                       movep_run_r   ? movep_addr_r :
-                       move16_run_r  ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
+    assign mem_addr  = movem_run_r    ? movem_addr_r :
+                       cmp2_run_r     ? cmp2_addr2_r :
+                       movep_run_r    ? movep_addr_r :
+                       move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
+                       memind_inner_r ? memind_inner_addr_r :
+                       memind_outer_r ? memind_outer_addr_w :
                        (ex_is_rtr && rtr_phase_r) ? rtr_a7_next_r : ex_ea;
     // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
     // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
