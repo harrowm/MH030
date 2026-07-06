@@ -1,0 +1,56 @@
+; WinUAE config for MC68030 CPU verification
+; Cycle-exact 68030, minimal Amiga, host filesystem mounted as DH0:
+
+use_gui=yes
+use_debugger=true
+
+kickstart_rom_file=Z:\Users\malcolm\MH030\winuae\roms\kickstart13.rom
+
+; CPU — WinUAE requires both cpu_type (arch base) and cpu_model (actual chip)
+cpu_type=68020
+cpu_model=68030
+cpu_speed=real
+cpu_multiplier=8
+cpu_compatible=true
+cpu_cycle_exact=true
+cpu_memory_cycle_exact=true
+cycle_exact=true
+blitter_cycle_exact=true
+cpu_24bit_addressing=false
+fpu_model=0
+fpu_strict=false
+
+; Chipset — minimal ECS, enough to boot
+chipset=ecs_agnus
+chipset_compatible=false
+ntsc=false
+
+; Memory
+chipmem_size=2
+bogomem_size=0
+
+; Workbench 1.3 boot disk
+floppy0=Z:\Users\malcolm\MH030\winuae\workbench13.adf
+floppy0type=0
+floppy1type=-1
+floppy2type=-1
+floppy3type=-1
+nr_floppies=1
+
+; Host filesystem as DH0: (read-write, so test programs can write output)
+uaehf0=dir,rw,DH0:work,Z:\Users\malcolm\MH030\winuae\tests,0
+
+; Display — small window, no fancy effects
+gfx_width=640
+gfx_height=512
+gfx_lores=false
+gfx_linemode=none
+show_leds=true
+gfx_fullscreen_amiga=false
+
+; Sound off (faster)
+sound_output=none
+
+; No joystick
+joyport0=mouse
+joyport1=none
