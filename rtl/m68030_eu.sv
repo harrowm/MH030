@@ -27,7 +27,7 @@ module m68030_eu (
     input  logic [31:0] pc_wr_data,
     output logic [31:0] pc_out,
 
-    // ── VBR (MOVEC target; read by exception controller) ─────────────────
+    // ── VBR (external override from exception controller) ────────────────
     input  logic        vbr_wr_en,
     input  logic [31:0] vbr_wr_data,
     output logic [31:0] vbr_out,
@@ -36,6 +36,10 @@ module m68030_eu (
     output logic [31:0] usp_out,
     output logic [31:0] msp_out,
     output logic [31:0] isp_out,
+
+    // ── Control register outputs (Phase 46: CACR/CAAR to BIU) ────────────
+    output logic [31:0] cacr_out,
+    output logic [31:0] caar_out,
 
     // ── Status Register outputs ───────────────────────────────────────────
     output logic [15:0] sr_out,       // full SR (read by exception ctrl, BIU FC)
@@ -58,6 +62,18 @@ module m68030_eu (
     input  logic [31:0] mem_rdata,
     input  logic        mem_ack,
     input  logic        mem_berr,
+    output logic        mem_rmw,      // 1=hold bus for RMW (TAS)
+
+    // ── Phase 52: FPU coprocessor interface (FC=111 CPU Space) ───────────
+    output logic        eu_coproc_req,
+    output logic        eu_coproc_rw,
+    output logic [1:0]  eu_coproc_siz,
+    output logic [2:0]  eu_coproc_fc,
+    output logic [31:0] eu_coproc_addr,
+    output logic [31:0] eu_coproc_wdata,
+    input  logic [31:0] eu_coproc_rdata,
+    input  logic        eu_coproc_ack,
+    input  logic        eu_coproc_berr,
 
     // ── Address register update port ──────────────────────────────────────
     output logic        an_wr_en,
@@ -66,6 +82,7 @@ module m68030_eu (
 
     // ── Exception signals ─────────────────────────────────────────────────
     output logic        div_trap,     // divide-by-zero (m68030_exc handles)
+    output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
 
     // ── Exception controller write-back ───────────────────────────────────
     // ssp_wr: update active supervisor stack pointer (A7, routing by S/M bits)
@@ -89,6 +106,25 @@ module m68030_eu (
     logic        sr_wr_en;
     logic [15:0] sr_wr_data;
     logic        sr_ccr_only;
+    // Phase 46: control register read/write wires (eu_seq ↔ eu_regfile)
+    logic [2:0]  seq_sfc_out, seq_dfc_out;
+    logic [31:0] seq_cacr_out, seq_caar_out;
+    logic        seq_vbr_wr_en;
+    logic [31:0] seq_vbr_wr_data;
+    logic        seq_sfc_wr_en;
+    logic [2:0]  seq_sfc_wr_data;
+    logic        seq_dfc_wr_en;
+    logic [2:0]  seq_dfc_wr_data;
+    logic        seq_cacr_wr_en;
+    logic [31:0] seq_cacr_wr_data;
+    logic        seq_caar_wr_en;
+    logic [31:0] seq_caar_wr_data;
+    logic        seq_usp_wr_en;
+    logic [31:0] seq_usp_wr_data;
+    logic        seq_isp_wr_en;
+    logic [31:0] seq_isp_wr_data;
+    logic        seq_msp_wr_en;
+    logic [31:0] seq_msp_wr_data;
 
     // -----------------------------------------------------------------------
     // Internal wires: eu_seq ↔ eu_alu
@@ -204,6 +240,7 @@ module m68030_eu (
         .instr_ack    (instr_ack),
         .seq_busy     (eu_busy),
         .div_trap     (div_trap),
+        .chk_trap     (chk_trap),
         .decode_pc    (decode_pc),
         .branch_taken (branch_taken),
         .branch_target(branch_target),
@@ -216,9 +253,46 @@ module m68030_eu (
         .mem_rdata    (mem_rdata),
         .mem_ack      (mem_ack),
         .mem_berr     (mem_berr),
+        .mem_rmw      (mem_rmw),
+        // Phase 52: FPU coprocessor
+        .eu_coproc_req   (eu_coproc_req),
+        .eu_coproc_rw    (eu_coproc_rw),
+        .eu_coproc_siz   (eu_coproc_siz),
+        .eu_coproc_fc    (eu_coproc_fc),
+        .eu_coproc_addr  (eu_coproc_addr),
+        .eu_coproc_wdata (eu_coproc_wdata),
+        .eu_coproc_rdata (eu_coproc_rdata),
+        .eu_coproc_ack   (eu_coproc_ack),
+        .eu_coproc_berr  (eu_coproc_berr),
         .an_wr_en     (an_wr_en),
         .an_wr_sel    (an_wr_sel),
-        .an_wr_data   (an_wr_data)
+        .an_wr_data   (an_wr_data),
+        // Phase 46: control register reads (from eu_regfile)
+        .sfc_in       (seq_sfc_out),
+        .dfc_in       (seq_dfc_out),
+        .vbr_in       (vbr_out),
+        .usp_in       (usp_out),
+        .isp_in       (isp_out),
+        .msp_in       (msp_out),
+        .cacr_in      (seq_cacr_out),
+        .caar_in      (seq_caar_out),
+        // Phase 46: control register writes (to eu_regfile)
+        .vbr_wr_en    (seq_vbr_wr_en),
+        .vbr_wr_data  (seq_vbr_wr_data),
+        .sfc_wr_en    (seq_sfc_wr_en),
+        .sfc_wr_data  (seq_sfc_wr_data),
+        .dfc_wr_en    (seq_dfc_wr_en),
+        .dfc_wr_data  (seq_dfc_wr_data),
+        .cacr_wr_en   (seq_cacr_wr_en),
+        .cacr_wr_data (seq_cacr_wr_data),
+        .caar_wr_en   (seq_caar_wr_en),
+        .caar_wr_data (seq_caar_wr_data),
+        .usp_wr_en    (seq_usp_wr_en),
+        .usp_wr_data  (seq_usp_wr_data),
+        .isp_wr_en    (seq_isp_wr_en),
+        .isp_wr_data  (seq_isp_wr_data),
+        .msp_wr_en    (seq_msp_wr_en),
+        .msp_wr_data  (seq_msp_wr_data)
     );
 
     // -----------------------------------------------------------------------
@@ -227,6 +301,8 @@ module m68030_eu (
     //   exc_sr_wr_en → write full SR (not CCR-only) with new exception SR
     // Both take priority; they fire during exception processing when eu_seq
     // pipeline is quiescent (no normal writes in flight).
+    // VBR: OR of external override (vbr_wr_en) and MOVEC write (seq_vbr_wr_en);
+    //   external takes priority for data.
     // -----------------------------------------------------------------------
     logic        rf_wr_en;
     logic [3:0]  rf_wr_sel;
@@ -235,6 +311,8 @@ module m68030_eu (
     logic        rf_sr_wr_en;
     logic [15:0] rf_sr_wr_data;
     logic        rf_sr_ccr_only;
+    logic        rf_vbr_wr_en;
+    logic [31:0] rf_vbr_wr_data;
 
     assign rf_wr_en       = ssp_wr_en    ? 1'b1           : wr_en;
     assign rf_wr_sel      = ssp_wr_en    ? 4'hF           : wr_sel;  // A7
@@ -243,43 +321,69 @@ module m68030_eu (
     assign rf_sr_wr_en    = exc_sr_wr_en ? 1'b1           : sr_wr_en;
     assign rf_sr_wr_data  = exc_sr_wr_en ? exc_sr_wr_data : sr_wr_data;
     assign rf_sr_ccr_only = exc_sr_wr_en ? 1'b0           : sr_ccr_only;
+    assign rf_vbr_wr_en   = vbr_wr_en | seq_vbr_wr_en;
+    assign rf_vbr_wr_data = vbr_wr_en ? vbr_wr_data : seq_vbr_wr_data;
 
     // -----------------------------------------------------------------------
     // eu_regfile — D0-D7, A0-A7, PC, SR, VBR, USP/ISP/MSP
     // -----------------------------------------------------------------------
     eu_regfile u_rf (
-        .clk_4x      (clk_4x),
-        .rst_n       (rst_n),
-        .rd_a_sel    (rd_a_sel),
-        .rd_a_siz    (rd_a_siz),
-        .rd_a_data   (rd_a_data),
-        .rd_b_sel    (rd_b_sel),
-        .rd_b_siz    (rd_b_siz),
-        .rd_b_data   (rd_b_data),
-        .wr_en       (rf_wr_en),
-        .wr_sel      (rf_wr_sel),
-        .wr_siz      (rf_wr_siz),
-        .wr_data     (rf_wr_data),
-        .pc_wr_en    (pc_wr_en),
-        .pc_wr_data  (pc_wr_data),
-        .pc_out      (pc_out),
-        .sr_wr_en    (rf_sr_wr_en),
-        .sr_wr_data  (rf_sr_wr_data),
-        .sr_ccr_only (rf_sr_ccr_only),
-        .sr_out      (sr_out),
-        .vbr_wr_en   (vbr_wr_en),
-        .vbr_wr_data (vbr_wr_data),
-        .vbr_out     (vbr_out),
-        .usp_out     (usp_out),
-        .msp_out     (msp_out),
-        .isp_out     (isp_out),
-        .supervisor  (supervisor),
-        .master_mode (master_mode),
-        .ipl_mask    (ipl_mask),
-        .an_wr_en    (an_wr_en),
-        .an_wr_sel   (an_wr_sel),
-        .an_wr_data  (an_wr_data)
+        .clk_4x       (clk_4x),
+        .rst_n        (rst_n),
+        .rd_a_sel     (rd_a_sel),
+        .rd_a_siz     (rd_a_siz),
+        .rd_a_data    (rd_a_data),
+        .rd_b_sel     (rd_b_sel),
+        .rd_b_siz     (rd_b_siz),
+        .rd_b_data    (rd_b_data),
+        .wr_en        (rf_wr_en),
+        .wr_sel       (rf_wr_sel),
+        .wr_siz       (rf_wr_siz),
+        .wr_data      (rf_wr_data),
+        .pc_wr_en     (pc_wr_en),
+        .pc_wr_data   (pc_wr_data),
+        .pc_out       (pc_out),
+        .sr_wr_en     (rf_sr_wr_en),
+        .sr_wr_data   (rf_sr_wr_data),
+        .sr_ccr_only  (rf_sr_ccr_only),
+        .sr_out       (sr_out),
+        .vbr_wr_en    (rf_vbr_wr_en),
+        .vbr_wr_data  (rf_vbr_wr_data),
+        .vbr_out      (vbr_out),
+        .usp_out      (usp_out),
+        .msp_out      (msp_out),
+        .isp_out      (isp_out),
+        .supervisor   (supervisor),
+        .master_mode  (master_mode),
+        .ipl_mask     (ipl_mask),
+        .an_wr_en     (an_wr_en),
+        .an_wr_sel    (an_wr_sel),
+        .an_wr_data   (an_wr_data),
+        // Phase 46: SFC/DFC/CACR/CAAR
+        .sfc_wr_en    (seq_sfc_wr_en),
+        .sfc_wr_data  (seq_sfc_wr_data),
+        .sfc_out      (seq_sfc_out),
+        .dfc_wr_en    (seq_dfc_wr_en),
+        .dfc_wr_data  (seq_dfc_wr_data),
+        .dfc_out      (seq_dfc_out),
+        .cacr_wr_en   (seq_cacr_wr_en),
+        .cacr_wr_data (seq_cacr_wr_data),
+        .cacr_out     (seq_cacr_out),
+        .caar_wr_en   (seq_caar_wr_en),
+        .caar_wr_data (seq_caar_wr_data),
+        .caar_out     (seq_caar_out),
+        // Phase 46: explicit USP/ISP/MSP writes
+        .usp_wr_en    (seq_usp_wr_en),
+        .usp_wr_data  (seq_usp_wr_data),
+        .isp_wr_en    (seq_isp_wr_en),
+        .isp_wr_data  (seq_isp_wr_data),
+        .msp_wr_en    (seq_msp_wr_en),
+        .msp_wr_data  (seq_msp_wr_data)
     );
+
+    // Route CACR/CAAR to module outputs for BIU/MMU use
+    assign cacr_out = seq_cacr_out;
+    assign caar_out = seq_caar_out;
 
     // -----------------------------------------------------------------------
     // eu_alu — purely combinational

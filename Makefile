@@ -92,6 +92,24 @@ $(SIM)/seq42:      $(EU_SRCS)                         tb/seq42_tb.sv      | $(SI
 $(SIM)/seq43:      $(EU_SRCS)                         tb/seq43_tb.sv      | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/seq46:      $(EU_SRCS)                         tb/seq46_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq47:      $(EU_SRCS)                         tb/seq47_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq48:      $(EU_SRCS)                         tb/seq48_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq49:      $(EU_SRCS)                         tb/seq49_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq50:      $(EU_SRCS)                         tb/seq50_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq52:      $(EU_SRCS)                         tb/seq52_tb.sv      | $(SIM)
+	$(IVCOMP)
+
 # ── Standalone modules ─────────────────────────────────────────────────────
 $(SIM)/ifu:        rtl/m68030_ifu.sv                  tb/ifu_tb.sv        | $(SIM)
 	$(IVCOMP)
@@ -130,7 +148,7 @@ ALL_TESTS := \
     $(SIM)/eu_bcd $(SIM)/eu_bitops $(SIM)/agu \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/seq36 $(SIM)/seq37 $(SIM)/seq38 $(SIM)/seq39 $(SIM)/seq40 \
-    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 \
+    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 \
     $(SIM)/ifu $(SIM)/seq_m $(SIM)/seq_int $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/m68030_biu \
     $(SIM)/top
@@ -172,7 +190,7 @@ $(SIM):
 
 help:
 	@echo "Targets:"
-	@echo "  make test          — compile and run all 25 tests (~2s)"
+	@echo "  make test          — compile and run all 27 tests (~2s)"
 	@echo "  make compile       — compile all without running"
 	@echo "  make run TEST=seq43 — compile and run one test"
 	@echo "  make sim/seq43     — recompile one test binary"

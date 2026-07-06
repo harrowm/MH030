@@ -185,6 +185,7 @@ module biu_tb;
     logic [2:0]  cfg_ipl_s;
     logic        cfg_br_s, cfg_bgack_s, cfg_cback_s;
     logic        cfg_pins_released;
+    logic        cfg_poweron_rstout_n;
 
     // Phase 9 — biu_pin_driver dedicated test signals
     logic [31:0] pd_d_out_tb     = 32'hDEAD_BEEF;
@@ -691,7 +692,39 @@ module biu_tb;
         .br_s          (cfg_br_s),
         .bgack_s       (cfg_bgack_s),
         .cback_s       (cfg_cback_s),
-        .pins_released (cfg_pins_released)
+        .pins_released     (cfg_pins_released),
+        .poweron_rstout_n  (cfg_poweron_rstout_n)
+    );
+
+    // -----------------------------------------------------------------------
+    // Phase 51 — dedicated biu_config instance for power-on RSTO counter tests.
+    // Uses POWERON_RSTO_CLKS=40 for quick simulation. Starts with rst_n=0
+    // so the counter loads immediately; P51 tests release it.
+    // -----------------------------------------------------------------------
+    logic        cfg51_rst_n = 1'b0;
+    logic        cfg51_poweron_rstout_n;
+    // Unused output stubs for the Phase 51 cfg instance
+    logic        cfg51_dsack0_s, cfg51_dsack1_s, cfg51_sterm_s;
+    logic        cfg51_berr_s, cfg51_halt_s, cfg51_avec_s, cfg51_vpa_s;
+    logic [2:0]  cfg51_ipl_s;
+    logic        cfg51_br_s, cfg51_bgack_s, cfg51_cback_s;
+    logic        cfg51_pins_released;
+
+    biu_config #(.POWERON_RSTO_CLKS(40)) u_cfg51 (
+        .clk_4x           (clk_4x),
+        .rst_n            (cfg51_rst_n),
+        .dsack0_n         (1'b1), .dsack1_n(1'b1), .sterm_n (1'b1),
+        .berr_n           (1'b1), .halt_n  (1'b1), .avec_n  (1'b1),
+        .vpa_n            (1'b1), .ipl_n   (3'b111),
+        .br_n             (1'b1), .bgack_n (1'b1),  .cback_n (1'b1),
+        .dsack0_s         (cfg51_dsack0_s),  .dsack1_s (cfg51_dsack1_s),
+        .sterm_s          (cfg51_sterm_s),   .berr_s   (cfg51_berr_s),
+        .halt_s           (cfg51_halt_s),    .avec_s   (cfg51_avec_s),
+        .vpa_s            (cfg51_vpa_s),     .ipl_s    (cfg51_ipl_s),
+        .br_s             (cfg51_br_s),      .bgack_s  (cfg51_bgack_s),
+        .cback_s          (cfg51_cback_s),
+        .pins_released    (cfg51_pins_released),
+        .poweron_rstout_n (cfg51_poweron_rstout_n)
     );
 
     // -----------------------------------------------------------------------
@@ -3312,6 +3345,122 @@ module biu_tb;
                 check32("P21-1e: mem[0x308] beat-2",  u_mem.mem[194], 32'hC001_0003);
                 check32("P21-1f: mem[0x30C] beat-3",  u_mem.mem[195], 32'hC001_0004);
             end
+            repeat(8) @(posedge clk_4x);
+        end
+
+        // Phase 51 — biu_config power-on RSTO counter + biu_pin_driver OE
+        // ===================================================================
+        begin
+            $display("=== Phase 51: Power-on RSTO counter + OE verification ===");
+
+            // --- P51-1: Power-on RSTO counter (u_cfg51, POWERON_RSTO_CLKS=40) ---
+            // cfg51_rst_n starts 0; verify RSTO asserted during reset.
+            begin
+                $display("--- P51-1: Power-on RSTO counter ---");
+
+                // Confirm: during reset (cfg51_rst_n=0), poweron_rstout_n must be 0.
+                @(posedge clk_4x); #1;
+                check("P51-1a: rstout_n low during reset", cfg51_poweron_rstout_n === 1'b0);
+
+                // Release reset. Count 4× cycles until rstout_n goes high (or timeout).
+                // Counter starts at POWERON_RSTO_CLKS=40 and counts on each posedge,
+                // so rstout_n must deassert after exactly 40 4× clock cycles.
+                cfg51_rst_n = 1'b1;
+                begin
+                    int cnt;
+                    cnt = 0;
+                    while (cfg51_poweron_rstout_n === 1'b0 && cnt < 100) begin
+                        @(posedge clk_4x); #1;
+                        cnt++;
+                    end
+                    check("P51-1b: rstout_n low while counter running",  cnt > 1);
+                    check("P51-1c: rstout_n deasserts after 40 cycles",
+                          cfg51_poweron_rstout_n === 1'b1 && cnt === 40);
+                end
+
+                // Verify counter saturates at 0 — rstout_n stays high.
+                repeat(8) @(posedge clk_4x); #1;
+                check("P51-1d: rstout_n stays high after expiry", cfg51_poweron_rstout_n === 1'b1);
+
+                // Re-assert reset — counter reloads, RSTOUT re-asserts.
+                cfg51_rst_n = 1'b0;
+                @(posedge clk_4x); #1;
+                check("P51-1e: rstout_n re-asserts on re-reset", cfg51_poweron_rstout_n === 1'b0);
+                cfg51_rst_n = 1'b1;
+            end
+
+            // --- P51-2: ext_d_oe S-state timing in write cycle ---
+            // Issue a longword write through the sizing_fsm → cycle_gen path.
+            // Verify ext_d_oe (from cycle_gen) is 0 before and after the cycle,
+            // and goes high during S3–S5 (write data phase) only.
+            begin
+                $display("--- P51-2: ext_d_oe asserts only during write data phase ---");
+                wait_bus_idle;
+
+                // Capture ext_d_oe transitions around a write cycle.
+                begin
+                    logic saw_oe_high, saw_oe_low_end;
+                    saw_oe_high    = 0;
+                    saw_oe_low_end = 0;
+
+                    // Verify OE starts low (no cycle active).
+                    @(posedge clk_4x); #1;
+                    check("P51-2a: ext_d_oe idle before write", ext_d_oe === 1'b0);
+
+                    // Issue a write: eu_addr=0x400, wdata=0xDEAD_1234, fc=101 (supervisor data)
+                    sf_in_addr  = 32'h0000_0400;
+                    sf_in_wdata = 32'hDEAD_1234;
+                    sf_in_fc    = 3'b101;
+                    sf_in_rw    = 1'b0;   // write
+                    sf_in_siz   = 2'b00;  // longword
+                    sf_in_is_op = 1'b1;
+                    sf_in_req   = 1'b1;
+
+                    // Wait for OE to assert (S3 of write cycle).
+                    @(posedge ext_d_oe);
+                    saw_oe_high = 1;
+                    // OE just went high — still inside the write data window.
+
+                    // Wait for OE to deassert (S6: DS# deasserts, bus turns around).
+                    @(negedge ext_d_oe);
+                    saw_oe_low_end = 1;
+
+                    sf_in_req = 1'b0;
+                    wait_bus_idle;
+
+                    check("P51-2b: ext_d_oe asserted during write (S3-S5)", saw_oe_high);
+                    check("P51-2c: ext_d_oe deasserted at S6",              saw_oe_low_end);
+                    // Final: OE back to 0 after cycle.
+                    @(posedge clk_4x); #1;
+                    check("P51-2d: ext_d_oe idle after write", ext_d_oe === 1'b0);
+                end
+            end
+
+            // --- P51-3: ext_d_oe stays 0 on a read cycle ---
+            begin
+                $display("--- P51-3: ext_d_oe not asserted during read cycle ---");
+                wait_bus_idle;
+                begin
+                    logic saw_oe_during_read;
+                    saw_oe_during_read = 0;
+
+                    sf_in_addr  = 32'h0000_0400;
+                    sf_in_fc    = 3'b101;
+                    sf_in_rw    = 1'b1;   // read
+                    sf_in_siz   = 2'b00;
+                    sf_in_is_op = 1'b1;
+                    sf_in_req   = 1'b1;
+
+                    // Poll for OE during the read cycle (wait for ack).
+                    @(posedge eu_ack);
+                    if (ext_d_oe === 1'b1) saw_oe_during_read = 1;
+                    sf_in_req = 1'b0;
+                    wait_bus_idle;
+
+                    check("P51-3: ext_d_oe=0 throughout read cycle", !saw_oe_during_read);
+                end
+            end
+
             repeat(8) @(posedge clk_4x);
         end
 

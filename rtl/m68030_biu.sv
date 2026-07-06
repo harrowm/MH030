@@ -23,8 +23,9 @@
 // Output tri-state gate: biu_pin_driver (blocks D-bus during reset).
 
 module m68030_biu #(
-    parameter int RSTOUT_CLKS  = 124,   // RSTOUT assertion duration (4x clocks)
-    parameter int TIMEOUT_CLKS = 128    // BERR watchdog threshold  (4x clocks)
+    parameter int RSTOUT_CLKS       = 124,   // RESET-instruction RSTOUT duration (4× clocks)
+    parameter int TIMEOUT_CLKS      = 128,   // BERR watchdog threshold  (4× clocks)
+    parameter int POWERON_RSTO_CLKS = 2048   // Power-on RSTOUT duration (4× clocks; = 512 ext clocks)
 ) (
     input  logic        clk_4x,
     input  logic        rst_n,
@@ -230,33 +231,35 @@ module m68030_biu #(
     logic [2:0] ipl_s;
     logic br_s, bgack_s, cback_s;
     logic pins_released;
+    logic cfg_poweron_rstout_n;  // power-on RSTOUT from biu_config
 
-    biu_config u_cfg (
-        .clk_4x       (clk_4x),
-        .rst_n        (rst_n),
-        .dsack0_n     (dsack0_n),
-        .dsack1_n     (dsack1_n),
-        .sterm_n      (sterm_n),
-        .berr_n       (berr_n),
-        .halt_n       (halt_n),
-        .avec_n       (avec_n),
-        .vpa_n        (vpa_n),
-        .ipl_n        (ipl_n),
-        .br_n         (br_n),
-        .bgack_n      (bgack_n),
-        .cback_n      (cback_n),
-        .dsack0_s     (dsack0_s),
-        .dsack1_s     (dsack1_s),
-        .sterm_s      (sterm_s),
-        .berr_s       (berr_s_ext),
-        .avec_s       (avec_s),
-        .halt_s       (halt_s),
-        .vpa_s        (vpa_s),
-        .ipl_s        (ipl_s),
-        .br_s         (br_s),
-        .bgack_s      (bgack_s),
-        .cback_s      (cback_s),
-        .pins_released(pins_released)
+    biu_config #(.POWERON_RSTO_CLKS(POWERON_RSTO_CLKS)) u_cfg (
+        .clk_4x            (clk_4x),
+        .rst_n             (rst_n),
+        .dsack0_n          (dsack0_n),
+        .dsack1_n          (dsack1_n),
+        .sterm_n           (sterm_n),
+        .berr_n            (berr_n),
+        .halt_n            (halt_n),
+        .avec_n            (avec_n),
+        .vpa_n             (vpa_n),
+        .ipl_n             (ipl_n),
+        .br_n              (br_n),
+        .bgack_n           (bgack_n),
+        .cback_n           (cback_n),
+        .dsack0_s          (dsack0_s),
+        .dsack1_s          (dsack1_s),
+        .sterm_s           (sterm_s),
+        .berr_s            (berr_s_ext),
+        .avec_s            (avec_s),
+        .halt_s            (halt_s),
+        .vpa_s             (vpa_s),
+        .ipl_s             (ipl_s),
+        .br_s              (br_s),
+        .bgack_s           (bgack_s),
+        .cback_s           (cback_s),
+        .pins_released     (pins_released),
+        .poweron_rstout_n  (cfg_poweron_rstout_n)
     );
 
     // -----------------------------------------------------------------------
@@ -341,6 +344,8 @@ module m68030_biu #(
     // Cycle_gen raw d-bus (before pin_driver gates OE)
     logic [31:0] cg_ext_d_out_raw;
     logic        cg_ext_d_out_raw_oe;
+    // RESET-instruction RSTOUT from cycle_gen (separate from power-on RSTOUT)
+    logic        cg_rstout_n;
 
     // -----------------------------------------------------------------------
     // Bus arbiter — Priority: MMU > EU > IFU > external DMA
@@ -545,7 +550,7 @@ module m68030_biu #(
         .ext_ocs_n       (ext_ocs_n),
         .ext_d_out       (cg_ext_d_out_raw),
         .ext_d_oe        (cg_ext_d_out_raw_oe),
-        .ext_rstout_n    (ext_rstout_n),
+        .ext_rstout_n    (cg_rstout_n),
         .ext_cbreq_n     (ext_cbreq_n),
         .ext_d_in        (ext_d_in),
         // Synchronised async inputs
@@ -710,6 +715,12 @@ module m68030_biu #(
         .ext_d_out    (ext_d_out),
         .ext_d_oe     (ext_d_oe)
     );
+
+    // -----------------------------------------------------------------------
+    // ext_rstout_n: asserted (low) by either power-on counter or RESET instruction.
+    // Active-low: both sources must be deasserted (high) for the pin to be high.
+    // -----------------------------------------------------------------------
+    assign ext_rstout_n = cg_rstout_n & cfg_poweron_rstout_n;
 
 endmodule
 

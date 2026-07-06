@@ -109,7 +109,7 @@ module m68030_biu_tb;
     // -----------------------------------------------------------------------
     // DUT: m68030_biu
     // -----------------------------------------------------------------------
-    m68030_biu #(.RSTOUT_CLKS(124), .TIMEOUT_CLKS(256)) u_biu (
+    m68030_biu #(.RSTOUT_CLKS(124), .TIMEOUT_CLKS(256), .POWERON_RSTO_CLKS(40)) u_biu (
         .clk_4x          (clk_4x),
         .rst_n           (rst_n),
         .ext_a           (ext_a),

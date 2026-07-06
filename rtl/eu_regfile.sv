@@ -49,7 +49,31 @@ module eu_regfile (
     // Second write port — An update from (An)+ / -(An) (always longword)
     input  logic        an_wr_en,
     input  logic [2:0]  an_wr_sel,    // 0=A0..6=A6, 7=A7 (routes via S/M)
-    input  logic [31:0] an_wr_data
+    input  logic [31:0] an_wr_data,
+
+    // SFC / DFC — source/destination function codes (3 bits each)
+    input  logic        sfc_wr_en,
+    input  logic [2:0]  sfc_wr_data,
+    output logic [2:0]  sfc_out,
+    input  logic        dfc_wr_en,
+    input  logic [2:0]  dfc_wr_data,
+    output logic [2:0]  dfc_out,
+
+    // CACR / CAAR — cache control registers (Phase 46: stored but not decoded)
+    input  logic        cacr_wr_en,
+    input  logic [31:0] cacr_wr_data,
+    output logic [31:0] cacr_out,
+    input  logic        caar_wr_en,
+    input  logic [31:0] caar_wr_data,
+    output logic [31:0] caar_out,
+
+    // USP / ISP / MSP — explicit write ports (MOVEC bypasses S/M routing)
+    input  logic        usp_wr_en,
+    input  logic [31:0] usp_wr_data,
+    input  logic        isp_wr_en,
+    input  logic [31:0] isp_wr_data,
+    input  logic        msp_wr_en,
+    input  logic [31:0] msp_wr_data
 );
 
     // -----------------------------------------------------------------------
@@ -61,6 +85,8 @@ module eu_regfile (
     logic [31:0] pc_r;
     logic [15:0] sr_r;
     logic [31:0] vbr_r;
+    logic [2:0]  sfc_r, dfc_r;
+    logic [31:0] cacr_r, caar_r;
 
     // -----------------------------------------------------------------------
     // A7 routing (combinational; S=0 => USP regardless of M)
@@ -201,6 +227,11 @@ module eu_regfile (
                 end
                 sr_r <= sr_next;
             end
+
+            // MOVEC explicit stack pointer writes — bypass S/M mode routing
+            if (usp_wr_en) usp_r <= usp_wr_data;
+            if (isp_wr_en) isp_r <= isp_wr_data;
+            if (msp_wr_en) msp_r <= msp_wr_data;
         end
     end
 
@@ -217,6 +248,20 @@ module eu_regfile (
         else if (vbr_wr_en) vbr_r <= vbr_wr_data;
     end
 
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            sfc_r  <= 3'h0;
+            dfc_r  <= 3'h0;
+            cacr_r <= 32'h0;
+            caar_r <= 32'h0;
+        end else begin
+            if (sfc_wr_en)  sfc_r  <= sfc_wr_data;
+            if (dfc_wr_en)  dfc_r  <= dfc_wr_data;
+            if (cacr_wr_en) cacr_r <= cacr_wr_data;
+            if (caar_wr_en) caar_r <= caar_wr_data;
+        end
+    end
+
     // -----------------------------------------------------------------------
     // Outputs
     // -----------------------------------------------------------------------
@@ -229,6 +274,10 @@ module eu_regfile (
     assign supervisor  = sr_r[13];
     assign master_mode = sr_r[12];
     assign ipl_mask    = sr_r[10:8];
+    assign sfc_out     = sfc_r;
+    assign dfc_out     = dfc_r;
+    assign cacr_out    = cacr_r;
+    assign caar_out    = caar_r;
 
 endmodule
 

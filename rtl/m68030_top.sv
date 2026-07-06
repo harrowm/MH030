@@ -16,7 +16,9 @@
 //   EU normal data requests (Phase 30+) are stubbed to zero here; the
 //   OR logic means EXC always wins while active.
 
-module m68030_top (
+module m68030_top #(
+    parameter int POWERON_RSTO_CLKS = 2048   // 4× clocks; pass-through to m68030_biu
+) (
     input  logic        clk_4x,
     input  logic        rst_n,
 
@@ -111,6 +113,10 @@ module m68030_top (
     logic [31:0] eu_burst_rdata2, eu_burst_rdata3;
     logic        eu_burst_ack, eu_burst_berr;
     logic        eu_m16_ack, eu_m16_berr;
+    logic        eu_coproc_req, eu_coproc_rw;
+    logic [1:0]  eu_coproc_siz;
+    logic [2:0]  eu_coproc_fc;
+    logic [31:0] eu_coproc_addr, eu_coproc_wdata;
     logic [31:0] eu_coproc_rdata;
     logic        eu_coproc_ack, eu_coproc_berr;
     logic [31:0] eu_mo_rdata0, eu_mo_rdata1;
@@ -141,6 +147,7 @@ module m68030_top (
     logic        eu_supervisor, eu_master_mode;
     logic [2:0]  eu_ipl_mask;
     logic        eu_div_trap;
+    logic        eu_chk_trap;
 
     // ───────────────────────────────────────────────────────────────────────
     // IFU output wires
@@ -185,9 +192,12 @@ module m68030_top (
     logic [1:0]  eu_mem_siz;
     logic [2:0]  eu_mem_fc;
     logic [31:0] eu_mem_addr, eu_mem_wdata;
+    logic        eu_mem_rmw;
     logic        eu_an_wr_en;
     logic [2:0]  eu_an_wr_sel;
     logic [31:0] eu_an_wr_data;
+    // Phase 46: CACR/CAAR from EU (wired to BIU instead of reset stubs)
+    logic [31:0] eu_cacr_out, eu_caar_out;
 
     // ───────────────────────────────────────────────────────────────────────
     // BIU eu_req mux — priority: EXC > EU data > idle
@@ -329,6 +339,16 @@ module m68030_top (
         .mem_rdata     (eu_ack && !exc_active ? eu_rdata : 32'h0),
         .mem_ack       (eu_ack && !exc_active),
         .mem_berr      (eu_berr && !exc_active),
+        .mem_rmw       (eu_mem_rmw),
+        .eu_coproc_req   (eu_coproc_req),
+        .eu_coproc_rw    (eu_coproc_rw),
+        .eu_coproc_siz   (eu_coproc_siz),
+        .eu_coproc_fc    (eu_coproc_fc),
+        .eu_coproc_addr  (eu_coproc_addr),
+        .eu_coproc_wdata (eu_coproc_wdata),
+        .eu_coproc_rdata (eu_coproc_rdata),
+        .eu_coproc_ack   (eu_coproc_ack),
+        .eu_coproc_berr  (eu_coproc_berr),
         .an_wr_en      (eu_an_wr_en),
         .an_wr_sel     (eu_an_wr_sel),
         .an_wr_data    (eu_an_wr_data),
@@ -338,11 +358,14 @@ module m68030_top (
         .usp_out       (eu_usp_out),
         .msp_out       (eu_msp_out),
         .isp_out       (eu_isp_out),
+        .cacr_out      (eu_cacr_out),
+        .caar_out      (eu_caar_out),
         .sr_out        (eu_sr_out),
         .supervisor    (eu_supervisor),
         .master_mode   (eu_master_mode),
         .ipl_mask      (eu_ipl_mask),
         .div_trap      (eu_div_trap),
+        .chk_trap      (eu_chk_trap),
         .ssp_wr_en     (ssp_wr_en_mux),
         .ssp_wr_data   (ssp_wr_data_mux),
         .exc_sr_wr_en  (exc_new_sr_wr),
@@ -367,7 +390,7 @@ module m68030_top (
         .linef_req    (1'b0),
         .fmt_err_req  (1'b0),
         .div_zero_req (eu_div_trap),
-        .chk_req      (1'b0),
+        .chk_req      (eu_chk_trap),
         .trapv_req    (1'b0),
         .trap_req     (1'b0),
         .trap_num     (4'h0),
@@ -451,8 +474,9 @@ module m68030_top (
     // m68030_biu
     // ───────────────────────────────────────────────────────────────────────
     m68030_biu #(
-        .RSTOUT_CLKS (124),
-        .TIMEOUT_CLKS(128)
+        .RSTOUT_CLKS       (124),
+        .TIMEOUT_CLKS      (128),
+        .POWERON_RSTO_CLKS (POWERON_RSTO_CLKS)
     ) u_biu (
         .clk_4x          (clk_4x),
         .rst_n           (rst_n),
@@ -505,8 +529,8 @@ module m68030_top (
         .eu_iack_ack     (eu_iack_ack),
         // RST (stub)
         .eu_rst_req      (1'b0),
-        // RMW (stub)
-        .eu_rmw          (1'b0),
+        // RMW
+        .eu_rmw          (eu_mem_rmw),
         .bus_lock        (bus_lock),
         // CAS2 (stub)
         .eu_cas2_req     (1'b0),
@@ -542,12 +566,12 @@ module m68030_top (
         .eu_m16_ack      (eu_m16_ack),
         .eu_m16_berr     (eu_m16_berr),
         // Coprocessor (stub)
-        .eu_coproc_req   (1'b0),
-        .eu_coproc_rw    (1'b1),
-        .eu_coproc_addr  (32'h0),
-        .eu_coproc_fc    (3'b0),
-        .eu_coproc_siz   (2'b0),
-        .eu_coproc_wdata (32'h0),
+        .eu_coproc_req   (eu_coproc_req),
+        .eu_coproc_rw    (eu_coproc_rw),
+        .eu_coproc_addr  (eu_coproc_addr),
+        .eu_coproc_fc    (eu_coproc_fc),
+        .eu_coproc_siz   (eu_coproc_siz),
+        .eu_coproc_wdata (eu_coproc_wdata),
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
@@ -579,8 +603,8 @@ module m68030_top (
         .ifu_ack         (ifu_ack),
         .ifu_berr        (ifu_berr),
         // Control registers (MMU/cache disabled)
-        .cacr            (CACR_RESET),
-        .caar            (CAAR_RESET),
+        .cacr            (eu_cacr_out),
+        .caar            (eu_caar_out),
         .tc              (TC_RESET),
         .crp             (CRP_RESET),
         .srp             (SRP_RESET),

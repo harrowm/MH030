@@ -1,6 +1,6 @@
 `default_nettype none
 
-// MC68030 BIU — Configuration / Input Synchronizer (Phase 9)
+// MC68030 BIU — Configuration / Input Synchronizer (Phase 9 + 51)
 //
 // Two-stage synchroniser flip-flops for every asynchronous input pin.
 // This prevents metastability from propagating into the synchronous FSM.
@@ -13,8 +13,16 @@
 // pins_released: asserts one cycle after rst_n deasserts, indicating that the
 // internal sync chain has had at least one clock to settle.  biu_pin_driver
 // uses this to gate the data bus OE during power-on reset.
+//
+// poweron_rstout_n: holds /RSTOUT asserted (low) for POWERON_RSTO_CLKS 4× cycles
+// after rst_n deasserts. The 68030 spec requires ≥512 external clock cycles
+// (= 2048 4× cycles at 4× bus frequency). After the count expires this output
+// stays high; it is OR'd (active-low AND) with biu_cycle_gen's RESET-instruction
+// RSTOUT in m68030_biu to form the final ext_rstout_n pin.
 
-module biu_config (
+module biu_config #(
+    parameter int POWERON_RSTO_CLKS = 2048   // 4× clocks; default = 512 ext clocks
+) (
     input  logic        clk_4x,
     input  logic        rst_n,
 
@@ -45,7 +53,9 @@ module biu_config (
     output logic        cback_s,    // 0 = CBACK# asserted (active-low retained)
 
     // Asserts one cycle after rst_n deasserts; used by biu_pin_driver
-    output logic        pins_released
+    output logic        pins_released,
+    // Low for POWERON_RSTO_CLKS 4× cycles after rst_n rises; OR'd with RESET-inst RSTOUT
+    output logic        poweron_rstout_n
 );
 
     // -----------------------------------------------------------------------
@@ -123,6 +133,22 @@ module biu_config (
         if (!rst_n) pins_released <= 1'b0;
         else        pins_released <= 1'b1;
     end
+
+    // -----------------------------------------------------------------------
+    // Power-on RSTOUT counter: assert /RSTOUT for POWERON_RSTO_CLKS 4× cycles
+    // after rst_n deasserts. Counter loads on reset, decrements each cycle
+    // until zero. 12 bits supports up to 4095 4× cycles.
+    // -----------------------------------------------------------------------
+    logic [11:0] rsto_cnt_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            rsto_cnt_r <= 12'(POWERON_RSTO_CLKS);
+        else if (rsto_cnt_r != 12'h0)
+            rsto_cnt_r <= rsto_cnt_r - 12'h1;
+    end
+
+    assign poweron_rstout_n = (rsto_cnt_r == 12'h0);
 
 endmodule
 

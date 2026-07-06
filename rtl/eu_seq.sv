@@ -109,6 +109,7 @@ module eu_seq (
     output logic        instr_ack,    // consumed this instruction
     output logic        seq_busy,     // pipeline stall
     output logic        div_trap,     // divide-by-zero trap
+    output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
 
     // ── Branch control ──────────────────────────────────────────────────────
     input  logic [31:0] decode_pc,    // PC of instruction at decode stage
@@ -125,11 +126,51 @@ module eu_seq (
     input  logic [31:0] mem_rdata,    // read data (from BIU)
     input  logic        mem_ack,      // bus cycle complete
     input  logic        mem_berr,     // bus error (ignored in Phase 37)
+    output logic        mem_rmw,      // 1=hold bus for RMW (TAS)
+
+    // ── Phase 52: FPU coprocessor interface (FC=111 CPU Space) ──────────────
+    output logic        eu_coproc_req,
+    output logic        eu_coproc_rw,
+    output logic [1:0]  eu_coproc_siz,
+    output logic [2:0]  eu_coproc_fc,
+    output logic [31:0] eu_coproc_addr,
+    output logic [31:0] eu_coproc_wdata,
+    input  logic [31:0] eu_coproc_rdata,
+    input  logic        eu_coproc_ack,
+    input  logic        eu_coproc_berr,
 
     // ── Address register update port (for (An)+ and -(An)) ──────────────────
     output logic        an_wr_en,
     output logic [2:0]  an_wr_sel,
-    output logic [31:0] an_wr_data
+    output logic [31:0] an_wr_data,
+
+    // ── Control register reads (for MOVEC Rc→Rn) ─────────────────────────────
+    input  logic [2:0]  sfc_in,
+    input  logic [2:0]  dfc_in,
+    input  logic [31:0] vbr_in,
+    input  logic [31:0] usp_in,
+    input  logic [31:0] isp_in,
+    input  logic [31:0] msp_in,
+    input  logic [31:0] cacr_in,
+    input  logic [31:0] caar_in,
+
+    // ── Control register writes (from MOVEC Rn→Rc, fired in WB stage) ────────
+    output logic        vbr_wr_en,
+    output logic [31:0] vbr_wr_data,
+    output logic        sfc_wr_en,
+    output logic [2:0]  sfc_wr_data,
+    output logic        dfc_wr_en,
+    output logic [2:0]  dfc_wr_data,
+    output logic        cacr_wr_en,
+    output logic [31:0] cacr_wr_data,
+    output logic        caar_wr_en,
+    output logic [31:0] caar_wr_data,
+    output logic        usp_wr_en,
+    output logic [31:0] usp_wr_data,
+    output logic        isp_wr_en,
+    output logic [31:0] isp_wr_data,
+    output logic        msp_wr_en,
+    output logic [31:0] msp_wr_data
 );
 
     // -----------------------------------------------------------------------
@@ -321,6 +362,42 @@ module eu_seq (
     logic        dec_movem_predec;  // 1=-(An) predecrement mode (store only)
     logic        dec_movem_postinc; // 1=(An)+ post-increment mode (load only)
     logic        dec_movem_long;    // 1=longword (f_ss[0]), 0=word
+    // Phase 46: MOVEC / MOVES
+    logic        dec_is_movec;      // MOVEC instruction (Rn→Rc direction only; Rc→Rn uses dec_use_imm)
+    logic        dec_movec_to_ctrl; // 1=Rn→Rc (write to ctrl reg)
+    logic        dec_is_moves;      // MOVES instruction
+    logic        dec_moves_load;    // 1=load (ea→Rn, SFC), 0=store (Rn→ea, DFC)
+    // Phase 47: TAS
+    logic        dec_is_tas;        // TAS.B instruction (test and set byte)
+    // Phase 48: CHK, CMP2, CHK2
+    logic        dec_is_chk;        // CHK <ea>,Dn
+    logic        dec_chk_word;      // 1=CHK.W (size word), 0=CHK.L (size long)
+    logic        dec_is_cmp2chk2;   // CMP2 or CHK2 two-bound compare
+    // Phase 49: MOVEP
+    logic        dec_is_movep;      // MOVEP instruction
+    logic        dec_movep_load;    // 1=mem→Dn (load), 0=Dn→mem (store)
+    logic        dec_movep_long;    // 1=longword (4 bytes), 0=word (2 bytes)
+    // Phase 50: MOVE16
+    logic        dec_is_move16;     // MOVE16 instruction
+    logic [1:0]  dec_move16_form;   // 00=(An)+/(Am)+, 01=(An)+/abs, 10=abs/(An)+, 11=(An)/(An)
+    // Phase 52: FPU coprocessor dispatch stub
+    logic        dec_is_fpu;        // Group F FPU instruction (cpid=1)
+
+    // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
+    logic [31:0] ctrl_reg_rd_val;
+    always_comb begin
+        case (ext_data[11:0])
+            12'h000: ctrl_reg_rd_val = {29'h0, sfc_in};
+            12'h001: ctrl_reg_rd_val = {29'h0, dfc_in};
+            12'h002: ctrl_reg_rd_val = cacr_in;
+            12'h800: ctrl_reg_rd_val = usp_in;
+            12'h801: ctrl_reg_rd_val = vbr_in;
+            12'h802: ctrl_reg_rd_val = caar_in;
+            12'h803: ctrl_reg_rd_val = msp_in;
+            12'h804: ctrl_reg_rd_val = isp_in;
+            default: ctrl_reg_rd_val = 32'h0;
+        endcase
+    end
 
     always_comb begin
         dec_valid        = 1'b0;
@@ -383,6 +460,20 @@ module eu_seq (
         dec_movem_predec  = 1'b0;
         dec_movem_postinc = 1'b0;
         dec_movem_long  = 1'b0;
+        dec_is_movec      = 1'b0;
+        dec_movec_to_ctrl = 1'b0;
+        dec_is_moves      = 1'b0;
+        dec_moves_load    = 1'b0;
+        dec_is_tas        = 1'b0;
+        dec_is_chk        = 1'b0;
+        dec_chk_word      = 1'b0;
+        dec_is_cmp2chk2   = 1'b0;
+        dec_is_movep      = 1'b0;
+        dec_movep_load    = 1'b0;
+        dec_movep_long    = 1'b0;
+        dec_is_move16     = 1'b0;
+        dec_move16_form   = 2'b0;
+        dec_is_fpu        = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -452,6 +543,84 @@ module eu_seq (
                             2'b10: begin dec_bit_op=BIT_CLR; dec_writes_reg=1'b1; dec_valid=1'b1; end
                             2'b11: begin dec_bit_op=BIT_SET; dec_writes_reg=1'b1; dec_valid=1'b1; end
                         endcase
+                    end else if (!f_dir && f_ss == 2'b11 && !f_dn[0] &&
+                                 f_dn != 3'b110 && f_mode == 3'b010) begin
+                        // CMP2/CHK2 <ea>,Rn — 0000 ss00 11 010 rrr + ext
+                        // ext[15]=D/A, ext[14:12]=Rn, ext[11]=CHK2(1)/CMP2(0)
+                        // EA: (An) only (Phase 48)
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_is_cmp2chk2 = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_x_unchanged = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};                     // An → rd_a (EA base)
+                        dec_reads_src   = 1'b1;
+                        dec_dst_reg     = {ext_data[15], ext_data[14:12]};   // Rn → rd_b
+                        dec_reads_dst   = 1'b1;
+                        case (f_dn)
+                            3'b000: dec_siz = 2'b01;   // byte
+                            3'b010: dec_siz = 2'b10;   // word
+                            default: dec_siz = 2'b00;  // long (f_dn=3'b100)
+                        endcase
+                    end else if (!f_dir && f_dn == 3'b111 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        // MOVES: 0000 1110 0ss mmm rrr + extension word
+                        // ext[15]=D/A, ext[14:12]=Rn, ext[11]=direction (1=load, 0=store)
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_siz         = f_siz;
+                        dec_x_unchanged = 1'b1;
+                        dec_is_moves    = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        if (ext_data[11]) begin
+                            // Load: ea → Rn (use SFC as mem_fc)
+                            dec_moves_load = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};   // An = EA base → rd_a
+                            dec_reads_src  = 1'b1;
+                            dec_dest_reg   = {ext_data[15], ext_data[14:12]};  // Rn
+                            dec_writes_reg = 1'b1;
+                        end else begin
+                            // Store: Rn → ea (use DFC as mem_fc)
+                            dec_moves_load = 1'b0;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_src_reg    = {ext_data[15], ext_data[14:12]};  // Rn = data
+                            dec_dst_reg    = {1'b1, f_reg};   // An = EA base → rd_b
+                            dec_reads_src  = 1'b1;
+                            dec_reads_dst  = 1'b1;
+                        end
+                        case (f_mode)
+                            3'b010: ;  // (An): offset = 0
+                            3'b011: begin  // (An)+
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg==3'b111);
+                            end
+                            3'b100: begin  // -(An)
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg==3'b111)+32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
+                    end else if (f_dir && f_mode == 3'b001) begin
+                        // MOVEP: 0000 DDD1 dir siz 001 AAA + d16
+                        // f_ss[1]=direction (1=Dn→mem/store, 0=mem→Dn/load)
+                        // f_ss[0]=size (1=longword 4 bytes, 0=word 2 bytes)
+                        // EA = (d16,An): An=f_reg, d16=ext_data signed
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_NONE;
+                        dec_is_movep   = 1'b1;
+                        dec_movep_load = !f_ss[1];
+                        dec_movep_long = f_ss[0];
+                        dec_needs_ext  = 1'b1;
+                        dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
+                        dec_src_reg    = {1'b1, f_reg};   // An → rd_a (EA base)
+                        dec_reads_src  = 1'b1;
+                        dec_dst_reg    = {1'b0, f_dn};    // Dn → rd_b (store data / load dest)
+                        dec_reads_dst  = 1'b1;
                     end
                 end
 
@@ -697,7 +866,7 @@ module eu_seq (
                 // ----------------------------------------------------------------
                 4'h4: begin
                     if (f_mode == 3'b000) begin
-                        if (f_ss != 2'b11) begin
+                        if (f_ss != 2'b11 && !f_dir) begin
                             dec_siz         = f_siz;
                             dec_dst_reg     = {1'b0, f_reg};
                             dec_dest_reg    = {1'b0, f_reg};
@@ -751,9 +920,24 @@ module eu_seq (
                                 3'b101: begin dec_alu_op=ALU_TST;  dec_x_unchanged=1'b1; dec_valid=1'b1; end
                                 default: ;
                             endcase
+                        end else if (f_ss != 2'b11 && f_dir) begin
+                            // CHK Dn_ub, Dn_chk: 0100 DDD1 ss 000 rrr
+                            // f_dir=1, f_ss=10→CHK.W, f_ss=00→CHK.L
+                            dec_valid       = 1'b1;
+                            dec_unit        = UNIT_NONE;  // N via wb_ccr[3], not wb_move_n
+                            dec_is_chk      = 1'b1;
+                            dec_chk_word    = (f_ss == 2'b10);
+                            dec_siz         = (f_ss == 2'b10) ? 2'b10 : 2'b00;
+                            dec_updates_ccr = 1'b1;
+                            dec_x_unchanged = 1'b1;
+                            dec_src_reg     = {1'b0, f_reg};   // upper bound → rd_a
+                            dec_dst_reg     = {1'b0, f_dn};    // value checked → rd_b
+                            dec_reads_src   = 1'b1;
+                            dec_reads_dst   = 1'b1;
                         end else begin
-                            // f_ss==11, f_mode==000: EXT.L (f_dir=0) / EXTB.L (f_dir=1)
+                            // f_ss==11, f_mode==000
                             if (f_dn == 3'b100) begin
+                                // EXT.L (f_dir=0) / EXTB.L (f_dir=1)
                                 dec_unit           = UNIT_MOVE;
                                 dec_src_reg        = {1'b0, f_reg};
                                 dec_dst_reg        = {1'b0, f_reg};
@@ -767,6 +951,19 @@ module eu_seq (
                                 dec_sext           = 1'b1;
                                 dec_sext_from_byte = f_dir;   // 0=EXT.L(word→long), 1=EXTB.L(byte→long)
                                 dec_valid          = 1'b1;
+                            end else if (f_dn == 3'b101 && !f_dir) begin
+                                // TAS.B Dn: 0100 1010 11 000 rrr
+                                // f_mode=000 puts us here; f_dn=101, f_dir=0, f_ss=11
+                                dec_valid       = 1'b1;
+                                dec_unit        = UNIT_MOVE;
+                                dec_siz         = 2'b01;    // byte
+                                dec_src_reg     = {1'b0, f_reg};
+                                dec_dest_reg    = {1'b0, f_reg};
+                                dec_reads_src   = 1'b1;
+                                dec_writes_reg  = 1'b1;
+                                dec_updates_ccr = 1'b1;
+                                dec_x_unchanged = 1'b1;
+                                dec_is_tas      = 1'b1;
                             end
                         end
                     end else if (f_dir && f_ss == 2'b11 && f_mode >= 3'b010) begin
@@ -827,6 +1024,21 @@ module eu_seq (
                             dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext  = 1'b1;
                         end
+                    end else if (f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
+                                 f_mode == 3'b111 && f_reg == 3'b100) begin
+                        // CHK #imm, Dn: 0100 DDD1 ss 111 100 + ext
+                        // f_dir=1, f_ss=10→CHK.W, f_ss=00→CHK.L, f_mode=7, f_reg=4
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_NONE;  // N via wb_ccr[3], not wb_move_n
+                        dec_is_chk      = 1'b1;
+                        dec_chk_word    = (f_ss == 2'b10);
+                        dec_siz         = (f_ss == 2'b10) ? 2'b10 : 2'b00;
+                        dec_updates_ccr = 1'b1;
+                        dec_x_unchanged = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};    // value checked → rd_b
+                        dec_reads_dst   = 1'b1;
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
                     end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b10) begin
                         // JSR ea: 0100 1110 10 mmm rrr — push PC to -(A7), jump to ea
                         if (f_mode == 3'b010 || f_mode == 3'b101) begin
@@ -986,6 +1198,48 @@ module eu_seq (
                     end else if (instr_word == 16'h4E71) begin
                         // NOP: 0100 1110 0111 0001
                         dec_valid = 1'b1;
+
+                    end else if (instr_word == 16'h4E7A) begin
+                        // MOVEC Rc,Rn: read control register → write to general register
+                        // Extension word: [15]=D/A, [14:12]=Rn, [11:0]=Rc
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_MOVE;
+                        dec_siz        = 2'b00;   // longword
+                        dec_writes_reg = 1'b1;
+                        dec_dest_reg   = {ext_data[15], ext_data[14:12]};
+                        dec_use_imm    = 1'b1;
+                        dec_imm        = ctrl_reg_rd_val;
+                        dec_needs_ext  = 1'b1;
+
+                    end else if (instr_word == 16'h4E7B) begin
+                        // MOVEC Rn,Rc: read general register → write to control register
+                        // Extension word: [15]=D/A, [14:12]=Rn, [11:0]=Rc
+                        dec_valid          = 1'b1;
+                        dec_unit           = UNIT_MOVE;
+                        dec_siz            = 2'b00;
+                        dec_is_movec       = 1'b1;
+                        dec_movec_to_ctrl  = 1'b1;
+                        dec_src_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_needs_ext      = 1'b1;
+
+                    // ----------------------------------------------------------------
+                    // Phase 47: TAS.B (An) — memory indirect RMW: 0100 1010 11 010 rrr
+                    // f_dn=101, f_dir=0, f_ss=11, f_mode=010.
+                    // TAS.B Dn (f_mode=000) is decoded inside the f_mode==000/f_ss==11 block above.
+                    // N=bit7(original), Z=(original_byte==0), V=0, C=0, X unchanged.
+                    // ----------------------------------------------------------------
+                    end else if (f_dn == 3'b101 && !f_dir && f_ss == 2'b11 && f_mode == 3'b010) begin
+                        // TAS.B (An) — memory indirect, RMW
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_siz         = 2'b01;    // byte
+                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a
+                        dec_reads_src   = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_updates_ccr = 1'b0;  // CCR fires via tas_sr_wr path
+                        dec_x_unchanged = 1'b1;
+                        dec_is_tas      = 1'b1;
 
                     // ----------------------------------------------------------------
                     // Phase 43: MOVEM — register list save/restore
@@ -1344,6 +1598,50 @@ module eu_seq (
                     end
                 end
 
+                // ----------------------------------------------------------------
+                // Group 1111: MOVE16 (Phase 50) and FPU coprocessor (Phase 52)
+                // cpid=1 (f_dn=001) is shared; disambiguate by f_mode and ppp.
+                // MOVE16 uses ppp=000 with EA mode 0-3 (!f_mode[2]).
+                // FPU uses cpid=1 with EA mode 4-7 (f_mode[2]=1) OR ppp != 000.
+                // ----------------------------------------------------------------
+                4'hf: begin
+                    if (f_dn == 3'b001 && !f_dir && f_ss == 2'b00 && !f_mode[2]) begin
+                        // MOVE16: ppp=000, EA modes 0-3 (modes 4-7 would be FPU)
+                        dec_valid     = 1'b1;
+                        dec_is_move16 = 1'b1;
+                        dec_unit      = UNIT_NONE;
+                        dec_needs_ext = 1'b1;
+                        dec_src_reg   = {1'b1, f_reg};   // Ax → rd_a (src An or dst An)
+                        dec_reads_src = 1'b1;
+                        case (f_mode)
+                            3'b001: begin  // (An)+,(Am)+
+                                dec_move16_form = 2'b00;
+                                dec_dst_reg     = {1'b1, ext_data[14:12]};
+                                dec_reads_dst   = 1'b1;
+                            end
+                            3'b010: begin  // (An)+,(xxx).L
+                                dec_move16_form = 2'b01;
+                            end
+                            3'b011: begin  // (xxx).L,(An)+
+                                dec_move16_form = 2'b10;
+                            end
+                            3'b000: begin  // (An),(An)  — no postincrement
+                                dec_move16_form = 2'b11;
+                                dec_dst_reg     = {1'b1, ext_data[14:12]};
+                                dec_reads_dst   = 1'b1;
+                            end
+                            default: ;
+                        endcase
+                    end else if (f_dn == 3'b001) begin
+                        // FPU coprocessor (Phase 52 stub): cpid=1, any ppp or EA mode 4-7.
+                        // Issues one CPI CPU Space bus cycle; full protocol in later phases.
+                        dec_valid     = 1'b1;
+                        dec_is_fpu    = 1'b1;
+                        dec_unit      = UNIT_NONE;
+                        dec_needs_ext = 1'b1;   // FPU opcode always has extension word (CIR)
+                    end
+                end
+
                 default: ;
 
             endcase
@@ -1365,6 +1663,9 @@ module eu_seq (
     logic [31:0] wb_an_upd_new;
     logic        wb_is_mem_rd;
     logic        wb_is_movea_w;
+    // Phase 46: MOVEC Rn→Rc write-back
+    logic        wb_is_movec_wr;
+    logic [11:0] wb_movec_rc;
 
     // -----------------------------------------------------------------------
     // Stall / hazard logic — checks both EX and WB for RAW conflicts.
@@ -1392,6 +1693,31 @@ module eu_seq (
     logic        ex_movem_predec;
     logic        ex_movem_postinc;
     logic        ex_movem_long;
+    // Phase 46: MOVEC / MOVES
+    logic        ex_is_movec_wr;   // MOVEC Rn→Rc in EX
+    logic [11:0] ex_movec_rc;      // Rc code latched from extension word
+    logic        ex_is_moves;      // MOVES in EX
+    logic        ex_moves_load;    // 1=load (SFC), 0=store (DFC)
+    // Phase 47: TAS
+    logic        ex_is_tas;        // TAS in EX stage
+    // Phase 48: CHK, CMP2/CHK2
+    logic        ex_is_chk;        // CHK in EX stage
+    logic        ex_chk_word;      // 1=CHK.W, 0=CHK.L
+    logic        ex_is_cmp2chk2;   // CMP2 or CHK2 in EX stage
+    logic        ex_is_movep;      // MOVEP in EX stage
+    logic        ex_is_fpu;        // FPU instruction in EX stage (Phase 52)
+    logic        ex_movep_load;    // 1=load, 0=store
+    logic        ex_movep_long;    // 1=longword, 0=word
+    logic        ex_is_move16;     // MOVE16 in EX stage
+    logic [1:0]  ex_move16_form;
+
+    // TAS (An) RMW state — declared early for ex_mem_stall
+    logic        tas_run_r;          // TAS write phase active
+    logic        tas_after_write_r;  // 1-cycle cooldown after write ack; prevents re-trigger
+    logic [7:0]  tas_wdata_r;        // byte to write (original | 0x80)
+    logic [4:0]  tas_ccr_r;          // CCR {X,N,Z,V,C} captured from read value
+    logic        tas_read_ack;       // hold stall on read-ack cycle before write starts
+    logic        tas_sr_wr_en;       // combinational: fire CCR update when write ack
 
     // RTR two-phase read state (module-level registers; declared here for stall)
     logic        rtr_phase_r;
@@ -1439,10 +1765,154 @@ module eu_seq (
     assign movem_an_final = movem_predec_r  ? movem_addr_r
                                             : (movem_addr_r + movem_step);
 
+    // Phase 49: MOVEP byte-interleaved FSM state — declared early for ex_mem_stall
+    logic        movep_start_r;       // 1-cycle EA-capture stall
+    logic        movep_run_r;         // bus sequence active
+    logic        movep_load_r;        // 1=mem→Dn (load), 0=Dn→mem (store)
+    logic        movep_long_r;        // 1=longword (4 bytes), 0=word (2 bytes)
+    logic [1:0]  movep_byte_r;        // current byte index (0=first)
+    logic [31:0] movep_addr_r;        // current byte address
+    logic [2:0]  movep_dn_r;          // Dn number for writeback
+    logic [31:0] movep_dn_val_r;      // captured Dn value for stores
+    logic [31:0] movep_acc_r;         // accumulated load data
+    logic        movep_last;          // final byte this cycle
+    logic [7:0]  movep_wr_byte_w;     // byte to send for stores
+    logic [31:0] movep_rd_acc_w;      // accumulator updated with current byte
+    logic        movep_wr_en;         // register writeback for loads
+    logic [31:0] movep_wr_data;
+    logic [3:0]  movep_wr_sel;
+
+    assign movep_last = movep_run_r && mem_ack &&
+                        ((movep_long_r && movep_byte_r == 2'd3) ||
+                         (!movep_long_r && movep_byte_r == 2'd1));
+
+    always_comb begin
+        movep_wr_byte_w = 8'h0;
+        if (movep_long_r) begin
+            case (movep_byte_r)
+                2'd0: movep_wr_byte_w = movep_dn_val_r[31:24];
+                2'd1: movep_wr_byte_w = movep_dn_val_r[23:16];
+                2'd2: movep_wr_byte_w = movep_dn_val_r[15:8];
+                2'd3: movep_wr_byte_w = movep_dn_val_r[7:0];
+            endcase
+        end else begin
+            movep_wr_byte_w = movep_byte_r[0] ? movep_dn_val_r[7:0] : movep_dn_val_r[15:8];
+        end
+    end
+
+    always_comb begin
+        movep_rd_acc_w = movep_acc_r;
+        if (movep_run_r && mem_ack && movep_load_r) begin
+            case ({movep_long_r, movep_byte_r})
+                3'b000: movep_rd_acc_w = {movep_acc_r[31:16], mem_rdata[7:0], movep_acc_r[7:0]};
+                3'b001: movep_rd_acc_w = {movep_acc_r[31:8],  mem_rdata[7:0]};
+                3'b100: movep_rd_acc_w = {mem_rdata[7:0],     movep_acc_r[23:0]};
+                3'b101: movep_rd_acc_w = {movep_acc_r[31:24], mem_rdata[7:0], movep_acc_r[15:0]};
+                3'b110: movep_rd_acc_w = {movep_acc_r[31:16], mem_rdata[7:0], movep_acc_r[7:0]};
+                3'b111: movep_rd_acc_w = {movep_acc_r[31:8],  mem_rdata[7:0]};
+                default: movep_rd_acc_w = movep_acc_r;
+            endcase
+        end
+    end
+
+    assign movep_wr_en   = movep_last && movep_load_r;
+    assign movep_wr_data = movep_rd_acc_w;
+    assign movep_wr_sel  = {1'b0, movep_dn_r};
+
+    // Phase 50: MOVE16 16-byte block move FSM — declared early for ex_mem_stall
+    logic        move16_start_r;
+    logic        move16_run_r;
+    logic        move16_phase_r;       // 0=read from src, 1=write to dst
+    logic [1:0]  move16_beat_r;
+    logic [31:0] move16_src_r;         // current read address
+    logic [31:0] move16_dst_r;         // current write address
+    logic [31:0] move16_src_base_r;    // captured src base for postinc calc
+    logic [31:0] move16_dst_base_r;    // captured dst base for postinc calc
+    logic [31:0] move16_data_r [0:3];  // read data buffer
+    logic [1:0]  move16_form_r;
+    logic        move16_src_postinc_r;
+    logic        move16_dst_postinc_r;
+    logic [2:0]  move16_src_an_r;
+    logic [2:0]  move16_dst_an_r;
+    logic        move16_an2_wr_r;      // deferred dst An postinc write
+
+    logic        move16_last;
+    logic [31:0] move16_wdata_w;
+    assign move16_last = move16_run_r && move16_phase_r && (move16_beat_r == 2'd3) && mem_ack;
+
+    // Phase 52: FPU dispatch FSM state — declared early for ex_mem_stall
+    logic        fpu_start_r;      // one-cycle setup after instr_ack
+    logic        fpu_run_r;        // eu_coproc_req active, waiting for ack
+    logic [2:0]  fpu_prim_r;       // captured ppp = {f_dir, f_ss} for address generation
+    always_comb begin
+        case (move16_beat_r)
+            2'd0: move16_wdata_w = move16_data_r[0];
+            2'd1: move16_wdata_w = move16_data_r[1];
+            2'd2: move16_wdata_w = move16_data_r[2];
+            2'd3: move16_wdata_w = move16_data_r[3];
+        endcase
+    end
+
+    // Phase 48: CMP2/CHK2 two-read FSM state — declared early for ex_mem_stall
+    logic        cmp2_run_r;        // second read in progress
+    logic        cmp2_after_r;      // 1-cycle cooldown after second read ack
+    logic [31:0] cmp2_lb_r;         // lower bound captured from first read
+    logic [31:0] cmp2_addr2_r;      // address for second read (EA + size_step)
+    logic [31:0] cmp2_rn_r;         // Rn value captured at FSM start
+    logic        cmp2_is_chk2_r;    // 1=CHK2 (trap on range fail), 0=CMP2
+    logic        cmp2_is_an_r;      // 1=Rn is An (always 32-bit compare)
+    logic [1:0]  cmp2_siz_r;        // instruction size for sign extension
+    logic        cmp2_first_ack;    // first read just acked — hold stall while FSM starts
+    logic        cmp2_sr_wr_en;     // fire CCR update when second read acks
+
+    // CMP2/CHK2 sign-extended comparison values (combinational from FSM state + mem_rdata)
+    logic [31:0] cmp2_lb_sext_w, cmp2_ub_sext_w, cmp2_rn_sext_w;
+    logic        cmp2_c_w, cmp2_z_w;
+    always_comb begin
+        case (cmp2_siz_r)
+            2'b01: begin  // byte
+                cmp2_lb_sext_w = {{24{cmp2_lb_r[7]}},  cmp2_lb_r[7:0]};
+                cmp2_ub_sext_w = {{24{mem_rdata[7]}},   mem_rdata[7:0]};
+                cmp2_rn_sext_w = cmp2_is_an_r ? cmp2_rn_r : {{24{cmp2_rn_r[7]}},  cmp2_rn_r[7:0]};
+            end
+            2'b10: begin  // word
+                cmp2_lb_sext_w = {{16{cmp2_lb_r[15]}}, cmp2_lb_r[15:0]};
+                cmp2_ub_sext_w = {{16{mem_rdata[15]}},  mem_rdata[15:0]};
+                cmp2_rn_sext_w = cmp2_is_an_r ? cmp2_rn_r : {{16{cmp2_rn_r[15]}}, cmp2_rn_r[15:0]};
+            end
+            default: begin  // long
+                cmp2_lb_sext_w = cmp2_lb_r;
+                cmp2_ub_sext_w = mem_rdata;
+                cmp2_rn_sext_w = cmp2_rn_r;
+            end
+        endcase
+        cmp2_c_w = ($signed(cmp2_rn_sext_w) < $signed(cmp2_lb_sext_w)) ||
+                   ($signed(cmp2_rn_sext_w) > $signed(cmp2_ub_sext_w));
+        cmp2_z_w = (cmp2_rn_sext_w == cmp2_lb_sext_w) || (cmp2_rn_sext_w == cmp2_ub_sext_w);
+    end
+
     logic rtr_stall, ex_mem_stall;
     assign rtr_stall    = ex_is_rtr && !(rtr_phase_r && mem_ack);
-    assign ex_mem_stall = movem_start_r || movem_run_r ||
-                          ((ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) || rtr_stall;
+    // tas_read_ack: hold pipeline stall on the cycle the TAS read ack fires (before
+    // tas_run_r becomes 1) so EX doesn't release prematurely. Gated by !tas_after_write_r
+    // to prevent re-triggering after the write phase completes.
+    assign tas_read_ack = ex_valid && ex_is_tas && ex_is_mem_rd && mem_ack
+                          && !tas_run_r && !tas_after_write_r;
+    // cmp2_first_ack: holds stall when first read of CMP2/CHK2 acks, before cmp2_run_r=1
+    assign cmp2_first_ack = ex_valid && ex_is_cmp2chk2 && ex_is_mem_rd && mem_ack
+                            && !cmp2_run_r && !cmp2_after_r;
+    // cmp2_sr_wr_en: combinational CCR update from CMP2/CHK2 second read
+    assign cmp2_sr_wr_en  = cmp2_run_r && mem_ack;
+    // During cmp2_after_r and tas_after_write_r cooldowns, suppress bus req and mem-wait
+    // stall so EX can advance cleanly without a spurious bus cycle.
+    assign ex_mem_stall = tas_run_r || tas_read_ack || movem_start_r || movem_run_r ||
+                          movep_start_r || movep_run_r ||
+                          move16_start_r || move16_run_r ||
+                          fpu_start_r || fpu_run_r ||
+                          cmp2_run_r || cmp2_first_ack ||
+                          (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
+                           (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
+                          rtr_stall;
 
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -1532,6 +2002,16 @@ module eu_seq (
             ex_movem_predec   <= 1'b0;
             ex_movem_postinc  <= 1'b0;
             ex_movem_long     <= 1'b0;
+            ex_is_tas         <= 1'b0;
+            ex_is_chk         <= 1'b0;
+            ex_chk_word       <= 1'b0;
+            ex_is_cmp2chk2    <= 1'b0;
+            ex_is_movep       <= 1'b0;
+            ex_movep_load     <= 1'b0;
+            ex_movep_long     <= 1'b0;
+            ex_is_move16      <= 1'b0;
+            ex_move16_form    <= 2'b0;
+            ex_is_fpu         <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -1563,6 +2043,20 @@ module eu_seq (
             ex_movem_predec   <= 1'b0;
             ex_movem_postinc  <= 1'b0;
             ex_movem_long     <= 1'b0;
+            ex_is_tas         <= 1'b0;
+            ex_is_chk         <= 1'b0;
+            ex_chk_word       <= 1'b0;
+            ex_is_cmp2chk2    <= 1'b0;
+            ex_is_movep       <= 1'b0;
+            ex_movep_load     <= 1'b0;
+            ex_movep_long     <= 1'b0;
+            ex_is_move16      <= 1'b0;
+            ex_move16_form    <= 2'b0;
+            ex_is_fpu         <= 1'b0;
+            ex_is_movec_wr    <= 1'b0;
+            ex_movec_rc       <= 12'h0;
+            ex_is_moves       <= 1'b0;
+            ex_moves_load     <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -1619,6 +2113,20 @@ module eu_seq (
             ex_movem_predec   <= dec_movem_predec;
             ex_movem_postinc  <= dec_movem_postinc;
             ex_movem_long     <= dec_movem_long;
+            ex_is_movec_wr    <= dec_is_movec && dec_movec_to_ctrl;
+            ex_movec_rc       <= ext_data[11:0];
+            ex_is_moves       <= dec_is_moves;
+            ex_moves_load     <= dec_moves_load;
+            ex_is_tas         <= dec_is_tas;
+            ex_is_chk         <= dec_is_chk;
+            ex_chk_word       <= dec_chk_word;
+            ex_is_cmp2chk2    <= dec_is_cmp2chk2;
+            ex_is_movep       <= dec_is_movep;
+            ex_movep_load     <= dec_movep_load;
+            ex_movep_long     <= dec_movep_long;
+            ex_is_move16      <= dec_is_move16;
+            ex_move16_form    <= dec_move16_form;
+            ex_is_fpu         <= dec_is_fpu;
         end
     end
 
@@ -1631,8 +2139,8 @@ module eu_seq (
     assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel : ex_src_reg;
     assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea) ? 2'b00 : ex_siz;
     assign rd_b_sel = ex_dst_reg;
-    // Phase 41: for indexed EA, rd_b carries Xn and must be read as full longword
-    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx) ? 2'b00 : ex_siz;
+    // Phase 41: for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
+    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2) ? 2'b00 : ex_siz;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
     logic [31:0] ex_an_base;
@@ -1721,6 +2229,237 @@ module eu_seq (
             if (movem_last) movem_run_r <= 1'b0;
         end
     end
+
+    // -----------------------------------------------------------------------
+    // Phase 47: TAS (An) RMW FSM
+    // Read phase: normal mem_rd with mem_rmw=1 (bus held).
+    // When read ack fires (tas_read_ack keeps stall high): set tas_run_r.
+    // Write phase (tas_run_r=1): drive write cycle; CCR fires on write ack.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            tas_run_r        <= 1'b0;
+            tas_after_write_r <= 1'b0;
+            tas_wdata_r      <= 8'h0;
+            tas_ccr_r        <= 5'h0;
+        end else begin
+            // 1-cycle cooldown pulse after write completes; clears re-trigger guard
+            tas_after_write_r <= tas_run_r && mem_ack;
+            if (!tas_run_r && !tas_after_write_r &&
+                ex_valid && ex_is_tas && ex_is_mem_rd && mem_ack) begin
+                // Read ack: capture data, start write phase
+                tas_run_r   <= 1'b1;
+                tas_wdata_r <= mem_rdata[7:0] | 8'h80;
+                tas_ccr_r   <= {flag_x, mem_rdata[7], (mem_rdata[7:0] == 8'h0), 1'b0, 1'b0};
+            end else if (tas_run_r && mem_ack) begin
+                // Write ack: end write phase
+                tas_run_r   <= 1'b0;
+            end
+        end
+    end
+
+    assign tas_sr_wr_en = tas_run_r && mem_ack;
+
+    // -----------------------------------------------------------------------
+    // Phase 48: CMP2/CHK2 two-read FSM
+    // First read: normal mem_rd path at EA (An).  On first ack (cmp2_first_ack
+    // holds stall one extra cycle) → capture lb and Rn, compute addr2, set
+    // cmp2_run_r.  Second read (cmp2_run_r=1): bus cycle at addr2; when it
+    // acks, fire CCR update and optionally chk_trap; cmp2_after_r suppresses
+    // a spurious third bus cycle for one cooldown cycle.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            cmp2_run_r     <= 1'b0;
+            cmp2_after_r   <= 1'b0;
+            cmp2_lb_r      <= 32'h0;
+            cmp2_addr2_r   <= 32'h0;
+            cmp2_rn_r      <= 32'h0;
+            cmp2_is_chk2_r <= 1'b0;
+            cmp2_is_an_r   <= 1'b0;
+            cmp2_siz_r     <= 2'b00;
+        end else begin
+            cmp2_after_r <= cmp2_run_r && mem_ack;
+            if (!cmp2_run_r && !cmp2_after_r &&
+                ex_valid && ex_is_cmp2chk2 && ex_is_mem_rd && mem_ack) begin
+                // First read ack: capture bounds and start second read
+                cmp2_run_r     <= 1'b1;
+                cmp2_lb_r      <= mem_rdata;
+                cmp2_rn_r      <= rd_b_data;   // rd_b = Rn (read as 32-bit; see rd_b_siz)
+                cmp2_is_chk2_r <= ex_imm[11];  // ext_data[11] = CHK2 selector
+                cmp2_is_an_r   <= ex_imm[15];  // ext_data[15] = D/A flag
+                cmp2_siz_r     <= ex_siz;
+                case (ex_siz)
+                    2'b01: cmp2_addr2_r <= ex_ea + 32'd1;
+                    2'b10: cmp2_addr2_r <= ex_ea + 32'd2;
+                    default: cmp2_addr2_r <= ex_ea + 32'd4;
+                endcase
+            end else if (cmp2_run_r && mem_ack) begin
+                cmp2_run_r <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Phase 49: MOVEP byte-interleaved FSM
+    // start_r (1 cycle): EX has An in rd_a_data, capture EA and Dn value.
+    // run_r: issue one SIZ=byte bus cycle per pending transfer.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            movep_start_r  <= 1'b0;
+            movep_run_r    <= 1'b0;
+            movep_load_r   <= 1'b0;
+            movep_long_r   <= 1'b0;
+            movep_byte_r   <= 2'd0;
+            movep_addr_r   <= 32'h0;
+            movep_dn_r     <= 3'h0;
+            movep_dn_val_r <= 32'h0;
+            movep_acc_r    <= 32'h0;
+        end else if (!movep_start_r && !movep_run_r && instr_ack && dec_is_movep) begin
+            movep_start_r <= 1'b1;
+            movep_load_r  <= dec_movep_load;
+            movep_long_r  <= dec_movep_long;
+            movep_dn_r    <= f_dn;
+        end else if (movep_start_r) begin
+            movep_start_r  <= 1'b0;
+            movep_run_r    <= 1'b1;
+            movep_byte_r   <= 2'd0;
+            movep_addr_r   <= ex_ea;       // EA = An + d16 from EX combinatorial
+            movep_dn_val_r <= rd_b_data;   // Dn value for stores
+            movep_acc_r    <= 32'h0;
+        end else if (movep_run_r && mem_ack) begin
+            movep_byte_r  <= movep_byte_r + 2'd1;
+            movep_addr_r  <= movep_addr_r + 32'd2;
+            movep_acc_r   <= movep_rd_acc_w;
+            if (movep_last) movep_run_r <= 1'b0;
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Phase 50: MOVE16 16-byte block move FSM
+    // start_r (1 cycle): capture src/dst base addresses from rd_a/rd_b/ex_imm.
+    // run_r phase 0: 4 longword reads from src, accumulate in move16_data_r.
+    // run_r phase 1: 4 longword writes to dst from move16_data_r.
+    // An postinc (if needed): src An fires on move16_last; dst An fires next cycle.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            move16_start_r       <= 1'b0;
+            move16_run_r         <= 1'b0;
+            move16_phase_r       <= 1'b0;
+            move16_beat_r        <= 2'd0;
+            move16_src_r         <= 32'h0;
+            move16_dst_r         <= 32'h0;
+            move16_src_base_r    <= 32'h0;
+            move16_dst_base_r    <= 32'h0;
+            move16_data_r[0]     <= 32'h0; move16_data_r[1] <= 32'h0;
+            move16_data_r[2]     <= 32'h0; move16_data_r[3] <= 32'h0;
+            move16_form_r        <= 2'b0;
+            move16_src_postinc_r <= 1'b0;
+            move16_dst_postinc_r <= 1'b0;
+            move16_src_an_r      <= 3'h0;
+            move16_dst_an_r      <= 3'h0;
+            move16_an2_wr_r      <= 1'b0;
+        end else begin
+            // Deferred dst An postinc: fire cycle after move16_last when dst needs postinc
+            move16_an2_wr_r <= move16_last && move16_dst_postinc_r;
+
+            if (!move16_start_r && !move16_run_r && instr_ack && dec_is_move16) begin
+                move16_start_r       <= 1'b1;
+                move16_form_r        <= dec_move16_form;
+                move16_src_an_r      <= f_reg;
+                move16_dst_an_r      <= ext_data[14:12];
+                // src postinc for forms 00 (post/post) and 01 (An+/abs)
+                move16_src_postinc_r <= (dec_move16_form == 2'b00) || (dec_move16_form == 2'b01);
+                // dst postinc for forms 00 (post/post) and 10 (abs/An+)
+                move16_dst_postinc_r <= (dec_move16_form == 2'b00) || (dec_move16_form == 2'b10);
+            end else if (move16_start_r) begin
+                move16_start_r <= 1'b0;
+                move16_run_r   <= 1'b1;
+                move16_phase_r <= 1'b0;
+                move16_beat_r  <= 2'd0;
+                case (move16_form_r)
+                    2'b00: begin  // (An)+,(Am)+: src=rd_a, dst=rd_b
+                        move16_src_r      <= rd_a_data; move16_src_base_r <= rd_a_data;
+                        move16_dst_r      <= rd_b_data; move16_dst_base_r <= rd_b_data;
+                    end
+                    2'b01: begin  // (An)+,(xxx).L: src=rd_a (An), dst=ex_imm (abs)
+                        move16_src_r      <= rd_a_data; move16_src_base_r <= rd_a_data;
+                        move16_dst_r      <= ex_imm;    move16_dst_base_r <= ex_imm;
+                    end
+                    2'b10: begin  // (xxx).L,(An)+: src=ex_imm (abs), dst=rd_a (An)
+                        move16_src_r      <= ex_imm;    move16_src_base_r <= ex_imm;
+                        move16_dst_r      <= rd_a_data; move16_dst_base_r <= rd_a_data;
+                    end
+                    2'b11: begin  // (An),(An): src=rd_a, dst=rd_b, no postinc
+                        move16_src_r      <= rd_a_data; move16_src_base_r <= rd_a_data;
+                        move16_dst_r      <= rd_b_data; move16_dst_base_r <= rd_b_data;
+                    end
+                endcase
+            end else if (move16_run_r && mem_ack) begin
+                if (!move16_phase_r) begin
+                    // Read phase: capture longword, advance src address
+                    case (move16_beat_r)
+                        2'd0: move16_data_r[0] <= mem_rdata;
+                        2'd1: move16_data_r[1] <= mem_rdata;
+                        2'd2: move16_data_r[2] <= mem_rdata;
+                        2'd3: move16_data_r[3] <= mem_rdata;
+                    endcase
+                    if (move16_beat_r == 2'd3) begin
+                        move16_phase_r <= 1'b1;
+                        move16_beat_r  <= 2'd0;
+                        move16_dst_r   <= move16_dst_base_r;  // reset dst to base for writes
+                    end else begin
+                        move16_beat_r <= move16_beat_r + 2'd1;
+                        move16_src_r  <= move16_src_r + 32'd4;
+                    end
+                end else begin
+                    // Write phase
+                    if (move16_beat_r == 2'd3) begin
+                        move16_run_r <= 1'b0;
+                    end else begin
+                        move16_beat_r <= move16_beat_r + 2'd1;
+                        move16_dst_r  <= move16_dst_r + 32'd4;
+                    end
+                end
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Phase 52: FPU coprocessor dispatch FSM
+    // On instr_ack of a FPU instruction, issue one CPI read via eu_coproc_req.
+    // Address: A[19:16]=0010 (coproc), A[15:13]=ppp, A[12:11]=01 (cpid=1), A[10:0]=0.
+    // Full FPU response protocol deferred; stub completes when eu_coproc_ack fires.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            fpu_start_r <= 1'b0;
+            fpu_run_r   <= 1'b0;
+            fpu_prim_r  <= 3'h0;
+        end else begin
+            if (!fpu_start_r && !fpu_run_r && instr_ack && dec_is_fpu) begin
+                fpu_start_r <= 1'b1;
+                fpu_prim_r  <= {f_dir, f_ss};   // ppp from opcode bits [8:6]
+            end else if (fpu_start_r) begin
+                fpu_start_r <= 1'b0;
+                fpu_run_r   <= 1'b1;
+            end else if (fpu_run_r && (eu_coproc_ack || eu_coproc_berr)) begin
+                fpu_run_r   <= 1'b0;
+            end
+        end
+    end
+
+    // CHK comparison: rd_b = value checked (sign-extended by regfile to ex_siz);
+    // upper bound: rd_a_data (register mode) or ex_imm (immediate mode).
+    logic [31:0] chk_val_w, chk_ub_w;
+    logic        chk_below_w, chk_above_w;
+    assign chk_val_w   = rd_b_data;
+    assign chk_ub_w    = ex_use_imm ? ex_imm : rd_a_data;
+    // Regfile zero-extends word reads for Dn, so check the size-appropriate sign bit.
+    assign chk_below_w = ex_chk_word ? chk_val_w[15] : chk_val_w[31];
+    assign chk_above_w = $signed(chk_val_w) > $signed(chk_ub_w);    // above upper bound
 
     logic [31:0] ex_src_operand;
     assign ex_src_operand = ex_use_imm ? ex_imm : rd_a_data;
@@ -1821,16 +2560,27 @@ module eu_seq (
                 ex_x      = flag_x;
             end
             UNIT_MOVE: begin
-                ex_result = move_result_w;
-                ex_move_n = (ex_siz == 2'b01) ? move_result_n_b :
-                            (ex_siz == 2'b10) ? move_result_n_w : move_result_n_l;
-                ex_n      = ex_move_n;
-                ex_z      = (ex_siz == 2'b01) ? move_result_z_b :
-                            (ex_siz == 2'b10) ? move_result_z_w :
-                                                (move_result_w == 32'h0);
-                ex_v      = 1'b0;
-                ex_c      = 1'b0;
-                ex_x      = flag_x;
+                if (ex_is_tas) begin
+                    // TAS.B Dn: result = original_byte | 0x80; CCR from original byte
+                    ex_result = {24'h0, rd_a_data[7:0] | 8'h80};
+                    ex_n      = rd_a_data[7];
+                    ex_z      = (rd_a_data[7:0] == 8'h0);
+                    ex_move_n = rd_a_data[7];
+                    ex_v      = 1'b0;
+                    ex_c      = 1'b0;
+                    ex_x      = flag_x;
+                end else begin
+                    ex_result = move_result_w;
+                    ex_move_n = (ex_siz == 2'b01) ? move_result_n_b :
+                                (ex_siz == 2'b10) ? move_result_n_w : move_result_n_l;
+                    ex_n      = ex_move_n;
+                    ex_z      = (ex_siz == 2'b01) ? move_result_z_b :
+                                (ex_siz == 2'b10) ? move_result_z_w :
+                                                    (move_result_w == 32'h0);
+                    ex_v      = 1'b0;
+                    ex_c      = 1'b0;
+                    ex_x      = flag_x;
+                end
             end
             UNIT_BCD: begin
                 ex_result = {24'h0, bcd_result};  // byte result, zero-extended
@@ -1848,7 +2598,15 @@ module eu_seq (
                 ex_c      = flag_c;     // C unchanged
                 ex_x      = flag_x;     // X unchanged
             end
-            default: ;
+            default: begin
+                if (ex_is_chk) begin
+                    ex_n = chk_below_w;
+                    ex_z = flag_z;
+                    ex_v = 1'b0;
+                    ex_c = 1'b0;
+                    ex_x = flag_x;
+                end
+            end
         endcase
     end
 
@@ -1866,6 +2624,8 @@ module eu_seq (
             wb_an_upd_en    <= 1'b0;
             wb_is_mem_rd    <= 1'b0;
             wb_is_movea_w   <= 1'b0;
+            wb_is_movec_wr  <= 1'b0;
+            wb_movec_rc     <= 12'h0;
         end else if (ex_mem_stall) begin
             // Memory cycle in progress: drain WB (bubble).
             wb_valid        <= 1'b0;
@@ -1874,6 +2634,7 @@ module eu_seq (
             wb_an_upd_en    <= 1'b0;
             wb_is_mem_rd    <= 1'b0;
             wb_is_movea_w   <= 1'b0;
+            wb_is_movec_wr  <= 1'b0;
         end else begin
             wb_valid        <= ex_valid;
             wb_writes_reg   <= ex_writes_reg;
@@ -1893,6 +2654,8 @@ module eu_seq (
             wb_an_upd_new   <= ex_an_new;
             wb_is_mem_rd    <= ex_is_mem_rd;
             wb_is_movea_w   <= ex_is_movea_w;
+            wb_is_movec_wr  <= ex_is_movec_wr;
+            wb_movec_rc     <= ex_movec_rc;
         end
     end
 
@@ -1914,22 +2677,40 @@ module eu_seq (
     assign movem_wr_data = movem_long_r ? mem_rdata
                                         : {{16{mem_rdata[15]}}, mem_rdata[15:0]};
 
-    assign wr_en   = movem_wr_en || (wb_valid && wb_writes_reg);
-    assign wr_sel  = movem_wr_en ? movem_reg_sel : wb_dest_reg;
-    assign wr_siz  = movem_wr_en ? 2'b00         : wb_siz;
-    assign wr_data = movem_wr_en ? movem_wr_data  : wb_result_final;
+    // Phase 49: MOVEP load writes on last byte ack (assembles bytes into Dn).
+    // Word MOVEP writes only [15:0] (siz=10); long writes full 32 bits (siz=00).
+    assign wr_en   = movem_wr_en || movep_wr_en || (wb_valid && wb_writes_reg);
+    assign wr_sel  = movem_wr_en  ? movem_reg_sel
+                   : movep_wr_en  ? movep_wr_sel
+                   :                wb_dest_reg;
+    assign wr_siz  = movem_wr_en  ? 2'b00
+                   : movep_wr_en  ? (movep_long_r ? 2'b00 : 2'b10)
+                   :                wb_siz;
+    assign wr_data = movem_wr_en  ? movem_wr_data
+                   : movep_wr_en  ? movep_wr_data
+                   :                wb_result_final;
 
     // An update port: MOVEM fires at completion; RTR fires from EX; WB handles normal.
     logic        movem_an_wr_en;
     assign movem_an_wr_en = movem_last && (movem_predec_r || movem_postinc_r);
 
-    assign an_wr_en   = movem_an_wr_en || rtr_an_wr_en || (wb_valid && wb_an_upd_en);
-    assign an_wr_sel  = movem_an_wr_en ? movem_an_r
-                      : rtr_an_wr_en   ? 3'b111
-                      :                  wb_an_upd_reg;
-    assign an_wr_data = movem_an_wr_en ? movem_an_final
-                      : rtr_an_wr_en   ? rtr_an_wr_data
-                      :                  wb_an_upd_new;
+    // Phase 50: MOVE16 postincrement — src An on move16_last, dst An one cycle later
+    logic move16_an1_wr_en;
+    assign move16_an1_wr_en = move16_last && move16_src_postinc_r;
+
+    assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en ||
+                       move16_an1_wr_en || move16_an2_wr_r ||
+                       (wb_valid && wb_an_upd_en);
+    assign an_wr_sel = movem_an_wr_en    ? movem_an_r
+                     : rtr_an_wr_en      ? 3'b111
+                     : move16_an1_wr_en  ? move16_src_an_r
+                     : move16_an2_wr_r   ? move16_dst_an_r
+                     :                     wb_an_upd_reg;
+    assign an_wr_data = movem_an_wr_en   ? movem_an_final
+                      : rtr_an_wr_en     ? rtr_an_wr_data
+                      : move16_an1_wr_en ? move16_src_base_r + 32'd16
+                      : move16_an2_wr_r  ? move16_dst_base_r + 32'd16
+                      :                    wb_an_upd_new;
 
     // -----------------------------------------------------------------------
     // CCR / SR write outputs
@@ -1938,15 +2719,22 @@ module eu_seq (
     logic [4:0] final_ccr;
     assign final_ccr = wb_is_move ? {wb_ccr[4], wb_move_n, wb_ccr[2:0]} : wb_ccr;
 
-    // SR write: RTR fires CCR update from EX (phase 2); normal WB handles others.
-    assign sr_wr_en   = rtr_sr_wr_en || (wb_valid && wb_updates_ccr);
-    assign sr_wr_data = rtr_sr_wr_en ? rtr_sr_wr_data : {sr_out[15:8], 3'b000, final_ccr};
+    // SR write: RTR fires CCR update from EX (phase 2); TAS (An) fires from write ack;
+    // CMP2/CHK2 fires from second-read ack (cmp2_sr_wr_en); normal WB handles all others.
+    assign sr_wr_en   = rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || (wb_valid && wb_updates_ccr);
+    assign sr_wr_data = rtr_sr_wr_en  ? rtr_sr_wr_data
+                      : tas_sr_wr_en  ? {sr_out[15:8], 3'b000, tas_ccr_r}
+                      : cmp2_sr_wr_en ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
+                      :                 {sr_out[15:8], 3'b000, final_ccr};
     assign sr_ccr_only = 1'b1;
 
     // -----------------------------------------------------------------------
-    // Divide-by-zero trap (combinational from EX stage)
+    // Divide-by-zero trap / CHK-CHK2 out-of-bounds trap (combinational)
     // -----------------------------------------------------------------------
     assign div_trap = ex_valid && (ex_unit == UNIT_DIV) && md_div_by_zero;
+    // CHK: trap on current cycle (register/imm mode) or when second operand arrives (mem not implemented yet)
+    assign chk_trap = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
+                   || (cmp2_run_r && mem_ack && cmp2_is_chk2_r && cmp2_c_w);
 
     // -----------------------------------------------------------------------
     // BRA/Bcc branch — decided at decode time once CCR hazards are clear.
@@ -2007,15 +2795,76 @@ module eu_seq (
     // JSR/BSR write: mem_wdata = return PC (not rd_a_data).
     // -----------------------------------------------------------------------
     // Phase 43: MOVEM drives the bus directly during movem_run_r; normal path otherwise.
-    assign mem_req   = movem_run_r || (ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
-    assign mem_rw    = movem_run_r ? movem_load_r  : ex_is_mem_rd;
-    assign mem_siz   = movem_run_r ? (movem_long_r ? 2'b00 : 2'b10) :
+    // Phase 47: tas_run_r drives the TAS write phase (second bus cycle).
+    // Phase 48: cmp2_run_r drives the CMP2/CHK2 second read (upper bound at EA+size).
+    // Phase 49: movep_run_r drives byte bus cycles for MOVEP.
+    // Phase 50: move16_run_r drives 4 longword reads then 4 longword writes.
+    // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
+    assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
+                       (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
+                        ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
+    assign mem_rw    = movem_run_r   ? movem_load_r
+                     : tas_run_r     ? 1'b0
+                     : cmp2_run_r    ? 1'b1
+                     : movep_run_r   ? movep_load_r
+                     : move16_run_r  ? !move16_phase_r   // 0=read phase, 1=write phase
+                     : ex_is_mem_rd;
+    assign mem_siz   = movem_run_r   ? (movem_long_r ? 2'b00 : 2'b10) :
+                       cmp2_run_r    ? cmp2_siz_r :
+                       movep_run_r   ? 2'b01 :
+                       move16_run_r  ? 2'b00 :   // always longword
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 : ex_siz;
-    assign mem_fc    = {sr_out[13], 1'b0, 1'b1};
-    assign mem_addr  = movem_run_r ? movem_addr_r :
+    // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
+    assign mem_fc    = (ex_is_moves && ex_moves_load)  ? sfc_in :
+                       (ex_is_moves && !ex_moves_load) ? dfc_in :
+                                                         {sr_out[13], 1'b0, 1'b1};
+    assign mem_addr  = movem_run_r   ? movem_addr_r :
+                       cmp2_run_r    ? cmp2_addr2_r :
+                       movep_run_r   ? movep_addr_r :
+                       move16_run_r  ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
                        (ex_is_rtr && rtr_phase_r) ? rtr_a7_next_r : ex_ea;
     // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
-    assign mem_wdata = (ex_is_jsr || ex_is_bsr) ? ex_return_pc : rd_a_data;
+    // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
+    // For MOVEP store: drive the appropriate byte of Dn.
+    // For MOVE16 write phase: drive the buffered longword for the current beat.
+    assign mem_wdata = tas_run_r               ? {24'h0, tas_wdata_r}
+                     : movep_run_r             ? {24'h0, movep_wr_byte_w}
+                     : move16_run_r            ? move16_wdata_w
+                     : (ex_is_jsr || ex_is_bsr) ? ex_return_pc : rd_a_data;
+    // Phase 47: RMW — assert during TAS (An) read phase (not during write or cooldown).
+    assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
+
+    // -----------------------------------------------------------------------
+    // Phase 52: FPU coprocessor bus interface outputs
+    // eu_coproc_req asserted while fpu_run_r; CPI read (rw=1) of cpid=1 register 0.
+    // Address: A[31:20]=0, A[19:16]=0010, A[15:13]=ppp, A[12:11]=01 (cpid=1), A[10:0]=0.
+    // -----------------------------------------------------------------------
+    assign eu_coproc_req   = fpu_run_r;
+    assign eu_coproc_rw    = 1'b1;
+    assign eu_coproc_fc    = 3'b111;        // CPU Space
+    assign eu_coproc_siz   = 2'b00;         // longword
+    assign eu_coproc_wdata = 32'h0;
+    assign eu_coproc_addr  = {12'h000, 4'b0010, fpu_prim_r, 2'b01, 11'h000};
+
+    // -----------------------------------------------------------------------
+    // Phase 46: MOVEC Rn→Rc write outputs — fire from WB stage
+    // -----------------------------------------------------------------------
+    assign vbr_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h801);
+    assign vbr_wr_data = wb_result;
+    assign sfc_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h000);
+    assign sfc_wr_data = wb_result[2:0];
+    assign dfc_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h001);
+    assign dfc_wr_data = wb_result[2:0];
+    assign cacr_wr_en  = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h002);
+    assign cacr_wr_data= wb_result;
+    assign caar_wr_en  = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h802);
+    assign caar_wr_data= wb_result;
+    assign usp_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h800);
+    assign usp_wr_data = wb_result;
+    assign isp_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h804);
+    assign isp_wr_data = wb_result;
+    assign msp_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h803);
+    assign msp_wr_data = wb_result;
 
 endmodule
 
