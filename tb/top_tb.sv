@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// MC68030 m68030_top smoke-test (Phase 22 + Phase 34)
+// MC68030 m68030_top smoke-test (Phase 22 + Phase 34 + Phase 55)
 //
 //   P22-1: init_done fires; init_ssp/init_pc hold the reset vector values.
 //   P22-2: post-init pin checks (RSTOUT# deasserted; IFU active).
@@ -10,6 +10,9 @@
 //   P34-1: EU pc_out equals init_pc one cycle after boot_pulse.
 //   P34-2: EU isp_out equals init_ssp one cycle after boot_pulse.
 //   P34-3: IFU begins fetching from init_pc (ifu_req asserted, addr matches).
+//   P55-1: MOVEQ #42,D0 executes — D0 = 42.
+//   P55-2: MOVEQ #17,D1 executes — D1 = 17.
+//   P55-3: EU, IFU, BIU, SEQ, EXC, MMU cooperate without deadlock.
 
 module top_tb;
 
@@ -135,9 +138,17 @@ module top_tb;
     initial begin
         $display("=== Phase 22: m68030_top Integration Smoke Test ===");
 
-        // Pre-load reset vectors
+        // Pre-load reset vectors (PC=0x8 keeps code within mem_model range)
         u_mem.mem[0] = 32'hDEAD_BEF0;   // SSP @ 0x000000
-        u_mem.mem[1] = 32'hCAFE_0010;   // PC  @ 0x000004
+        u_mem.mem[1] = 32'h0000_0008;   // PC  @ 0x000004 → start at 0x8
+
+        // Phase 55: instruction code starting at 0x8 (word index 2)
+        // 0x08: MOVEQ #42,D0 (702A) | MOVEQ #17,D1 (7211) — consecutive
+        // 0x0C: NOP (4E71) | NOP (4E71)
+        // 0x10: NOP (4E71) | NOP (4E71)  — just NOPs after; no BRA needed
+        u_mem.mem[2] = 32'h702A_7211;
+        u_mem.mem[3] = 32'h4E71_4E71;
+        u_mem.mem[4] = 32'h4E71_4E71;
 
         // Release reset after 20 clocks
         repeat(20) @(posedge clk_4x);
@@ -160,7 +171,7 @@ module top_tb;
             end
             check("P22-1a: init_done fires",              saw_init);
             check32("P22-1b: init_ssp=$DEADBEF0",         u_top.u_biu.init_ssp, 32'hDEAD_BEF0);
-            check32("P22-1c: init_pc=$CAFE0010",          u_top.u_biu.init_pc,  32'hCAFE_0010);
+            check32("P22-1c: init_pc=$00000008",          u_top.u_biu.init_pc,  32'h0000_0008);
             check("P22-1d: AS# asserted during init",     saw_as_low);
             check("P22-1e: AS# deasserted (cycle ended)", saw_as_deassert);
         end
@@ -173,7 +184,7 @@ module top_tb;
         repeat(3) @(posedge clk_4x);
         begin
             check32("P34-1: EU pc_out == init_pc",
-                    u_top.u_eu.pc_out, 32'hCAFE_0010);
+                    u_top.u_eu.pc_out, 32'h0000_0008);
             check32("P34-2: EU isp_out == init_ssp",
                     u_top.u_eu.isp_out, 32'hDEAD_BEF0);
         end
@@ -188,7 +199,7 @@ module top_tb;
             logic saw_ifu_req;
             logic [31:0] init_pc_val;
             int t;
-            init_pc_val = 32'hCAFE_0010;
+            init_pc_val = 32'h0000_0008;
             saw_ifu_req = 0;
             for (t = 0; t < 10; t++) begin
                 @(posedge clk_4x);
@@ -252,6 +263,27 @@ module top_tb;
             @(posedge clk_4x);
             check("P22-4a: eu_addr_err quiescent",  !eu_addr_err);
             check("P22-4b: ifu_addr_err quiescent", !ifu_addr_err);
+        end
+
+        // ----------------------------------------------------------------
+        // P55: Instruction execution smoke test
+        // The EU executes MOVEQ #42,D0 and MOVEQ #17,D1 from the code
+        // loaded at 0x8. Wait up to 300 cycles for D0 to settle, then check.
+        // ----------------------------------------------------------------
+        $display("--- P55: Instruction execution (MOVEQ → D0, D1) ---");
+        begin
+            int t;
+            logic got_d0, got_d1;
+            got_d0 = 0; got_d1 = 0;
+            for (t = 0; t < 800; t++) begin
+                @(posedge clk_4x);
+                if (u_top.u_eu.u_rf.d_reg[0] == 32'd42) got_d0 = 1;
+                if (u_top.u_eu.u_rf.d_reg[1] == 32'd17) got_d1 = 1;
+                if (got_d0 && got_d1) break;
+            end
+            check("P55-1: D0 = 42 after MOVEQ #42,D0", got_d0);
+            check("P55-2: D1 = 17 after MOVEQ #17,D1", got_d1);
+            check("P55-3: No deadlock (completed in time)", t < 800);
         end
 
         $display("=== %0d failure(s) ===", fail_count);

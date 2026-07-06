@@ -1,9 +1,10 @@
 `default_nettype none
 
-// MC68030 Top Level — Phase 34 Integration
+// MC68030 Top Level — Phase 55 Final Integration
 //
-// Integrates: m68030_biu, m68030_ifu, m68030_seq, m68030_eu, m68030_exc.
-// m68030_mmu and m68030_cache remain stubs (tc=0, cacr=0).
+// Integrates: m68030_biu, m68030_ifu, m68030_seq, m68030_eu, m68030_exc,
+// m68030_mmu. All EU control registers (TC/TT0/TT1/CACR/CAAR) are wired
+// to both the BIU and the MMU. m68030_cache remains a stub (cacr disables it).
 //
 // Boot sequence:
 //   BIU fetches SSP@0 and PC@4 (init_done pulse).  On the rising edge of
@@ -628,11 +629,11 @@ module m68030_top #(
         // Control registers (MMU/cache disabled)
         .cacr            (eu_cacr_out),
         .caar            (eu_caar_out),
-        .tc              (TC_RESET),
-        .crp             (CRP_RESET),
+        .tc              (eu_tc_w),       // Phase 54/55: TC register from EU
+        .crp             (CRP_RESET),     // CRP/SRP: MOVEC not yet implemented
         .srp             (SRP_RESET),
-        .tt0             (TT0_RESET),
-        .tt1             (TT1_RESET),
+        .tt0             (eu_tt0_w),      // Phase 54/55: TT0 register from EU
+        .tt1             (eu_tt1_w),      // Phase 54/55: TT1 register from EU
         // Status outputs
         .bus_idle        (bus_idle),
         .bus_halted      (bus_halted),
