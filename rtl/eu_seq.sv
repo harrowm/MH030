@@ -144,6 +144,11 @@ module eu_seq (
     output logic [2:0]  an_wr_sel,
     output logic [31:0] an_wr_data,
 
+    // ── Phase 58: second Dn write port for 64-bit mul/div high result ────────
+    output logic        wr2_en,
+    output logic [2:0]  wr2_sel,
+    output logic [31:0] wr2_data,
+
     // ── Control register reads (for MOVEC Rc→Rn) ─────────────────────────────
     input  logic [2:0]  sfc_in,
     input  logic [2:0]  dfc_in,
@@ -185,7 +190,14 @@ module eu_seq (
     input  logic [15:0] eu_ptest_mmusr,  // MMUSR result (valid when ptest_ack)
     output logic [31:0] tc_out,          // TC register → MMU
     output logic [31:0] tt0_out,         // TT0 register → MMU
-    output logic [31:0] tt1_out          // TT1 register → MMU
+    output logic [31:0] tt1_out,         // TT1 register → MMU
+    // Phase 56: OS exception/control instructions
+    output logic        eu_trap_req,     // one-cycle pulse: TRAP #n firing
+    output logic [3:0]  eu_trap_num,     // trap vector number (0–15)
+    output logic        eu_trapv_req,    // one-cycle pulse: TRAPV fired (V was set)
+    output logic        eu_illegal_req,  // one-cycle pulse: ILLEGAL instruction
+    output logic        eu_stop,         // 1 while STOP state active
+    input  logic        exc_sr_wr_en     // from exc controller: interrupt taken, resume STOP
 );
 
     // -----------------------------------------------------------------------
@@ -212,7 +224,7 @@ module eu_seq (
                      SHF_ROL=4'h4, SHF_ROR=4'h5, SHF_ROXL=4'h6, SHF_ROXR=4'h7;
 
     localparam [2:0] MUL_UW=3'h0, MUL_SW=3'h1, MUL_UL=3'h2, MUL_SL=3'h3,
-                     DIV_UW=3'h4, DIV_SW=3'h5;
+                     DIV_UW=3'h4, DIV_SW=3'h5, DIV_UL=3'h6, DIV_SL=3'h7;
 
     // -----------------------------------------------------------------------
     // Pre-extract instruction word fields as assigns.
@@ -259,6 +271,10 @@ module eu_seq (
     logic [1:0] f_siz;
     assign f_siz = (f_ss == 2'b00) ? 2'b01 :
                    (f_ss == 2'b01) ? 2'b10 : 2'b00;
+
+    // Phase 56: TRAP #n vector number (bits [3:0] of opcode)
+    logic [3:0] f_trap_num;
+    assign f_trap_num = instr_word[3:0];
 
     // Pre-extract CCR flags to avoid bit-selects inside always_comb
     logic flag_x, flag_z, flag_n, flag_v, flag_c;
@@ -434,6 +450,25 @@ module eu_seq (
     logic [2:0]  dec_pmove_preg;
     logic        dec_pmove_to_mem;   // 1=register→EA (write), 0=EA→register (read)
 
+    // Phase 56: OS control / exception instructions
+    logic        dec_is_rte;         // RTE (return from exception)
+    logic        dec_is_stop;        // STOP #sr
+    logic [15:0] dec_stop_sr;        // new SR value from extension word
+    logic        dec_is_trap;        // TRAP #n
+    logic [3:0]  dec_trap_num;       // trap number (0–15)
+    logic        dec_is_trapv;       // TRAPV
+    logic        dec_is_illegal;     // ILLEGAL
+    logic        dec_is_move_sr_r;   // MOVE SR,Dn  (read SR → register)
+    logic        dec_is_move_ccr_r;  // MOVE CCR,Dn (read CCR → register)
+    logic        dec_is_move_sr_w;   // MOVE Dn,SR  (write register → full SR)
+    logic        dec_is_move_ccr_w;  // MOVE Dn,CCR (write register → CCR only)
+    logic        dec_is_move_usp;    // MOVE An,USP (write An → USP)
+    logic        dec_sext_src;      // sign-extend ALU source from 16→32 bits (ADDA.W/SUBA.W/CMPA.W)
+    // Phase 58: MULU.L/MULS.L/DIVU.L/DIVS.L
+    logic        dec_is_muldivl;   // instruction is a long mul/div
+    logic [2:0]  dec_md_dst2;      // Dh (MUL) or Dr (DIV) register number
+    logic        dec_md_64bit;     // 1=write second register (Dh/Dr distinct from Dl/Dq)
+
     // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
     logic [31:0] ctrl_reg_rd_val;
     always_comb begin
@@ -536,6 +571,22 @@ module eu_seq (
         dec_is_pmove       = 1'b0;
         dec_pmove_preg     = 3'b0;
         dec_pmove_to_mem   = 1'b0;
+        dec_is_rte        = 1'b0;
+        dec_is_stop       = 1'b0;
+        dec_stop_sr       = 16'h0;
+        dec_is_trap       = 1'b0;
+        dec_trap_num      = 4'h0;
+        dec_is_trapv      = 1'b0;
+        dec_is_illegal    = 1'b0;
+        dec_is_move_sr_r  = 1'b0;
+        dec_is_move_ccr_r = 1'b0;
+        dec_is_move_sr_w  = 1'b0;
+        dec_is_move_ccr_w = 1'b0;
+        dec_is_move_usp   = 1'b0;
+        dec_sext_src      = 1'b0;
+        dec_is_muldivl    = 1'b0;
+        dec_md_dst2       = 3'b0;
+        dec_md_64bit      = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -683,6 +734,34 @@ module eu_seq (
                         dec_reads_src  = 1'b1;
                         dec_dst_reg    = {1'b0, f_dn};    // Dn → rd_b (store data / load dest)
                         dec_reads_dst  = 1'b1;
+                    end else if (!f_dir && f_mode == 3'b111 && f_reg == 3'b100 &&
+                                 (f_ss == 2'b00 || f_ss == 2'b01) &&
+                                 (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b101)) begin
+                        // ORI/ANDI/EORI #imm to CCR (f_ss=00) or SR (f_ss=01)
+                        // f_dn: 000=ORI, 001=ANDI, 101=EORI
+                        // Result computed at decode time using current sr_out + immediate.
+                        dec_valid     = 1'b1;
+                        dec_unit      = UNIT_MOVE;
+                        dec_reads_ccr = 1'b1;
+                        dec_needs_ext = 1'b1;
+                        dec_use_imm   = 1'b1;
+                        if (f_ss == 2'b00) begin    // CCR (byte immediate, f_ss=00=byte)
+                            dec_is_move_ccr_w = 1'b1;
+                            case (f_dn)
+                                3'b000: dec_imm = {24'h0, sr_out[7:0] |  ext_data[7:0]};
+                                3'b001: dec_imm = {24'h0, sr_out[7:0] &  ext_data[7:0]};
+                                3'b101: dec_imm = {24'h0, sr_out[7:0] ^  ext_data[7:0]};
+                                default: dec_valid = 1'b0;
+                            endcase
+                        end else begin              // SR (word immediate, f_ss=01=word)
+                            dec_is_move_sr_w = 1'b1;
+                            case (f_dn)
+                                3'b000: dec_imm = {16'h0, sr_out |  ext_data[15:0]};
+                                3'b001: dec_imm = {16'h0, sr_out &  ext_data[15:0]};
+                                3'b101: dec_imm = {16'h0, sr_out ^  ext_data[15:0]};
+                                default: dec_valid = 1'b0;
+                            endcase
+                        end
                     end
                 end
 
@@ -1025,6 +1104,45 @@ module eu_seq (
                                     end
                                 end
                                 3'b101: begin dec_alu_op=ALU_TST;  dec_x_unchanged=1'b1; dec_valid=1'b1; end
+                                3'b110: begin
+                                    // MULU.L/MULS.L (f_ss=00) or DIVU.L/DIVS.L (f_ss=01)
+                                    // Opcode Dn (f_reg) = multiplier/divisor; ext Dl/Dq = destination
+                                    dec_needs_ext   = 1'b1;
+                                    dec_siz         = 2'b00;
+                                    dec_src_reg     = {1'b0, f_reg};          // multiplier/divisor
+                                    dec_dst_reg     = {1'b0, ext_data[2:0]};  // Dl/Dq (multiplicand/dividend)
+                                    dec_dest_reg    = {1'b0, ext_data[2:0]};  // primary result write
+                                    dec_md_dst2     = ext_data[14:12];         // Dh/Dr (secondary write)
+                                    dec_reads_src   = 1'b1;
+                                    dec_reads_dst   = 1'b1;
+                                    dec_writes_reg  = 1'b1;
+                                    dec_updates_ccr = 1'b1;
+                                    dec_is_muldivl  = 1'b1;
+                                    if (f_ss == 2'b00) begin
+                                        // MULU.L / MULS.L
+                                        dec_valid    = 1'b1;
+                                        dec_unit     = UNIT_MUL;
+                                        dec_md_op    = ext_data[6] ? MUL_SL : MUL_UL;
+                                        dec_md_64bit = ext_data[10];
+                                    end else if (f_ss == 2'b01) begin
+                                        // DIVU.L / DIVS.L
+                                        dec_valid    = 1'b1;
+                                        dec_unit     = UNIT_DIV;
+                                        dec_md_op    = ext_data[6] ? DIV_SL : DIV_UL;
+                                        dec_md_64bit = (ext_data[14:12] != ext_data[2:0]);
+                                    end
+                                end
+                                3'b111: begin
+                                    // TRAP #0-7: 0100 1110 0100 0nnn (f_ss=01)
+                                    // TRAP #8-15 has f_mode=001 and is handled later.
+                                    // Must override the shared prefix (updates_ccr=1, reads_dst=1, unit=ALU).
+                                    dec_valid       = 1'b1;
+                                    dec_is_trap     = 1'b1;
+                                    dec_trap_num    = f_trap_num;
+                                    dec_updates_ccr = 1'b0;
+                                    dec_reads_dst   = 1'b0;
+                                    dec_unit        = UNIT_NONE;
+                                end
                                 default: ;
                             endcase
                         end else if (f_ss != 2'b11 && f_dir) begin
@@ -1042,8 +1160,50 @@ module eu_seq (
                             dec_reads_src   = 1'b1;
                             dec_reads_dst   = 1'b1;
                         end else begin
-                            // f_ss==11, f_mode==000
-                            if (f_dn == 3'b100) begin
+                            // f_ss==11, f_mode==000: MOVE to/from SR/CCR, EXT, TAS.B Dn
+                            if (f_dn == 3'b000 && !f_dir) begin
+                                // MOVE SR,Dn: 0100 000 0 11 000 rrr — read SR → Dn[15:0]
+                                dec_valid        = 1'b1;
+                                dec_unit         = UNIT_MOVE;
+                                dec_siz          = 2'b10;   // word write
+                                dec_dest_reg     = {1'b0, f_reg};
+                                dec_writes_reg   = 1'b1;
+                                dec_x_unchanged  = 1'b1;
+                                dec_reads_ccr    = 1'b1;    // stall while CCR in-flight
+                                dec_use_imm      = 1'b1;
+                                dec_imm          = {16'h0, sr_out};
+                                dec_is_move_sr_r = 1'b1;
+                            end else if (f_dn == 3'b001 && !f_dir) begin
+                                // MOVE CCR,Dn: 0100 001 0 11 000 rrr — read CCR → Dn
+                                dec_valid         = 1'b1;
+                                dec_unit          = UNIT_MOVE;
+                                dec_siz           = 2'b10;
+                                dec_dest_reg      = {1'b0, f_reg};
+                                dec_writes_reg    = 1'b1;
+                                dec_x_unchanged   = 1'b1;
+                                dec_reads_ccr     = 1'b1;
+                                dec_use_imm       = 1'b1;
+                                dec_imm           = {24'h0, sr_out[7:0]};
+                                dec_is_move_ccr_r = 1'b1;
+                            end else if (f_dn == 3'b010 && !f_dir) begin
+                                // MOVE Dn,CCR: 0100 010 0 11 000 rrr — write Dn → CCR
+                                dec_valid         = 1'b1;
+                                dec_unit          = UNIT_MOVE;
+                                dec_siz           = 2'b10;
+                                dec_src_reg       = {1'b0, f_reg};
+                                dec_reads_src     = 1'b1;
+                                dec_x_unchanged   = 1'b1;
+                                dec_is_move_ccr_w = 1'b1;
+                            end else if (f_dn == 3'b011 && !f_dir) begin
+                                // MOVE Dn,SR: 0100 011 0 11 000 rrr — write Dn[15:0] → SR
+                                dec_valid        = 1'b1;
+                                dec_unit         = UNIT_MOVE;
+                                dec_siz          = 2'b10;
+                                dec_src_reg      = {1'b0, f_reg};
+                                dec_reads_src    = 1'b1;
+                                dec_x_unchanged  = 1'b1;
+                                dec_is_move_sr_w = 1'b1;
+                            end else if (f_dn == 3'b100) begin
                                 // EXT.L (f_dir=0) / EXTB.L (f_dir=1)
                                 dec_unit           = UNIT_MOVE;
                                 dec_src_reg        = {1'b0, f_reg};
@@ -1302,6 +1462,46 @@ module eu_seq (
                         dec_an_upd_en  = 1'b1;
                         dec_an_upd_reg = 3'b111;          // A7 ← An+4
                         dec_an_delta   = 32'd4;
+                    end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b100) begin
+                        // MOVE An,USP: 0100 1110 0110 0rrr  (An → USP)
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_siz         = 2'b00;
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_reads_src   = 1'b1;
+                        dec_is_move_usp = 1'b1;
+                    end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b101) begin
+                        // MOVE USP,An: 0100 1110 0110 1rrr  (USP → An)
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_MOVE;
+                        dec_siz        = 2'b00;
+                        dec_dest_reg   = {1'b1, f_reg};
+                        dec_writes_reg = 1'b1;
+                        dec_use_imm    = 1'b1;
+                        dec_imm        = usp_in;
+                    end else if (instr_word[15:4] == 12'h4E4) begin
+                        // TRAP #n: 0100 1110 0100 nnnn  (vector 32+n, n=0..15)
+                        dec_valid     = 1'b1;
+                        dec_is_trap   = 1'b1;
+                        dec_trap_num  = f_trap_num;
+                    end else if (instr_word == 16'h4E73) begin
+                        // RTE: pop SR (word at A7) then PC (longword at A7+4)
+                        dec_valid     = 1'b1;
+                        dec_is_rte    = 1'b1;
+                        dec_is_mem_rd = 1'b1;
+                        dec_src_reg   = {1'b1, 3'b111};  // A7 → rd_a
+                        dec_reads_src = 1'b1;
+                        dec_siz       = 2'b00;
+                    end else if (instr_word == 16'h4E72) begin
+                        // STOP #sr: 0100 1110 0111 0010 + extension word (new SR)
+                        dec_valid     = 1'b1;
+                        dec_is_stop   = 1'b1;
+                        dec_stop_sr   = ext_data[15:0];
+                        dec_needs_ext = 1'b1;
+                    end else if (instr_word == 16'h4E76) begin
+                        // TRAPV: trap if V flag set
+                        dec_valid     = 1'b1;
+                        dec_is_trapv  = 1'b1;
                     end else if (instr_word == 16'h4E71) begin
                         // NOP: 0100 1110 0111 0001
                         dec_valid = 1'b1;
@@ -1357,6 +1557,10 @@ module eu_seq (
                     // Mask always in ext_data[15:0] (1 extension word).
                     // f_ss[0]: 0=word, 1=longword.
                     // ----------------------------------------------------------------
+                    end else if (instr_word == 16'h4AFC) begin
+                        // ILLEGAL: 0100 1010 1111 1100 — always traps
+                        dec_valid         = 1'b1;
+                        dec_is_illegal    = 1'b1;
                     end else if (!f_dir && f_ss[1] &&
                                  (f_dn == 3'b100 || f_dn == 3'b110)) begin
                         // MOVEM store: f_dn=100  EA: -(An)(100) or (An)(010)
@@ -1548,7 +1752,7 @@ module eu_seq (
                 end
 
                 // ----------------------------------------------------------------
-                // Group 1001: SUB
+                // Group 1001: SUB / SUBA
                 // ----------------------------------------------------------------
                 4'h9: begin
                     if (f_mode == 3'b000 && f_ss != 2'b11) begin
@@ -1569,11 +1773,35 @@ module eu_seq (
                             dec_dst_reg  = {1'b0, f_reg};
                             dec_dest_reg = {1'b0, f_reg};
                         end
+                    end else if (f_ss == 2'b11) begin
+                        // SUBA.W (f_dir=0) / SUBA.L (f_dir=1): An ← An − src; CCR unchanged
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = ALU_SUB;
+                        dec_siz        = 2'b00;
+                        dec_dst_reg    = {1'b1, f_dn};
+                        dec_dest_reg   = {1'b1, f_dn};
+                        dec_reads_dst  = 1'b1;
+                        dec_writes_reg = 1'b1;
+                        if (f_mode == 3'b000) begin
+                            dec_reads_src = 1'b1;
+                            dec_src_reg   = {1'b0, f_reg};
+                            dec_sext_src  = !f_dir;
+                        end else if (f_mode == 3'b001) begin
+                            dec_reads_src = 1'b1;
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_sext_src  = !f_dir;
+                        end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
+                            dec_use_imm   = 1'b1;
+                            dec_needs_ext = 1'b1;
+                            dec_imm       = f_dir ? ext_data[31:0]
+                                                  : {{16{ext_data[15]}}, ext_data[15:0]};
+                        end
                     end
                 end
 
                 // ----------------------------------------------------------------
-                // Group 1011: CMP (f_dir=0) / EOR (f_dir=1)
+                // Group 1011: CMP (f_dir=0) / EOR (f_dir=1) / CMPA (f_ss=11)
                 // ----------------------------------------------------------------
                 4'hb: begin
                     if (f_mode == 3'b000 && f_ss != 2'b11) begin
@@ -1595,6 +1823,30 @@ module eu_seq (
                             dec_src_reg     = {1'b0, f_dn};
                             dec_dst_reg     = {1'b0, f_reg};
                             dec_dest_reg    = {1'b0, f_reg};
+                        end
+                    end else if (f_ss == 2'b11) begin
+                        // CMPA.W (f_dir=0) / CMPA.L (f_dir=1): CCR from (An − sign_ext(src))
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_CMP;
+                        dec_siz         = 2'b00;           // 32-bit compare
+                        dec_updates_ccr = 1'b1;
+                        dec_x_unchanged = 1'b1;
+                        dec_dst_reg     = {1'b1, f_dn};    // An (compared from) → rd_b
+                        dec_reads_dst   = 1'b1;
+                        if (f_mode == 3'b000) begin
+                            dec_reads_src = 1'b1;
+                            dec_src_reg   = {1'b0, f_reg}; // Dn → rd_a
+                            dec_sext_src  = !f_dir;        // sign-extend for .W
+                        end else if (f_mode == 3'b001) begin
+                            dec_reads_src = 1'b1;
+                            dec_src_reg   = {1'b1, f_reg}; // An → rd_a
+                            dec_sext_src  = !f_dir;
+                        end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
+                            dec_use_imm   = 1'b1;
+                            dec_needs_ext = 1'b1;
+                            dec_imm       = f_dir ? ext_data[31:0]
+                                                  : {{16{ext_data[15]}}, ext_data[15:0]};
                         end
                     end
                 end
@@ -1653,7 +1905,7 @@ module eu_seq (
                 end
 
                 // ----------------------------------------------------------------
-                // Group 1101: ADD
+                // Group 1101: ADD / ADDA
                 // ----------------------------------------------------------------
                 4'hd: begin
                     if (f_mode == 3'b000 && f_ss != 2'b11) begin
@@ -1673,6 +1925,31 @@ module eu_seq (
                             dec_src_reg  = {1'b0, f_dn};
                             dec_dst_reg  = {1'b0, f_reg};
                             dec_dest_reg = {1'b0, f_reg};
+                        end
+                    end else if (f_ss == 2'b11) begin
+                        // ADDA.W (f_dir=0) / ADDA.L (f_dir=1): An ← An + src; CCR unchanged
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = ALU_ADD;
+                        dec_siz        = 2'b00;           // 32-bit operation
+                        dec_dst_reg    = {1'b1, f_dn};    // An destination → rd_b
+                        dec_dest_reg   = {1'b1, f_dn};
+                        dec_reads_dst  = 1'b1;
+                        dec_writes_reg = 1'b1;
+                        // dec_updates_ccr stays 0 — ADDA never affects CCR
+                        if (f_mode == 3'b000) begin
+                            dec_reads_src = 1'b1;
+                            dec_src_reg   = {1'b0, f_reg}; // Dn → rd_a
+                            dec_sext_src  = !f_dir;        // sign-extend low 16 bits for .W
+                        end else if (f_mode == 3'b001) begin
+                            dec_reads_src = 1'b1;
+                            dec_src_reg   = {1'b1, f_reg}; // An → rd_a
+                            dec_sext_src  = !f_dir;
+                        end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
+                            dec_use_imm   = 1'b1;
+                            dec_needs_ext = 1'b1;
+                            dec_imm       = f_dir ? ext_data[31:0]
+                                                  : {{16{ext_data[15]}}, ext_data[15:0]};
                         end
                     end
                 end
@@ -1829,6 +2106,15 @@ module eu_seq (
     // Phase 46: MOVEC Rn→Rc write-back
     logic        wb_is_movec_wr;
     logic [11:0] wb_movec_rc;
+    // Phase 56: SR/CCR/USP write flags
+    logic        wb_is_move_sr_w;   // MOVE Dn,SR  → full SR write in WB
+    logic        wb_is_move_ccr_w;  // MOVE Dn,CCR → CCR-only write in WB
+    logic        wb_is_move_usp;    // MOVE An,USP → USP write in WB
+    // Phase 58: 64-bit mul/div high result write
+    logic        wb_is_muldivl;     // MULU.L/MULS.L/DIVU.L/DIVS.L in WB
+    logic [2:0]  wb_md_dst2;        // Dh (MUL) or Dr (DIV) register number
+    logic        wb_md_64bit;       // 1=write second register (Dh/Dr ≠ Dl/Dq)
+    logic [31:0] wb_md_hi;          // latched result_hi from EX stage
 
     // -----------------------------------------------------------------------
     // Stall / hazard logic — checks both EX and WB for RAW conflicts.
@@ -1886,6 +2172,22 @@ module eu_seq (
     logic        ex_movep_long;    // 1=longword, 0=word
     logic        ex_is_move16;     // MOVE16 in EX stage
     logic [1:0]  ex_move16_form;
+    // Phase 56: OS control / exception instructions
+    logic        ex_is_rte;
+    logic        ex_is_stop;
+    logic [15:0] ex_stop_sr;
+    logic        ex_is_trap;
+    logic [3:0]  ex_trap_num;
+    logic        ex_is_trapv;
+    logic        ex_is_illegal;
+    logic        ex_is_move_sr_w;
+    logic        ex_is_move_ccr_w;
+    logic        ex_is_move_usp;
+    logic        ex_sext_src;          // sign-extend ALU source 16→32 (ADDA.W/SUBA.W/CMPA.W)
+    // Phase 58: 64-bit mul/div long in EX
+    logic        ex_is_muldivl;       // MULU.L/MULS.L/DIVU.L/DIVS.L in EX
+    logic [2:0]  ex_md_dst2;          // Dh (MUL) or Dr (DIV) register number
+    logic        ex_md_64bit;         // 1=write second register
 
     // TAS (An) RMW state — declared early for ex_mem_stall
     logic        tas_run_r;          // TAS write phase active
@@ -1904,6 +2206,17 @@ module eu_seq (
     logic [15:0] rtr_sr_wr_data;
     logic        rtr_an_wr_en;
     logic [31:0] rtr_an_wr_data;
+
+    // Phase 56: RTE two-phase read state (mirrors RTR; declared early for stall/an_wr assigns)
+    logic        rte_phase_r;
+    logic [15:0] rte_sr_r;
+    logic [31:0] rte_a7_next_r;
+    logic        rte_sr_wr_en;    // combinational: fire full-SR write when phase-2 acks
+    logic        rte_an_wr_en;    // combinational: update A7 when phase-2 acks
+
+    // Phase 56: STOP state (CPU halted until interrupt)
+    logic        stop_r;          // 1 = CPU stopped, waiting for interrupt
+    logic        stop_sr_wr_en;   // combinational: fire SR write on first cycle STOP is in EX
 
     // Phase 43: MOVEM FSM state registers
     logic        movem_start_r;    // 1-cycle stall while waiting for An to appear in rd_b
@@ -2093,8 +2406,9 @@ module eu_seq (
         cmp2_z_w = (cmp2_rn_sext_w == cmp2_lb_sext_w) || (cmp2_rn_sext_w == cmp2_ub_sext_w);
     end
 
-    logic rtr_stall, ex_mem_stall;
+    logic rtr_stall, rte_stall, ex_mem_stall;
     assign rtr_stall    = ex_is_rtr && !(rtr_phase_r && mem_ack);
+    assign rte_stall    = ex_is_rte && !(rte_phase_r && mem_ack);
     // tas_read_ack: hold pipeline stall on the cycle the TAS read ack fires (before
     // tas_run_r becomes 1) so EX doesn't release prematurely. Gated by !tas_after_write_r
     // to prevent re-triggering after the write phase completes.
@@ -2118,15 +2432,21 @@ module eu_seq (
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                            !memind_start_r && !memind_inner_r && !memind_outer_r &&
                            (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
-                          rtr_stall;
+                          rtr_stall || rte_stall || stop_r;
 
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
                             (dec_reads_src && ex_dest_reg == dec_src_reg) ||
-                            (dec_reads_dst && ex_dest_reg == dec_dst_reg));
+                            (dec_reads_dst && ex_dest_reg == dec_dst_reg)) ||
+                        (ex_valid && ex_is_muldivl && ex_md_64bit && (
+                            (dec_reads_src && {1'b0, ex_md_dst2} == dec_src_reg) ||
+                            (dec_reads_dst && {1'b0, ex_md_dst2} == dec_dst_reg)));
     assign hazard_wb  = wb_valid && wb_writes_reg && (
                             (dec_reads_src && wb_dest_reg == dec_src_reg) ||
-                            (dec_reads_dst && wb_dest_reg == dec_dst_reg));
+                            (dec_reads_dst && wb_dest_reg == dec_dst_reg)) ||
+                        (wb_valid && wb_is_muldivl && wb_md_64bit && (
+                            (dec_reads_src && {1'b0, wb_md_dst2} == dec_src_reg) ||
+                            (dec_reads_dst && {1'b0, wb_md_dst2} == dec_dst_reg)));
     assign hazard_ccr = dec_reads_ccr && (
                             (ex_valid && ex_updates_ccr) ||
                             (wb_valid && wb_updates_ccr));
@@ -2229,6 +2549,20 @@ module eu_seq (
             ex_is_pmove       <= 1'b0;
             ex_pmove_preg     <= 3'b0;
             ex_pmove_to_mem   <= 1'b0;
+            ex_is_rte         <= 1'b0;
+            ex_is_stop        <= 1'b0;
+            ex_stop_sr        <= 16'h0;
+            ex_is_trap        <= 1'b0;
+            ex_trap_num       <= 4'h0;
+            ex_is_trapv       <= 1'b0;
+            ex_is_illegal     <= 1'b0;
+            ex_is_move_sr_w   <= 1'b0;
+            ex_is_move_ccr_w  <= 1'b0;
+            ex_is_move_usp    <= 1'b0;
+            ex_sext_src       <= 1'b0;
+            ex_is_muldivl     <= 1'b0;
+            ex_md_dst2        <= 3'b0;
+            ex_md_64bit       <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -2285,6 +2619,18 @@ module eu_seq (
             ex_is_pmove       <= 1'b0;
             ex_pmove_preg     <= 3'b0;
             ex_pmove_to_mem   <= 1'b0;
+            ex_is_rte         <= 1'b0;
+            ex_is_stop        <= 1'b0;
+            ex_is_trap        <= 1'b0;
+            ex_is_trapv       <= 1'b0;
+            ex_is_illegal     <= 1'b0;
+            ex_is_move_sr_w   <= 1'b0;
+            ex_is_move_ccr_w  <= 1'b0;
+            ex_is_move_usp    <= 1'b0;
+            ex_sext_src       <= 1'b0;
+            ex_is_muldivl     <= 1'b0;
+            ex_md_dst2        <= 3'b0;
+            ex_md_64bit       <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -2366,6 +2712,20 @@ module eu_seq (
             ex_is_pmove       <= dec_is_pmove;
             ex_pmove_preg     <= dec_pmove_preg;
             ex_pmove_to_mem   <= dec_pmove_to_mem;
+            ex_is_rte         <= dec_is_rte;
+            ex_is_stop        <= dec_is_stop;
+            ex_stop_sr        <= dec_stop_sr;
+            ex_is_trap        <= dec_is_trap;
+            ex_trap_num       <= dec_trap_num;
+            ex_is_trapv       <= dec_is_trapv;
+            ex_is_illegal     <= dec_is_illegal;
+            ex_is_move_sr_w   <= dec_is_move_sr_w;
+            ex_is_move_ccr_w  <= dec_is_move_ccr_w;
+            ex_is_move_usp    <= dec_is_move_usp;
+            ex_sext_src       <= dec_sext_src;
+            ex_is_muldivl     <= dec_is_muldivl;
+            ex_md_dst2        <= dec_md_dst2;
+            ex_md_64bit       <= dec_md_64bit;
         end
     end
 
@@ -2427,6 +2787,33 @@ module eu_seq (
             rtr_a7_next_r <= ex_ea + 32'd4;
         end else if (ex_valid && ex_is_rtr && rtr_phase_r && mem_ack) begin
             rtr_phase_r   <= 1'b0;
+        end
+    end
+
+    // Phase 56: RTE two-phase read FSM (mirrors RTR pattern)
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            rte_phase_r   <= 1'b0;
+            rte_sr_r      <= 16'h0;
+            rte_a7_next_r <= 32'h0;
+        end else if (ex_valid && ex_is_rte && !rte_phase_r && mem_ack) begin
+            rte_phase_r   <= 1'b1;
+            rte_sr_r      <= mem_rdata[15:0];   // SR from word read at (A7)
+            rte_a7_next_r <= ex_ea + 32'd4;     // simplified: A7+4 (same convention as RTR)
+        end else if (ex_valid && ex_is_rte && rte_phase_r && mem_ack) begin
+            rte_phase_r   <= 1'b0;
+        end
+    end
+
+    // Phase 56: STOP FSM — halt CPU; cleared by exc_sr_wr_en (interrupt taken)
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            stop_r <= 1'b0;
+        end else begin
+            if (ex_valid && ex_is_stop && !stop_r)
+                stop_r <= 1'b1;
+            else if (stop_r && exc_sr_wr_en)
+                stop_r <= 1'b0;
         end
     end
 
@@ -2838,7 +3225,8 @@ module eu_seq (
     assign move_result_z_b = (move_result_w[7:0]  == 8'h00);
     assign move_result_z_w = (move_result_w[15:0] == 16'h00);
 
-    assign alu_src   = ex_src_operand;
+    assign alu_src   = ex_sext_src ? {{16{ex_src_operand[15]}}, ex_src_operand[15:0]}
+                                   : ex_src_operand;
     assign alu_dst   = rd_b_data;
     assign alu_op    = ex_alu_op;
     assign alu_siz   = ex_siz;
@@ -2981,38 +3369,58 @@ module eu_seq (
             wb_an_upd_en    <= 1'b0;
             wb_is_mem_rd    <= 1'b0;
             wb_is_movea_w   <= 1'b0;
-            wb_is_movec_wr  <= 1'b0;
-            wb_movec_rc     <= 12'h0;
+            wb_is_movec_wr   <= 1'b0;
+            wb_movec_rc      <= 12'h0;
+            wb_is_move_sr_w  <= 1'b0;
+            wb_is_move_ccr_w <= 1'b0;
+            wb_is_move_usp   <= 1'b0;
+            wb_is_muldivl    <= 1'b0;
+            wb_md_dst2       <= 3'b0;
+            wb_md_64bit      <= 1'b0;
+            wb_md_hi         <= 32'h0;
         end else if (ex_mem_stall) begin
             // Memory cycle in progress: drain WB (bubble).
-            wb_valid        <= 1'b0;
-            wb_writes_reg   <= 1'b0;
-            wb_updates_ccr  <= 1'b0;
-            wb_an_upd_en    <= 1'b0;
-            wb_is_mem_rd    <= 1'b0;
-            wb_is_movea_w   <= 1'b0;
-            wb_is_movec_wr  <= 1'b0;
+            wb_valid         <= 1'b0;
+            wb_writes_reg    <= 1'b0;
+            wb_updates_ccr   <= 1'b0;
+            wb_an_upd_en     <= 1'b0;
+            wb_is_mem_rd     <= 1'b0;
+            wb_is_movea_w    <= 1'b0;
+            wb_is_movec_wr   <= 1'b0;
+            wb_is_move_sr_w  <= 1'b0;
+            wb_is_move_ccr_w <= 1'b0;
+            wb_is_move_usp   <= 1'b0;
+            wb_is_muldivl    <= 1'b0;
+            wb_md_dst2       <= 3'b0;
+            wb_md_64bit      <= 1'b0;
         end else begin
-            wb_valid        <= ex_valid;
-            wb_writes_reg   <= ex_writes_reg;
-            wb_updates_ccr  <= ex_updates_ccr;
-            wb_x_unchanged  <= ex_x_unchanged;
-            wb_is_move      <= (ex_unit == UNIT_MOVE);
-            wb_move_n       <= ex_move_n;
-            wb_dest_reg     <= ex_dest_reg;
-            wb_siz          <= ex_siz;
+            wb_valid         <= ex_valid;
+            wb_writes_reg    <= ex_writes_reg;
+            wb_updates_ccr   <= ex_updates_ccr;
+            wb_x_unchanged   <= ex_x_unchanged;
+            wb_is_move       <= (ex_unit == UNIT_MOVE);
+            wb_move_n        <= ex_move_n;
+            wb_dest_reg      <= ex_dest_reg;
+            wb_siz           <= ex_siz;
             // Result selection: memory load uses mem_rdata, LEA uses EA, else ALU/MOVE
-            wb_result       <= ex_is_mem_rd         ? mem_rdata
-                             : (ex_is_lea || ex_is_link) ? ex_ea
-                             :                             ex_result;
-            wb_ccr          <= {ex_x, ex_n, ex_z, ex_v, ex_c};
-            wb_an_upd_en    <= ex_an_upd_en;
-            wb_an_upd_reg   <= ex_an_upd_reg;
-            wb_an_upd_new   <= ex_an_new;
-            wb_is_mem_rd    <= ex_is_mem_rd;
-            wb_is_movea_w   <= ex_is_movea_w;
-            wb_is_movec_wr  <= ex_is_movec_wr;
-            wb_movec_rc     <= ex_movec_rc;
+            wb_result        <= ex_is_mem_rd         ? mem_rdata
+                              : (ex_is_lea || ex_is_link) ? ex_ea
+                              :                              ex_result;
+            wb_ccr           <= {ex_x, ex_n, ex_z, ex_v, ex_c};
+            wb_an_upd_en     <= ex_an_upd_en;
+            wb_an_upd_reg    <= ex_an_upd_reg;
+            wb_an_upd_new    <= ex_an_new;
+            wb_is_mem_rd     <= ex_is_mem_rd;
+            wb_is_movea_w    <= ex_is_movea_w;
+            wb_is_movec_wr   <= ex_is_movec_wr;
+            wb_movec_rc      <= ex_movec_rc;
+            wb_is_move_sr_w  <= ex_is_move_sr_w;
+            wb_is_move_ccr_w <= ex_is_move_ccr_w;
+            wb_is_move_usp   <= ex_is_move_usp;
+            wb_is_muldivl    <= ex_is_muldivl;
+            wb_md_dst2       <= ex_md_dst2;
+            wb_md_64bit      <= ex_md_64bit;
+            wb_md_hi         <= md_result_hi;   // capture from combinational before next EX overwrites
         end
     end
 
@@ -3054,6 +3462,12 @@ module eu_seq (
                    : memind_wr_en ? mem_rdata
                    :                wb_result_final;
 
+    // Phase 58: second Dn write port for 64-bit mul/div high result (Dh or Dr).
+    // Fires in WB stage when the instruction produces two Dn results.
+    assign wr2_en   = wb_valid && wb_is_muldivl && wb_md_64bit && !div_trap;
+    assign wr2_sel  = wb_md_dst2;
+    assign wr2_data = wb_md_hi;
+
     // An update port: MOVEM fires at completion; RTR fires from EX; WB handles normal.
     logic        movem_an_wr_en;
     assign movem_an_wr_en = movem_last && (movem_predec_r || movem_postinc_r);
@@ -3062,16 +3476,18 @@ module eu_seq (
     logic move16_an1_wr_en;
     assign move16_an1_wr_en = move16_last && move16_src_postinc_r;
 
-    assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en ||
+    assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en || rte_an_wr_en ||
                        move16_an1_wr_en || move16_an2_wr_r ||
                        (wb_valid && wb_an_upd_en);
     assign an_wr_sel = movem_an_wr_en    ? movem_an_r
                      : rtr_an_wr_en      ? 3'b111
+                     : rte_an_wr_en      ? 3'b111
                      : move16_an1_wr_en  ? move16_src_an_r
                      : move16_an2_wr_r   ? move16_dst_an_r
                      :                     wb_an_upd_reg;
     assign an_wr_data = movem_an_wr_en   ? movem_an_final
                       : rtr_an_wr_en     ? rtr_an_wr_data
+                      : rte_an_wr_en     ? (rte_a7_next_r + 32'd4)
                       : move16_an1_wr_en ? move16_src_base_r + 32'd16
                       : move16_an2_wr_r  ? move16_dst_base_r + 32'd16
                       :                    wb_an_upd_new;
@@ -3095,17 +3511,22 @@ module eu_seq (
         endcase
     end
 
-    // SR write: RTR fires CCR update from EX (phase 2); TAS (An) fires from write ack;
-    // CMP2/CHK2 fires from second-read ack (cmp2_sr_wr_en); memind fires on outer read ack;
-    // normal WB handles all others.
-    assign sr_wr_en   = rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || memind_ccr_wr_en
-                      || (wb_valid && wb_updates_ccr);
-    assign sr_wr_data = rtr_sr_wr_en      ? rtr_sr_wr_data
-                      : tas_sr_wr_en      ? {sr_out[15:8], 3'b000, tas_ccr_r}
-                      : cmp2_sr_wr_en     ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
-                      : memind_ccr_wr_en  ? {sr_out[15:8], 3'b000, memind_ccr_w}
-                      :                     {sr_out[15:8], 3'b000, final_ccr};
-    assign sr_ccr_only = 1'b1;
+    // SR write: RTE/STOP write full SR; RTR/MOVE CCR write CCR-only; others normal WB.
+    // Phase 56: wb_is_move_sr_w fires full SR write; wb_is_move_ccr_w fires CCR-only write.
+    assign sr_wr_en   = rte_sr_wr_en || stop_sr_wr_en ||
+                        rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || memind_ccr_wr_en ||
+                        (wb_valid && (wb_updates_ccr || wb_is_move_sr_w || wb_is_move_ccr_w));
+    assign sr_wr_data = rte_sr_wr_en        ? rte_sr_r
+                      : stop_sr_wr_en       ? ex_stop_sr
+                      : rtr_sr_wr_en        ? rtr_sr_wr_data
+                      : tas_sr_wr_en        ? {sr_out[15:8], 3'b000, tas_ccr_r}
+                      : cmp2_sr_wr_en       ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
+                      : memind_ccr_wr_en    ? {sr_out[15:8], 3'b000, memind_ccr_w}
+                      : wb_is_move_sr_w     ? wb_result[15:0]
+                      : wb_is_move_ccr_w    ? {sr_out[15:8], 3'b000, wb_result[4:0]}
+                      :                       {sr_out[15:8], 3'b000, final_ccr};
+    assign sr_ccr_only = (rte_sr_wr_en || stop_sr_wr_en ||
+                          (wb_valid && wb_is_move_sr_w)) ? 1'b0 : 1'b1;
 
     // -----------------------------------------------------------------------
     // Divide-by-zero trap / CHK-CHK2 out-of-bounds trap (combinational)
@@ -3141,22 +3562,23 @@ module eu_seq (
     // RTS: fires when stack-read completes (mem_ack=1).
     // RTR: fires after BOTH reads complete (rtr_phase_r=1 and mem_ack=1).
     // -----------------------------------------------------------------------
-    logic ex_jmp_taken, ex_jsr_taken, ex_bsr_taken, ex_rts_taken, ex_rtr_taken;
+    logic ex_jmp_taken, ex_jsr_taken, ex_bsr_taken, ex_rts_taken, ex_rtr_taken, ex_rte_taken;
     assign ex_jmp_taken = ex_valid && ex_is_jmp;
     assign ex_jsr_taken = ex_valid && ex_is_jsr && mem_ack;
     assign ex_bsr_taken = ex_valid && ex_is_bsr && mem_ack;
     assign ex_rts_taken = ex_valid && ex_is_rts && mem_ack;
     assign ex_rtr_taken = ex_valid && ex_is_rtr && rtr_phase_r && mem_ack;
+    assign ex_rte_taken = ex_valid && ex_is_rte && rte_phase_r && mem_ack;
 
     assign branch_taken  = dec_branch_taken | ex_dbcc_taken |
                            ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
-                           ex_rts_taken | ex_rtr_taken;
+                           ex_rts_taken | ex_rtr_taken | ex_rte_taken;
 
-    assign branch_target = dec_branch_taken              ? (decode_pc    + 32'd2 + dec_branch_disp)
-                         : ex_dbcc_taken                 ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
-                         : ex_bsr_taken                  ? ex_bsr_target
-                         : (ex_rts_taken || ex_rtr_taken) ? mem_rdata
-                         :                                  ex_jmp_target;  // JMP or JSR
+    assign branch_target = dec_branch_taken                         ? (decode_pc    + 32'd2 + dec_branch_disp)
+                         : ex_dbcc_taken                            ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
+                         : ex_bsr_taken                             ? ex_bsr_target
+                         : (ex_rts_taken || ex_rtr_taken || ex_rte_taken) ? mem_rdata
+                         :                                             ex_jmp_target;  // JMP or JSR
 
     // -----------------------------------------------------------------------
     // RTR completion: CCR write and A7 update fire directly from EX stage.
@@ -3167,6 +3589,13 @@ module eu_seq (
     assign rtr_sr_wr_data = {sr_out[15:8], rtr_ccr_r};
     assign rtr_an_wr_en  = ex_rtr_taken;
     assign rtr_an_wr_data = rtr_a7_next_r + 32'd4;
+
+    // Phase 56: RTE completion — full SR restore + A7 update
+    assign rte_sr_wr_en  = ex_rte_taken;
+    assign rte_an_wr_en  = ex_rte_taken;
+
+    // Phase 56: STOP — SR write fires first cycle STOP is in EX (before stop_r is set)
+    assign stop_sr_wr_en = ex_valid && ex_is_stop && !stop_r;
 
     // -----------------------------------------------------------------------
     // Memory bus outputs — driven from EX stage when a memory op is active.
@@ -3198,7 +3627,8 @@ module eu_seq (
                        move16_run_r   ? 2'b00 :
                        memind_inner_r ? 2'b00 :     // inner: longword
                        memind_outer_r ? memind_siz_r :
-                       (ex_is_rtr && !rtr_phase_r) ? 2'b10 : ex_siz;
+                       (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
+                       (ex_is_rte && !rte_phase_r) ? 2'b10 : ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
     assign mem_fc    = (ex_is_moves && ex_moves_load)  ? sfc_in :
                        (ex_is_moves && !ex_moves_load) ? dfc_in :
@@ -3209,7 +3639,8 @@ module eu_seq (
                        move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
                        memind_inner_r ? memind_inner_addr_r :
                        memind_outer_r ? memind_outer_addr_w :
-                       (ex_is_rtr && rtr_phase_r) ? rtr_a7_next_r : ex_ea;
+                       (ex_is_rtr && rtr_phase_r) ? rtr_a7_next_r :
+                       (ex_is_rte && rte_phase_r) ? rte_a7_next_r : ex_ea;
     // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
     // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
     // For MOVEP store: drive the appropriate byte of Dn.
@@ -3247,7 +3678,8 @@ module eu_seq (
     assign cacr_wr_data= wb_result;
     assign caar_wr_en  = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h802);
     assign caar_wr_data= wb_result;
-    assign usp_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h800);
+    assign usp_wr_en   = (wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h800)) ||
+                         (wb_valid && wb_is_move_usp);
     assign usp_wr_data = wb_result;
     assign isp_wr_en   = wb_valid && wb_is_movec_wr && (wb_movec_rc == 12'h804);
     assign isp_wr_data = wb_result;
@@ -3267,6 +3699,15 @@ module eu_seq (
     assign tc_out        = tc_r;
     assign tt0_out       = tt0_r;
     assign tt1_out       = tt1_r;
+
+    // -----------------------------------------------------------------------
+    // Phase 56: OS exception/control output assigns
+    // -----------------------------------------------------------------------
+    assign eu_trap_req    = ex_valid && ex_is_trap;
+    assign eu_trap_num    = ex_trap_num;
+    assign eu_trapv_req   = ex_valid && ex_is_trapv && flag_v;
+    assign eu_illegal_req = ex_valid && ex_is_illegal;
+    assign eu_stop        = stop_r;
 
 endmodule
 

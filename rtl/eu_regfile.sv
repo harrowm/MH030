@@ -73,7 +73,12 @@ module eu_regfile (
     input  logic        isp_wr_en,
     input  logic [31:0] isp_wr_data,
     input  logic        msp_wr_en,
-    input  logic [31:0] msp_wr_data
+    input  logic [31:0] msp_wr_data,
+
+    // Third write port — Dn only, for 64-bit mul/div high result (Dh or Dr)
+    input  logic        wr2_en,
+    input  logic [2:0]  wr2_sel,
+    input  logic [31:0] wr2_data
 );
 
     // -----------------------------------------------------------------------
@@ -148,6 +153,8 @@ module eu_regfile (
                         2'b10: d_reg[gi] <= {d_reg[gi][31:16], wr_data[15:0]};
                         default: d_reg[gi] <= wr_data;
                     endcase
+                end else if (wr2_en && (wr2_sel == gi[2:0])) begin
+                    d_reg[gi] <= wr2_data;
                 end
             end
         end

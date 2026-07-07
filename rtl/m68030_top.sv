@@ -149,6 +149,10 @@ module m68030_top #(
     logic [2:0]  eu_ipl_mask;
     logic        eu_div_trap;
     logic        eu_chk_trap;
+    logic        eu_trap_req_w;
+    logic [3:0]  eu_trap_num_w;
+    logic        eu_trapv_req_w;
+    logic        eu_illegal_req_w;
 
     // ───────────────────────────────────────────────────────────────────────
     // IFU output wires
@@ -390,6 +394,11 @@ module m68030_top #(
         .ipl_mask      (eu_ipl_mask),
         .div_trap      (eu_div_trap),
         .chk_trap      (eu_chk_trap),
+        .eu_trap_req   (eu_trap_req_w),
+        .eu_trap_num   (eu_trap_num_w),
+        .eu_trapv_req  (eu_trapv_req_w),
+        .eu_illegal_req(eu_illegal_req_w),
+        .eu_stop       (),              // unused at top level for now
         .ssp_wr_en     (ssp_wr_en_mux),
         .ssp_wr_data   (ssp_wr_data_mux),
         .exc_sr_wr_en  (exc_new_sr_wr),
@@ -407,7 +416,7 @@ module m68030_top #(
         .addr_err_req (ifu_addr_err_int),
         .ipl_sync     (ipl_sync),
         .ipl_mask     (eu_ipl_mask),
-        .illegal_req  (1'b0),
+        .illegal_req  (eu_illegal_req_w),
         .priv_req     (1'b0),
         .trace_req    (1'b0),
         .linea_req    (1'b0),
@@ -415,9 +424,9 @@ module m68030_top #(
         .fmt_err_req  (1'b0),
         .div_zero_req (eu_div_trap),
         .chk_req      (eu_chk_trap),
-        .trapv_req    (1'b0),
-        .trap_req     (1'b0),
-        .trap_num     (4'h0),
+        .trapv_req    (eu_trapv_req_w),
+        .trap_req     (eu_trap_req_w),
+        .trap_num     (eu_trap_num_w),
         // Fault snapshot
         .fault_pc     (ifu_decode_pc),
         .fault_sr     (eu_sr_out),

@@ -1,7 +1,7 @@
 `default_nettype none
 
 // MC68030 multiply/divide unit — purely combinational.
-// Implements MULU.W, MULS.W, MULU.L, MULS.L, DIVU.W, DIVS.W.
+// Implements MULU.W, MULS.W, MULU.L, MULS.L, DIVU.W, DIVS.W, DIVU.L, DIVS.L.
 //
 // Operand convention (matches 68030 instruction encoding):
 //   src = source (<ea> field, multiplier / divisor)
@@ -34,7 +34,9 @@ module eu_mul_div (
         MUL_UL = 3'h2,   // MULU.L: unsigned 32×32 → 64
         MUL_SL = 3'h3,   // MULS.L: signed   32×32 → 64
         DIV_UW = 3'h4,   // DIVU.W: unsigned 32÷16 → 16r:16q
-        DIV_SW = 3'h5;   // DIVS.W: signed   32÷16 → 16r:16q
+        DIV_SW = 3'h5,   // DIVS.W: signed   32÷16 → 16r:16q
+        DIV_UL = 3'h6,   // DIVU.L: unsigned 32÷32 → 32r:32q
+        DIV_SL = 3'h7;   // DIVS.L: signed   32÷32 → 32r:32q
 
     // -----------------------------------------------------------------------
     // Word multiply operands — sign/zero extended to 32 bits
@@ -128,6 +130,35 @@ module eu_mul_div (
     assign divs_z          = (divs_quot[15:0] == 16'h0);
 
     // -----------------------------------------------------------------------
+    // DIVU.L — unsigned 32-bit ÷ 32-bit → result_lo=quotient, result_hi=remainder
+    // -----------------------------------------------------------------------
+    logic [31:0] divul_quot, divul_rem;
+    logic        divul_zero, divul_n, divul_z;
+    assign divul_zero = (src == 32'h0);
+    assign divul_quot = divul_zero ? 32'h0 : (dst / src);
+    assign divul_rem  = divul_zero ? 32'h0 : (dst % src);
+    assign divul_n    = divul_quot[31];
+    assign divul_z    = (divul_quot == 32'h0);
+
+    // -----------------------------------------------------------------------
+    // DIVS.L — signed 32-bit ÷ 32-bit → result_lo=quotient, result_hi=remainder
+    // Overflow: INT_MIN / -1 (undefined result; set V, no trap)
+    // -----------------------------------------------------------------------
+    logic signed [31:0] divsl_dividend_s, divsl_divisor_s, divsl_quot_s, divsl_rem_s;
+    logic [31:0] divsl_quot, divsl_rem;
+    logic        divsl_zero, divsl_ovf, divsl_n, divsl_z;
+    assign divsl_dividend_s = dst;
+    assign divsl_divisor_s  = src;
+    assign divsl_zero       = (src == 32'h0);
+    assign divsl_ovf        = !divsl_zero && (dst == 32'h8000_0000) && (src == 32'hFFFF_FFFF);
+    assign divsl_quot_s     = (divsl_zero || divsl_ovf) ? 32'sh0 : (divsl_dividend_s / divsl_divisor_s);
+    assign divsl_rem_s      = (divsl_zero || divsl_ovf) ? 32'sh0 : (divsl_dividend_s % divsl_divisor_s);
+    assign divsl_quot       = divsl_quot_s;
+    assign divsl_rem        = divsl_rem_s;
+    assign divsl_n          = divsl_quot[31];
+    assign divsl_z          = (divsl_quot == 32'h0);
+
+    // -----------------------------------------------------------------------
     // Output mux — no constant bit-selects here; all extracted above
     // -----------------------------------------------------------------------
     always_comb begin
@@ -178,6 +209,26 @@ module eu_mul_div (
                     result_lo = divs_res;
                     n_out     = divs_n;
                     z_out     = divs_z;
+                end
+            end
+            DIV_UL: begin
+                div_by_zero = divul_zero;
+                v_out       = divul_zero;
+                if (!divul_zero) begin
+                    result_lo = divul_quot;
+                    result_hi = divul_rem;
+                    n_out     = divul_n;
+                    z_out     = divul_z;
+                end
+            end
+            DIV_SL: begin
+                div_by_zero = divsl_zero;
+                v_out       = divsl_zero | divsl_ovf;
+                if (!divsl_zero && !divsl_ovf) begin
+                    result_lo = divsl_quot;
+                    result_hi = divsl_rem;
+                    n_out     = divsl_n;
+                    z_out     = divsl_z;
                 end
             end
             default: ;

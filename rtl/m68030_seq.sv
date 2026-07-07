@@ -52,6 +52,7 @@ module m68030_seq (
     logic       f_dir;    assign f_dir   = instr_word[8];
     logic [1:0] f_ss;     assign f_ss    = instr_word[7:6];
     logic [2:0] f_mode;   assign f_mode  = instr_word[5:3];
+    logic [2:0] f_reg;    assign f_reg   = instr_word[2:0];
 
     // -----------------------------------------------------------------------
     // Extension-word count (0, 1, or 2)
@@ -141,15 +142,32 @@ module m68030_seq (
     assign is_pc_rel = (is_move_abs_src || is_lea_abs || is_jsr_jmp_abs) &&
                        (instr_word[2:0] == 3'b010 || instr_word[2:0] == 3'b011);
 
+    // Phase 57: ADDA/SUBA/CMPA #imm,An (groups 9/B/D, f_ss=11, f_mode=111, f_reg=100)
+    logic is_adda_suba_cmpa_imm;
+    assign is_adda_suba_cmpa_imm =
+        (f_group == 4'h9 || f_group == 4'hb || f_group == 4'hd) &&
+        (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b100);
+
+    // Phase 57: ORI/ANDI/EORI #imm,CCR/SR (group 0, !f_dir, f_mode=111, f_reg=100)
+    logic is_ori_andi_eori_sr;
+    assign is_ori_andi_eori_sr =
+        (f_group == 4'h0) && !f_dir && (f_mode == 3'b111) && (f_reg == 3'b100);
+
+    // Phase 58: MULU.L/MULS.L/DIVU.L/DIVS.L — always 1 extension word
+    logic is_muldivl;
+    assign is_muldivl = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
+                        (f_ss == 2'b00 || f_ss == 2'b01) && (f_mode == 3'b000);
+
     logic [1:0] ext_count;
     always_comb begin
         if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
-        else if (is_branch_l || is_abs_long)
-            ext_count = 2'd2;
+        else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir))
+            ext_count = 2'd2;   // ADDA.L/SUBA.L/CMPA.L #imm32 needs 2 ext words
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
-                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem)
+                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
+                 is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl)
             ext_count = 2'd1;
         else
             ext_count = 2'd0;

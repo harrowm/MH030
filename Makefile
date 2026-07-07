@@ -116,6 +116,15 @@ $(SIM)/seq53:      $(EU_SRCS)                         tb/seq53_tb.sv      | $(SI
 $(SIM)/seq54:      $(EU_SRCS)                         tb/seq54_tb.sv      | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/seq56:      $(EU_SRCS)                         tb/seq56_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq57:      $(EU_SRCS)                         tb/seq57_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq58:      $(EU_SRCS)                         tb/seq58_tb.sv      | $(SIM)
+	$(IVCOMP)
+
 # ── Standalone modules ─────────────────────────────────────────────────────
 $(SIM)/ifu:        rtl/m68030_ifu.sv                  tb/ifu_tb.sv        | $(SIM)
 	$(IVCOMP)
@@ -154,7 +163,7 @@ ALL_TESTS := \
     $(SIM)/eu_bcd $(SIM)/eu_bitops $(SIM)/agu \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/seq36 $(SIM)/seq37 $(SIM)/seq38 $(SIM)/seq39 $(SIM)/seq40 \
-    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 \
+    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 $(SIM)/seq56 $(SIM)/seq57 $(SIM)/seq58 \
     $(SIM)/ifu $(SIM)/seq_m $(SIM)/seq_int $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/m68030_biu \
     $(SIM)/top
