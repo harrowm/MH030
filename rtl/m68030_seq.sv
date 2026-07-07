@@ -158,16 +158,35 @@ module m68030_seq (
     assign is_muldivl = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
                         (f_ss == 2'b00 || f_ss == 2'b01) && (f_mode == 3'b000);
 
+    // Phase 59: PEA — 1 ext word for (d16,An)/indexed/abs.W/PC-rel, 2 for abs.L
+    logic is_pea;
+    assign is_pea = (f_group == 4'h4) && !f_dir && (f_dn == 3'b100) &&
+                    (f_ss == 2'b01) && (f_mode >= 3'b010);
+
+    // Phase 59: RTD — exactly 1 extension word (displacement)
+    logic is_rtd;
+    assign is_rtd = (instr_word == 16'h4E74);
+
+    // PEA abs.L: f_mode=111, f_reg=001
+    logic is_pea_abs_long;
+    assign is_pea_abs_long = is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b001);
+
     logic [1:0] ext_count;
     always_comb begin
         if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
-        else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir))
-            ext_count = 2'd2;   // ADDA.L/SUBA.L/CMPA.L #imm32 needs 2 ext words
+        else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long)
+            ext_count = 2'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
-                 is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl)
+                 is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
+                 is_rtd ||
+                 (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
+                 (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
+                 (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
+                 (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b010)) || // (d16,PC)
+                 (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b011)))   // (d8,PC,Xn)
             ext_count = 2'd1;
         else
             ext_count = 2'd0;
