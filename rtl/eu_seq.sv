@@ -480,6 +480,12 @@ module eu_seq (
     // Phase 61: ADDX/SUBX -(Ay),-(Ax) memory predecrement form
     logic        dec_is_addx_mem;  // 3-phase predecrement read-read-write FSM
 
+    // Phase 62: bit-field instructions (BFTST/BFEXTU/BFEXTS/BFFFO/BFCLR/BFSET/BFINS)
+    logic        dec_is_bf;        // bit-field instruction
+    logic [2:0]  dec_bf_op;        // {f_dn[1:0], f_dir}: 000=TST 001=EXTU 010=EXTS 011=FFO 100=CLR 110=SET 111=INS
+    logic        dec_bf_reg_ea;    // 1=register EA (Dn), 0=memory EA ((An))
+    logic        dec_bf_mutates;   // 1=CLR/SET/INS (modifies field in place)
+
     // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
     logic [31:0] ctrl_reg_rd_val;
     always_comb begin
@@ -604,6 +610,10 @@ module eu_seq (
         dec_md_64bit      = 1'b0;
         dec_is_mem_rmw    = 1'b0;
         dec_is_addx_mem   = 1'b0;
+        dec_is_bf         = 1'b0;
+        dec_bf_op         = 3'b0;
+        dec_bf_reg_ea     = 1'b0;
+        dec_bf_mutates    = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -2457,6 +2467,49 @@ module eu_seq (
                             dec_use_reg_cnt = 1'b1;
                             dec_reads_dst   = 1'b1;
                         end
+                    // ── Phase 62: bit-field instructions (f_ss=11, f_dn[2]=1) ──────────
+                    // BFTST=1000 BFEXTU=1001 BFEXTS=1010 BFFFO=1011
+                    // BFCLR=1100 BFSET=1110  BFINS=1111 (bits 11:8 of opcode)
+                    end else if (f_dn[2] &&
+                                 (f_mode == 3'b000 || f_mode == 3'b010)) begin
+                        dec_valid     = 1'b1;
+                        dec_needs_ext = 1'b1;
+                        dec_is_bf     = 1'b1;
+                        dec_siz       = 2'b00;           // longword bus cycles
+                        dec_bf_op     = {f_dn[1:0], f_dir};  // operation encoding
+                        dec_bf_mutates = (f_dn[1:0] == 2'b10 || f_dn[1:0] == 2'b11);
+                        dec_bf_reg_ea  = (f_mode == 3'b000);
+                        // Source EA register: Dn (f_mode=000) or An (f_mode=010)
+                        dec_src_reg   = f_mode[1] ? {1'b1, f_reg} : {1'b0, f_reg};
+                        dec_reads_src = 1'b1;
+                        // For BFINS (op=111): read source Dn from ext_data[14:12]
+                        if ({f_dn[1:0], f_dir} == 3'b111) begin
+                            dec_dst_reg   = {1'b0, ext_data[14:12]};
+                            dec_reads_dst = 1'b1;
+                        end
+                        if (f_mode == 3'b000) begin
+                            // Register EA: result and CCR via normal WB path
+                            case ({f_dn[1:0], f_dir})
+                                3'b000: begin  // BFTST: CCR only, no reg write
+                                    dec_updates_ccr = 1'b1;
+                                end
+                                3'b001, 3'b010, 3'b011: begin  // BFEXTU/BFEXTS/BFFFO
+                                    dec_writes_reg  = 1'b1;
+                                    dec_dest_reg    = {1'b0, ext_data[14:12]};
+                                    dec_updates_ccr = 1'b1;
+                                end
+                                default: begin  // BFCLR/BFSET/BFINS: write back to EA Dn
+                                    dec_writes_reg  = 1'b1;
+                                    dec_dest_reg    = {1'b0, f_reg};
+                                    dec_updates_ccr = 1'b1;
+                                end
+                            endcase
+                        end else begin
+                            // Memory EA: FSM fires Dn write and CCR directly; dest holds result Dn#
+                            dec_dest_reg    = {1'b0, ext_data[14:12]};
+                            dec_writes_reg  = 1'b0;
+                            dec_updates_ccr = 1'b0;
+                        end
                     // ── Phase 60: shift/rotate ea (f_ss=11, f_dn[2]=0, memory forms) ──
                     // Encoding: 1110 tt d 11 0ss mmm rrr  (f_dn={tt,0,ss?} — use f_shf_tt)
                     // f_ss=11 + f_dn[2]=0: single-bit shift of (An)/(An)+/-(An)
@@ -2710,6 +2763,12 @@ module eu_seq (
     // Phase 61
     logic        ex_is_addx_mem;      // ADDX/SUBX -(Ay),-(Ax) in EX stage
 
+    // Phase 62: bit-field instructions in EX stage
+    logic        ex_is_bf;
+    logic [2:0]  ex_bf_op;
+    logic        ex_bf_reg_ea;
+    logic        ex_bf_mutates;
+
     // TAS (An) RMW state — declared early for ex_mem_stall
     logic        tas_run_r;          // TAS write phase active
     logic        tas_after_write_r;  // 1-cycle cooldown after write ack; prevents re-trigger
@@ -2761,6 +2820,25 @@ module eu_seq (
     logic        addx_mem_stall;
     assign addx_mem_stall = ex_valid && ex_is_addx_mem &&
                             !(addx_mem_run_r && addx_mem_phase_r == 2'd2 && mem_ack);
+
+    // Phase 62: bit-field memory FSM (declared early for ex_mem_stall)
+    logic        bf_mem_run_r;       // FSM active
+    logic        bf_mem_phase_r;     // 0=read, 1=write
+    logic [31:0] bf_mem_data_r;      // captured memory longword
+    logic [31:0] bf_mem_addr_r;      // EA address
+    logic [2:0]  bf_mem_op_r;        // bf_op captured
+    logic [4:0]  bf_mem_offset_r;    // offset captured
+    logic [4:0]  bf_mem_width_r;     // width captured
+    logic [2:0]  bf_mem_dn_r;        // result Dn (EXTU/EXTS/FFO) captured
+    logic [31:0] bf_mem_src_r;       // BFINS source Dn captured
+    logic        bf_mem_mutates_r;   // 1=CLR/SET/INS (needs write phase)
+
+    // bf_mem_stall: active while FSM is running and not yet done
+    logic bf_mem_stall;
+    assign bf_mem_stall = ex_valid && ex_is_bf && !ex_bf_reg_ea &&
+                          !(bf_mem_run_r && mem_ack &&
+                            (!bf_mem_phase_r && !bf_mem_mutates_r ||   // read done, non-mut
+                              bf_mem_phase_r));                          // write done
 
     // Phase 60: general memory RMW state (declared early for ex_mem_stall)
     logic        mem_rmw_run_r;    // write phase of RMW active
@@ -2992,7 +3070,7 @@ module eu_seq (
                           ptest_start_r  || ptest_run_r  ||
                           cmp2_run_r || cmp2_first_ack ||
                           mem_rmw_run_r || mem_rmw_read_ack ||
-                          addx_mem_stall ||
+                          addx_mem_stall || bf_mem_stall ||
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                            !memind_start_r && !memind_inner_r && !memind_outer_r &&
                            !mem_rmw_run_r && !mem_rmw_after_r &&
@@ -3134,6 +3212,10 @@ module eu_seq (
             ex_is_cmpm        <= 1'b0;
             ex_is_mem_rmw     <= 1'b0;
             ex_is_addx_mem    <= 1'b0;
+            ex_is_bf          <= 1'b0;
+            ex_bf_op          <= 3'b0;
+            ex_bf_reg_ea      <= 1'b0;
+            ex_bf_mutates     <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -3208,6 +3290,10 @@ module eu_seq (
             ex_is_cmpm        <= 1'b0;
             ex_is_mem_rmw     <= 1'b0;
             ex_is_addx_mem    <= 1'b0;
+            ex_is_bf          <= 1'b0;
+            ex_bf_op          <= 3'b0;
+            ex_bf_reg_ea      <= 1'b0;
+            ex_bf_mutates     <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -3309,6 +3395,10 @@ module eu_seq (
             ex_is_cmpm        <= dec_is_cmpm;
             ex_is_mem_rmw     <= dec_is_mem_rmw;
             ex_is_addx_mem    <= dec_is_addx_mem;
+            ex_is_bf          <= dec_is_bf;
+            ex_bf_op          <= dec_bf_op;
+            ex_bf_reg_ea      <= dec_bf_reg_ea;
+            ex_bf_mutates     <= dec_bf_mutates;
         end
     end
     // ex_an_upd_en declared above inside the EX latch always_ff block:
@@ -3331,7 +3421,7 @@ module eu_seq (
     // Phase 41: for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
     // Phase 53: memind post-indexed also needs full longword Xn in rd_b (for outer EA scaling)
     // Phase 59: CMPM rd_b carries Ax address base — must be full 32-bit regardless of siz
-    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem) ? 2'b00 : ex_siz;
+    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem || ex_is_bf) ? 2'b00 : ex_siz;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
     logic [31:0] ex_an_base;
@@ -3443,6 +3533,48 @@ module eu_seq (
                         addx_mem_phase_r <= 2'd0;
                     end
                 endcase
+            end
+        end
+    end
+
+    // Phase 62: bit-field memory EA FSM
+    // Phase 0 (read): issue longword read from M[An]; on ack: capture data, go to phase 1 if mutating
+    // Phase 1 (write): issue write of modified longword back to M[An]; on ack: FSM done
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            bf_mem_run_r     <= 1'b0;
+            bf_mem_phase_r   <= 1'b0;
+            bf_mem_data_r    <= 32'h0;
+            bf_mem_addr_r    <= 32'h0;
+            bf_mem_op_r      <= 3'b0;
+            bf_mem_offset_r  <= 5'h0;
+            bf_mem_width_r   <= 5'h0;
+            bf_mem_dn_r      <= 3'b0;
+            bf_mem_src_r     <= 32'h0;
+            bf_mem_mutates_r <= 1'b0;
+        end else begin
+            if (ex_valid && ex_is_bf && !ex_bf_reg_ea && !bf_mem_run_r) begin
+                // Setup: capture parameters from EX stage
+                bf_mem_run_r     <= 1'b1;
+                bf_mem_phase_r   <= 1'b0;
+                bf_mem_addr_r    <= rd_a_data;        // An value
+                bf_mem_op_r      <= ex_bf_op;
+                bf_mem_offset_r  <= ex_imm[10:6];
+                bf_mem_width_r   <= ex_imm[4:0];
+                bf_mem_dn_r      <= ex_dest_reg[2:0]; // result Dn from extension word
+                bf_mem_src_r     <= rd_b_data;        // BFINS source Dn (0 if not BFINS)
+                bf_mem_mutates_r <= ex_bf_mutates;
+            end else if (bf_mem_run_r && mem_ack) begin
+                if (!bf_mem_phase_r) begin
+                    bf_mem_data_r  <= mem_rdata;      // capture longword
+                    if (bf_mem_mutates_r)
+                        bf_mem_phase_r <= 1'b1;       // proceed to write phase
+                    else
+                        bf_mem_run_r   <= 1'b0;       // read-only op: done
+                end else begin
+                    bf_mem_run_r   <= 1'b0;           // write done
+                    bf_mem_phase_r <= 1'b0;
+                end
             end
         end
     end
@@ -3882,6 +4014,37 @@ module eu_seq (
     assign move_result_z_b = (move_result_w[7:0]  == 8'h00);
     assign move_result_z_w = (move_result_w[15:0] == 16'h00);
 
+    // -----------------------------------------------------------------------
+    // Phase 62: eu_bitfield combinational unit
+    // bf_data: mem_rdata at phase-0 ack (non-mut), bf_mem_data_r at phase-1 (mut), rd_a_data for reg EA
+    // -----------------------------------------------------------------------
+    logic [31:0] bf_data_mux, bf_src_mux, bf_result, bf_result_w;
+    logic [4:0]  bf_offset_mux, bf_width_mux;
+    logic [2:0]  bf_op_mux;
+    logic        bf_n, bf_z, bf_v, bf_c;
+
+    assign bf_data_mux   = (ex_is_bf && !ex_bf_reg_ea && bf_mem_run_r && !bf_mem_phase_r) ? mem_rdata
+                         : (ex_is_bf && !ex_bf_reg_ea && bf_mem_run_r &&  bf_mem_phase_r) ? bf_mem_data_r
+                         : rd_a_data;
+    assign bf_offset_mux = bf_mem_run_r ? bf_mem_offset_r : ex_imm[10:6];
+    assign bf_width_mux  = bf_mem_run_r ? bf_mem_width_r  : ex_imm[4:0];
+    assign bf_src_mux    = bf_mem_run_r ? bf_mem_src_r    : rd_b_data;
+    assign bf_op_mux     = bf_mem_run_r ? bf_mem_op_r     : ex_bf_op;
+
+    eu_bitfield u_bitfield (
+        .bf_data      (bf_data_mux),
+        .bf_offset    (bf_offset_mux),
+        .bf_raw_width (bf_width_mux),
+        .bf_src       (bf_src_mux),
+        .bf_op        (bf_op_mux),
+        .bf_result    (bf_result),
+        .bf_n         (bf_n),
+        .bf_z         (bf_z),
+        .bf_v         (bf_v),
+        .bf_c         (bf_c)
+    );
+    assign bf_result_w = bf_result;  // alias for clarity
+
     assign alu_src   = (ex_is_cmpm && cmpm_phase_r) ? cmpm_src_r :
                        (ex_is_addx_mem && addx_mem_run_r && addx_mem_phase_r == 2'd2) ? addx_src_r :
                        (ex_is_mem_rmw && !ex_use_imm) ? rd_b_data :  // Dn in rd_b for binary RMW
@@ -3939,6 +4102,16 @@ module eu_seq (
         ex_c      = 1'b0;
         ex_x      = flag_x;
         ex_move_n = 1'b0;
+
+        // Phase 62: register EA bit-field — single-cycle, bypasses unit case
+        if (ex_is_bf && ex_bf_reg_ea) begin
+            ex_result = bf_result_w;  // extracted (EXTU/EXTS/FFO) or modified (CLR/SET/INS)
+            ex_n      = bf_n;
+            ex_z      = bf_z;
+            ex_v      = bf_v;
+            ex_c      = bf_c;
+            ex_x      = flag_x;       // X unchanged by all BF ops
+        end else
 
         case (ex_unit)
             UNIT_ALU: begin
@@ -4156,19 +4329,35 @@ module eu_seq (
     logic memind_wr_en;
     assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r;
 
+    // Phase 62: BF memory Dn write — non-mutating ops write extracted result to Dn at read ack.
+    // BFTST(000) has no Dn destination; BFEXTU/EXTS/FFO(001/010/011) write to ext_data[14:12]=bf_mem_dn_r.
+    logic bf_dn_wr_en;
+    assign bf_dn_wr_en = bf_mem_run_r && mem_ack && !bf_mem_phase_r && !bf_mem_mutates_r &&
+                         (bf_mem_op_r != 3'b000);
+
+    // Phase 62: BF memory CCR — non-mutating at read ack; mutating at write ack.
+    logic bf_mem_sr_wr_en;
+    assign bf_mem_sr_wr_en = bf_mem_run_r && mem_ack &&
+                             ((!bf_mem_mutates_r && !bf_mem_phase_r) ||
+                              ( bf_mem_mutates_r &&  bf_mem_phase_r));
+
     // Word MOVEP writes only [15:0] (siz=10); long writes full 32 bits (siz=00).
-    assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || (wb_valid && wb_writes_reg);
+    assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || bf_dn_wr_en ||
+                    (wb_valid && wb_writes_reg);
     assign wr_sel  = movem_wr_en  ? movem_reg_sel
                    : movep_wr_en  ? movep_wr_sel
                    : memind_wr_en ? memind_dest_r
+                   : bf_dn_wr_en  ? {1'b0, bf_mem_dn_r}
                    :                wb_dest_reg;
     assign wr_siz  = movem_wr_en  ? 2'b00
                    : movep_wr_en  ? (movep_long_r ? 2'b00 : 2'b10)
                    : memind_wr_en ? memind_siz_r
+                   : bf_dn_wr_en  ? 2'b00
                    :                wb_siz;
     assign wr_data = movem_wr_en  ? movem_wr_data
                    : movep_wr_en  ? movep_wr_data
                    : memind_wr_en ? mem_rdata
+                   : bf_dn_wr_en  ? bf_result_w
                    :                wb_result_final;
 
     // Phase 58: second Dn write port for 64-bit mul/div high result (Dh or Dr).
@@ -4255,7 +4444,7 @@ module eu_seq (
     // Phase 56: wb_is_move_sr_w fires full SR write; wb_is_move_ccr_w fires CCR-only write.
     assign sr_wr_en   = rte_sr_wr_en || stop_sr_wr_en ||
                         rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || memind_ccr_wr_en ||
-                        mem_rmw_sr_wr_en || addx_mem_sr_wr_en ||
+                        mem_rmw_sr_wr_en || addx_mem_sr_wr_en || bf_mem_sr_wr_en ||
                         (wb_valid && (wb_updates_ccr || wb_is_move_sr_w || wb_is_move_ccr_w));
     assign sr_wr_data = rte_sr_wr_en        ? rte_sr_r
                       : stop_sr_wr_en       ? ex_stop_sr
@@ -4265,6 +4454,7 @@ module eu_seq (
                       : memind_ccr_wr_en    ? {sr_out[15:8], 3'b000, memind_ccr_w}
                       : mem_rmw_sr_wr_en    ? {sr_out[15:8], 3'b000, mem_rmw_ccr_r}
                       : addx_mem_sr_wr_en   ? {sr_out[15:8], 3'b000, ex_x, ex_n, ex_z, ex_v, ex_c}
+                      : bf_mem_sr_wr_en     ? {sr_out[15:8], 3'b000, flag_x, bf_n, bf_z, bf_v, bf_c}
                       : wb_is_move_sr_w     ? wb_result[15:0]
                       : wb_is_move_ccr_w    ? {sr_out[15:8], 3'b000, wb_result[4:0]}
                       :                       {sr_out[15:8], 3'b000, final_ccr};
@@ -4352,7 +4542,7 @@ module eu_seq (
     // Phase 50: move16_run_r drives 4 longword reads then 4 longword writes.
     // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
     assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
-                       memind_inner_r || memind_outer_r || mem_rmw_run_r || addx_mem_run_r ||
+                       memind_inner_r || memind_outer_r || mem_rmw_run_r || addx_mem_run_r || bf_mem_run_r ||
                        (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                         !memind_start_r && !memind_inner_r && !memind_outer_r &&
                         !mem_rmw_run_r && !mem_rmw_after_r &&
@@ -4366,6 +4556,7 @@ module eu_seq (
                      : memind_outer_r ? memind_is_rd_r
                      : mem_rmw_run_r  ? 1'b0        // write phase of RMW
                      : addx_mem_run_r ? (addx_mem_phase_r != 2'd2)  // read phases 0,1; write phase 2
+                     : bf_mem_run_r   ? !bf_mem_phase_r              // phase 0=read, phase 1=write
                      : ex_is_mem_rd;
     assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
@@ -4374,6 +4565,7 @@ module eu_seq (
                        memind_inner_r ? 2'b00 :     // inner: longword
                        memind_outer_r ? memind_siz_r :
                        addx_mem_run_r ? addx_siz_r :
+                       bf_mem_run_r   ? 2'b00 :       // always longword
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
                        (ex_is_rte && !rte_phase_r) ? 2'b10 : ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
@@ -4388,6 +4580,7 @@ module eu_seq (
                        memind_outer_r ? memind_outer_addr_w :
                        mem_rmw_run_r  ? mem_rmw_addr_r :
                        addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :
+                       bf_mem_run_r   ? bf_mem_addr_r :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
                        (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :
                        (ex_is_cmpm && cmpm_phase_r)          ? cmpm_ax_addr_r : ex_ea;
@@ -4397,6 +4590,7 @@ module eu_seq (
     // For MOVE16 write phase: drive the buffered longword for the current beat.
     assign mem_wdata = mem_rmw_run_r            ? mem_rmw_wdata_r
                      : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ? ex_result
+                     : (bf_mem_run_r && bf_mem_phase_r) ? bf_result_w
                      : tas_run_r               ? {24'h0, tas_wdata_r}
                      : movep_run_r             ? {24'h0, movep_wr_byte_w}
                      : move16_run_r            ? move16_wdata_w

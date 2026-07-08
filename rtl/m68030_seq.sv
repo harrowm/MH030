@@ -174,6 +174,11 @@ module m68030_seq (
     logic is_rtd;
     assign is_rtd = (instr_word == 16'h4E74);
 
+    // Phase 62: bit-field instructions — always exactly 1 extension word
+    // Group E, f_ss=11 (bits[7:6]=11), f_dn[2]=1 (bit[11]=1)
+    logic is_bf;
+    assign is_bf = (f_group == 4'he) && (f_ss == 2'b11) && f_dn[2];
+
     // PEA abs.L: f_mode=111, f_reg=001
     logic is_pea_abs_long;
     assign is_pea_abs_long = is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b001);
@@ -190,7 +195,7 @@ module m68030_seq (
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
-                 is_rtd ||
+                 is_rtd || is_bf ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
