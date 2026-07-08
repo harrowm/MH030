@@ -269,6 +269,7 @@ module m68030_top #(
     logic [31:0] eu_ptest_va_w;
     logic [2:0]  eu_ptest_fc_w;
     logic [31:0] eu_tc_w, eu_tt0_w, eu_tt1_w;
+    logic [63:0] eu_crp_w, eu_srp_w;
 
     // BIU ↔ MMU translation port wires
     logic [31:0] biu_mmu_va_w;
@@ -377,6 +378,8 @@ module m68030_top #(
         .tc_out          (eu_tc_w),
         .tt0_out         (eu_tt0_w),
         .tt1_out         (eu_tt1_w),
+        .crp_out         (eu_crp_w),
+        .srp_out         (eu_srp_w),
         .an_wr_en      (eu_an_wr_en),
         .an_wr_sel     (eu_an_wr_sel),
         .an_wr_data    (eu_an_wr_data),
@@ -640,8 +643,8 @@ module m68030_top #(
         .cacr            (eu_cacr_out),
         .caar            (eu_caar_out),
         .tc              (eu_tc_w),       // Phase 54/55: TC register from EU
-        .crp             (CRP_RESET),     // CRP/SRP: MOVEC not yet implemented
-        .srp             (SRP_RESET),
+        .crp             (eu_crp_w),      // Phase 64: CRP from EU PMOVE
+        .srp             (eu_srp_w),
         .tt0             (eu_tt0_w),      // Phase 54/55: TT0 register from EU
         .tt1             (eu_tt1_w),      // Phase 54/55: TT1 register from EU
         // Status outputs

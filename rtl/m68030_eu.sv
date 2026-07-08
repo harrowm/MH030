@@ -89,6 +89,8 @@ module m68030_eu (
     output logic [31:0] tc_out,
     output logic [31:0] tt0_out,
     output logic [31:0] tt1_out,
+    output logic [63:0] crp_out,         // Phase 64: CRP register → MMU
+    output logic [63:0] srp_out,         // Phase 64: SRP register → MMU
 
     // ── Address register update port ──────────────────────────────────────
     output logic        an_wr_en,
@@ -304,6 +306,8 @@ module m68030_eu (
         .tc_out          (tc_out),
         .tt0_out         (tt0_out),
         .tt1_out         (tt1_out),
+        .crp_out         (crp_out),
+        .srp_out         (srp_out),
         .an_wr_en     (an_wr_en),
         .an_wr_sel    (an_wr_sel),
         .an_wr_data   (an_wr_data),

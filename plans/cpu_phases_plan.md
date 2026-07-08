@@ -323,7 +323,7 @@ Files: `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `rtl/m68030_top.sv` (RESET wire), `
 
 ---
 
-### Phase 64 — MOVES full EA, PMOVE CRP/SRP (64-bit)
+### Phase 64 — MOVES full EA, PMOVE CRP/SRP (64-bit) ✅
 
 **Why last**: These are wiring-heavy finishes that require co-ordination between
 EU, BIU, and MMU. Low risk of breaking other paths; best left until the instruction

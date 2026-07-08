@@ -191,6 +191,8 @@ module eu_seq (
     output logic [31:0] tc_out,          // TC register → MMU
     output logic [31:0] tt0_out,         // TT0 register → MMU
     output logic [31:0] tt1_out,         // TT1 register → MMU
+    output logic [63:0] crp_out,         // CRP register → MMU (Phase 64)
+    output logic [63:0] srp_out,         // SRP register → MMU (Phase 64)
     // Phase 56: OS exception/control instructions
     output logic        eu_trap_req,     // one-cycle pulse: TRAP #n firing
     output logic [3:0]  eu_trap_num,     // trap vector number (0–15)
@@ -448,6 +450,7 @@ module eu_seq (
     logic        dec_is_ptest;
     logic [2:0]  dec_ptest_fc;
     logic        dec_is_pmove;
+    logic        dec_is_pmove64;     // Phase 64: 64-bit PMOVE (CRP/SRP)
     logic [2:0]  dec_pmove_preg;
     logic        dec_pmove_to_mem;   // 1=register→EA (write), 0=EA→register (read)
 
@@ -593,6 +596,7 @@ module eu_seq (
         dec_is_ptest       = 1'b0;
         dec_ptest_fc       = 3'b0;
         dec_is_pmove       = 1'b0;
+        dec_is_pmove64     = 1'b0;
         dec_pmove_preg     = 3'b0;
         dec_pmove_to_mem   = 1'b0;
         dec_is_rte        = 1'b0;
@@ -832,6 +836,78 @@ module eu_seq (
                             end
                             default: ;
                         endcase
+                    end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b101) begin
+                        // Phase 64: MOVES (d16,An) — ext_count=2
+                        // ext[31:16]=MOVES desc, ext[15:0]=d16
+                        // ext[27]=dir (1=load), ext[31]=D/A, ext[30:28]=Rn
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_siz         = f_siz;
+                        dec_x_unchanged = 1'b1;
+                        dec_is_moves    = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_ea_offset   = {{16{ext_data[15]}}, ext_data[15:0]};
+                        if (ext_data[27]) begin
+                            dec_moves_load = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};
+                            dec_reads_src  = 1'b1;
+                            dec_dest_reg   = {ext_data[31], ext_data[30:28]};
+                            dec_writes_reg = 1'b1;
+                        end else begin
+                            dec_moves_load = 1'b0;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_src_reg    = {ext_data[31], ext_data[30:28]};
+                            dec_dst_reg    = {1'b1, f_reg};
+                            dec_reads_src  = 1'b1;
+                            dec_reads_dst  = 1'b1;
+                        end
+                    end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b110 &&
+                                 ext_data[27]) begin
+                        // Phase 64: MOVES (d8,An,Xn) LOAD only — ext_count=2
+                        // ext[31:16]=MOVES desc, ext[15:0]=brief ext word
+                        // Store omitted: 3-register conflict (Rn+An+Xn simultaneously)
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_siz         = f_siz;
+                        dec_x_unchanged = 1'b1;
+                        dec_is_moves    = 1'b1;
+                        dec_moves_load  = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};                    // An = EA base
+                        dec_reads_src   = 1'b1;
+                        dec_dst_reg     = {ext_data[15], ext_data[14:12]};  // Xn index
+                        dec_reads_dst   = 1'b1;
+                        dec_dest_reg    = {ext_data[31], ext_data[30:28]};  // Rn = dest
+                        dec_writes_reg  = 1'b1;
+                        dec_is_idx      = 1'b1;
+                        dec_xn_wl       = ext_data[11];
+                        dec_xn_scale    = ext_data[10:9];
+                        dec_ea_offset   = {{24{ext_data[7]}}, ext_data[7:0]};
+                    end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b111 &&
+                                 f_reg == 3'b000) begin
+                        // Phase 64: MOVES (xxx).W — ext_count=2
+                        // ext[31:16]=MOVES desc, ext[15:0]=abs.W address
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MOVE;
+                        dec_siz         = f_siz;
+                        dec_x_unchanged = 1'b1;
+                        dec_is_moves    = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_abs_ea_en   = 1'b1;
+                        dec_abs_ea_val  = {{16{ext_data[15]}}, ext_data[15:0]};
+                        if (ext_data[27]) begin
+                            dec_moves_load = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_dest_reg   = {ext_data[31], ext_data[30:28]};
+                            dec_writes_reg = 1'b1;
+                        end else begin
+                            dec_moves_load = 1'b0;
+                            dec_is_mem_wr  = 1'b1;
+                            dec_src_reg    = {ext_data[31], ext_data[30:28]};
+                            dec_reads_src  = 1'b1;
+                        end
                     end else if (f_dir && f_mode == 3'b001) begin
                         // MOVEP: 0000 DDD1 dir siz 001 AAA + d16
                         // f_ss[1]=direction (1=Dn→mem/store, 0=mem→Dn/load)
@@ -2685,9 +2761,27 @@ module eu_seq (
                                 end
                             end
                             3'b010: begin
-                                // PMOVE (32-bit registers: TC/TT0/TT1/MMUSR)
-                                // Skip 64-bit CRP/SRP (mmu_sub_mode=100/110).
+                                // PMOVE 32-bit registers (TC/TT0/TT1/MMUSR)
+                                // Phase 64: 64-bit CRP/SRP (mmu_sub_mode=100/110)
                                 if (f_mode == 3'b010 &&
+                                    (mmu_sub_mode == 3'b100 || mmu_sub_mode == 3'b110)) begin
+                                    // PMOVE CRP/SRP: 2x 32-bit bus cycles, hi word first
+                                    dec_valid         = 1'b1;
+                                    dec_unit          = UNIT_NONE;
+                                    dec_is_pmove64    = 1'b1;
+                                    dec_pmove_preg    = mmu_sub_mode;
+                                    dec_pmove_to_mem  = mmu_dr;
+                                    dec_siz           = 2'b00;
+                                    if (mmu_dr) begin
+                                        dec_dst_reg   = {1'b1, f_reg};
+                                        dec_reads_dst = 1'b1;
+                                        dec_is_mem_wr = 1'b1;
+                                    end else begin
+                                        dec_src_reg   = {1'b1, f_reg};
+                                        dec_reads_src = 1'b1;
+                                        dec_is_mem_rd = 1'b1;
+                                    end
+                                end else if (f_mode == 3'b010 &&
                                     mmu_sub_mode != 3'b100 && mmu_sub_mode != 3'b110) begin
                                     dec_valid         = 1'b1;
                                     dec_unit          = UNIT_NONE;
@@ -2800,6 +2894,7 @@ module eu_seq (
     logic        ex_is_ptest;
     logic [2:0]  ex_ptest_fc;
     logic        ex_is_pmove;
+    logic        ex_is_pmove64;   // Phase 64: 64-bit PMOVE (CRP/SRP)
     logic [2:0]  ex_pmove_preg;
     logic        ex_pmove_to_mem;
     logic        ex_movep_load;    // 1=load, 0=store
@@ -3140,6 +3235,10 @@ module eu_seq (
         cmp2_z_w = (cmp2_rn_sext_w == cmp2_lb_sext_w) || (cmp2_rn_sext_w == cmp2_ub_sext_w);
     end
 
+    // Phase 64: pmove64_run_r/skip declared early for ex_mem_stall (FSM body is below)
+    logic pmove64_run_r;
+    logic pmove64_skip_r;  // burns the stale ack from the old address at phase-1 start
+
     logic rtr_stall, rte_stall, ex_mem_stall;
     assign rtr_stall    = ex_is_rtr && !(rtr_phase_r && mem_ack);
     assign rte_stall    = ex_is_rte && !(rte_phase_r && mem_ack);
@@ -3166,9 +3265,10 @@ module eu_seq (
                           cmp2_run_r || cmp2_first_ack ||
                           mem_rmw_run_r || mem_rmw_read_ack ||
                           addx_mem_stall || bf_mem_stall || pack_mem_stall ||
+                          pmove64_run_r ||
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                            !memind_start_r && !memind_inner_r && !memind_outer_r &&
-                           !mem_rmw_run_r && !mem_rmw_after_r &&
+                           !mem_rmw_run_r && !mem_rmw_after_r && !pmove64_run_r &&
                            (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
                           rtr_stall || rte_stall || cmpm_stall || stop_r || reset_run_r;
 
@@ -3285,6 +3385,7 @@ module eu_seq (
             ex_is_ptest       <= 1'b0;
             ex_ptest_fc       <= 3'b0;
             ex_is_pmove       <= 1'b0;
+            ex_is_pmove64     <= 1'b0;
             ex_pmove_preg     <= 3'b0;
             ex_pmove_to_mem   <= 1'b0;
             ex_is_rte         <= 1'b0;
@@ -3369,6 +3470,7 @@ module eu_seq (
             ex_is_ptest       <= 1'b0;
             ex_ptest_fc       <= 3'b0;
             ex_is_pmove       <= 1'b0;
+            ex_is_pmove64     <= 1'b0;
             ex_pmove_preg     <= 3'b0;
             ex_pmove_to_mem   <= 1'b0;
             ex_is_rte         <= 1'b0;
@@ -3476,6 +3578,7 @@ module eu_seq (
             ex_is_ptest       <= dec_is_ptest;
             ex_ptest_fc       <= dec_ptest_fc;
             ex_is_pmove       <= dec_is_pmove;
+            ex_is_pmove64     <= dec_is_pmove64;
             ex_pmove_preg     <= dec_pmove_preg;
             ex_pmove_to_mem   <= dec_pmove_to_mem;
             ex_is_rte         <= dec_is_rte;
@@ -4396,6 +4499,65 @@ module eu_seq (
     end
 
     // -----------------------------------------------------------------------
+    // Phase 64: PMOVE CRP/SRP 64-bit 2-phase FSM
+    // Phase 0: bus cycle at An (hi word); phase 1: bus cycle at An+4 (lo word).
+    // pmove64_run_r=1 during phase 1 to hold ex_mem_stall and drive bus.
+    // pmove64_run_r declared above (before ex_mem_stall) for forward-ref safety.
+    // -----------------------------------------------------------------------
+    logic        pmove64_to_mem_r;
+    logic        pmove64_is_crp_r;
+    logic [31:0] pmove64_addr_r;
+    logic [31:0] crp_hi_r, crp_lo_r;
+    logic [31:0] srp_hi_r, srp_lo_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            pmove64_run_r    <= 1'b0;
+            pmove64_skip_r   <= 1'b0;
+            pmove64_to_mem_r <= 1'b0;
+            pmove64_is_crp_r <= 1'b0;
+            pmove64_addr_r   <= 32'h0;
+            crp_hi_r <= 32'h0; crp_lo_r <= 32'h0;
+            srp_hi_r <= 32'h0; srp_lo_r <= 32'h0;
+        end else begin
+            if (!pmove64_run_r && ex_valid && ex_is_pmove64 && mem_ack) begin
+                // Phase 0 ack: save address, arm skip, move to phase 1.
+                // skip_r burns the stale mem_ack that fires in the same clock as
+                // pmove64_run_r transitions 0→1 (memory model responded to the old
+                // normal-path address, not yet to the new An+4 address).
+                pmove64_run_r    <= 1'b1;
+                pmove64_skip_r   <= 1'b1;
+                pmove64_to_mem_r <= ex_pmove_to_mem;
+                pmove64_is_crp_r <= (ex_pmove_preg == 3'b100);
+                pmove64_addr_r   <= ex_ea;
+                if (!ex_pmove_to_mem) begin
+                    if (ex_pmove_preg == 3'b100) crp_hi_r <= mem_rdata;
+                    else                          srp_hi_r <= mem_rdata;
+                end
+            end else if (pmove64_run_r && pmove64_skip_r) begin
+                // Skip cycle: address has just switched to An+4.
+                // The memory model is responding to the old An; discard and wait.
+                pmove64_skip_r <= 1'b0;
+            end else if (pmove64_run_r && !pmove64_skip_r && mem_ack) begin
+                // Phase 1 ack: fresh response to An+4.
+                pmove64_run_r <= 1'b0;
+                if (!pmove64_to_mem_r) begin
+                    if (pmove64_is_crp_r) crp_lo_r <= mem_rdata;
+                    else                  srp_lo_r <= mem_rdata;
+                end
+            end
+        end
+    end
+
+    assign crp_out = {crp_hi_r, crp_lo_r};
+    assign srp_out = {srp_hi_r, srp_lo_r};
+
+    logic [31:0] pmove64_wr_data_w;
+    assign pmove64_wr_data_w =
+        (!pmove64_run_r) ? (ex_pmove_preg == 3'b100 ? crp_hi_r : srp_hi_r)
+                         : (pmove64_is_crp_r         ? crp_lo_r : srp_lo_r);
+
+    // -----------------------------------------------------------------------
     // Phase 60: general memory RMW FSM
     // Read phase uses the normal ex_is_mem_rd path.  When the read acks
     // (mem_rmw_read_ack), we capture the ALU/SHF/BIT result and EA, then
@@ -4752,10 +4914,10 @@ module eu_seq (
     // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
     assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
                        memind_inner_r || memind_outer_r || mem_rmw_run_r || addx_mem_run_r ||
-                       bf_mem_run_r || pack_mem_run_r ||
+                       bf_mem_run_r || pack_mem_run_r || pmove64_run_r ||
                        (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                         !memind_start_r && !memind_inner_r && !memind_outer_r &&
-                        !mem_rmw_run_r && !mem_rmw_after_r &&
+                        !mem_rmw_run_r && !mem_rmw_after_r && !pmove64_run_r &&
                         ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
     assign mem_rw    = movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
@@ -4768,6 +4930,7 @@ module eu_seq (
                      : addx_mem_run_r ? (addx_mem_phase_r != 2'd2)  // read phases 0,1; write phase 2
                      : bf_mem_run_r   ? !bf_mem_phase_r              // phase 0=read, phase 1=write
                      : pack_mem_run_r ? !pack_mem_phase_r            // phase 0=read, phase 1=write
+                     : pmove64_run_r  ? !pmove64_to_mem_r            // phase 1: same rw as phase 0
                      : ex_is_mem_rd;
     assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
@@ -4778,6 +4941,7 @@ module eu_seq (
                        addx_mem_run_r ? addx_siz_r :
                        bf_mem_run_r   ? 2'b00 :       // always longword
                        pack_mem_run_r ? pack_mem_cur_siz :
+                       pmove64_run_r  ? 2'b00 :       // phase 1: always longword
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
                        (ex_is_rte && !rte_phase_r) ? 2'b10 : ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
@@ -4794,6 +4958,7 @@ module eu_seq (
                        addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :
                        bf_mem_run_r   ? bf_mem_addr_r :
                        pack_mem_run_r ? (pack_mem_phase_r ? pack_mem_ax_addr_r : pack_mem_ay_addr_r) :
+                       pmove64_run_r  ? (pmove64_addr_r + 32'd4) :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
                        (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :
                        (ex_is_cmpm && cmpm_phase_r)          ? cmpm_ax_addr_r : ex_ea;
@@ -4809,6 +4974,8 @@ module eu_seq (
                      : movep_run_r             ? {24'h0, movep_wr_byte_w}
                      : move16_run_r            ? move16_wdata_w
                      : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w
+                     : (ex_is_pmove64 && ex_pmove_to_mem) ? pmove64_wr_data_w
+                     : (pmove64_run_r && pmove64_to_mem_r) ? pmove64_wr_data_w
                      : ex_is_pea               ? (ex_abs_jmp_en ? ex_abs_ea_val
                                                                  : (rd_a_data + ex_jump_offset))
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc : rd_a_data;
