@@ -474,6 +474,12 @@ module eu_seq (
     logic        dec_exg_dd;       // 1=Dx,Dy (wr2 port); 0=Ax,Ay or Dx,Ay (an_wr)
     logic        dec_is_cmpm;      // CMPM (Ay)+,(Ax)+ — two-phase memory compare
 
+    // Phase 60: memory-destination ALU RMW
+    logic        dec_is_mem_rmw;   // read-modify-write: read EA, ALU op, write back
+
+    // Phase 61: ADDX/SUBX -(Ay),-(Ax) memory predecrement form
+    logic        dec_is_addx_mem;  // 3-phase predecrement read-read-write FSM
+
     // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
     logic [31:0] ctrl_reg_rd_val;
     always_comb begin
@@ -596,6 +602,8 @@ module eu_seq (
         dec_is_cmpm       = 1'b0;
         dec_md_dst2       = 3'b0;
         dec_md_64bit      = 1'b0;
+        dec_is_mem_rmw    = 1'b0;
+        dec_is_addx_mem   = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -664,6 +672,82 @@ module eu_seq (
                             2'b01: begin dec_bit_op=BIT_CHG; dec_writes_reg=1'b1; dec_valid=1'b1; end
                             2'b10: begin dec_bit_op=BIT_CLR; dec_writes_reg=1'b1; dec_valid=1'b1; end
                             2'b11: begin dec_bit_op=BIT_SET; dec_writes_reg=1'b1; dec_valid=1'b1; end
+                        endcase
+                    // ── Phase 60: immediate ALU ops to memory ea ─────────────────
+                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (An)/(An)+/-(An)
+                    // Exclude f_ss=11 (overlaps CMP2 encoding) and f_dn=100 (bit subop).
+                    end else if (!f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
+                                 (f_dn != 3'b100 && f_dn != 3'b111)) begin
+                        dec_siz        = f_siz;
+                        dec_unit       = UNIT_ALU;
+                        dec_use_imm    = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_src_reg    = {1'b1, f_reg};  // An → rd_a (EA base)
+                        dec_reads_src  = 1'b1;
+                        dec_is_mem_rd  = 1'b1;
+                        case (f_mode)
+                            3'b011: begin  // (An)+
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin  // -(An)
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
+                        case (f_dn)
+                            3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b110: begin  // CMPI: read + CCR update, no write back
+                                dec_alu_op      = ALU_CMP;
+                                dec_x_unchanged = 1'b1;
+                                dec_updates_ccr = 1'b1;  // CCR fires normally from WB
+                                dec_valid       = 1'b1;
+                            end
+                            default: ;
+                        endcase
+                    // ── Phase 60: register bit ops to memory ea ───────────────────
+                    // BTST/BCHG/BCLR/BSET Dn, (An)/(An)+/-(An)  (f_dir=1)
+                    end else if (f_dir &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_unit         = UNIT_BIT;
+                        dec_siz          = 2'b01;    // memory bit ops are always byte
+                        dec_src_reg      = {1'b1, f_reg};  // An → rd_a (EA base)
+                        dec_dst_reg      = {1'b0, f_dn};   // Dn → rd_b (bit count)
+                        dec_bit_from_reg = 1'b1;
+                        dec_reads_src    = 1'b1;
+                        dec_reads_dst    = 1'b1;
+                        dec_updates_ccr  = 1'b1;
+                        dec_x_unchanged  = 1'b1;
+                        dec_is_mem_rd    = 1'b1;
+                        case (f_mode)
+                            3'b011: begin  // (An)+
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
+                            end
+                            3'b100: begin  // -(An)
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
+                        case (f_ss)
+                            2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; end  // BTST: WB fires CCR
+                            // BCHG/BCLR/BSET: CCR fires via mem_rmw_sr_wr_en, not WB
+                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
                         endcase
                     end else if (!f_dir && f_ss == 2'b11 && !f_dn[0] &&
                                  f_dn != 3'b110 && f_mode == 3'b010) begin
@@ -1242,6 +1326,43 @@ module eu_seq (
                                 dec_is_tas      = 1'b1;
                             end
                         end
+                    // ── Phase 60: NEGX/CLR/NEG/NOT/TST to memory ea ─────────────
+                    end else if (!f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
+                                 (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
+                                  f_dn == 3'b011 || f_dn == 3'b101)) begin
+                        dec_siz         = f_siz;
+                        dec_unit        = UNIT_ALU;
+                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a (EA base)
+                        dec_reads_src   = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
+                        case (f_dn)
+                            3'b000: begin dec_alu_op=ALU_NEGX; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b001: begin dec_alu_op=ALU_CLR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b010: begin dec_alu_op=ALU_NEG;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b011: begin dec_alu_op=ALU_NOT;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b101: begin  // TST ea — read + CCR, no write
+                                dec_alu_op      = ALU_TST;
+                                dec_x_unchanged = 1'b1;
+                                dec_updates_ccr = 1'b1;
+                                dec_valid       = 1'b1;
+                            end
+                            default: ;
+                        endcase
                     end else if (f_dir && f_ss == 2'b11 && f_mode >= 3'b010) begin
                         // LEA ea,An: 0100 aaa 111 mmm rrr
                         // f_dir=1, f_ss=11 (bits[8:6]=111 when combined as dst_mode)
@@ -1686,7 +1807,59 @@ module eu_seq (
                             dec_x_unchanged    = 1'b1;
                             dec_use_imm        = 1'b1;
                             dec_imm            = eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c) ? 32'hFF : 32'h00;
+                        // ── Phase 60: Scc to memory ea ───────────────────────────
+                        end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) begin
+                            dec_valid       = 1'b1;
+                            dec_unit        = UNIT_MOVE;
+                            dec_siz         = 2'b01;
+                            dec_x_unchanged = 1'b1;
+                            dec_use_imm     = 1'b1;
+                            dec_imm         = eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c) ? 32'hFF : 32'h00;
+                            dec_is_mem_rd   = 1'b1;
+                            dec_is_mem_rmw  = 1'b1;
+                            dec_src_reg     = {1'b1, f_reg};
+                            dec_reads_src   = 1'b1;
+                            case (f_mode)
+                                3'b011: begin
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
+                                end
+                                3'b100: begin
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
+                                    dec_ea_offset  = dec_an_delta;
+                                end
+                                default: ;
+                            endcase
                         end
+                    // ── Phase 60: ADDQ/SUBQ to memory ea ─────────────────────────
+                    end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = f_dir ? ALU_SUB : ALU_ADD;
+                        dec_siz         = f_siz;
+                        dec_use_imm     = 1'b1;
+                        dec_imm         = f_addq_imm;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_reads_src   = 1'b1;
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
                     end else if (f_mode == 3'b000) begin
                         // ADDQ / SUBQ #imm3, Dn
                         dec_valid       = 1'b1;
@@ -1819,6 +1992,33 @@ module eu_seq (
                                 dec_dest_reg = {1'b0, f_reg};
                             end
                         end
+                    // ── Phase 60: OR Dn, (An)/(An)+/-(An) ───────────────────────
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_OR;
+                        dec_siz         = f_siz;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a (EA base)
+                        dec_dst_reg     = {1'b0, f_dn};   // Dn → rd_b (ALU src via redirect)
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
                     end
                 end
 
@@ -1836,14 +2036,55 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         if (!f_dir) begin
+                            // SUB Dm,Dn: Dn ← Dn − Dm
                             dec_src_reg  = {1'b0, f_reg};
                             dec_dst_reg  = {1'b0, f_dn};
                             dec_dest_reg = {1'b0, f_dn};
                         end else begin
-                            dec_src_reg  = {1'b0, f_dn};
-                            dec_dst_reg  = {1'b0, f_reg};
-                            dec_dest_reg = {1'b0, f_reg};
+                            // SUBX Dy,Dx: Dx ← Dx − Dy − X (register form)
+                            dec_alu_op   = ALU_SUBX;
+                            dec_src_reg  = {1'b0, f_reg};  // Dy
+                            dec_dst_reg  = {1'b0, f_dn};   // Dx
+                            dec_dest_reg = {1'b0, f_dn};
                         end
+                    // ── Phase 61: SUBX -(Ay),-(Ax) ───────────────────────────────
+                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b001) begin
+                        dec_valid       = 1'b1;
+                        dec_is_addx_mem = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_SUBX;
+                        dec_siz         = f_siz;
+                        dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
+                        dec_dst_reg     = {1'b1, f_dn};   // Ax → rd_b
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                    // ── Phase 60: SUB Dn, (An)/(An)+/-(An) ──────────────────────
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_SUB;
+                        dec_siz         = f_siz;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
                     end else if (f_ss == 2'b11) begin
                         // SUBA.W (f_dir=0) / SUBA.L (f_dir=1): An ← An − src; CCR unchanged
                         dec_valid      = 1'b1;
@@ -1913,6 +2154,34 @@ module eu_seq (
                         dec_reads_dst   = 1'b1;
                         dec_an_delta    = calc_step(f_siz, f_dn == 3'b111);
 
+                    // ── Phase 60: EOR Dn, (An)/(An)+/-(An) ──────────────────────
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_EOR;
+                        dec_siz         = f_siz;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
                     end else if (f_ss == 2'b11) begin
                         // CMPA.W (f_dir=0) / CMPA.L (f_dir=1): CCR from (An − sign_ext(src))
                         dec_valid       = 1'b1;
@@ -2005,6 +2274,34 @@ module eu_seq (
                                 dec_dest_reg = {1'b0, f_reg};
                             end
                         end
+                    // ── Phase 60: AND Dn, (An)/(An)+/-(An) ──────────────────────
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_AND;
+                        dec_siz         = f_siz;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
                     end else if (f_dir &&
                                  ((f_ss == 2'b01 && f_mode == 3'b000) ||   // EXG Dx,Dy (handled above)
                                   (f_ss == 2'b01 && f_mode == 3'b001) ||   // EXG Ax,Ay
@@ -2057,14 +2354,56 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         if (!f_dir) begin
+                            // ADD Dm,Dn: Dn ← Dn + Dm
                             dec_src_reg  = {1'b0, f_reg};
                             dec_dst_reg  = {1'b0, f_dn};
                             dec_dest_reg = {1'b0, f_dn};
                         end else begin
-                            dec_src_reg  = {1'b0, f_dn};
-                            dec_dst_reg  = {1'b0, f_reg};
-                            dec_dest_reg = {1'b0, f_reg};
+                            // ADDX Dy,Dx: Dx ← Dx + Dy + X (register form)
+                            dec_alu_op   = ALU_ADDX;
+                            dec_src_reg  = {1'b0, f_reg};  // Dy
+                            dec_dst_reg  = {1'b0, f_dn};   // Dx
+                            dec_dest_reg = {1'b0, f_dn};
                         end
+                    // ── Phase 61: ADDX -(Ay),-(Ax) ───────────────────────────────
+                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b001) begin
+                        dec_valid       = 1'b1;
+                        dec_is_addx_mem = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_ADDX;
+                        dec_siz         = f_siz;
+                        dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
+                        dec_dst_reg     = {1'b1, f_dn};   // Ax → rd_b
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                    // ── Phase 60: ADD Dn, (An)/(An)+/-(An) ──────────────────────
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_ADD;
+                        dec_siz         = f_siz;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            default: ;
+                        endcase
                     end else if (f_ss == 2'b11) begin
                         // ADDA.W (f_dir=0) / ADDA.L (f_dir=1): An ← An + src; CCR unchanged
                         dec_valid      = 1'b1;
@@ -2118,6 +2457,37 @@ module eu_seq (
                             dec_use_reg_cnt = 1'b1;
                             dec_reads_dst   = 1'b1;
                         end
+                    // ── Phase 60: shift/rotate ea (f_ss=11, f_dn[2]=0, memory forms) ──
+                    // Encoding: 1110 tt d 11 0ss mmm rrr  (f_dn={tt,0,ss?} — use f_shf_tt)
+                    // f_ss=11 + f_dn[2]=0: single-bit shift of (An)/(An)+/-(An)
+                    end else if (!f_dn[2] &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_SHF;
+                        dec_siz         = 2'b10;   // word (memory shifts are always word)
+                        dec_is_mem_rd   = 1'b1;
+                        dec_is_mem_rmw  = 1'b1;
+                        // CCR fires via mem_rmw_sr_wr_en (not WB), to avoid stale mem_rdata
+                        dec_updates_ccr = 1'b0;
+                        dec_shf_imm_cnt = 6'd1;    // always 1-bit memory shift
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_reads_src   = 1'b1;
+                        // shf_op: {0, f_dn[1], f_dn[0]^f_dn[1], ~f_dir} — same as register form
+                        dec_shf_op      = {1'b0, f_dn[1], f_dn[0]^f_dn[1], ~f_dir};
+                        case (f_mode)
+                            3'b011: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = 32'd2;
+                            end
+                            3'b100: begin
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = 32'hFFFFFFFE;  // -2
+                                dec_ea_offset  = 32'hFFFFFFFE;
+                            end
+                            default: ;
+                        endcase
                     end
                 end
 
@@ -2335,6 +2705,10 @@ module eu_seq (
     logic        ex_is_exg;           // EXG in EX stage
     logic        ex_exg_dd;           // 1=Dx,Dy form
     logic        ex_is_cmpm;          // CMPM in EX stage
+    // Phase 60
+    logic        ex_is_mem_rmw;       // memory read-modify-write in EX stage
+    // Phase 61
+    logic        ex_is_addx_mem;      // ADDX/SUBX -(Ay),-(Ax) in EX stage
 
     // TAS (An) RMW state — declared early for ex_mem_stall
     logic        tas_run_r;          // TAS write phase active
@@ -2373,6 +2747,37 @@ module eu_seq (
     logic [2:0]  cmpm_ax_reg_r;   // Ax register number latched for an_wr
     logic        cmpm_stall;
     assign cmpm_stall = ex_valid && ex_is_cmpm && !(cmpm_phase_r && mem_ack);
+
+    // Phase 61: ADDX/SUBX -(Ay),-(Ax) 3-phase predecrement FSM (declared early for ex_mem_stall)
+    logic        addx_mem_run_r;    // FSM is active (phases 0-2 in progress)
+    logic [1:0]  addx_mem_phase_r;  // 0=read Ay, 1=read Ax, 2=write result
+    logic [31:0] addx_src_r;        // M[Ay-step] captured at phase 0 ack
+    logic [31:0] addx_dst_r;        // M[Ax-step] captured at phase 1 ack
+    logic [31:0] addx_ay_addr_r;    // Ay-step (predecremented Ay address)
+    logic [31:0] addx_ax_addr_r;    // Ax-step (predecremented Ax address)
+    logic [2:0]  addx_ay_reg_r;     // Ay register number
+    logic [2:0]  addx_ax_reg_r;     // Ax register number
+    logic [1:0]  addx_siz_r;        // transfer size
+    logic        addx_mem_stall;
+    assign addx_mem_stall = ex_valid && ex_is_addx_mem &&
+                            !(addx_mem_run_r && addx_mem_phase_r == 2'd2 && mem_ack);
+
+    // Phase 60: general memory RMW state (declared early for ex_mem_stall)
+    logic        mem_rmw_run_r;    // write phase of RMW active
+    logic        mem_rmw_after_r;  // 1-cycle cooldown after write ack
+    logic [31:0] mem_rmw_wdata_r;  // ALU/unit result captured at read ack
+    logic [4:0]  mem_rmw_ccr_r;   // {X,N,Z,V,C} captured at read ack
+    logic [31:0] mem_rmw_addr_r;   // EA captured at read ack (for write phase)
+    logic        mem_rmw_read_ack;   // combinatorial: read phase just acked
+    logic        mem_rmw_sr_wr_en;   // combinatorial: fire CCR on write ack
+    logic        mem_rmw_an_wr_en;   // combinatorial: fire An update on write ack
+    logic        mem_rmw_ccr_en_r;   // registered: this RMW op updates CCR
+    // Read ack: all referenced signals declared before this block.
+    assign mem_rmw_read_ack = ex_valid && ex_is_mem_rmw && ex_is_mem_rd && mem_ack
+                              && !mem_rmw_run_r && !mem_rmw_after_r;
+    // CCR fires from the captured mem_rmw_ccr_en_r flag (set at read ack).
+    // ex_updates_ccr is NOT used here because dec_updates_ccr=0 for most RMW ops.
+    assign mem_rmw_sr_wr_en = mem_rmw_run_r && mem_ack && mem_rmw_ccr_en_r;
 
     // Phase 43: MOVEM FSM state registers
     logic        movem_start_r;    // 1-cycle stall while waiting for An to appear in rd_b
@@ -2586,8 +2991,11 @@ module eu_seq (
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
                           cmp2_run_r || cmp2_first_ack ||
+                          mem_rmw_run_r || mem_rmw_read_ack ||
+                          addx_mem_stall ||
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                            !memind_start_r && !memind_inner_r && !memind_outer_r &&
+                           !mem_rmw_run_r && !mem_rmw_after_r &&
                            (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
                           rtr_stall || rte_stall || cmpm_stall || stop_r;
 
@@ -2724,6 +3132,8 @@ module eu_seq (
             ex_is_exg         <= 1'b0;
             ex_exg_dd         <= 1'b0;
             ex_is_cmpm        <= 1'b0;
+            ex_is_mem_rmw     <= 1'b0;
+            ex_is_addx_mem    <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -2796,6 +3206,8 @@ module eu_seq (
             ex_is_exg         <= 1'b0;
             ex_exg_dd         <= 1'b0;
             ex_is_cmpm        <= 1'b0;
+            ex_is_mem_rmw     <= 1'b0;
+            ex_is_addx_mem    <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -2895,8 +3307,17 @@ module eu_seq (
             ex_is_exg         <= dec_is_exg;
             ex_exg_dd         <= dec_exg_dd;
             ex_is_cmpm        <= dec_is_cmpm;
+            ex_is_mem_rmw     <= dec_is_mem_rmw;
+            ex_is_addx_mem    <= dec_is_addx_mem;
         end
     end
+    // ex_an_upd_en declared above inside the EX latch always_ff block:
+    assign mem_rmw_an_wr_en = mem_rmw_run_r && mem_ack && ex_valid && ex_an_upd_en;
+
+    // Scc to memory is UNIT_MOVE and does NOT affect CCR.
+    // All other memory RMW ops (ALU/SHF/BIT) do affect CCR.
+    logic ex_mem_rmw_ccr;
+    assign ex_mem_rmw_ccr = ex_is_mem_rmw && (ex_unit != UNIT_MOVE);
 
     // -----------------------------------------------------------------------
     // Drive functional unit inputs from EX stage + register file
@@ -2910,7 +3331,7 @@ module eu_seq (
     // Phase 41: for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
     // Phase 53: memind post-indexed also needs full longword Xn in rd_b (for outer EA scaling)
     // Phase 59: CMPM rd_b carries Ax address base — must be full 32-bit regardless of siz
-    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm) ? 2'b00 : ex_siz;
+    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem) ? 2'b00 : ex_siz;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
     logic [31:0] ex_an_base;
@@ -2978,6 +3399,51 @@ module eu_seq (
             cmpm_ax_reg_r  <= ex_dst_reg[2:0];    // Ax register number
         end else if (ex_valid && ex_is_cmpm && cmpm_phase_r && mem_ack) begin
             cmpm_phase_r   <= 1'b0;
+        end
+    end
+
+    // Phase 61: ADDX/SUBX -(Ay),-(Ax) 3-phase FSM
+    // Phase 0 (setup, run=0): capture Ay-step/Ax-step addresses from rd_a/rd_b.
+    // Phase 0 (run=1):        read M[Ay-step]; on ack fire Ay An write, advance.
+    // Phase 1:                read M[Ax-step]; on ack fire Ax An write, advance.
+    // Phase 2:                write ALU result; on ack fire CCR, FSM done.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            addx_mem_run_r   <= 1'b0;
+            addx_mem_phase_r <= 2'd0;
+            addx_src_r       <= 32'h0;
+            addx_dst_r       <= 32'h0;
+            addx_ay_addr_r   <= 32'h0;
+            addx_ax_addr_r   <= 32'h0;
+            addx_ay_reg_r    <= 3'b0;
+            addx_ax_reg_r    <= 3'b0;
+            addx_siz_r       <= 2'b0;
+        end else begin
+            if (ex_valid && ex_is_addx_mem && !addx_mem_run_r) begin
+                // First EX cycle: capture predecremented addresses while rd_a/rd_b are valid
+                addx_mem_run_r   <= 1'b1;
+                addx_mem_phase_r <= 2'd0;
+                addx_ay_addr_r   <= rd_a_data - calc_step(ex_siz, ex_src_reg[2:0] == 3'd7);
+                addx_ax_addr_r   <= rd_b_data - calc_step(ex_siz, ex_dst_reg[2:0] == 3'd7);
+                addx_ay_reg_r    <= ex_src_reg[2:0];
+                addx_ax_reg_r    <= ex_dst_reg[2:0];
+                addx_siz_r       <= ex_siz;
+            end else if (addx_mem_run_r && mem_ack) begin
+                case (addx_mem_phase_r)
+                    2'd0: begin
+                        addx_src_r       <= mem_rdata;   // M[Ay-step]
+                        addx_mem_phase_r <= 2'd1;
+                    end
+                    2'd1: begin
+                        addx_dst_r       <= mem_rdata;   // M[Ax-step]
+                        addx_mem_phase_r <= 2'd2;
+                    end
+                    2'd2: begin
+                        addx_mem_run_r   <= 1'b0;
+                        addx_mem_phase_r <= 2'd0;
+                    end
+                endcase
+            end
         end
     end
 
@@ -3417,15 +3883,22 @@ module eu_seq (
     assign move_result_z_w = (move_result_w[15:0] == 16'h00);
 
     assign alu_src   = (ex_is_cmpm && cmpm_phase_r) ? cmpm_src_r :
+                       (ex_is_addx_mem && addx_mem_run_r && addx_mem_phase_r == 2'd2) ? addx_src_r :
+                       (ex_is_mem_rmw && !ex_use_imm) ? rd_b_data :  // Dn in rd_b for binary RMW
                        ex_sext_src ? {{16{ex_src_operand[15]}}, ex_src_operand[15:0]}
                                    : ex_src_operand;
-    assign alu_dst   = (ex_is_cmpm && cmpm_phase_r) ? mem_rdata : rd_b_data;
+    // When reading from memory (RMW read phase, CMPI ea, TST ea, etc.),
+    // the loaded mem_rdata is the ALU/BIT destination.
+    assign alu_dst   = (ex_is_cmpm && cmpm_phase_r) ? mem_rdata :
+                       (ex_is_addx_mem && addx_mem_run_r && addx_mem_phase_r == 2'd2) ? addx_dst_r :
+                       ex_is_mem_rd                  ? mem_rdata :
+                       rd_b_data;
     assign alu_op    = ex_alu_op;
     assign alu_siz   = ex_siz;
     assign alu_x_in  = flag_x;
     assign alu_z_in  = flag_z;
 
-    assign shf_operand = rd_a_data;
+    assign shf_operand = ex_is_mem_rmw ? mem_rdata : rd_a_data;
     assign shf_count   = ex_use_reg_cnt ? rd_b_data[5:0] : ex_shf_imm_cnt;
     assign shf_op      = ex_shf_op;
     assign shf_siz     = ex_siz;
@@ -3443,8 +3916,12 @@ module eu_seq (
     assign bcd_z_in = flag_z;
 
     // Bitops datapath drives
-    assign bit_dst = rd_b_data;       // destination register (full 32-bit)
-    assign bit_num = ex_bit_from_reg ? rd_a_bit_num : ex_bit_num;
+    // For register bit ops targeting memory (BSET Dn,(An)): rd_a=An (EA base), rd_b=Dn (bit count).
+    // bit_dst must be mem_rdata; bit_num must come from rd_b[4:0] not rd_a[4:0].
+    assign bit_dst = ex_is_mem_rd ? mem_rdata : rd_b_data;
+    // Memory bit ops: bit# mod 8 (byte EA); reg-to-reg: mod 32 via [4:0]
+    assign bit_num = (ex_is_mem_rmw && ex_bit_from_reg) ? {2'b00, rd_b_data[2:0]} :
+                     ex_bit_from_reg                     ? rd_a_bit_num             : ex_bit_num;
     assign bit_op  = ex_bit_op;
 
     // -----------------------------------------------------------------------
@@ -3548,6 +4025,36 @@ module eu_seq (
     end
 
     // -----------------------------------------------------------------------
+    // Phase 60: general memory RMW FSM
+    // Read phase uses the normal ex_is_mem_rd path.  When the read acks
+    // (mem_rmw_read_ack), we capture the ALU/SHF/BIT result and EA, then
+    // drive a write cycle via mem_rmw_run_r.  CCR fires on write ack.
+    // Placed here — after ex_result/ex_x/ex_n/ex_z/ex_v/ex_c are declared.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            mem_rmw_run_r    <= 1'b0;
+            mem_rmw_after_r  <= 1'b0;
+            mem_rmw_wdata_r  <= 32'h0;
+            mem_rmw_ccr_r    <= 5'h0;
+            mem_rmw_addr_r   <= 32'h0;
+            mem_rmw_ccr_en_r <= 1'b0;
+        end else begin
+            mem_rmw_after_r <= mem_rmw_run_r && mem_ack;
+            if (mem_rmw_read_ack) begin
+                mem_rmw_run_r    <= 1'b1;
+                mem_rmw_wdata_r  <= ex_result;
+                mem_rmw_ccr_r    <= {ex_x, ex_n, ex_z, ex_v, ex_c};
+                mem_rmw_addr_r   <= ex_ea;
+                mem_rmw_ccr_en_r <= ex_mem_rmw_ccr;  // capture: does this op update CCR?
+            end else if (mem_rmw_run_r && mem_ack) begin
+                mem_rmw_run_r    <= 1'b0;
+                mem_rmw_ccr_en_r <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
     // WB stage latch
     // When ex_mem_stall: WB gets a bubble (don't advance).
     // When mem_ack arrives (ex_mem_stall=0): WB captures mem_rdata for loads,
@@ -3605,7 +4112,8 @@ module eu_seq (
                               : (ex_is_lea || ex_is_link) ? ex_ea
                               :                         ex_result;
             wb_ccr           <= {ex_x, ex_n, ex_z, ex_v, ex_c};
-            wb_an_upd_en     <= ex_an_upd_en;
+            // RMW ops: mem_rmw_an_wr_en handles An update at write ack; WB must not double-apply
+            wb_an_upd_en     <= ex_an_upd_en && !ex_is_mem_rmw;
             wb_an_upd_reg    <= ex_an_upd_reg;
             wb_an_upd_new    <= ex_an_new;
             wb_is_mem_rd     <= ex_is_mem_rd;
@@ -3683,25 +4191,40 @@ module eu_seq (
     assign cmpm_ay_wr_en = ex_valid && ex_is_cmpm && !cmpm_phase_r && mem_ack;
     assign cmpm_ax_wr_en = ex_valid && ex_is_cmpm &&  cmpm_phase_r && mem_ack;
 
+    // Phase 61: ADDX/SUBX -(Ay),-(Ax) — Ay fires at phase 0 ack, Ax fires at phase 1 ack.
+    logic addx_ay_wr_en, addx_ax_wr_en;
+    assign addx_ay_wr_en = ex_valid && ex_is_addx_mem && addx_mem_run_r &&
+                           addx_mem_phase_r == 2'd0 && mem_ack;
+    assign addx_ax_wr_en = ex_valid && ex_is_addx_mem && addx_mem_run_r &&
+                           addx_mem_phase_r == 2'd1 && mem_ack;
+
     assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en || rte_an_wr_en ||
                        move16_an1_wr_en || move16_an2_wr_r ||
+                       addx_ay_wr_en || addx_ax_wr_en ||
                        cmpm_ay_wr_en || cmpm_ax_wr_en ||
+                       mem_rmw_an_wr_en ||
                        (wb_valid && wb_an_upd_en);
     assign an_wr_sel = movem_an_wr_en    ? movem_an_r
                      : rtr_an_wr_en      ? 3'b111
                      : rte_an_wr_en      ? 3'b111
                      : move16_an1_wr_en  ? move16_src_an_r
                      : move16_an2_wr_r   ? move16_dst_an_r
-                     : cmpm_ay_wr_en     ? ex_src_reg[2:0]   // Ay register
-                     : cmpm_ax_wr_en     ? cmpm_ax_reg_r      // Ax register (latched)
+                     : addx_ay_wr_en     ? addx_ay_reg_r
+                     : addx_ax_wr_en     ? addx_ax_reg_r
+                     : cmpm_ay_wr_en     ? ex_src_reg[2:0]
+                     : cmpm_ax_wr_en     ? cmpm_ax_reg_r
+                     : mem_rmw_an_wr_en  ? ex_an_upd_reg
                      :                     wb_an_upd_reg;
     assign an_wr_data = movem_an_wr_en   ? movem_an_final
                       : rtr_an_wr_en     ? rtr_an_wr_data
                       : rte_an_wr_en     ? (rte_a7_next_r + 32'd4)
                       : move16_an1_wr_en ? move16_src_base_r + 32'd16
                       : move16_an2_wr_r  ? move16_dst_base_r + 32'd16
-                      : cmpm_ay_wr_en    ? (rd_a_data + ex_an_delta)       // Ay + step
-                      : cmpm_ax_wr_en    ? (cmpm_ax_addr_r + cmpm_step_r)  // Ax + step
+                      : addx_ay_wr_en    ? addx_ay_addr_r   // Ay − step (already captured)
+                      : addx_ax_wr_en    ? addx_ax_addr_r   // Ax − step (already captured)
+                      : cmpm_ay_wr_en    ? (rd_a_data + ex_an_delta)
+                      : cmpm_ax_wr_en    ? (cmpm_ax_addr_r + cmpm_step_r)
+                      : mem_rmw_an_wr_en ? (rd_a_data + ex_an_delta)  // An base + delta
                       :                    wb_an_upd_new;
 
     // -----------------------------------------------------------------------
@@ -3723,10 +4246,16 @@ module eu_seq (
         endcase
     end
 
+    // Phase 61: ADDX/SUBX mem CCR fires at write ack; ALU mux already drives addx_src/dst.
+    logic addx_mem_sr_wr_en;
+    assign addx_mem_sr_wr_en = ex_valid && ex_is_addx_mem && addx_mem_run_r &&
+                               addx_mem_phase_r == 2'd2 && mem_ack;
+
     // SR write: RTE/STOP write full SR; RTR/MOVE CCR write CCR-only; others normal WB.
     // Phase 56: wb_is_move_sr_w fires full SR write; wb_is_move_ccr_w fires CCR-only write.
     assign sr_wr_en   = rte_sr_wr_en || stop_sr_wr_en ||
                         rtr_sr_wr_en || tas_sr_wr_en || cmp2_sr_wr_en || memind_ccr_wr_en ||
+                        mem_rmw_sr_wr_en || addx_mem_sr_wr_en ||
                         (wb_valid && (wb_updates_ccr || wb_is_move_sr_w || wb_is_move_ccr_w));
     assign sr_wr_data = rte_sr_wr_en        ? rte_sr_r
                       : stop_sr_wr_en       ? ex_stop_sr
@@ -3734,6 +4263,8 @@ module eu_seq (
                       : tas_sr_wr_en        ? {sr_out[15:8], 3'b000, tas_ccr_r}
                       : cmp2_sr_wr_en       ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
                       : memind_ccr_wr_en    ? {sr_out[15:8], 3'b000, memind_ccr_w}
+                      : mem_rmw_sr_wr_en    ? {sr_out[15:8], 3'b000, mem_rmw_ccr_r}
+                      : addx_mem_sr_wr_en   ? {sr_out[15:8], 3'b000, ex_x, ex_n, ex_z, ex_v, ex_c}
                       : wb_is_move_sr_w     ? wb_result[15:0]
                       : wb_is_move_ccr_w    ? {sr_out[15:8], 3'b000, wb_result[4:0]}
                       :                       {sr_out[15:8], 3'b000, final_ccr};
@@ -3821,9 +4352,10 @@ module eu_seq (
     // Phase 50: move16_run_r drives 4 longword reads then 4 longword writes.
     // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
     assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
-                       memind_inner_r || memind_outer_r ||
+                       memind_inner_r || memind_outer_r || mem_rmw_run_r || addx_mem_run_r ||
                        (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                         !memind_start_r && !memind_inner_r && !memind_outer_r &&
+                        !mem_rmw_run_r && !mem_rmw_after_r &&
                         ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
     assign mem_rw    = movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
@@ -3832,6 +4364,8 @@ module eu_seq (
                      : move16_run_r   ? !move16_phase_r
                      : memind_inner_r ? 1'b1        // inner: always longword read
                      : memind_outer_r ? memind_is_rd_r
+                     : mem_rmw_run_r  ? 1'b0        // write phase of RMW
+                     : addx_mem_run_r ? (addx_mem_phase_r != 2'd2)  // read phases 0,1; write phase 2
                      : ex_is_mem_rd;
     assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
@@ -3839,6 +4373,7 @@ module eu_seq (
                        move16_run_r   ? 2'b00 :
                        memind_inner_r ? 2'b00 :     // inner: longword
                        memind_outer_r ? memind_siz_r :
+                       addx_mem_run_r ? addx_siz_r :
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
                        (ex_is_rte && !rte_phase_r) ? 2'b10 : ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
@@ -3851,6 +4386,8 @@ module eu_seq (
                        move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
                        memind_inner_r ? memind_inner_addr_r :
                        memind_outer_r ? memind_outer_addr_w :
+                       mem_rmw_run_r  ? mem_rmw_addr_r :
+                       addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
                        (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :
                        (ex_is_cmpm && cmpm_phase_r)          ? cmpm_ax_addr_r : ex_ea;
@@ -3858,7 +4395,9 @@ module eu_seq (
     // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
     // For MOVEP store: drive the appropriate byte of Dn.
     // For MOVE16 write phase: drive the buffered longword for the current beat.
-    assign mem_wdata = tas_run_r               ? {24'h0, tas_wdata_r}
+    assign mem_wdata = mem_rmw_run_r            ? mem_rmw_wdata_r
+                     : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ? ex_result
+                     : tas_run_r               ? {24'h0, tas_wdata_r}
                      : movep_run_r             ? {24'h0, movep_wr_byte_w}
                      : move16_run_r            ? move16_wdata_w
                      : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w

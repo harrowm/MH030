@@ -142,6 +142,13 @@ module m68030_seq (
     assign is_pc_rel = (is_move_abs_src || is_lea_abs || is_jsr_jmp_abs) &&
                        (instr_word[2:0] == 3'b010 || instr_word[2:0] == 3'b011);
 
+    // Phase 60: Group 0 immediate ALU ops to (An)/(An)+/-(An)
+    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, ea  (f_dir=0, f_mode ∈ {010,011,100}, f_dn ∉ {100,111})
+    logic is_imm_g0_mem;
+    assign is_imm_g0_mem = (f_group == 4'h0) && !f_dir && (f_ss != 2'b11) &&
+                           (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
+                           (f_dn != 3'b100 && f_dn != 3'b111);
+
     // Phase 57: ADDA/SUBA/CMPA #imm,An (groups 9/B/D, f_ss=11, f_mode=111, f_reg=100)
     logic is_adda_suba_cmpa_imm;
     assign is_adda_suba_cmpa_imm =
@@ -175,6 +182,8 @@ module m68030_seq (
     always_comb begin
         if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
+        else if (is_imm_g0_mem)
+            ext_count = (f_ss == 2'b10) ? 2'd2 : 2'd1;  // long imm = 2 ext; byte/word = 1
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long)
             ext_count = 2'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
