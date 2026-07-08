@@ -1,6 +1,6 @@
 # MC68030 CPU — Development Plan
 
-## Status (as of Phase 57)
+## Status (as of Phase 62)
 
 ### BIU — complete (Phases 1–22)
 All 8 bus cycle types, BERR/HALT/STERM/VPA, IACK, RMW, CAS2, MOVEM/MOVEP bus cycles,
@@ -8,7 +8,7 @@ burst linefill, MOVE16 burst, biu_exc_capture (fault snapshot, SSW), m68030_biu 
 m68030_top stub. `biu_pin_driver`, `biu_config`, `biu_error_handler` fully fleshed out in
 Phases 45 and 51.
 
-### EU — complete through Phase 57
+### EU — complete through Phase 62
 
 | Phase | Module / Feature | Status |
 |-------|-----------------|--------|
@@ -40,12 +40,16 @@ Phases 45 and 51.
 | 55 | m68030_biu + m68030_top final — full external pin integration | ✅ done |
 | 56 | RTE, MOVE SR/CCR/USP, STOP, TRAP #n, TRAPV, ILLEGAL | ✅ done |
 | 57 | ADDA/SUBA/CMPA, ORI/ANDI/EORI to SR/CCR | ✅ done |
+| 58 | MULS.L/MULU.L/DIVS.L/DIVU.L decode | ✅ done |
+| 59 | PEA, EXG, RTD, CMPM | ✅ done |
+| 60 | Memory-destination ALU operations (read-modify-write) | ✅ done |
+| 61 | ADDX/SUBX register fix + -(An) predecrement form | ✅ done |
+| 62 | Bit-field instructions: BFTST/BFEXTU/BFEXTS/BFFFO/BFCLR/BFSET/BFINS | ✅ done |
 
-**35/35 regression tests pass** (`make test`).
+**40/40 regression tests pass** (`make test`).
 
-Instruction coverage after Phase 57: ~80% of the 68030 encoding space.
-Remaining gaps: 32-bit mul/div decode, PEA/EXG/RTD/CMPM, memory-destination ALU,
-ADDX/SUBX -(An), bit-field ops (BFXXX), PACK/UNPK/LINK.L/RESET, MOVES full EA.
+Instruction coverage after Phase 62: ~92% of the 68030 encoding space.
+Remaining gaps: PACK/UNPK/LINK.L/RESET, MOVES full EA, PMOVE CRP/SRP (64-bit).
 
 ---
 
@@ -120,13 +124,25 @@ biu_pin_driver/biu_config, FPU coprocessor bus, memory-indirect EA, MMU instruct
   using sr_out OP ext_data[7:0 or 15:0]; reuses dec_is_move_ccr_w / dec_is_move_sr_w paths
 - m68030_seq: added f_reg declaration; updated ext_count for .L (2 ext words) vs .W (1)
 
+### Phases 58–62 ✅
+- Phase 58: MULS.L/MULU.L 32×32→64 and DIVS.L/DIVU.L 64÷32; wr2 port for Dh/Dr; 64-bit N flag from product[63]
+- Phase 59: PEA (push EA value), EXG (register swap via an_wr), RTD (RTS + imm delta), CMPM (2-phase postinc reads)
+- Phase 60: Memory-destination ALU (ADD/SUB/AND/OR/EOR/CLR/NOT/NEG/Scc/shift/bit to (An));
+  mem_rmw_run_r FSM captures result+CCR at read ack, issues write, fires sr_wr_en at write ack
+- Phase 61: ADDX/SUBX register form fix (src/dst registers were swapped); -(An) 3-phase FSM
+  (predec+read Ay, predec+read Ax, write result); Z only cleared rule verified
+- Phase 62: Bit-field instructions via new `eu_bitfield.sv` combinational unit;
+  register EA single-cycle through WB; memory EA 2-phase FSM (read→write for CLR/SET/INS);
+  bf_dn_wr_en and bf_mem_sr_wr_en bypass paths for Dn+CCR at ack; 33-bit mask handles width=32;
+  ext word bits[10:6]=offset, bits[4:0]=width(0→32); BFINS CCR from inserted value, not field
+
 ---
 
-## Remaining Phases (58–64)
+## Remaining Phases (63–64)
 
 ---
 
-### Phase 58 — MULS.L / MULU.L / DIVS.L / DIVU.L decode
+### Phase 58 — MULS.L / MULU.L / DIVS.L / DIVU.L decode ✅ done
 
 **Why first**: The functional units for 32-bit multiply and divide already exist in
 `eu_mul_div.sv`. Only the decode in `eu_seq.sv` is missing. Quickest win.
@@ -153,7 +169,7 @@ Files: `rtl/eu_seq.sv`, `tb/seq58_tb.sv`
 
 ---
 
-### Phase 59 — PEA, EXG, RTD, CMPM
+### Phase 59 — PEA, EXG, RTD, CMPM ✅ done
 
 **Why here**: Four small, independent instructions. Each takes only a few lines in eu_seq.
 Knocking them out together keeps momentum.
@@ -184,7 +200,7 @@ Files: `rtl/eu_seq.sv`, `tb/seq59_tb.sv`
 
 ---
 
-### Phase 60 — Memory-destination ALU operations
+### Phase 60 — Memory-destination ALU operations ✅ done
 
 **Why here**: This is the largest remaining gap. Every ALU instruction that can write
 back to a memory EA (not just Dn) must be handled. This covers a substantial fraction
@@ -216,7 +232,7 @@ Files: `rtl/eu_seq.sv`, `tb/seq60_tb.sv`
 
 ---
 
-### Phase 61 — ADDX/SUBX -(An) and X-flag precision
+### Phase 61 — ADDX/SUBX -(An) and X-flag precision ✅ done
 
 **Why here**: Extended-precision arithmetic (multi-word addition) is heavily used in
 compilers for 64-bit integer support. The -(An) memory form requires two predecrement
@@ -244,7 +260,7 @@ Files: `rtl/eu_seq.sv`, `tb/seq61_tb.sv`
 
 ---
 
-### Phase 62 — Bit-field instructions (BFXXX)
+### Phase 62 — Bit-field instructions (BFXXX) ✅ done
 
 **Why here**: Required for the cputest `all` suite to pass cleanly. The bit-field ops
 are a 68020+ extension; the cputest exercises them heavily.
