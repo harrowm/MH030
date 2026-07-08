@@ -197,6 +197,7 @@ module eu_seq (
     output logic        eu_trapv_req,    // one-cycle pulse: TRAPV fired (V was set)
     output logic        eu_illegal_req,  // one-cycle pulse: ILLEGAL instruction
     output logic        eu_stop,         // 1 while STOP state active
+    output logic        eu_reset_req,    // RESET instruction — pulse RSTOUT low
     input  logic        exc_sr_wr_en     // from exc controller: interrupt taken, resume STOP
 );
 
@@ -486,6 +487,12 @@ module eu_seq (
     logic        dec_bf_reg_ea;    // 1=register EA (Dn), 0=memory EA ((An))
     logic        dec_bf_mutates;   // 1=CLR/SET/INS (modifies field in place)
 
+    // Phase 63: PACK/UNPK/LINK.L/RESET
+    logic        dec_is_pack;      // PACK instruction (register or memory form)
+    logic        dec_is_unpk;      // UNPK instruction (register or memory form)
+    logic        dec_is_pack_mem;  // 1=memory form -(Ay),-(Ax), 0=register form Dy,Dx
+    logic        dec_is_reset;     // RESET instruction (pulse RSTOUT)
+
     // Control register read mux for MOVEC Rc→Rn (ext_data[11:0] = Rc code)
     logic [31:0] ctrl_reg_rd_val;
     always_comb begin
@@ -614,6 +621,10 @@ module eu_seq (
         dec_bf_op         = 3'b0;
         dec_bf_reg_ea     = 1'b0;
         dec_bf_mutates    = 1'b0;
+        dec_is_pack       = 1'b0;
+        dec_is_unpk       = 1'b0;
+        dec_is_pack_mem   = 1'b0;
+        dec_is_reset      = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
@@ -1587,6 +1598,24 @@ module eu_seq (
                         // A7_new = A7-4 + d16 = A7 + (d16-4); -4 = 32'hFFFF_FFFC
                         dec_an_delta   = {{16{ext_data[15]}}, ext_data[15:0]} + 32'hFFFF_FFFC;
                         dec_needs_ext  = 1'b1;
+                    end else if (f_dn == 3'b100 && !f_dir && f_ss == 2'b00 && f_mode == 3'b001) begin
+                        // LINK.L An, #d32: 0100 1000 0000 1rrr | d32 (2 extension words)
+                        dec_valid      = 1'b1;
+                        dec_is_link    = 1'b1;
+                        dec_is_mem_wr  = 1'b1;
+                        dec_src_reg    = {1'b1, f_reg};   // An (value to push) → rd_a
+                        dec_dst_reg    = {1'b1, 3'b111};  // A7 (EA base for push) → rd_b
+                        dec_reads_src  = 1'b1;
+                        dec_reads_dst  = 1'b1;
+                        dec_siz        = 2'b00;
+                        dec_ea_offset  = 32'hFFFF_FFFC;   // A7-4 = push address
+                        dec_writes_reg = 1'b1;            // An ← A7-4 in WB (wb_result = ex_ea)
+                        dec_dest_reg   = {1'b1, f_reg};   // destination = An
+                        dec_an_upd_en  = 1'b1;
+                        dec_an_upd_reg = 3'b111;          // A7 update
+                        // A7_new = A7-4 + d32 = A7 + (d32-4)
+                        dec_an_delta   = ext_data + 32'hFFFF_FFFC;
+                        dec_needs_ext  = 1'b1;
                     end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b011) begin
                         // UNLK An: 0100 1110 0101 1rrr
                         // A7 ← An; An ← M[(An)]; A7 ← An+4
@@ -1659,6 +1688,11 @@ module eu_seq (
                     end else if (instr_word == 16'h4E71) begin
                         // NOP: 0100 1110 0111 0001
                         dec_valid = 1'b1;
+
+                    end else if (instr_word == 16'h4E70) begin
+                        // RESET: 0100 1110 0111 0000 — assert RSTOUT ~128 E-clocks; EU stalls
+                        dec_valid    = 1'b1;
+                        dec_is_reset = 1'b1;
 
                     end else if (instr_word == 16'h4E7A) begin
                         // MOVEC Rc,Rn: read control register → write to general register
@@ -1982,6 +2016,28 @@ module eu_seq (
                             dec_updates_ccr = 1'b1;
                             dec_reads_src   = 1'b1;
                             dec_reads_dst   = 1'b1;
+                        end else if (f_dir && f_ss == 2'b01) begin
+                            // PACK Dy,Dx,#adj: 1000 Dx 1 01 000 Dy | adj16
+                            // temp = Dy[15:0] + adj; result = {temp[11:8], temp[3:0]}
+                            dec_valid      = 1'b1;
+                            dec_is_pack    = 1'b1;
+                            dec_src_reg    = {1'b0, f_reg};  // Dy → rd_a
+                            dec_dest_reg   = {1'b0, f_dn};   // Dx = destination
+                            dec_reads_src  = 1'b1;
+                            dec_writes_reg = 1'b1;
+                            dec_siz        = 2'b00;   // long read so rd_a_data[15:0] is valid; result zero-extends
+                            dec_needs_ext  = 1'b1;    // adj16 in extension word
+                        end else if (f_dir && f_ss == 2'b10) begin
+                            // UNPK Dy,Dx,#adj: 1000 Dx 1 10 000 Dy | adj16
+                            // temp = {0,Dy[7:4],0,Dy[3:0]} + adj; result = temp[15:0]
+                            dec_valid      = 1'b1;
+                            dec_is_unpk    = 1'b1;
+                            dec_src_reg    = {1'b0, f_reg};  // Dy → rd_a
+                            dec_dest_reg   = {1'b0, f_dn};   // Dx = destination
+                            dec_reads_src  = 1'b1;
+                            dec_writes_reg = 1'b1;
+                            dec_siz        = 2'b10;   // word result written to Dx
+                            dec_needs_ext  = 1'b1;    // adj16 in extension word
                         end else begin
                             // OR.ss Dn,ea (f_dir=1) or ea,Dn (f_dir=0)
                             dec_valid       = 1'b1;
@@ -2029,6 +2085,19 @@ module eu_seq (
                             end
                             default: ;
                         endcase
+                    // ── Phase 63: PACK/UNPK -(Ay),-(Ax),#adj — memory form ───────────
+                    end else if (f_dir && (f_ss == 2'b01 || f_ss == 2'b10) && f_mode == 3'b001) begin
+                        // PACK: 1000 Ax 1 01 001 Ay | adj16  →  predec Ay by 2 (word), predec Ax by 1 (byte)
+                        // UNPK: 1000 Ax 1 10 001 Ay | adj16  →  predec Ay by 1 (byte), predec Ax by 2 (word)
+                        dec_valid       = 1'b1;
+                        dec_is_pack     = (f_ss == 2'b01);
+                        dec_is_unpk     = (f_ss == 2'b10);
+                        dec_is_pack_mem = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
+                        dec_dst_reg     = {1'b1, f_dn};   // Ax → rd_b
+                        dec_reads_src   = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        dec_needs_ext   = 1'b1;           // adj16 in extension word
                     end
                 end
 
@@ -2769,6 +2838,12 @@ module eu_seq (
     logic        ex_bf_reg_ea;
     logic        ex_bf_mutates;
 
+    // Phase 63
+    logic        ex_is_pack;
+    logic        ex_is_unpk;
+    logic        ex_is_pack_mem;
+    logic        ex_is_reset;
+
     // TAS (An) RMW state — declared early for ex_mem_stall
     logic        tas_run_r;          // TAS write phase active
     logic        tas_after_write_r;  // 1-cycle cooldown after write ack; prevents re-trigger
@@ -2839,6 +2914,26 @@ module eu_seq (
                           !(bf_mem_run_r && mem_ack &&
                             (!bf_mem_phase_r && !bf_mem_mutates_r ||   // read done, non-mut
                               bf_mem_phase_r));                          // write done
+
+    // Phase 63: PACK/UNPK memory FSM state registers (declared early for stall)
+    logic        pack_mem_run_r;
+    logic        pack_mem_phase_r;     // 0=read Ay, 1=write result to Ax
+    logic        pack_mem_is_unpk_r;   // 1=UNPK, 0=PACK
+    logic [31:0] pack_mem_src_r;       // captured read data
+    logic [31:0] pack_mem_ay_addr_r;   // predecremented Ay address (read address)
+    logic [31:0] pack_mem_ax_addr_r;   // predecremented Ax address (write address)
+    logic [2:0]  pack_mem_ay_reg_r;    // Ay register number (for An update)
+    logic [2:0]  pack_mem_ax_reg_r;    // Ax register number (for An update)
+    logic [15:0] pack_mem_adj_r;       // adj immediate captured from ext word
+    // Stall: active while FSM is running and not done (write ack ends it)
+    logic pack_mem_stall;
+    assign pack_mem_stall = ex_valid && (ex_is_pack || ex_is_unpk) && ex_is_pack_mem &&
+                            !(pack_mem_run_r && pack_mem_phase_r && mem_ack);
+
+    // Phase 63: RESET counter (declared early for stall / eu_reset_req)
+    logic        reset_run_r;
+    logic [9:0]  reset_cnt_r;   // counts down from 511 (~128 E-clocks × 4 sub-clocks)
+    assign eu_reset_req = reset_run_r;
 
     // Phase 60: general memory RMW state (declared early for ex_mem_stall)
     logic        mem_rmw_run_r;    // write phase of RMW active
@@ -3070,12 +3165,12 @@ module eu_seq (
                           ptest_start_r  || ptest_run_r  ||
                           cmp2_run_r || cmp2_first_ack ||
                           mem_rmw_run_r || mem_rmw_read_ack ||
-                          addx_mem_stall || bf_mem_stall ||
+                          addx_mem_stall || bf_mem_stall || pack_mem_stall ||
                           (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                            !memind_start_r && !memind_inner_r && !memind_outer_r &&
                            !mem_rmw_run_r && !mem_rmw_after_r &&
                            (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
-                          rtr_stall || rte_stall || cmpm_stall || stop_r;
+                          rtr_stall || rte_stall || cmpm_stall || stop_r || reset_run_r;
 
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -3216,6 +3311,10 @@ module eu_seq (
             ex_bf_op          <= 3'b0;
             ex_bf_reg_ea      <= 1'b0;
             ex_bf_mutates     <= 1'b0;
+            ex_is_pack        <= 1'b0;
+            ex_is_unpk        <= 1'b0;
+            ex_is_pack_mem    <= 1'b0;
+            ex_is_reset       <= 1'b0;
         end else if (ex_mem_stall) begin
             // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
@@ -3294,6 +3393,10 @@ module eu_seq (
             ex_bf_op          <= 3'b0;
             ex_bf_reg_ea      <= 1'b0;
             ex_bf_mutates     <= 1'b0;
+            ex_is_pack        <= 1'b0;
+            ex_is_unpk        <= 1'b0;
+            ex_is_pack_mem    <= 1'b0;
+            ex_is_reset       <= 1'b0;
         end else begin
             ex_valid          <= dec_valid;
             ex_unit           <= dec_unit;
@@ -3399,6 +3502,10 @@ module eu_seq (
             ex_bf_op          <= dec_bf_op;
             ex_bf_reg_ea      <= dec_bf_reg_ea;
             ex_bf_mutates     <= dec_bf_mutates;
+            ex_is_pack        <= dec_is_pack;
+            ex_is_unpk        <= dec_is_unpk;
+            ex_is_pack_mem    <= dec_is_pack_mem;
+            ex_is_reset       <= dec_is_reset;
         end
     end
     // ex_an_upd_en declared above inside the EX latch always_ff block:
@@ -3984,6 +4091,30 @@ module eu_seq (
         endcase
     end
 
+    // Phase 63: PACK/UNPK register-form combinational result
+    // PACK Dy,Dx,#adj: temp = Dy[15:0] + adj; result byte = {temp[11:8], temp[3:0]}
+    logic [15:0] pack_reg_temp_w;
+    assign pack_reg_temp_w = rd_a_data[15:0] + ex_imm[15:0];
+    // UNPK Dy,Dx,#adj: temp = {0,Dy[7:4],0,Dy[3:0]} + adj; result word = temp
+    logic [15:0] unpk_reg_temp_w;
+    assign unpk_reg_temp_w = {4'h0, rd_a_data[7:4], 4'h0, rd_a_data[3:0]} + ex_imm[15:0];
+
+    // Phase 63: PACK/UNPK memory-form combinational result (from captured read data)
+    logic [15:0] pack_mem_temp_w;
+    assign pack_mem_temp_w = pack_mem_is_unpk_r
+        ? ({4'h0, pack_mem_src_r[7:4], 4'h0, pack_mem_src_r[3:0]} + pack_mem_adj_r)
+        : (pack_mem_src_r[15:0] + pack_mem_adj_r);
+    // Write data for phase 1
+    logic [31:0] pack_mem_wdata_w;
+    assign pack_mem_wdata_w = pack_mem_is_unpk_r
+        ? {16'h0, pack_mem_temp_w}                                       // UNPK: write word
+        : {24'h0, pack_mem_temp_w[11:8], pack_mem_temp_w[3:0]};         // PACK: write byte
+    // Phase 0 read size / phase 1 write size
+    logic [1:0] pack_mem_cur_siz;
+    assign pack_mem_cur_siz = pack_mem_phase_r
+        ? (pack_mem_is_unpk_r ? 2'b10 : 2'b01)   // write: UNPK=word, PACK=byte
+        : (pack_mem_is_unpk_r ? 2'b01 : 2'b10);  // read: UNPK=byte, PACK=word
+
     // CHK comparison: rd_b = value checked (sign-extended by regfile to ex_siz);
     // upper bound: rd_a_data (register mode) or ex_imm (immediate mode).
     logic [31:0] chk_val_w, chk_ub_w;
@@ -4192,9 +4323,76 @@ module eu_seq (
                     ex_v = 1'b0;
                     ex_c = 1'b0;
                     ex_x = flag_x;
+                end else if (ex_is_pack && !ex_is_pack_mem) begin
+                    // PACK Dy,Dx,#adj — register form; CCR unaffected
+                    ex_result = {24'h0, pack_reg_temp_w[11:8], pack_reg_temp_w[3:0]};
+                    ex_n = flag_n; ex_z = flag_z; ex_v = flag_v; ex_c = flag_c; ex_x = flag_x;
+                end else if (ex_is_unpk && !ex_is_pack_mem) begin
+                    // UNPK Dy,Dx,#adj — register form; CCR unaffected
+                    ex_result = {16'h0, unpk_reg_temp_w};
+                    ex_n = flag_n; ex_z = flag_z; ex_v = flag_v; ex_c = flag_c; ex_x = flag_x;
                 end
             end
         endcase
+    end
+
+    // -----------------------------------------------------------------------
+    // Phase 63: PACK/UNPK memory FSM (2-phase: read Ay, write to Ax)
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            pack_mem_run_r     <= 1'b0;
+            pack_mem_phase_r   <= 1'b0;
+            pack_mem_is_unpk_r <= 1'b0;
+            pack_mem_src_r     <= 32'h0;
+            pack_mem_ay_addr_r <= 32'h0;
+            pack_mem_ax_addr_r <= 32'h0;
+            pack_mem_ay_reg_r  <= 3'b0;
+            pack_mem_ax_reg_r  <= 3'b0;
+            pack_mem_adj_r     <= 16'h0;
+        end else begin
+            if (ex_valid && (ex_is_pack || ex_is_unpk) && ex_is_pack_mem && !pack_mem_run_r) begin
+                // Setup: capture predecremented addresses
+                // PACK: Ay-=2 (word read), Ax-=1 (byte write)
+                // UNPK: Ay-=1 (byte read), Ax-=2 (word write)
+                pack_mem_run_r     <= 1'b1;
+                pack_mem_phase_r   <= 1'b0;
+                pack_mem_is_unpk_r <= ex_is_unpk;
+                pack_mem_adj_r     <= ex_imm[15:0];
+                pack_mem_ay_reg_r  <= ex_src_reg[2:0];
+                pack_mem_ax_reg_r  <= ex_dst_reg[2:0];
+                pack_mem_ay_addr_r <= rd_a_data - (ex_is_unpk ? 32'd1 : 32'd2);
+                pack_mem_ax_addr_r <= rd_b_data - (ex_is_unpk ? 32'd2 : 32'd1);
+            end else if (pack_mem_run_r && mem_ack) begin
+                if (!pack_mem_phase_r) begin
+                    pack_mem_src_r   <= mem_rdata;   // capture word or byte from Ay
+                    pack_mem_phase_r <= 1'b1;        // advance to write phase
+                end else begin
+                    pack_mem_run_r   <= 1'b0;        // write done, FSM complete
+                    pack_mem_phase_r <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Phase 63: RESET instruction FSM — hold RSTOUT high for ~512 sub-clocks
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            reset_run_r <= 1'b0;
+            reset_cnt_r <= 10'd0;
+        end else begin
+            if (ex_valid && ex_is_reset && !reset_run_r) begin
+                reset_run_r <= 1'b1;
+                reset_cnt_r <= 10'd511;
+            end else if (reset_run_r) begin
+                if (reset_cnt_r == 10'd0)
+                    reset_run_r <= 1'b0;
+                else
+                    reset_cnt_r <= reset_cnt_r - 10'd1;
+            end
+        end
     end
 
     // -----------------------------------------------------------------------
@@ -4387,9 +4585,16 @@ module eu_seq (
     assign addx_ax_wr_en = ex_valid && ex_is_addx_mem && addx_mem_run_r &&
                            addx_mem_phase_r == 2'd1 && mem_ack;
 
+    // Phase 63: PACK/UNPK memory An update enables
+    // Ay is updated at read ack (phase 0); Ax is updated at write ack (phase 1).
+    logic pack_ay_wr_en, pack_ax_wr_en;
+    assign pack_ay_wr_en = pack_mem_run_r && !pack_mem_phase_r && mem_ack;
+    assign pack_ax_wr_en = pack_mem_run_r &&  pack_mem_phase_r && mem_ack;
+
     assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en || rte_an_wr_en ||
                        move16_an1_wr_en || move16_an2_wr_r ||
                        addx_ay_wr_en || addx_ax_wr_en ||
+                       pack_ay_wr_en || pack_ax_wr_en ||
                        cmpm_ay_wr_en || cmpm_ax_wr_en ||
                        mem_rmw_an_wr_en ||
                        (wb_valid && wb_an_upd_en);
@@ -4400,6 +4605,8 @@ module eu_seq (
                      : move16_an2_wr_r   ? move16_dst_an_r
                      : addx_ay_wr_en     ? addx_ay_reg_r
                      : addx_ax_wr_en     ? addx_ax_reg_r
+                     : pack_ay_wr_en     ? pack_mem_ay_reg_r
+                     : pack_ax_wr_en     ? pack_mem_ax_reg_r
                      : cmpm_ay_wr_en     ? ex_src_reg[2:0]
                      : cmpm_ax_wr_en     ? cmpm_ax_reg_r
                      : mem_rmw_an_wr_en  ? ex_an_upd_reg
@@ -4411,6 +4618,8 @@ module eu_seq (
                       : move16_an2_wr_r  ? move16_dst_base_r + 32'd16
                       : addx_ay_wr_en    ? addx_ay_addr_r   // Ay − step (already captured)
                       : addx_ax_wr_en    ? addx_ax_addr_r   // Ax − step (already captured)
+                      : pack_ay_wr_en    ? pack_mem_ay_addr_r  // predecremented Ay
+                      : pack_ax_wr_en    ? pack_mem_ax_addr_r  // predecremented Ax
                       : cmpm_ay_wr_en    ? (rd_a_data + ex_an_delta)
                       : cmpm_ax_wr_en    ? (cmpm_ax_addr_r + cmpm_step_r)
                       : mem_rmw_an_wr_en ? (rd_a_data + ex_an_delta)  // An base + delta
@@ -4542,7 +4751,8 @@ module eu_seq (
     // Phase 50: move16_run_r drives 4 longword reads then 4 longword writes.
     // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
     assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
-                       memind_inner_r || memind_outer_r || mem_rmw_run_r || addx_mem_run_r || bf_mem_run_r ||
+                       memind_inner_r || memind_outer_r || mem_rmw_run_r || addx_mem_run_r ||
+                       bf_mem_run_r || pack_mem_run_r ||
                        (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
                         !memind_start_r && !memind_inner_r && !memind_outer_r &&
                         !mem_rmw_run_r && !mem_rmw_after_r &&
@@ -4557,6 +4767,7 @@ module eu_seq (
                      : mem_rmw_run_r  ? 1'b0        // write phase of RMW
                      : addx_mem_run_r ? (addx_mem_phase_r != 2'd2)  // read phases 0,1; write phase 2
                      : bf_mem_run_r   ? !bf_mem_phase_r              // phase 0=read, phase 1=write
+                     : pack_mem_run_r ? !pack_mem_phase_r            // phase 0=read, phase 1=write
                      : ex_is_mem_rd;
     assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
@@ -4566,6 +4777,7 @@ module eu_seq (
                        memind_outer_r ? memind_siz_r :
                        addx_mem_run_r ? addx_siz_r :
                        bf_mem_run_r   ? 2'b00 :       // always longword
+                       pack_mem_run_r ? pack_mem_cur_siz :
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
                        (ex_is_rte && !rte_phase_r) ? 2'b10 : ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
@@ -4581,6 +4793,7 @@ module eu_seq (
                        mem_rmw_run_r  ? mem_rmw_addr_r :
                        addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :
                        bf_mem_run_r   ? bf_mem_addr_r :
+                       pack_mem_run_r ? (pack_mem_phase_r ? pack_mem_ax_addr_r : pack_mem_ay_addr_r) :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
                        (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :
                        (ex_is_cmpm && cmpm_phase_r)          ? cmpm_ax_addr_r : ex_ea;
@@ -4591,6 +4804,7 @@ module eu_seq (
     assign mem_wdata = mem_rmw_run_r            ? mem_rmw_wdata_r
                      : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ? ex_result
                      : (bf_mem_run_r && bf_mem_phase_r) ? bf_result_w
+                     : (pack_mem_run_r && pack_mem_phase_r) ? pack_mem_wdata_w
                      : tas_run_r               ? {24'h0, tas_wdata_r}
                      : movep_run_r             ? {24'h0, movep_wr_byte_w}
                      : move16_run_r            ? move16_wdata_w

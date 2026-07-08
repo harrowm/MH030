@@ -104,6 +104,7 @@ module m68030_eu (
     output logic        eu_trapv_req,
     output logic        eu_illegal_req,
     output logic        eu_stop,
+    output logic        eu_reset_req,    // RESET instruction — pulse RSTOUT low
 
     // ── Exception controller write-back ───────────────────────────────────
     // ssp_wr: update active supervisor stack pointer (A7, routing by S/M bits)
@@ -338,6 +339,7 @@ module m68030_eu (
         .eu_trapv_req   (eu_trapv_req),
         .eu_illegal_req (eu_illegal_req),
         .eu_stop        (eu_stop),
+        .eu_reset_req   (eu_reset_req),
         .exc_sr_wr_en   (exc_sr_wr_en),
         // Phase 58: second Dn write port
         .wr2_en         (wr2_en),

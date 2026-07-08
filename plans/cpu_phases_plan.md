@@ -1,6 +1,6 @@
 # MC68030 CPU — Development Plan
 
-## Status (as of Phase 62)
+## Status (as of Phase 63)
 
 ### BIU — complete (Phases 1–22)
 All 8 bus cycle types, BERR/HALT/STERM/VPA, IACK, RMW, CAS2, MOVEM/MOVEP bus cycles,
@@ -8,7 +8,7 @@ burst linefill, MOVE16 burst, biu_exc_capture (fault snapshot, SSW), m68030_biu 
 m68030_top stub. `biu_pin_driver`, `biu_config`, `biu_error_handler` fully fleshed out in
 Phases 45 and 51.
 
-### EU — complete through Phase 62
+### EU — complete through Phase 63
 
 | Phase | Module / Feature | Status |
 |-------|-----------------|--------|
@@ -45,11 +45,21 @@ Phases 45 and 51.
 | 60 | Memory-destination ALU operations (read-modify-write) | ✅ done |
 | 61 | ADDX/SUBX register fix + -(An) predecrement form | ✅ done |
 | 62 | Bit-field instructions: BFTST/BFEXTU/BFEXTS/BFFFO/BFCLR/BFSET/BFINS | ✅ done |
+| 63 | PACK, UNPK (register + memory forms), LINK.L (#d32, 2 ext words), RESET | ✅ done |
 
-**40/40 regression tests pass** (`make test`).
+**41/41 regression tests pass** (`make test`).
 
-Instruction coverage after Phase 62: ~92% of the 68030 encoding space.
-Remaining gaps: PACK/UNPK/LINK.L/RESET, MOVES full EA, PMOVE CRP/SRP (64-bit).
+Notable fix in Phase 63: PACK register form requires `dec_siz=2'b00` (longword) so
+`rd_a_data[15:0]` carries the full source word — `dec_siz=01` (byte) masked off the upper
+nibble and gave wrong results. Result is written as a zero-extended longword (upper 24 bits
+are architecturally undefined on the real silicon).
+
+RESET FSM: `eu_reset_req` pulses high for 512 sub-clocks. The testbench must deassert
+`instr_valid` after `instr_ack` fires, otherwise the EX stage re-captures RESET after the
+countdown completes (EX is stalled with ex_is_reset=1 during the 512-cycle hold).
+
+Instruction coverage after Phase 63: ~93% of the 68030 encoding space.
+Remaining gaps: MOVES full EA, PMOVE CRP/SRP (64-bit).
 
 ---
 

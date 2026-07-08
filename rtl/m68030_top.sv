@@ -399,6 +399,7 @@ module m68030_top #(
         .eu_trapv_req  (eu_trapv_req_w),
         .eu_illegal_req(eu_illegal_req_w),
         .eu_stop       (),              // unused at top level for now
+        .eu_reset_req  (),              // wired to BIU RSTOUT in Phase 55
         .ssp_wr_en     (ssp_wr_en_mux),
         .ssp_wr_data   (ssp_wr_data_mux),
         .exc_sr_wr_en  (exc_new_sr_wr),

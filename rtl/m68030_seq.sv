@@ -93,6 +93,18 @@ module m68030_seq (
     assign is_link = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
                      (f_ss == 2'b01) && (f_mode == 3'b010);
 
+    // Phase 63: LINK.L — 2 ext words (32-bit displacement)
+    logic is_link_l;
+    assign is_link_l = (f_group == 4'h4) && !f_dir && (f_dn == 3'b100) &&
+                       (f_ss == 2'b00) && (f_mode == 3'b001);
+
+    // Phase 63: PACK/UNPK — 1 ext word (16-bit adj immediate)
+    // Register form: f_mode=000; memory form: f_mode=001; both need 1 ext word
+    logic is_pack_unpk;
+    assign is_pack_unpk = (f_group == 4'h8) && f_dir &&
+                          (f_ss == 2'b01 || f_ss == 2'b10) &&
+                          (f_mode == 3'b000 || f_mode == 3'b001);
+
     // Phase 43: MOVEM — always exactly 1 extension word (the register mask)
     // Supported EA modes: -(An)(100), (An)+(011), (An)(010) — no extra displacement word.
     // MOVEM store: f_dn=100, !f_dir, f_ss[1]=1  MOVEM load: f_dn=110, !f_dir, f_ss[1]=1
@@ -189,13 +201,14 @@ module m68030_seq (
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
         else if (is_imm_g0_mem)
             ext_count = (f_ss == 2'b10) ? 2'd2 : 2'd1;  // long imm = 2 ext; byte/word = 1
-        else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long)
+        else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
+                 is_link_l)
             ext_count = 2'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
-                 is_rtd || is_bf ||
+                 is_rtd || is_bf || is_pack_unpk ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
