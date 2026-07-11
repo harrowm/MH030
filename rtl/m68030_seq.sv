@@ -202,6 +202,17 @@ module m68030_seq (
     logic is_bf;
     assign is_bf = (f_group == 4'he) && (f_ss == 2'b11) && f_dn[2];
 
+    // Phase 65: ALU memory-source forms (OR/SUB/CMP/AND/ADD + DIVU/DIVS/MULU/MULS from memory EA)
+    // Groups 8/9/B/C/D with (d16,An), (xxx).W, (xxx).L, (d16,PC) — 1 or 2 extension words
+    logic is_alu_mem_src;
+    assign is_alu_mem_src =
+        (f_group == 4'h8 || f_group == 4'h9 || f_group == 4'hb ||
+         f_group == 4'hc || f_group == 4'hd) &&
+        (f_mode == 3'b101 ||
+         (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 || f_reg == 3'b010)));
+    logic is_alu_mem_src_long;
+    assign is_alu_mem_src_long = is_alu_mem_src && (f_mode == 3'b111) && (f_reg == 3'b001);
+
     // PEA abs.L: f_mode=111, f_reg=001
     logic is_pea_abs_long;
     assign is_pea_abs_long = is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b001);
@@ -213,13 +224,14 @@ module m68030_seq (
         else if (is_imm_g0_mem)
             ext_count = (f_ss == 2'b10) ? 2'd2 : 2'd1;  // long imm = 2 ext; byte/word = 1
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
-                 is_link_l || is_moves_long_ea)
+                 is_link_l || is_moves_long_ea || is_alu_mem_src_long)
             ext_count = 2'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
                  is_rtd || is_bf || is_pack_unpk || is_moves ||
+                 (is_alu_mem_src && !is_alu_mem_src_long) ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
