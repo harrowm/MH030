@@ -213,6 +213,13 @@ module m68030_seq (
     logic is_alu_mem_src_long;
     assign is_alu_mem_src_long = is_alu_mem_src && (f_mode == 3'b111) && (f_reg == 3'b001);
 
+    // Phase 66: ADDQ/SUBQ #n, (d16,An) / (xxx).W / (xxx).L — 1 or 2 ext words
+    logic is_addq_subq_ext;
+    assign is_addq_subq_ext = (f_group == 4'h5) && (f_ss != 2'b11) &&
+        (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)));
+    logic is_addq_subq_ext_long;
+    assign is_addq_subq_ext_long = is_addq_subq_ext && (f_mode == 3'b111) && (f_reg == 3'b001);
+
     // PEA abs.L: f_mode=111, f_reg=001
     logic is_pea_abs_long;
     assign is_pea_abs_long = is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b001);
@@ -224,7 +231,7 @@ module m68030_seq (
         else if (is_imm_g0_mem)
             ext_count = (f_ss == 2'b10) ? 2'd2 : 2'd1;  // long imm = 2 ext; byte/word = 1
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
-                 is_link_l || is_moves_long_ea || is_alu_mem_src_long)
+                 is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
             ext_count = 2'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
@@ -232,6 +239,7 @@ module m68030_seq (
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
                  is_rtd || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||
+                 (is_addq_subq_ext && !is_addq_subq_ext_long) ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
