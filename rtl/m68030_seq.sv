@@ -224,12 +224,52 @@ module m68030_seq (
     logic is_pea_abs_long;
     assign is_pea_abs_long = is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b001);
 
+    // Phase 67: MOVE memory→memory — both src and dst are memory EA (not register)
+    // Must appear before is_move_d16/is_abs_short in ext_count priority.
+    logic is_move_mm;
+    assign is_move_mm = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_move_dst_mode_s == 3'b010 || f_move_dst_mode_s == 3'b011 ||
+         f_move_dst_mode_s == 3'b100 || f_move_dst_mode_s == 3'b101 ||
+         f_move_dst_mode_s == 3'b111) &&
+        (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+         f_mode == 3'b101 || f_mode == 3'b111);
+
+    // Number of extension words needed by src EA and dst EA independently
+    logic [1:0] move_mm_src_ext_w, move_mm_dst_ext_w;
+    logic [2:0] move_mm_total_ext_w;  // sum; 3+ = unsupported (not decoded)
+    always_comb begin
+        if (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010)))
+            move_mm_src_ext_w = 2'd1;
+        else if (f_mode == 3'b111 && f_reg == 3'b001)
+            move_mm_src_ext_w = 2'd2;
+        else
+            move_mm_src_ext_w = 2'd0;
+    end
+    always_comb begin
+        if (f_move_dst_mode_s == 3'b101 ||
+            (f_move_dst_mode_s == 3'b111 && f_dn == 3'b000))
+            move_mm_dst_ext_w = 2'd1;
+        else if (f_move_dst_mode_s == 3'b111 && f_dn == 3'b001)
+            move_mm_dst_ext_w = 2'd2;
+        else
+            move_mm_dst_ext_w = 2'd0;
+    end
+    assign move_mm_total_ext_w = {1'b0, move_mm_src_ext_w} + {1'b0, move_mm_dst_ext_w};
+
     logic [1:0] ext_count;
     always_comb begin
         if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
         else if (is_imm_g0_mem)
             ext_count = (f_ss == 2'b10) ? 2'd2 : 2'd1;  // long imm = 2 ext; byte/word = 1
+        // Phase 67: move_mm before is_move_d16/is_abs_short so dual-ext combos get ext_count=2
+        else if (is_move_mm && move_mm_total_ext_w >= 3'd2)
+            ext_count = 2'd2;
+        else if (is_move_mm && move_mm_total_ext_w == 3'd1)
+            ext_count = 2'd1;
+        // Phase 68: TRAPcc.L has 2-word operand
+        else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b000))
+            ext_count = 2'd2;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
             ext_count = 2'd2;
@@ -244,7 +284,13 @@ module m68030_seq (
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b010)) || // (d16,PC)
-                 (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b011)))   // (d8,PC,Xn)
+                 (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b011)) || // (d8,PC,Xn)
+                 // Phase 68: TRAPcc.W, CAS, BTST/BCHG/BCLR/BSET #n mem — all 1 ext word
+                 ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b010)) ||
+                 ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
+                  (f_dn == 3'b101 || f_dn == 3'b011 || f_dn == 3'b111) && (f_mode == 3'b010)) ||
+                 ((f_group == 4'h0) && !f_dir && (f_dn == 3'b100) &&
+                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)))
             ext_count = 2'd1;
         else
             ext_count = 2'd0;
