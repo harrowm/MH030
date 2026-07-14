@@ -286,11 +286,17 @@ module eu_seq (
 
     // Pre-extract CCR flags to avoid bit-selects inside always_comb
     logic flag_x, flag_z, flag_n, flag_v, flag_c;
-    assign flag_x = sr_out[4];
-    assign flag_z = sr_out[2];
-    assign flag_n = sr_out[3];
-    assign flag_v = sr_out[1];
-    assign flag_c = sr_out[0];
+    // WB→EX SR forwarding bypass: when WB is writing SR/CCR in the same cycle that
+    // EX reads flags, bypass the new value combinationally so EX sees correct SR.
+    // Declarations here; assigns placed after wb_* and final_ccr are declared below.
+    wire        sr_fwd_en;
+    wire [15:0] sr_fwd_val;
+    wire [15:0] sr_live;
+    assign flag_x = sr_live[4];
+    assign flag_z = sr_live[2];
+    assign flag_n = sr_live[3];
+    assign flag_v = sr_live[1];
+    assign flag_c = sr_live[0];
 
     // Condition code evaluator used by Bcc/Scc/DBcc decode and EX stages.
     function automatic logic eval_cc(
@@ -1100,7 +1106,7 @@ module eu_seq (
                                  (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b101)) begin
                         // ORI/ANDI/EORI #imm to CCR or SR.
                         // SR form is supervisor-only; CCR form is always allowed.
-                        if (f_ss == 2'b01 && !sr_out[13]) begin
+                        if (f_ss == 2'b01 && !sr_live[13]) begin
                             // ANDI/ORI/EORI to SR in user mode → privilege violation
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
@@ -1113,17 +1119,17 @@ module eu_seq (
                             if (f_ss == 2'b00) begin    // CCR
                                 dec_is_move_ccr_w = 1'b1;
                                 case (f_dn)
-                                    3'b000: dec_imm = {24'h0, sr_out[7:0] |  ext_data[7:0]};
-                                    3'b001: dec_imm = {24'h0, sr_out[7:0] &  ext_data[7:0]};
-                                    3'b101: dec_imm = {24'h0, sr_out[7:0] ^  ext_data[7:0]};
+                                    3'b000: dec_imm = {24'h0, sr_live[7:0] |  ext_data[7:0]};
+                                    3'b001: dec_imm = {24'h0, sr_live[7:0] &  ext_data[7:0]};
+                                    3'b101: dec_imm = {24'h0, sr_live[7:0] ^  ext_data[7:0]};
                                     default: dec_valid = 1'b0;
                                 endcase
                             end else begin              // SR (supervisor only, already checked)
                                 dec_is_move_sr_w = 1'b1;
                                 case (f_dn)
-                                    3'b000: dec_imm = {16'h0, sr_out |  ext_data[15:0]};
-                                    3'b001: dec_imm = {16'h0, sr_out &  ext_data[15:0]};
-                                    3'b101: dec_imm = {16'h0, sr_out ^  ext_data[15:0]};
+                                    3'b000: dec_imm = {16'h0, sr_live |  ext_data[15:0]};
+                                    3'b001: dec_imm = {16'h0, sr_live &  ext_data[15:0]};
+                                    3'b101: dec_imm = {16'h0, sr_live ^  ext_data[15:0]};
                                     default: dec_valid = 1'b0;
                                 endcase
                             end
@@ -1693,7 +1699,7 @@ module eu_seq (
                                 dec_x_unchanged  = 1'b1;
                                 dec_reads_ccr    = 1'b1;    // stall while CCR in-flight
                                 dec_use_imm      = 1'b1;
-                                dec_imm          = {16'h0, sr_out};
+                                dec_imm          = {16'h0, sr_live};
                                 dec_is_move_sr_r = 1'b1;
                             end else if (f_dn == 3'b001 && !f_dir) begin
                                 // MOVE CCR,Dn: 0100 001 0 11 000 rrr — read CCR → Dn
@@ -1705,7 +1711,7 @@ module eu_seq (
                                 dec_x_unchanged   = 1'b1;
                                 dec_reads_ccr     = 1'b1;
                                 dec_use_imm       = 1'b1;
-                                dec_imm           = {24'h0, sr_out[7:0]};
+                                dec_imm           = {24'h0, sr_live[7:0]};
                                 dec_is_move_ccr_r = 1'b1;
                             end else if (f_dn == 3'b010 && !f_dir) begin
                                 // MOVE Dn,CCR: 0100 010 0 11 000 rrr — write Dn → CCR
@@ -1718,7 +1724,7 @@ module eu_seq (
                                 dec_is_move_ccr_w = 1'b1;
                             end else if (f_dn == 3'b011 && !f_dir) begin
                                 // MOVE Dn,SR: supervisor only
-                                if (!sr_out[13]) begin
+                                if (!sr_live[13]) begin
                                     dec_valid   = 1'b1;
                                     dec_is_priv = 1'b1;
                                 end else begin
@@ -2062,7 +2068,7 @@ module eu_seq (
                         end
                     end else if (instr_word == 16'h46FC) begin
                         // MOVE.W #imm, SR — supervisor-only; loads new SR from immediate
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -2156,7 +2162,7 @@ module eu_seq (
                         dec_an_delta   = 32'd4;
                     end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b100) begin
                         // MOVE An,USP: supervisor only
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -2169,7 +2175,7 @@ module eu_seq (
                         end
                     end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b01 && f_mode == 3'b101) begin
                         // MOVE USP,An: supervisor only
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -2202,7 +2208,7 @@ module eu_seq (
                         dec_trap_num  = f_trap_num;
                     end else if (instr_word == 16'h4E73) begin
                         // RTE: supervisor only
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -2215,7 +2221,7 @@ module eu_seq (
                         end
                     end else if (instr_word == 16'h4E72) begin
                         // STOP #sr: supervisor only
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -2236,7 +2242,7 @@ module eu_seq (
 
                     end else if (instr_word == 16'h4E70) begin
                         // RESET: supervisor only
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -2258,7 +2264,7 @@ module eu_seq (
 
                     end else if (instr_word == 16'h4E7B) begin
                         // MOVEC Rn,Rc: supervisor only
-                        if (!sr_out[13]) begin
+                        if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
                         end else begin
@@ -3806,7 +3812,7 @@ module eu_seq (
                               dec_is_trap || dec_is_trapv || dec_is_dbcc ||
                               (dec_is_branch && dec_branch_taken);
     assign dec_is_trace = dec_valid && !dec_is_priv && !dec_is_linea && !dec_is_linef &&
-                          (sr_out[15] || (sr_out[14] && dec_is_flow_chg));
+                          (sr_live[15] || (sr_live[14] && dec_is_flow_chg));
 
     // -----------------------------------------------------------------------
     // WB stage signal declarations — placed before stall assigns to avoid
@@ -4863,7 +4869,7 @@ module eu_seq (
 
     // Phase 70: current active stack pointer (mirrors regfile's A7 selection by SR[13:12])
     logic [31:0] ex_cur_sp;
-    assign ex_cur_sp = sr_out[13] ? (sr_out[12] ? msp_in : isp_in) : usp_in;
+    assign ex_cur_sp = sr_live[13] ? (sr_live[12] ? msp_in : isp_in) : usp_in;
 
     logic [31:0] ex_ea;       // effective address for bus cycle or LEA result
     // Phase 42: ex_xn_scaled always added — zero when !ex_is_idx; handles (d8,PC,Xn)
@@ -5851,7 +5857,7 @@ module eu_seq (
                                                          : (rd_b_data + ex_dst_ea_offset);
                 move_mm_siz_r        <= ex_siz;
                 // CCR: {X unchanged, N, Z, 0, 0}; N/Z from sized read data
-                move_mm_ccr_r        <= {sr_out[4],
+                move_mm_ccr_r        <= {sr_live[4],
                                          (ex_siz == 2'b01) ? mem_rdata[7]  :
                                          (ex_siz == 2'b10) ? mem_rdata[15] : mem_rdata[31],
                                          (ex_siz == 2'b01) ? (mem_rdata[7:0]  == 8'h0)  :
@@ -6295,6 +6301,12 @@ module eu_seq (
     // -----------------------------------------------------------------------
     logic [4:0] final_ccr;
     assign final_ccr = wb_is_move ? {wb_ccr[4], wb_move_n, wb_ccr[2:0]} : wb_ccr;
+    // WB→EX SR forwarding assigns — here so all wb_* and final_ccr are in scope.
+    assign sr_fwd_en  = wb_valid && (wb_is_move_sr_w || wb_is_move_ccr_w || wb_updates_ccr);
+    assign sr_fwd_val = wb_is_move_sr_w  ? wb_result[15:0]
+                      : wb_is_move_ccr_w ? {sr_out[15:8], 3'b000, wb_result[4:0]}
+                      :                    {sr_out[15:8], 3'b000, final_ccr};
+    assign sr_live    = sr_fwd_en ? sr_fwd_val : sr_out;
 
     // Phase 53: memind outer-read CCR update (MOVE sets N/Z, clears V/C)
     logic memind_ccr_wr_en;
@@ -6323,19 +6335,19 @@ module eu_seq (
     assign sr_wr_data = rte_sr_wr_en        ? rte_sr_r
                       : stop_sr_wr_en       ? ex_stop_sr
                       : rtr_sr_wr_en        ? rtr_sr_wr_data
-                      : tas_sr_wr_en        ? {sr_out[15:8], 3'b000, tas_ccr_r}
-                      : cmp2_sr_wr_en       ? {sr_out[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
-                      : memind_ccr_wr_en    ? {sr_out[15:8], 3'b000, memind_ccr_w}
-                      : mem_rmw_sr_wr_en    ? {sr_out[15:8], 3'b000, mem_rmw_ccr_r}
-                      : addx_mem_sr_wr_en   ? {sr_out[15:8], 3'b000, ex_x, ex_n, ex_z, ex_v, ex_c}
-                      : bf_mem_sr_wr_en     ? {sr_out[15:8], 3'b000, flag_x, bf_n, bf_z, bf_v, bf_c}
-                      : move_mm_sr_wr_en    ? {sr_out[15:8], 3'b000, move_mm_ccr_r}
-                      : cas_sr_wr_en        ? {sr_out[15:8], 3'b000, cas_ccr_r}
-                      : bcds_sr_wr_en       ? {sr_out[15:8], 3'b000, bcd_c, bcd_result[7], bcd_z, 1'b0, bcd_c}
-                      : cas2_sr_wr_en       ? {sr_out[15:8], 3'b000, cas2_ccr_r}
+                      : tas_sr_wr_en        ? {sr_live[15:8], 3'b000, tas_ccr_r}
+                      : cmp2_sr_wr_en       ? {sr_live[15:8], 3'b000, flag_x, flag_n, cmp2_z_w, flag_v, cmp2_c_w}
+                      : memind_ccr_wr_en    ? {sr_live[15:8], 3'b000, memind_ccr_w}
+                      : mem_rmw_sr_wr_en    ? {sr_live[15:8], 3'b000, mem_rmw_ccr_r}
+                      : addx_mem_sr_wr_en   ? {sr_live[15:8], 3'b000, ex_x, ex_n, ex_z, ex_v, ex_c}
+                      : bf_mem_sr_wr_en     ? {sr_live[15:8], 3'b000, flag_x, bf_n, bf_z, bf_v, bf_c}
+                      : move_mm_sr_wr_en    ? {sr_live[15:8], 3'b000, move_mm_ccr_r}
+                      : cas_sr_wr_en        ? {sr_live[15:8], 3'b000, cas_ccr_r}
+                      : bcds_sr_wr_en       ? {sr_live[15:8], 3'b000, bcd_c, bcd_result[7], bcd_z, 1'b0, bcd_c}
+                      : cas2_sr_wr_en       ? {sr_live[15:8], 3'b000, cas2_ccr_r}
                       : wb_is_move_sr_w     ? wb_result[15:0]
-                      : wb_is_move_ccr_w    ? {sr_out[15:8], 3'b000, wb_result[4:0]}
-                      :                       {sr_out[15:8], 3'b000, final_ccr};
+                      : wb_is_move_ccr_w    ? {sr_live[15:8], 3'b000, wb_result[4:0]}
+                      :                       {sr_live[15:8], 3'b000, final_ccr};
     assign sr_ccr_only = (rte_sr_wr_en || stop_sr_wr_en ||
                           (wb_valid && wb_is_move_sr_w)) ? 1'b0 : 1'b1;
 
@@ -6398,7 +6410,7 @@ module eu_seq (
     // rtr_sr_wr_en/rtr_an_wr_en declared in early section for forward-ref safety.
     // -----------------------------------------------------------------------
     assign rtr_sr_wr_en  = ex_rtr_taken;
-    assign rtr_sr_wr_data = {sr_out[15:8], rtr_ccr_r};
+    assign rtr_sr_wr_data = {sr_live[15:8], rtr_ccr_r};
     assign rtr_an_wr_en  = ex_rtr_taken;
     assign rtr_an_wr_data = rtr_a7_next_r + 32'd4;
 
@@ -6487,7 +6499,7 @@ module eu_seq (
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
     assign mem_fc    = (ex_is_moves && ex_moves_load)  ? sfc_in :
                        (ex_is_moves && !ex_moves_load) ? dfc_in :
-                                                         {sr_out[13], 1'b0, 1'b1};
+                                                         {sr_live[13], 1'b0, 1'b1};
     assign mem_addr  = movem_run_r    ? movem_addr_r :
                        cmp2_run_r     ? cmp2_addr2_r :
                        movep_run_r    ? movep_addr_r :

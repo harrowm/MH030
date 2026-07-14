@@ -97,11 +97,6 @@ def build_binary(pre, instr_bytes):
     # If the test vector is user-mode, the SR[13]=0 will actually switch mode.
     code += _move_w_imm_sr(pre['sr'] | 0x2000)
 
-    # Pipeline bubble: MOVE.W #,SR writes the SR register (including X flag) in the
-    # WB stage.  Without a gap, the very next instruction's EX stage coincides with
-    # that WB and reads the stale (pre-write) SR value.  One NOP is enough.
-    code += _nop()
-
     # Align to word boundary (should already be, but be safe)
     while len(code) % 2 != 0:
         code += b'\x00'
