@@ -215,8 +215,14 @@ module m68030_ifu (
                 q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3];
                 q_cnt <= q_cnt_d;
 
-                // Issue a new fetch if queue has room (≤ 2 words after drain)
-                if (!fetch_pend_r && !bus_err_r && initialized_r && (q_cnt_d <= 3'd2)) begin
+                // Issue a new fetch if queue has room (≤ 2 words after drain).
+                // Guard !ifu_ack: biu_cycle_gen holds ifu_ack high for all 4
+                // ticks of S7.  Without this guard the drain-only path re-arms
+                // fetch_pend_r on tick 1 of S7, causing a spurious second fill
+                // (at tick 2) with stale captured_rdata and advancing
+                // fetch_addr_r past the next real fetch address.
+                if (!fetch_pend_r && !bus_err_r && initialized_r &&
+                    (q_cnt_d <= 3'd2) && !ifu_ack) begin
                     fetch_pend_r <= 1'b1;
                 end
             end

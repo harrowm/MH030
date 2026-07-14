@@ -159,6 +159,12 @@ $(SIM)/seq68:      $(EU_SRCS)                         tb/seq68_tb.sv      | $(SI
 $(SIM)/seq69:      $(EU_SRCS)                         tb/seq69_tb.sv      | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/seq70:      $(EU_SRCS)                         tb/seq70_tb.sv      | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/seq71:      $(EU_SRCS)                         tb/seq71_tb.sv      | $(SIM)
+	$(IVCOMP)
+
 # ── Standalone modules ─────────────────────────────────────────────────────
 $(SIM)/ifu:        rtl/m68030_ifu.sv                  tb/ifu_tb.sv        | $(SIM)
 	$(IVCOMP)
@@ -185,11 +191,25 @@ $(SIM)/m68030_biu: rtl/m68030_biu.sv $(BIU_SRCS) \
 	$(IVCOMP)
 
 # ── Top integration ────────────────────────────────────────────────────────
-$(SIM)/top:        rtl/m68030_top.sv rtl/m68030_biu.sv $(BIU_SRCS) \
-                   $(EU_SRCS) rtl/m68030_ifu.sv rtl/m68030_seq.sv \
-                   rtl/m68030_exc.sv rtl/m68030_mmu.sv \
-                   tb/mem_model.sv tb/top_tb.sv | $(SIM)
+TOP_SRCS := rtl/m68030_top.sv rtl/m68030_biu.sv $(BIU_SRCS) \
+            $(EU_SRCS) rtl/m68030_ifu.sv rtl/m68030_seq.sv \
+            rtl/m68030_exc.sv rtl/m68030_mmu.sv
+
+$(SIM)/top:        $(TOP_SRCS) tb/mem_model.sv tb/top_tb.sv | $(SIM)
 	$(IVCOMP)
+
+$(SIM)/cosim72:    $(TOP_SRCS) tb/cosim72_tb.sv | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/cosim73:    $(TOP_SRCS) tb/cosim73_tb.sv | $(SIM)
+	$(IVCOMP)
+
+# ── Bare-metal test hex generation (requires vasmm68k_mot in PATH) ──────────
+tests/%.bin: tests/%.s
+	vasmm68k_mot -Fbin -m68030 $< -o $@
+
+tests/%.hex: tests/%.bin tools/bin2hex.py
+	python3 tools/bin2hex.py $< > $@
 
 # ── Regression list (ordered: unit → EU → standalone → BIU → top) ─────────
 ALL_TESTS := \
@@ -197,10 +217,49 @@ ALL_TESTS := \
     $(SIM)/eu_bcd $(SIM)/eu_bitops $(SIM)/agu \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/seq36 $(SIM)/seq37 $(SIM)/seq38 $(SIM)/seq39 $(SIM)/seq40 \
-    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 $(SIM)/seq56 $(SIM)/seq57 $(SIM)/seq58 $(SIM)/seq59 $(SIM)/seq60 $(SIM)/seq61 $(SIM)/seq62 $(SIM)/seq63 $(SIM)/seq64 $(SIM)/seq65 $(SIM)/seq66 $(SIM)/seq67 $(SIM)/seq68 $(SIM)/seq69 \
+    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 $(SIM)/seq56 $(SIM)/seq57 $(SIM)/seq58 $(SIM)/seq59 $(SIM)/seq60 $(SIM)/seq61 $(SIM)/seq62 $(SIM)/seq63 $(SIM)/seq64 $(SIM)/seq65 $(SIM)/seq66 $(SIM)/seq67 $(SIM)/seq68 $(SIM)/seq69 $(SIM)/seq70 $(SIM)/seq71 \
     $(SIM)/ifu $(SIM)/seq_m $(SIM)/seq_int $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/m68030_biu \
-    $(SIM)/top
+    $(SIM)/top $(SIM)/cosim72 $(SIM)/cosim73
+
+# ── Phase 74: Musashi reference log ─────────────────────────────────────────
+MUSASHI_DIR := tools/musashi
+MUSASHI_SRC := $(MUSASHI_DIR)/m68kcpu.c $(MUSASHI_DIR)/m68kdasm.c \
+               $(MUSASHI_DIR)/m68kops.c  $(MUSASHI_DIR)/softfloat/softfloat.c
+MUSASHI_FLAGS := -O2 -DM68K_EMULATE_FC=1 -I$(MUSASHI_DIR) -lm
+
+$(MUSASHI_DIR)/m68kmake: $(MUSASHI_DIR)/m68kmake.c
+	gcc -o $@ $<
+
+$(MUSASHI_DIR)/m68kops.c $(MUSASHI_DIR)/m68kops.h: $(MUSASHI_DIR)/m68kmake
+	cd $(MUSASHI_DIR) && ./m68kmake
+
+tools/m68ksim: tools/m68ksim.c $(MUSASHI_SRC)
+	gcc $(MUSASHI_FLAGS) -o $@ $^
+
+winuae/tests/smoke_ref.log: tools/m68ksim tests/smoke.hex | winuae/tests
+	./tools/m68ksim tests/smoke.hex 300 > $@
+
+winuae/tests:
+	mkdir -p winuae/tests
+
+.PHONY: m68ksim ref-log buscmp
+m68ksim: tools/m68ksim
+ref-log: winuae/tests/smoke_ref.log
+
+# Phase 75: compare DUT bus log to reference
+# Usage: make buscmp  (captures live DUT run and compares to reference)
+buscmp: winuae/tests/smoke_ref.log
+	$(VVP) $(SIM)/cosim73 2>&1 | grep "^BUS" > /tmp/_dut_smoke.log || true
+	python3 tools/buscmp.py /tmp/_dut_smoke.log winuae/tests/smoke_ref.log \
+	    --reads-only --dut-may-continue
+
+# WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
+winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py
+	python3 tools/make_kickrom.py $< $@
+
+.PHONY: uae-rom
+uae-rom: winuae/roms/smoke_test.rom
 
 # ── Phony targets ──────────────────────────────────────────────────────────
 .PHONY: compile test run clean help

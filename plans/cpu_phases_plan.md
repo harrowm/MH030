@@ -1,6 +1,6 @@
 # MC68030 CPU — Development Plan
 
-## Status (as of Phase 64)
+## Status (as of Phase 69)
 
 ### BIU — complete (Phases 1–22)
 All 8 bus cycle types, BERR/HALT/STERM/VPA, IACK, RMW, CAS2, MOVEM/MOVEP bus cycles,
@@ -8,7 +8,7 @@ burst linefill, MOVE16 burst, biu_exc_capture (fault snapshot, SSW), m68030_biu 
 m68030_top stub. `biu_pin_driver`, `biu_config`, `biu_error_handler` fully fleshed out in
 Phases 45 and 51.
 
-### EU — complete through Phase 64
+### EU — complete through Phase 69
 
 | Phase | Module / Feature | Status |
 |-------|-----------------|--------|
@@ -47,13 +47,18 @@ Phases 45 and 51.
 | 62 | Bit-field instructions: BFTST/BFEXTU/BFEXTS/BFFFO/BFCLR/BFSET/BFINS | ✅ done |
 | 63 | PACK, UNPK (register + memory forms), LINK.L (#d32, 2 ext words), RESET | ✅ done |
 | 64 | MOVES full EA + PMOVE CRP/SRP 64-bit 2-phase FSM | ✅ done |
+| 65 | ALU memory-source → register destination (ADD/SUB/AND/OR/EOR/CMP/MUL/DIV from memory) | ✅ done |
+| 66 | ADDQ/SUBQ #,An; ADDA/SUBA/CMPA from memory | ✅ done |
+| 67 | MOVE memory→memory; MOVE ea,SR/CCR from/to memory | ✅ done |
+| 68 | TRAPcc; CAS EU decode; BCD/bit-op memory forms | ✅ done |
+| 69 | Extended EA sweep: MOVEM/Scc/CHK/TAS/Bitfield/CMP2-CHK2 | ✅ done |
 
-**42/42 regression tests pass** (`make test`).
+**47/47 regression tests pass** (`make test`).
 
-### ISA gap analysis (post Phase 64)
+### ISA gap analysis (post Phase 64, closed by Phases 65–69)
 
 A systematic audit of `eu_seq.sv` decode against the MC68030 programmer's reference manual
-identified the following gaps. Phases 65–69 close all of them.
+identified the following gaps. **All were closed in Phases 65–69.** Remaining items for Phases 70–71 are listed separately.
 
 **Critical — present in nearly every compiled binary**:
 - ALU ops (ADD/SUB/AND/OR/EOR/CMP) with memory source → register destination
@@ -81,12 +86,113 @@ identified the following gaps. Phases 65–69 close all of them.
 
 **Deliberate omissions** (not being added):
 - `MOVES (xxx).L` — requires 3 extension words; ext_count is capped at 2
-- `MOVES (d8,An,Xn)` STORE — 3-register conflict (Rn + An + Xn simultaneously)
+- `MOVES (d8,An,Xn)` STORE — true 3-register conflict: Rn (source/dest), An (base), and Xn (index) all needed simultaneously; only 2 read ports available
 - `PLOAD` — not commonly used; MMU ATC is managed by PFLUSH/PTEST
+
+Note: `JSR (d8,An,Xn)` and `JSR (d8,PC,Xn)` were previously marked as 3-register conflicts but are NOT: PC comes from `ex_decode_pc` (not the regfile) and A7 from dedicated SP outputs. Only Xn occupies a read port alongside An. These are implemented in Phase 70.
 
 ---
 
-## Verification Strategy: WinUAE cputest
+## Edge Case Disposition Table (post-Phase-69 audit)
+
+A review of known MC68030 edge cases and tricky encoding interactions. Each item is
+marked with its current status and assigned phase.
+
+### Control Flow
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| JSR (d8,An,Xn) | 🔲 Phase 70 | Not a true 3-reg conflict; implementable |
+| JSR (d8,PC,Xn) | 🔲 Phase 70 | PC not from regfile; only Xn uses rd port |
+| JMP (d8,An,Xn) / (d8,PC,Xn) | 🔲 Phase 70 | Same EA logic as JSR forms |
+| BSR short (8-bit offset, opcode `[7:0]≠0`) | ✅ done | Phase 38 |
+| DBcc counter = -1 fallthrough (no taken-branch, no re-loop) | ✅ done | Phase 36: count decremented to -1 → branch not taken, fall through |
+| BRA.S opcode `0x6000` (displacement in bits [7:0]) | ✅ done | Phase 36 |
+| RTS/RTR from misaligned A7 | ✅ handled | BIU raises address error; EU propagates fault |
+
+### Exceptions and Vectors
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| Trace mode T1 (every instruction) | 🔲 Phase 70 | `sr_out[15]` never checked; `eu_trace_req` missing |
+| Trace mode T0 (flow-change only) | 🔲 Phase 70 | `sr_out[14]` never checked |
+| Privilege violation → vector 8 | 🔲 Phase 70 | Currently collapses into vector 4 (ILLEGAL) |
+| Line-A (Group A opcodes) → vector 10 | 🔲 Phase 70 | Group A case branch absent; silent hang |
+| Line-F (non-FPU Group F) → vector 11 | 🔲 Phase 70 | Falls through without raising exception |
+| Format Error (RTE bad frame code) → vector 14 | 🔲 Phase 71 | Not implemented in RTE FSM |
+| TRAP #n vectors 32–47 | ✅ done | Phase 56 |
+| TRAPV → vector 7 | ✅ done | Phase 56 |
+| CHK out-of-range → vector 6 | ✅ done | Phase 48 |
+| CHK2/CMP2 out-of-range → vector 6 | ✅ done | Phase 48 |
+| ILLEGAL ($4AFC) → vector 4 | ✅ done | Phase 56 |
+| Address error (odd PC/EA) → vector 3 | ✅ done | BIU raises, EU captures |
+| Bus error (BERR) → vector 2 | ✅ done | Phase 11 |
+| Double-bus fault (BERR during exception frame push) | ✅ done | biu_exc_capture halts |
+
+### Atomic and Read-Modify-Write
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| CAS compare-match path | ✅ done | Phase 47/68 |
+| CAS compare-miss path (Dc updated from memory) | ✅ done | Phase 68 |
+| CAS2 EU decode | 🔲 Phase 71 | BIU machinery exists; EU decode absent |
+| TAS read-modify-write byte lock | ✅ done | Phase 47 |
+| RMW bus lock released on BERR | ✅ done | biu_error_handler clears AS/DS |
+
+### Register-File Edge Cases
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| MOVEM -(An) when An is in the save list | ✅ correct | An in regfile not updated until FSM end; original value stored automatically |
+| MOVEM (An)+ when An is in the load list | ✅ correct | 68030 undefined behaviour; An gets loaded value per PRM |
+| `set_an()` clobbers D0 via internal path | ✅ documented | Testbench convention: always call `set_an` before `set_dn(0,...)` |
+| EXG Dx,Ax (cross-class swap) | ✅ done | Phase 59 |
+| LINK with An=A7 (self-referential frame) | ✅ correct | A7 written before push in LINK sequence |
+| UNLK with An=A7 | ✅ correct | A7 ← An (= old A7) then pop; net: just pop |
+
+### CCR Flag Edge Cases
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| ADDX/SUBX: Z flag only cleared, never set | ✅ done | Phase 61 |
+| X flag preserved by non-arithmetic instructions | ✅ done | `dec_x_unchanged` path |
+| NEGX when source=0: sets C=0, clears N, sets Z only if X=0 | ✅ correct | eu_alu NEGX result |
+| CMPA: CCR updated, no register write, sign-extension for .W | ✅ done | Phase 57 |
+| MULS.L 32×32→64: N flag from bit 63 of product | ✅ done | Phase 58 |
+| DIVU by zero → vector 5 (zero-divide) | ✅ done | eu_mul_div raises eu_divz_req |
+| DIVS overflow (−2³¹ ÷ −1) | ✅ done | eu_mul_div detects and sets V |
+
+### BCD and String
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| ABCD/SBCD: C and X flags set from decimal carry | ✅ done | Phase 27 |
+| NBCD: Z only cleared never set (same as ADDX rule) | ✅ done | Phase 27 |
+| PACK/UNPK with adjustment word | ✅ done | Phase 63 |
+
+### Bus Timing and Sizing
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| Dynamic bus sizing 32/16/8-bit via DSACK0/1 | ✅ done | Phase 3 |
+| Burst fill: AS stays low across subsequent longwords | ✅ done | Phase 7 |
+| BERR + HALT retry | ✅ done | Phase 4 |
+| IACK: FC=111, level in A[3:1] | ✅ done | Phase 4 |
+| SIZ[1:0] encoding: 00=long, 01=byte, 10=word, 11=line | ✅ done | Phase 1 |
+| Write-through D-cache (no write-back cycles) | ✅ done | Architecture fixed |
+| RESET instruction: RSTOUT duration | ⚠️ Phase 71 | Counter sized for 512 internal ticks; should be 2048 (512 ext × 4) |
+
+### Coprocessor (FPU)
+
+| Edge Case | Status | Notes |
+|-----------|--------|-------|
+| FPU bus cycles: FC=111, A[19:16]=0010 | ✅ done | Phase 52 |
+| CPI/CPM/CPIR/CPCR opcode classes | ✅ done | Phase 52 |
+| FPU absent: Line-F non-FPU → vector 11 | 🔲 Phase 70 | Need eu_linef_req output |
+
+---
+
+## Verification Strategy: WinUAE cputest: WinUAE cputest
 
 ### What the tool is
 
@@ -127,7 +233,7 @@ WinUAE (68030 mode)
 Verification checkpoints:
 - **Checkpoint α** (after Phase 43) ✅ — BRA/Bcc, MOVE, ALU, shifts, MOVEM
 - **Checkpoint β** (after Phase 50) ✅ — extended EA modes, control flow, atomics, MOVEM/MOVEP/MOVE16
-- **Checkpoint γ** (after Phase 64) — near-complete instruction set; run cputest `basic/all` suite
+- **Checkpoint γ** (after Phase 71) — full instruction set including exception vectors and CAS2; run cputest `basic/all` suite
 
 ---
 
@@ -577,22 +683,245 @@ Files: `rtl/eu_seq.sv`, `tb/seq69_tb.sv`
 
 ---
 
+## Remaining Phases (70–71)
+
+---
+
+### Phase 70 — JSR/JMP indexed EA; Trace mode; Exception vector routing
+
+**Why here**: Three categories of correctness gaps that will cause WinUAE cputest failures
+on common patterns. Each is mechanically small but architecturally important.
+
+**Part A — JSR/JMP (d8,An,Xn) and (d8,PC,Xn)**
+
+Phase 38 deferred `JSR (d8,An,Xn)` with a "3-register conflict" comment. This was
+a mistake: the conflict does not exist. The three values needed — An (base), Xn (index),
+A7 (SP for push) — only consume *two* regfile read ports because A7/SP is available
+on the dedicated `isp`/`msp`/`usp_out` outputs, and for `(d8,PC,Xn)` the base is
+`ex_decode_pc` (not the regfile at all). Only Xn needs a read port alongside An.
+
+| Instruction | EA | Notes |
+|-------------|----|----|
+| `JSR (d8,An,Xn)` | An + sign_ext(d8) + Xn×scale | rd_a=An, rd_b=Xn; push PC; jump |
+| `JSR (d8,PC,Xn)` | PC + sign_ext(d8) + Xn×scale | rd_a=Xn; PC from `ex_decode_pc`; push PC; jump |
+| `JMP (d8,An,Xn)` | An + sign_ext(d8) + Xn×scale | rd_a=An, rd_b=Xn; no push |
+| `JMP (d8,PC,Xn)` | PC + sign_ext(d8) + Xn×scale | rd_a=Xn; PC from `ex_decode_pc`; no push |
+
+Implementation in `eu_seq.sv`: lift the `dec_valid=0` guard on these decode paths;
+wire the EA through the existing indexed AGU machinery.
+
+**Part B — Trace mode (T1/T0 bits in SR)**
+
+The SR trace bits at `[15:14]` are stored but never acted on. The 68030 supports two
+trace modes:
+
+- **T1=1** (SR bit 15): single-step — raise trace exception (vector 9) after *every*
+  instruction retires
+- **T0=1** (SR bit 14): branch-trace — raise trace exception after any instruction that
+  changes the flow (taken branch, JSR, RTS, JMP, TRAP, RTE, etc.)
+
+Both modes raise vector 9. Priority: lower than bus error and address error, but higher
+than all normal interrupts.
+
+Implementation:
+- Add `eu_trace_req` output to `m68030_eu.sv` and `eu_seq.sv`
+- Fire `eu_trace_req` at WB (after instr_ack) when `sr_out[15]` is set
+- Fire `eu_trace_req` at WB for flow-change instructions when `sr_out[14]` is set
+- `m68030_exc.sv`: map `eu_trace_req` → vector 9 (priority after BERR/addr-error)
+
+**Part C — Exception vector routing corrections**
+
+Currently `eu_seq.sv` issues `eu_illegal_req` for all unrecognised or privileged opcodes.
+Three distinct vectors are collapsed into one:
+
+| Condition | Current | Correct |
+|-----------|---------|---------|
+| Privilege violation (supervisor instr in user mode) | vector 4 via `eu_illegal_req` | vector 8 via `eu_priv_req` |
+| Line-A opcode (group A, `f_group[3:0]=4'hA`) | silent hang (no dec_valid) | vector 10 via `eu_linea_req` |
+| Line-F opcode (group F, non-FPU) | silent hang or FPU dispatch | vector 11 via `eu_linef_req` |
+
+Supervisor-only instructions requiring privilege check: `STOP`, `RESET`, `RTE`, `MOVE An,USP`,
+`MOVE USP,An`, `MOVEC`, `MOVES`, all MMU/cache control instructions, `ORI/ANDI/EORI to SR`.
+
+Add output ports to `m68030_eu.sv`: `eu_priv_req`, `eu_linea_req`, `eu_linef_req`.
+In `eu_seq.sv` Group A case: raise `eu_linea_req`. In the Group F default (non-FPU
+encodings): raise `eu_linef_req`. In privileged-instruction paths: check `sr_out[13]`
+(supervisor bit S); if clear, raise `eu_priv_req` instead of executing.
+In `m68030_exc.sv`: route each new signal to the correct vector number.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_eu.sv`, `rtl/m68030_exc.sv`, `tb/seq70_tb.sv`
+
+---
+
+### Phase 71 — CAS2 EU decode; Format Error; RESET duration audit
+
+**Part A — CAS2 EU decode**
+
+Phase 47 built the BIU's four-bus-cycle locked machinery for CAS2. The EU decode in
+`eu_seq.sv` is entirely absent — there is no handler for the CAS2 opcode.
+
+CAS2 encoding (MC68030 PRM §6-5):
+
+| Size | Opcode word | Extension words |
+|------|-------------|-----------------|
+| `.W` | `0000 1100 1111 1100` (0x0CFC) | ext1: [15:12]=Dc2, [11:6]=Du2, [2:0]=Rn2; ext2: [15:12]=Dc1, [11:6]=Du1, [2:0]=Rn1 |
+| `.L` | `0000 1110 1111 1100` (0x0EFC) | same format |
+
+Operation: simultaneously compare `M[Rn1]` vs `Dc1` and `M[Rn2]` vs `Dc2`. If both match,
+store `Du1` → `M[Rn1]` and `Du2` → `M[Rn2]` (all four bus cycles locked). If mismatch,
+load `Dc1 ← M[Rn1]` and `Dc2 ← M[Rn2]`.
+
+EU decode needs `dec_needs_ext=2` (two extension words); a new `dec_is_cas2` flag;
+and a sequencer FSM that issues the four bus cycles through `biu_multiop_fsm` (which
+already has the locked cycle machinery from Phase 22).
+
+The two address registers `Rn1` and `Rn2` are `Dn` or `An` depending on bit [3] of each
+`Rn` field. Read both via `rd_a` / `rd_b` in the EX stage (they cannot be the same register
+due to the two-port limitation; CAS2 on the same address is a programming error but the
+hardware doesn't need to detect it).
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_seq.sv`, `tb/seq71_tb.sv`
+
+**Part B — Format Error exception (vector 14)**
+
+When `RTE` reads the format code word from the stack, if the format field `[15:12]`
+contains an unrecognised value (anything other than $0, $2, $3, $4, $8, $9, $A, $B),
+the 68030 raises a Format Error exception (vector 14) immediately.
+
+Currently `eu_seq.sv` (Phase 56) reads the format word and dispatches on the known codes;
+unknown codes silently fall through. Add a default branch that asserts `eu_format_err_req`
+(new output port) and stalls until `m68030_exc` takes the request.
+
+Files: `rtl/eu_seq.sv`, `rtl/m68030_eu.sv`, `rtl/m68030_exc.sv`
+
+**Part C — RESET instruction duration audit**
+
+Phase 63 notes `RESET` asserts `RSTOUT` for 512 ext clocks. The MC68030 PRM (§4-73)
+specifies a minimum of 512 *MCLK* cycles (= external bus clock cycles) at the minimum
+clock rate. At 4× internal clock: 512 external cycles = 2048 internal ticks. Confirm
+the `biu_config` counter is sized for 2048 (11-bit counter), not 512 (9-bit). If the
+counter stops at 512 internal ticks it would only be 128 external cycles — a factor
+of 4 short.
+
+Files: `rtl/biu_config.sv`, `rtl/eu_seq.sv`
+
+---
+
 **CHECKPOINT γ — WinUAE cputest near-full-binary execution**
 
-After Phase 69 the MC68030 encoding space is fully covered (excluding the three deliberate
-omissions listed above). Strategy:
-1. Extract `.dat` test vectors from WinUAE (run cputest in WinUAE 68030 mode)
-2. Python parser reads `.dat` binary format → JSON vectors:
-   `(instr_bytes, initial_D[0..7], initial_A[0..7], initial_SR, expected_D/A/SR/memory)`
-3. Verilator testbench (`tb/cosim_tb.sv`) applies each vector:
-   - Pre-load registers via hierarchical DPI calls
-   - Write instruction bytes to simulation memory
-   - Run for fixed cycle budget
-   - Read back register file state via DPI
-   - Compare with expected
-4. Run the full `basic/all` cputest suite for 68030; target <10 failures per opcode group
+After Phase 71 the MC68030 encoding space is fully covered. Strategy (Phases 72–77):
 
-Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`, `scripts/compare.py`, `tb/cosim_tb.sv`
+- **Toolchain**: Icarus Verilog (simulation), vasmm68k_mot (assembler), Python 3 (diff / .dat parser), WinUAE/Wine (reference). No Verilator, no Musashi.
+- **Log format** (shared between DUT and reference): one line per completed bus cycle: `BUS R|W addr32 data32 fc=FCfcfc siz=SZsz` (all hex, no spaces inside fields).
+- **Reference**: WinUAE in 68030 mode logs the same fields via its built-in debug output or the UAE-Control plugin. Alternatively, the `.dat` suite encodes pre/post state without per-cycle bus logs — used in Phase 77.
+
+---
+
+**Phase 72 — `tb/cosim72_tb.sv`: Full-chip bus testbench**
+
+Instantiates `m68030_top` (all modules integrated). Implements an inline 4KB memory model:
+- Loaded at elaboration time via `$readmemh("tests/boot.hex", rom)`.
+- 32-bit port: DSACK0+DSACK1 asserted one internal cycle after DS# asserts (0 wait states).
+- Byte-lane read steering via SIZ[1:0]+A[1:0] so 8-bit and 16-bit sub-cycle reads return the correct byte on D[31:24] or D[31:16].
+- Write capture: on cycle DSACK asserts (when BIU's ext_d_oe is high), write to the correct byte lane.
+- Bus transaction logger: on each AS# deassert, emits `BUS R|W …` to stdout.
+- STOP detection: sets `stop_seen` when the STOP opcode (0x4E72) appears on any instruction-space read cycle.
+
+Boot test (`tests/boot.hex`): SSP=0x00010000 at addr 0; PC=0x00000008 at addr 4; NOP+STOP #$2700 starting at addr 8. Pass criterion: `stop_seen` within 3000 internal cycles.
+
+Files: `tb/cosim72_tb.sv`, `tests/boot.hex`
+
+---
+
+**Phase 73 — Bare-metal test toolchain**
+
+Establish the flow: `vasmm68k_mot -Fbin -m68030 tests/smoke.s -o tests/smoke.bin` → convert binary to 32-bit hex words (`tools/bin2hex.py`) → `tests/smoke.hex` → loaded by `cosim72_tb` via `$readmemh`.
+
+`tests/smoke.s` structure:
+```asm
+        org     0
+        dc.l    $00010000   ; SSP
+        dc.l    start       ; PC
+start:  nop
+        moveq   #42,d0
+        add.l   d0,d0       ; d0=84
+        stop    #$2700
+```
+
+`tools/bin2hex.py`: reads binary, emits one 32-bit big-endian hex word per line. Handles alignment (pads to longword boundary with 0x4E71 NOP fill).
+
+Files: `tests/smoke.s`, `tools/bin2hex.py`, Makefile rule `tests/smoke.hex`
+
+---
+
+**Phase 74 — WinUAE reference log extraction**
+
+Script `tools/uae_run.sh` drives WinUAE under Wine:
+1. Build a minimal ADF or raw boot ROM from `tests/smoke.bin`.
+2. Configure WinUAE for MC68030, disable all caches, set debug breakpoint at reset.
+3. Enable bus-cycle logging (UAE debug: `z|l` level; or UAE-Control plugin).
+4. Let CPU run until STOP; capture log.
+5. Post-process: `tools/uae_parse.py` reads UAE log → emits lines in the standard `BUS R|W …` format.
+
+The UAE log and the Icarus simulation log then share a format that `tools/buscmp.py` (Phase 75) can diff.
+
+Files: `tools/uae_run.sh`, `tools/uae_parse.py`
+
+---
+
+**Phase 75 — Python diff tool (`tools/buscmp.py`)**
+
+```
+python tools/buscmp.py dut.log ref.log [--skip-init N]
+```
+
+Algorithm:
+1. Parse both logs into lists of `(rw, addr, data, fc, siz)` tuples.
+2. `--skip-init N` skips the first N cycles (power-on reset vector reads that differ in timing but not content can be normalised).
+3. Walk both lists in lockstep; on first mismatch print a context window (5 cycles before, 5 after) and exit 1.
+4. If lists differ in length, report "DUT ran N cycles, ref ran M cycles" and exit 1.
+5. On success: `OK: N cycles match` and exit 0.
+
+Files: `tools/buscmp.py`
+
+---
+
+**Phase 76 — 8 opcode group test programs**
+
+One `.s` file per MC68000 instruction group (groups 0–7 by bits [15:12] of the opcode):
+
+| File | Group | Key instructions |
+|------|-------|-----------------|
+| `tests/grp0.s` | 0 | ORI/ANDI/SUBI/ADDI/EORI/CMPI, BTST/BCHG/BCLR/BSET, MOVEP, CAS, CAS2 |
+| `tests/grp1.s` | 1 | MOVE.B |
+| `tests/grp2.s` | 2 | MOVE.L, MOVEA.L |
+| `tests/grp3.s` | 3 | MOVE.W, MOVEA.W |
+| `tests/grp4.s` | 4 | NEGX/CLR/NEG/NOT/EXT/NBCD/SWAP/PEA/MOVEM/TST/TAS/ILLEGAL/JSR/JMP/TRAP/RTS/RTE |
+| `tests/grp5.s` | 5 | ADDQ/SUBQ/Scc/DBcc/TRAPcc |
+| `tests/grp6.s` | 6 | BRA/BSR/Bcc |
+| `tests/grp7.s` | 7 | MOVEQ |
+
+Each program: initialise registers with known values, perform operations, STOP at end. Run both through `cosim72_tb` (DUT) and WinUAE (ref), diff with `buscmp.py`. Target: 0 divergences per group.
+
+Files: `tests/grpN.s` (N=0..7), Makefile rules for each
+
+---
+
+**Phase 77 — Toni Wilen `.dat` suite replay**
+
+`scripts/parse_dat.py` reads the `.dat` binary format from the WinUAE cputest suite:
+- Each record: pre-state (D[0..7], A[0..7], SR, PC, memory snapshot), instruction bytes, post-state.
+- Does not contain cycle-by-cycle bus logs — only register/memory snapshot comparison.
+
+`scripts/run_cosim.py` drives the DUT:
+1. For each test vector: pre-load registers via `$dumpvars`-based force or by executing MOVEQ/MOVEA sequences in the testbench.
+2. Set PC to the instruction; run for a cycle budget (50 cycles per instruction).
+3. Read back register state via waveform or `$display` probes.
+4. Compare with expected post-state; report pass/fail.
+
+Target: run the full `basic/all` 68030 cputest suite; <10 failures per opcode group.
+
+Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`
 
 ---
 
@@ -629,23 +958,33 @@ Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`, `scripts/compare.py`, `tb
 | **62** | Bit-field instructions (BFXXX) | ✅ | Packed data, bit manipulation |
 | **63** | PACK/UNPK, LINK.L, RESET | ✅ | BCD, large frames, hardware reset |
 | **64** | MOVES full EA, PMOVE CRP/SRP (64-bit) | ✅ | Alternate-space moves, MMU root ptrs |
-| **65** | ALU memory-source → register (ADD/SUB/AND/OR/EOR/CMP/MUL/DIV from memory) | — | *Most* compiled code patterns |
-| **66** | ADDQ/SUBQ #,An; ADDA/SUBA/CMPA from memory | — | Every C function prologue/epilogue |
-| **67** | MOVE memory→memory; MOVE ea,SR/CCR | — | Block copy, OS SR manipulation |
-| **68** | TRAPcc; CAS EU decode; BCD/bit-op memory forms | — | OS traps, atomics, BCD memory |
-| **69** | Extended EA sweep: MOVEM/Scc/CHK/TAS/Bitfield/CMP2CHK2 | — | Full EA coverage |
-| **γ** | Checkpoint γ: WinUAE cputest full suite | — | Pass/fail per opcode group |
+| **65** | ALU memory-source → register (ADD/SUB/AND/OR/EOR/CMP/MUL/DIV from memory) | ✅ | Most compiled code patterns |
+| **66** | ADDQ/SUBQ #,An; ADDA/SUBA/CMPA from memory | ✅ | Every C function prologue/epilogue |
+| **67** | MOVE memory→memory; MOVE ea,SR/CCR | ✅ | Block copy, OS SR manipulation |
+| **68** | TRAPcc; CAS EU decode; BCD/bit-op memory forms | ✅ | OS traps, atomics, BCD memory |
+| **69** | Extended EA sweep: MOVEM/Scc/CHK/TAS/Bitfield/CMP2-CHK2 | ✅ | Full EA coverage |
+| **70** | JSR/JMP (d8,An,Xn)/(d8,PC,Xn); Trace mode T1/T0; Exception vector routing | ✅ | Correct trace/priv/Line-A/Line-F |
+| **71** | CAS2 EU decode; Format Error (vector 14); RESET duration audit | ✅ | Atomic dual-compare, RTE safety |
+| **γ** | Checkpoint γ: WinUAE cputest full suite (after Phase 71) | — | Pass/fail per opcode group |
+| **72** | `tb/cosim72_tb.sv` — full-chip bus testbench; `$readmemh` ROM; bus logger | — | Co-simulation infrastructure |
+| **73** | Bare-metal test toolchain — `vasmm68k_mot` → hex; `tests/smoke.s` | — | Assembler-driven test programs |
+| **74** | WinUAE reference log extraction — scripted UAE run + bus log parser | — | Reference bus traces |
+| **75** | Python diff tool — `tools/buscmp.py`; find first bus-cycle divergence | — | Automated regression |
+| **76** | 8 opcode group test programs (`tests/grpN.s`) + co-sim run | — | Cover full encoding space |
+| **77** | Toni Wilen `.dat` suite player — `scripts/parse_dat.py` + replay harness | — | Near-exhaustive verification |
 
 ---
 
 ## Dependency Notes
 
-- Phase 65 is independent — no new infrastructure, just decode widening
-- Phase 66 is independent — depends only on existing mem-read path
-- Phase 67 needs a `move_mm_run_r` FSM (new, ~30 lines); otherwise independent
-- Phase 68 CAS depends on Phase 47 BIU machinery (already done); BCD memory depends on Phase 61 -(An) FSM
-- Phase 69 is purely decode/EA widening — all infrastructure exists; can partly parallel Phase 68
-- Checkpoint γ requires Phases 65–69 all complete
+- Phases 65–71 are complete ✅
+- Checkpoint γ requires Phases 70–71 complete ✅
+- Phase 72 depends on `m68030_top` (Phase 55, done) and the inline memory model; introduces `tests/` directory
+- Phase 73 requires `vasmm68k_mot` to be installed on the host; produces hex files consumed by Phase 72
+- Phase 74 requires WinUAE under Wine on macOS; `uae_run.sh` must be tuned for local Wine/WinUAE paths
+- Phase 75 depends on Phase 74 (reference log) and Phase 72 (DUT log); standalone Python, no extra deps
+- Phase 76 depends on Phases 73 and 75; one `.s` → `.hex` → DUT log → diff against WinUAE log per group
+- Phase 77 depends on the `.dat` files from the WinUAE cputest directory; no DUT bus log needed (register comparison only)
 
 ---
 
@@ -653,7 +992,7 @@ Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`, `scripts/compare.py`, `tb
 
 ```bash
 cd /Users/malcolm/MH030
-make test        # compile and run all 42 tests; should report "42 passed, 0 failed"
+make test        # compile and run all 47 tests; should report "47 passed, 0 failed"
 make run TEST=seq58   # compile and run a single testbench
 ```
 

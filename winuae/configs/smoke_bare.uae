@@ -1,0 +1,65 @@
+; WinUAE config for bare-metal MC68030 smoke test (Phase 74)
+;
+; The CPU boots from winuae/roms/smoke_test.rom (built by tools/make_kickrom.py):
+;   $FC0000+0 : SSP = $00010000    (chip RAM stack)
+;   $FC0000+4 : PC  = $00FC0008    (ROM-space code start)
+;   $FC0000+8 : NOP / MOVEQ #42,D0 / ADD.L D0,D0 / STOP #$2700
+;
+; use_debugger=true: WinUAE opens the debug console at startup.
+; uae_run.sh pipes "t 20\nq\n" to stdin so it traces 20 instructions then quits.
+
+use_gui=no
+use_debugger=true
+
+; WinUAE log to default location (C:\users\Public\Documents\Amiga Files\WinUAE\winuaelog.txt)
+win32.logfile=true
+
+; --- CPU: cycle-exact 68030, no FPU ---
+cpu_type=68020
+cpu_model=68030
+cpu_speed=real
+cpu_multiplier=2
+cpu_compatible=true
+cpu_cycle_exact=true
+cpu_memory_cycle_exact=true
+cycle_exact=true
+blitter_cycle_exact=true
+cpu_24bit_addressing=false
+fpu_model=0
+fpu_strict=false
+
+; --- Our test ROM (replaces Kickstart) ---
+kickstart_rom_file=Z:\Users\malcolm\MH030\winuae\roms\smoke_test.rom
+
+; --- Minimal ECS chipset ---
+chipset=ecs_agnus
+chipset_compatible=false
+ntsc=false
+chipmem_size=2
+bogomem_size=0
+
+; --- No floppy, no hard drive ---
+nr_floppies=0
+floppy0type=-1
+floppy1type=-1
+floppy2type=-1
+floppy3type=-1
+
+; --- Minimal display ---
+gfx_width=320
+gfx_height=256
+gfx_lores=true
+gfx_fullscreen_amiga=false
+show_leds=false
+
+; --- Sound: cycle-exact mode requires emulated or better ---
+sound_output=emulated
+
+; --- CPU trace log: write per-instruction trace to winuae log ---
+; (WinUAE 6.x: debug_mem logs bus read/writes to winuaelog.txt)
+debug_mem=true
+log_illegal_mem=false
+
+; --- Input ---
+joyport0=mouse
+joyport1=none

@@ -197,6 +197,10 @@ module m68030_seq (
     logic is_rtd;
     assign is_rtd = (instr_word == 16'h4E74);
 
+    // STOP — exactly 1 extension word (new SR immediate)
+    logic is_stop_opcode;
+    assign is_stop_opcode = (instr_word == 16'h4E72);
+
     // Phase 62: bit-field instructions — always exactly 1 extension word
     // Group E, f_ss=11 (bits[7:6]=11), f_dn[2]=1 (bit[11]=1)
     logic is_bf;
@@ -270,6 +274,11 @@ module m68030_seq (
         // Phase 68: TRAPcc.L has 2-word operand
         else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b000))
             ext_count = 2'd2;
+        // Phase 71: CAS2 always needs 2 extension words (Rn1/Dc1/Du1 + Rn2/Dc2/Du2)
+        else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
+                 (f_dn == 3'b110 || f_dn == 3'b111) &&
+                 (f_mode == 3'b111) && (f_reg == 3'b100))
+            ext_count = 2'd2;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
             ext_count = 2'd2;
@@ -277,7 +286,7 @@ module m68030_seq (
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
-                 is_rtd || is_bf || is_pack_unpk || is_moves ||
+                 is_rtd || is_stop_opcode || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||
                  (is_addq_subq_ext && !is_addq_subq_ext_long) ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)

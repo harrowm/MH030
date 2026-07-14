@@ -153,6 +153,11 @@ module m68030_top #(
     logic [3:0]  eu_trap_num_w;
     logic        eu_trapv_req_w;
     logic        eu_illegal_req_w;
+    logic        eu_priv_req_w;
+    logic        eu_trace_req_w;
+    logic        eu_linea_req_w;
+    logic        eu_linef_req_w;
+    logic        eu_fmt_err_req_w;
 
     // ───────────────────────────────────────────────────────────────────────
     // IFU output wires
@@ -403,6 +408,11 @@ module m68030_top #(
         .eu_illegal_req(eu_illegal_req_w),
         .eu_stop       (),              // unused at top level for now
         .eu_reset_req  (),              // wired to BIU RSTOUT in Phase 55
+        .eu_priv_req    (eu_priv_req_w),
+        .eu_trace_req   (eu_trace_req_w),
+        .eu_linea_req   (eu_linea_req_w),
+        .eu_linef_req   (eu_linef_req_w),
+        .eu_fmt_err_req (eu_fmt_err_req_w),
         .ssp_wr_en     (ssp_wr_en_mux),
         .ssp_wr_data   (ssp_wr_data_mux),
         .exc_sr_wr_en  (exc_new_sr_wr),
@@ -421,11 +431,11 @@ module m68030_top #(
         .ipl_sync     (ipl_sync),
         .ipl_mask     (eu_ipl_mask),
         .illegal_req  (eu_illegal_req_w),
-        .priv_req     (1'b0),
-        .trace_req    (1'b0),
-        .linea_req    (1'b0),
-        .linef_req    (1'b0),
-        .fmt_err_req  (1'b0),
+        .priv_req     (eu_priv_req_w),
+        .trace_req    (eu_trace_req_w),
+        .linea_req    (eu_linea_req_w),
+        .linef_req    (eu_linef_req_w),
+        .fmt_err_req  (eu_fmt_err_req_w),
         .div_zero_req (eu_div_trap),
         .chk_req      (eu_chk_trap),
         .trapv_req    (eu_trapv_req_w),

@@ -408,7 +408,8 @@ module seq63_tb;
         chk("P63-08:result", ram[32'h0200 >> 2], 32'h0000_0A0B);
 
         // ==================================================================
-        // P63-09: RESET — eu_reset_req pulses high for ~512 sub-clocks.
+        // P63-09: RESET — eu_reset_req pulses high for 2048 internal ticks
+        //   (512 ext clock cycles × 4 internal ticks/cycle).
         // Critical: deassert instr_valid immediately after instr_ack fires
         // so the EU does not restart a second RESET after the countdown
         // completes (the EX stage still holds ex_is_reset during the stall).
@@ -429,8 +430,8 @@ module seq63_tb;
             end
         end
         instr_valid = 1'b0;
-        // Wait for ~512-cycle countdown plus margin; monitor eu_reset_req
-        repeat(700) begin
+        // Wait for 2048-cycle countdown plus margin; monitor eu_reset_req
+        repeat(2200) begin
             @(posedge clk);
             if (eu_reset_req) saw_reset_p09 = 1;
         end
