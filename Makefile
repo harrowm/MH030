@@ -207,6 +207,9 @@ $(SIM)/cosim73:    $(TOP_SRCS) tb/cosim73_tb.sv | $(SIM)
 $(SIM)/cosim_grp:  $(TOP_SRCS) tb/cosim_grp_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/cosim_dat:  $(TOP_SRCS) tb/cosim_dat_tb.sv | $(SIM)
+	$(IVCOMP)
+
 # ── Bare-metal test hex generation (requires vasmm68k_mot in PATH) ──────────
 tests/%.bin: tests/%.s
 	vasmm68k_mot -Fbin -m68030 $< -o $@
@@ -248,9 +251,21 @@ winuae/tests:
 
 .PHONY: m68ksim ref-log buscmp cosim_grp \
         buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
-        buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7
+        buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7 \
+        dat-replay dat-synth
 m68ksim: tools/m68ksim
 ref-log: winuae/tests/smoke_ref.log
+
+# Phase 77: .dat-suite replay
+# Usage: make dat-replay DAT=path/to/68030.dat [LIMIT=200] [VERBOSE=-v]
+dat-replay: $(SIM)/cosim_dat tools/m68ksim
+	python3 scripts/run_cosim.py --dat $(DAT) $(if $(LIMIT),--limit $(LIMIT)) $(VERBOSE)
+
+# Phase 77: synthetic DUT vs Musashi register-state comparison (no .dat needed)
+# Usage: make dat-synth [N=50]
+DAT_SYNTH_N ?= 50
+dat-synth: $(SIM)/cosim_dat tools/m68ksim
+	python3 scripts/run_cosim.py --synth $(DAT_SYNTH_N) $(VERBOSE)
 
 # Phase 75: compare DUT bus log to reference
 # Usage: make buscmp  (captures live DUT run and compares to reference)

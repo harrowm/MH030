@@ -246,6 +246,8 @@ module m68030_seq (
             move_mm_src_ext_w = 2'd1;
         else if (f_mode == 3'b111 && f_reg == 3'b001)
             move_mm_src_ext_w = 2'd2;
+        else if (f_mode == 3'b111 && f_reg == 3'b100)  // immediate: MOVE.L=2 words, .B/.W=1
+            move_mm_src_ext_w = (f_group == 4'h2) ? 2'd2 : 2'd1;
         else
             move_mm_src_ext_w = 2'd0;
     end
@@ -279,6 +281,15 @@ module m68030_seq (
                  (f_dn == 3'b110 || f_dn == 3'b111) &&
                  (f_mode == 3'b111) && (f_reg == 3'b100))
             ext_count = 2'd2;
+        // MOVE/MOVEA #imm, Dn/An — immediate src (f_mode=111,f_reg=100) with register dst
+        // is_move_mm doesn't fire when dst_mode is 000 (Dn) or 001 (An direct)
+        else if ((f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                 (f_mode == 3'b111) && (f_reg == 3'b100) &&
+                 (f_move_dst_mode_s == 3'b000 || f_move_dst_mode_s == 3'b001))
+            ext_count = (f_group == 4'h2) ? 2'd2 : 2'd1;
+        // MOVE.W #imm, SR (0x46FC) / MOVE.W #imm, CCR (0x44FC) — group 4, 1 ext word
+        else if (instr_word == 16'h46FC || instr_word == 16'h44FC)
+            ext_count = 2'd1;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
             ext_count = 2'd2;

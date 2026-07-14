@@ -1184,19 +1184,33 @@ module eu_seq (
                                 default: ;
                             endcase
                         end else if (f_mode == 3'b111) begin
-                            // MOVE.B/W/L (special EA), Dn — abs or PC-relative source
+                            // MOVE.B/W/L (special EA), Dn — abs, PC-relative, or immediate source
                             dec_valid     = 1'b1;
-                            dec_is_mem_rd = 1'b1;
                             dec_unit      = UNIT_MOVE;
-                            dec_abs_ea_en = 1'b1;
                             dec_needs_ext = 1'b1;
                             case (f_reg)
-                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
-                                3'b001: dec_abs_ea_val = ext_data;
-                                3'b010: // (d16,PC): EA = PC+2 + sign_ext(d16)
+                                3'b100: begin // MOVE #imm, Dn — immediate source
+                                    dec_use_imm = 1'b1;
+                                end
+                                3'b000: begin
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
+                                    dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
+                                3'b001: begin
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
+                                    dec_abs_ea_val = ext_data;
+                                end
+                                3'b010: begin // (d16,PC): EA = PC+2 + sign_ext(d16)
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
                                     dec_abs_ea_val = decode_pc + 32'd2
                                                    + {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
                                 3'b011: begin // (d8,PC,Xn): EA = PC+2 + d8 + scaled(Xn)
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
                                     dec_abs_ea_val = decode_pc + 32'd2
                                                    + {{24{ext_data[7]}}, ext_data[7:0]};
                                     dec_dst_reg   = {ext_data[15], ext_data[14:12]};
@@ -1295,18 +1309,34 @@ module eu_seq (
                                 default: ;
                             endcase
                         end else if (f_mode == 3'b111) begin
-                            // MOVEA (special EA), An — abs or PC-relative source
+                            // MOVEA (special EA), An — abs, PC-relative, or immediate source
                             dec_valid     = 1'b1;
-                            dec_is_mem_rd = 1'b1;
                             dec_unit      = UNIT_MOVE;
-                            dec_abs_ea_en = 1'b1;
                             dec_needs_ext = 1'b1;
                             case (f_reg)
-                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
-                                3'b001: dec_abs_ea_val = ext_data;
-                                3'b010: dec_abs_ea_val = decode_pc + 32'd2
-                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b100: begin // MOVEA.L #imm32, An — immediate source
+                                    dec_use_imm = 1'b1;
+                                    // dec_is_movea_w already set above for group 3
+                                end
+                                3'b000: begin
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
+                                    dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
+                                3'b001: begin
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
+                                    dec_abs_ea_val = ext_data;
+                                end
+                                3'b010: begin
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
                                 3'b011: begin
+                                    dec_is_mem_rd = 1'b1;
+                                    dec_abs_ea_en = 1'b1;
                                     dec_abs_ea_val = decode_pc + 32'd2
                                                    + {{24{ext_data[7]}}, ext_data[7:0]};
                                     dec_dst_reg   = {ext_data[15], ext_data[14:12]};
@@ -2030,6 +2060,29 @@ module eu_seq (
                             dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext   = 1'b1;
                         end
+                    end else if (instr_word == 16'h46FC) begin
+                        // MOVE.W #imm, SR — supervisor-only; loads new SR from immediate
+                        if (!sr_out[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
+                            dec_valid        = 1'b1;
+                            dec_unit         = UNIT_MOVE;
+                            dec_siz          = 2'b10;
+                            dec_needs_ext    = 1'b1;
+                            dec_use_imm      = 1'b1;
+                            dec_is_move_sr_w = 1'b1;
+                            dec_x_unchanged  = 1'b1;
+                        end
+                    end else if (instr_word == 16'h44FC) begin
+                        // MOVE.W #imm, CCR — write low byte of immediate to CCR
+                        dec_valid         = 1'b1;
+                        dec_unit          = UNIT_MOVE;
+                        dec_siz           = 2'b01;
+                        dec_needs_ext     = 1'b1;
+                        dec_use_imm       = 1'b1;
+                        dec_is_move_ccr_w = 1'b1;
+                        dec_x_unchanged   = 1'b1;
                     end else if (instr_word == 16'h4E75) begin
                         // RTS: pop PC from (A7), A7 += 4
                         dec_valid      = 1'b1;

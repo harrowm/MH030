@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "m68k.h"
 
@@ -129,12 +130,22 @@ void m68k_write_memory_32(unsigned int a, unsigned int v) {
 
 /* ── main ─────────────────────────────────────────────────────────────────── */
 int main(int argc, char *argv[]) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <file.hex> [max_cycles]\n", argv[0]); return 1; }
-    int max_cycles = (argc >= 3) ? atoi(argv[2]) : 300;
+    /* Parse flags: --regstate enables REGSTATE output after execution */
+    int do_regstate = 0;
+    int argi = 1;
+    while (argi < argc && argv[argi][0] == '-') {
+        if (strcmp(argv[argi], "--regstate") == 0) { do_regstate = 1; argi++; }
+        else { fprintf(stderr, "unknown flag: %s\n", argv[argi]); return 1; }
+    }
+    if (argi >= argc) {
+        fprintf(stderr, "usage: %s [--regstate] <file.hex> [max_cycles]\n", argv[0]);
+        return 1;
+    }
+    int max_cycles = (argi + 1 < argc) ? atoi(argv[argi + 1]) : 300;
 
     for (int i = 0; i < MEM_WORDS; i++) g_mem[i] = 0x4E714E71u;
-    FILE *f = fopen(argv[1], "r");
-    if (!f) { perror(argv[1]); return 1; }
+    FILE *f = fopen(argv[argi], "r");
+    if (!f) { perror(argv[argi]); return 1; }
     char line[64]; int idx = 0;
     while (fgets(line, sizeof(line), f) && idx < MEM_WORDS) {
         unsigned long v;
@@ -147,5 +158,21 @@ int main(int argc, char *argv[]) {
     m68k_set_fc_callback(fc_callback);
     m68k_pulse_reset();
     m68k_execute(max_cycles);
+
+    if (do_regstate) {
+        printf("REGSTATE"
+               " D0=%08x D1=%08x D2=%08x D3=%08x D4=%08x D5=%08x D6=%08x D7=%08x"
+               " A0=%08x A1=%08x A2=%08x A3=%08x A4=%08x A5=%08x A6=%08x A7=%08x"
+               " SR=%04x PC=%08x\n",
+               m68k_get_reg(NULL, M68K_REG_D0), m68k_get_reg(NULL, M68K_REG_D1),
+               m68k_get_reg(NULL, M68K_REG_D2), m68k_get_reg(NULL, M68K_REG_D3),
+               m68k_get_reg(NULL, M68K_REG_D4), m68k_get_reg(NULL, M68K_REG_D5),
+               m68k_get_reg(NULL, M68K_REG_D6), m68k_get_reg(NULL, M68K_REG_D7),
+               m68k_get_reg(NULL, M68K_REG_A0), m68k_get_reg(NULL, M68K_REG_A1),
+               m68k_get_reg(NULL, M68K_REG_A2), m68k_get_reg(NULL, M68K_REG_A3),
+               m68k_get_reg(NULL, M68K_REG_A4), m68k_get_reg(NULL, M68K_REG_A5),
+               m68k_get_reg(NULL, M68K_REG_A6), m68k_get_reg(NULL, M68K_REG_A7),
+               m68k_get_reg(NULL, M68K_REG_SR), m68k_get_reg(NULL, M68K_REG_PC));
+    }
     return 0;
 }

@@ -42,6 +42,7 @@ module m68030_top #(
     output logic        ext_e,
     output logic        ext_bg_n,
     output logic        bus_halted,
+    output logic        eu_stop,
     output logic        eu_addr_err,
     output logic        ifu_addr_err,
     input  logic        dsack0_n,
@@ -406,7 +407,7 @@ module m68030_top #(
         .eu_trap_num   (eu_trap_num_w),
         .eu_trapv_req  (eu_trapv_req_w),
         .eu_illegal_req(eu_illegal_req_w),
-        .eu_stop       (),              // unused at top level for now
+        .eu_stop       (eu_stop),
         .eu_reset_req  (),              // wired to BIU RSTOUT in Phase 55
         .eu_priv_req    (eu_priv_req_w),
         .eu_trace_req   (eu_trace_req_w),

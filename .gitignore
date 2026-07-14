@@ -4,6 +4,13 @@ a.out
 *.vcd
 sim/
 
+# Compiled binaries
+tools/m68ksim
+
+# Python bytecode
+scripts/__pycache__/
+*.pyc
+
 # Editor artifacts
 *.bak
 
