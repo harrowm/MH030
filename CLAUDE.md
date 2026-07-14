@@ -125,42 +125,32 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 7. Burst linefill read, MOVE16 burst write, biu_exc_capture (fault snapshot, frame format)
 8. biu_byte_lane_ctrl (write-data steering), mem_model byte-selective writes
 
-*EU and integration (Phases 23–37)*:
-23. eu_regfile — D0-D7, A0-A7, USP/MSP/ISP, PC, SR, VBR
-24. eu_alu — ADD/SUB/AND/OR/EOR/NEG/CMP/CLR/TST + X-extended variants
-25. eu_shifter — ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR, all sizes
-26. eu_mul_div — MULS.W/MULU.W/MULS.L/MULU.L, DIVS.W/DIVU.W
-27. eu_bcd — ABCD/SBCD/NBCD; eu_bitops — BTST/BCHG/BCLR/BSET
-28. m68030_eu wrapper; eu_agu — all EA modes (memory-indirect deferred)
-29. m68030_ifu — 4-word prefetch queue; m68030_seq — IFU→EU glue
-30. m68030_exc — exception controller, all 9 frame formats; m68030_top integration
-31. m68030_mmu — TLB, 3-level table walker, TT0/TT1, CRP/SRP
-36. eu_seq: non-memory instrs + branches — NOP, SWAP, EXT/EXTB, ADDQ/SUBQ, Scc, DBcc, BRA/Bcc, MOVEQ
-37. eu_seq: memory EA — (An)/(An)+/-(An)/(d16,An) for MOVE/MOVEA/LEA reads+writes
+*EU and integration (Phases 23–76)*:
+23–31. eu_regfile, eu_alu, eu_shifter, eu_mul_div, eu_bcd/bitops, eu_agu, m68030_eu, m68030_ifu, m68030_seq, m68030_exc, m68030_mmu
+36–37. eu_seq non-memory instrs + branches; eu_seq memory EA (An)/(An)+/-(An)/(d16,An)
+38–55. Full ISA: JMP/JSR/RTS, LINK/UNLK, absolute EA, indexed/PC-relative EA, MOVEM, exception frames, BERR watchdog, MOVEC/MOVES, TAS/CAS, CHK/CHK2/CMP2, MOVEP, MOVE16, biu_pin_driver, FPU coprocessor bus, memory-indirect EA, MMU instructions, m68030_top final wiring
+56–71. RTE/STOP/TRAP/TRAPV, ADDA/SUBA/CMPA/ORI-ANDI-EORI-to-SR, MULS.L/MULU.L/DIVS.L/DIVU.L, PEA/EXG/RTD/CMPM, memory-dest ALU, ADDX/SUBX, bit-field ops, PACK/UNPK/LINK.L/RESET, MOVES/PMOVE 64-bit, ALU mem→reg, extended EA sweep, trace/priv/Line-A/Line-F, CAS2/Format-Error
+72–76. cosim72_tb (full-chip testbench), smoke.s bare-metal test, Musashi reference generator, buscmp.py diff tool, 8 opcode group tests (`tests/grp0.s`–`grp7.s`, `tb/cosim_grp_tb.sv`)
 
-**Remaining phases** — execution order (see `plans/cpu_phases_plan.md` for full specs):
+**Current state**: 51/51 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi reference (`make cosim_grp`).
 
-38. JMP, JSR, BSR, RTS, RTR — stack push/pop; enables subroutine calls
-39. LINK, UNLK — C function frame setup/teardown
-40. Absolute EA (xxx).W/(xxx).L — global variable and MMIO access
-41. (d8,An,Xn) brief indexed mode — array/struct access
-42. (d16,PC), (d8,PC,Xn) PC-relative modes — PIC/ROM code
-43. MOVEM — register list save/restore (BIU multiop_fsm already handles bus)
-→ **Checkpoint α**: WinUAE .dat vector verification for Phases 38–43
-44. Exception stack frame EU integration — formats $9/$A/$B full push sequence
-45. BERR timeout watchdog — biu_error_handler, configurable N-cycle timeout
-46. MOVEC, MOVES — control-register and alternate-FC moves
-47. TAS, CAS — atomic RMW (BIU RMW mode already done)
-48. CHK, CHK2, CMP2 — bounds checking with exception on failure
-49. MOVEP EU decode (BIU multiop_fsm already handles bus cycles)
-50. MOVE16 EU decode (BIU burst_ctrl already handles bus cycles)
-→ **Checkpoint β**: WinUAE verification for Phases 44–50
-51. biu_pin_driver + biu_config — tri-state OE management, reset sequencing
-52. FPU coprocessor bus interface — FC=111 CPU Space CPI/CPM/CPIR/CPCR cycles
-53. Memory-indirect EA ([bd,An],Xn,od) — 030-specific inner dereference (rare in practice)
-54. MMU instructions: PFLUSH, PTEST, PMOVE (MMU module done; EU decode + wiring needed)
-55. m68030_biu + m68030_top final — wire all modules, full external pin integration
-→ **Checkpoint γ**: WinUAE cputest .dat replay — full basic/all suite vs. 68030 reference
+**Next phase**: Phase 77 — Toni Wilen `.dat` suite replay harness (see `plans/cpu_phases_plan.md`).
+
+## Verification Commands
+
+```bash
+make test          # 51/51 unit + integration regression
+make buscmp        # smoke.s DUT vs Musashi bus log
+make cosim_grp     # all 8 opcode group bus comparisons (grp0–grp7)
+make buscmp-grp0   # single group (replace 0 with 1–7)
+make cosim_grp     # rebuild cosim_grp sim binary if needed
+```
+
+Bus log format: `BUS R|W %08x %08x fc=%b siz=%b` (siz: 00=longword, 01=byte, 10=word, 11=line)
+
+`--dut-may-continue`: DUT may have extra trailing reads after STOP (IFU prefetch); REF ends at STOP.
+
+`m68k_read_memory_32` fix (Phase 76): after first instruction word fetch, program-space 32-bit reads route through the siz=10 word cache so Musashi's extension-word fetches match DUT IFU bus cycles.
 
 ## SIZ[1:0] Encoding
 

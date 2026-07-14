@@ -1,6 +1,6 @@
 # MC68030 CPU — Development Plan
 
-## Status (as of Phase 75)
+## Status (as of Phase 76)
 
 ### BIU — complete (Phases 1–22)
 All 8 bus cycle types, BERR/HALT/STERM/VPA, IACK, RMW, CAS2, MOVEM/MOVEP bus cycles,
@@ -8,7 +8,7 @@ burst linefill, MOVE16 burst, biu_exc_capture (fault snapshot, SSW), m68030_biu 
 m68030_top stub. `biu_pin_driver`, `biu_config`, `biu_error_handler` fully fleshed out in
 Phases 45 and 51.
 
-### EU — complete through Phase 75
+### EU + verification — complete through Phase 76
 
 | Phase | Module / Feature | Status |
 |-------|-----------------|--------|
@@ -58,6 +58,7 @@ Phases 45 and 51.
 | 73 | Bare-metal smoke test — `tests/smoke.s`/hex; cosim73_tb.sv verifies D0=84 | ✅ done |
 | 74 | Musashi reference log generator — `tools/m68ksim.c` matching DUT bus format | ✅ done |
 | 75 | `tools/buscmp.py` — DUT vs reference bus log comparator | ✅ done |
+| 76 | 8 opcode group test programs — `tests/grp0.s`–`grp7.s`; `tb/cosim_grp_tb.sv`; `make cosim_grp` | ✅ done |
 
 **Bug fix (Phases 74–75)**: `m68030_seq.sv` was missing `ext_count=1` for STOP ($4E72).
 The STOP immediate was left in the IFU queue and decoded as `MOVE.L D0,-(A4)`, producing
@@ -65,7 +66,15 @@ spurious memory writes. Fixed by adding `is_stop_opcode` to the ext_count=1 list
 Simultaneously: `eu_seq.sv` correctly reads `dec_stop_sr = ext_data[15:0]` (m68030_seq
 format puts 1-word immediates in the low 16 bits).
 
-**51/51 regression tests pass** (`make test`).
+**Bug fix (Phase 76)**: `eu_seq.sv` — STOP pipeline timing: when STOP first enters EX
+(`stop_r=0`), `stall` was still 0 so the next instruction also entered EX at the same
+posedge. Fix: `stop_first_cycle = ex_valid && ex_is_stop && !stop_r` added to the regular
+stall path (not `ex_mem_stall`) so EX gets a bubble, preventing the following instruction
+from executing. `m68ksim.c` — `m68k_read_memory_32` for program-space (fc=2/6) now routes
+through the 32-bit word cache (siz=10) once instruction execution has started, matching the
+DUT IFU's bus behaviour for 32-bit immediate extension words.
+
+**51/51 regression tests pass** (`make test`). **All 8 opcode groups pass** (`make cosim_grp`).
 
 ### ISA gap analysis (post Phase 64, closed by Phases 65–69)
 
@@ -1025,7 +1034,7 @@ Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`
 | **73** | Bare-metal test toolchain — `vasmm68k_mot` → hex; `tests/smoke.s`; cosim73 | ✅ | Assembler-driven test programs |
 | **74** | Musashi reference log — `tools/m68ksim.c`; 32-bit bus simulation | ✅ | Reference bus traces |
 | **75** | Python diff tool — `tools/buscmp.py`; `--dut-may-continue` for IFU prefetch | ✅ | Automated regression |
-| **76** | 8 opcode group test programs (`tests/grpN.s`) + co-sim run | — | Cover full encoding space |
+| **76** | 8 opcode group tests (`tests/grpN.s`, `tb/cosim_grp_tb.sv`, `make cosim_grp`) | ✅ | All groups 0–7 pass |
 | **77** | Toni Wilen `.dat` suite player — `scripts/parse_dat.py` + replay harness | — | Near-exhaustive verification |
 
 ---
@@ -1038,7 +1047,7 @@ Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`
 - Phase 73 requires `vasmm68k_mot` to be installed on the host; produces hex files consumed by Phase 72
 - Phase 74 requires WinUAE under Wine on macOS; `uae_run.sh` must be tuned for local Wine/WinUAE paths
 - Phase 75 depends on Phase 74 (reference log) and Phase 72 (DUT log); standalone Python, no extra deps
-- Phase 76 depends on Phases 73 and 75; one `.s` → `.hex` → DUT log → diff against WinUAE log per group
+- Phase 76 complete ✅: `tests/grpN.s` (N=0–7), `tb/cosim_grp_tb.sv`, `make cosim_grp`; m68ksim extension-word fix routes program-space 32-bit reads through siz=10 cache
 - Phase 77 depends on the `.dat` files from the WinUAE cputest directory; no DUT bus log needed (register comparison only)
 
 ---
