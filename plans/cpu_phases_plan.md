@@ -1,6 +1,6 @@
 # MC68030 CPU — Development Plan
 
-## Status (as of Phase 69)
+## Status (as of Phase 75)
 
 ### BIU — complete (Phases 1–22)
 All 8 bus cycle types, BERR/HALT/STERM/VPA, IACK, RMW, CAS2, MOVEM/MOVEP bus cycles,
@@ -8,7 +8,7 @@ burst linefill, MOVE16 burst, biu_exc_capture (fault snapshot, SSW), m68030_biu 
 m68030_top stub. `biu_pin_driver`, `biu_config`, `biu_error_handler` fully fleshed out in
 Phases 45 and 51.
 
-### EU — complete through Phase 69
+### EU — complete through Phase 75
 
 | Phase | Module / Feature | Status |
 |-------|-----------------|--------|
@@ -52,8 +52,20 @@ Phases 45 and 51.
 | 67 | MOVE memory→memory; MOVE ea,SR/CCR from/to memory | ✅ done |
 | 68 | TRAPcc; CAS EU decode; BCD/bit-op memory forms | ✅ done |
 | 69 | Extended EA sweep: MOVEM/Scc/CHK/TAS/Bitfield/CMP2-CHK2 | ✅ done |
+| 70 | JSR/JMP (d8,An,Xn)/(d8,PC,Xn); Trace T1/T0; priv/Line-A/Line-F routing | ✅ done |
+| 71 | CAS2 EU decode; Format Error (vector 14); RESET duration audit | ✅ done |
+| 72 | `cosim72_tb.sv` — full-chip bus testbench with $readmemh ROM + bus logger | ✅ done |
+| 73 | Bare-metal smoke test — `tests/smoke.s`/hex; cosim73_tb.sv verifies D0=84 | ✅ done |
+| 74 | Musashi reference log generator — `tools/m68ksim.c` matching DUT bus format | ✅ done |
+| 75 | `tools/buscmp.py` — DUT vs reference bus log comparator | ✅ done |
 
-**47/47 regression tests pass** (`make test`).
+**Bug fix (Phases 74–75)**: `m68030_seq.sv` was missing `ext_count=1` for STOP ($4E72).
+The STOP immediate was left in the IFU queue and decoded as `MOVE.L D0,-(A4)`, producing
+spurious memory writes. Fixed by adding `is_stop_opcode` to the ext_count=1 list.
+Simultaneously: `eu_seq.sv` correctly reads `dec_stop_sr = ext_data[15:0]` (m68030_seq
+format puts 1-word immediates in the low 16 bits).
+
+**51/51 regression tests pass** (`make test`).
 
 ### ISA gap analysis (post Phase 64, closed by Phases 65–69)
 
@@ -807,6 +819,45 @@ Files: `rtl/biu_config.sv`, `rtl/eu_seq.sv`
 
 ---
 
+### Phase 72 — Full-chip bus testbench ✅ done
+
+`tb/cosim72_tb.sv` instantiates `m68030_top`; provides a 4KB inline memory model
+(`$readmemh`), 0-wait-state DSACK0+DSACK1 response, bus transaction logger on AS↑.
+Boot test: NOP+STOP at $8; pass criterion = stop_seen within 3000 cycles.
+
+### Phase 73 — Bare-metal smoke test ✅ done
+
+`tests/smoke.s` → `tests/smoke.hex` via `vasmm68k_mot` + `tools/bin2hex.py`.
+Sequence: NOP→MOVEQ #42,D0→ADD.L D0,D0→STOP #$2700. Expected: D0=84 at STOP.
+Three checks (P73-01 STOP fetched, P73-02 D0=84, P73-03 no address errors).
+
+IFU spurious-fill bug fixed: `biu_cycle_gen` holds `ifu_ack=1` for all 4 ticks of S7.
+The drain-only arm condition needed `&& !ifu_ack` to prevent re-arming on tick 2 of S7.
+
+### Phase 74 — Musashi reference log generator ✅ done
+
+`tools/m68ksim.c` wraps Musashi v4.60 MC68030. Loads `$readmemh`-format hex, runs
+until halt, prints every bus cycle in DUT-matching format (`BUS R/W addr data fc= siz=`).
+Key: `m68k_read_memory_16` caches 32-bit reads per 4-byte-aligned block and emits one
+log line per block with siz=10 — matching the DUT testbench's 32-bit bus DSACK response.
+Compile: `gcc -O2 -DM68K_EMULATE_FC=1 -Itools/musashi -o tools/m68ksim tools/m68ksim.c ...`
+
+STOP bug discovered and fixed here: `m68030_seq.sv` had no `ext_count=1` for STOP ($4E72),
+causing the immediate word to stay in the IFU queue and be executed as MOVE.L D0,-(A4).
+Fix: added `is_stop_opcode = (instr_word == 16'h4E72)` to the ext_count=1 block.
+`eu_seq.sv` correctly uses `dec_stop_sr = ext_data[15:0]` (m68030_seq puts 1-word
+immediates in the low 16 bits of eu_ext_data; [31:16] is always $0000 for 1-word ops).
+
+### Phase 75 — Bus log comparator ✅ done
+
+`tools/buscmp.py`: parses both logs into (rw,addr,data,fc,siz) tuples; lockstep comparison;
+5-cycle context window on mismatch. Options: `--skip`, `--reads-only`, `--addr-mask`,
+`--max`, `--dut-may-continue` (DUT IFU prefetches extra reads after STOP that Musashi
+doesn't model — allow DUT>REF without failing). Exit codes: 0=match, 1=mismatch, 2=length.
+`make buscmp` → "OK 5 cycles match (DUT has 2 extra trailing cycles)".
+
+---
+
 **CHECKPOINT γ — WinUAE cputest near-full-binary execution**
 
 After Phase 71 the MC68030 encoding space is fully covered. Strategy (Phases 72–77):
@@ -966,10 +1017,10 @@ Files: `scripts/parse_dat.py`, `scripts/run_cosim.py`
 | **70** | JSR/JMP (d8,An,Xn)/(d8,PC,Xn); Trace mode T1/T0; Exception vector routing | ✅ | Correct trace/priv/Line-A/Line-F |
 | **71** | CAS2 EU decode; Format Error (vector 14); RESET duration audit | ✅ | Atomic dual-compare, RTE safety |
 | **γ** | Checkpoint γ: WinUAE cputest full suite (after Phase 71) | — | Pass/fail per opcode group |
-| **72** | `tb/cosim72_tb.sv` — full-chip bus testbench; `$readmemh` ROM; bus logger | — | Co-simulation infrastructure |
-| **73** | Bare-metal test toolchain — `vasmm68k_mot` → hex; `tests/smoke.s` | — | Assembler-driven test programs |
-| **74** | WinUAE reference log extraction — scripted UAE run + bus log parser | — | Reference bus traces |
-| **75** | Python diff tool — `tools/buscmp.py`; find first bus-cycle divergence | — | Automated regression |
+| **72** | `tb/cosim72_tb.sv` — full-chip bus testbench; `$readmemh` ROM; bus logger | ✅ | Co-simulation infrastructure |
+| **73** | Bare-metal test toolchain — `vasmm68k_mot` → hex; `tests/smoke.s`; cosim73 | ✅ | Assembler-driven test programs |
+| **74** | Musashi reference log — `tools/m68ksim.c`; 32-bit bus simulation | ✅ | Reference bus traces |
+| **75** | Python diff tool — `tools/buscmp.py`; `--dut-may-continue` for IFU prefetch | ✅ | Automated regression |
 | **76** | 8 opcode group test programs (`tests/grpN.s`) + co-sim run | — | Cover full encoding space |
 | **77** | Toni Wilen `.dat` suite player — `scripts/parse_dat.py` + replay harness | — | Near-exhaustive verification |
 
