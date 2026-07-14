@@ -131,10 +131,11 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 38–55. Full ISA: JMP/JSR/RTS, LINK/UNLK, absolute EA, indexed/PC-relative EA, MOVEM, exception frames, BERR watchdog, MOVEC/MOVES, TAS/CAS, CHK/CHK2/CMP2, MOVEP, MOVE16, biu_pin_driver, FPU coprocessor bus, memory-indirect EA, MMU instructions, m68030_top final wiring
 56–71. RTE/STOP/TRAP/TRAPV, ADDA/SUBA/CMPA/ORI-ANDI-EORI-to-SR, MULS.L/MULU.L/DIVS.L/DIVU.L, PEA/EXG/RTD/CMPM, memory-dest ALU, ADDX/SUBX, bit-field ops, PACK/UNPK/LINK.L/RESET, MOVES/PMOVE 64-bit, ALU mem→reg, extended EA sweep, trace/priv/Line-A/Line-F, CAS2/Format-Error
 72–76. cosim72_tb (full-chip testbench), smoke.s bare-metal test, Musashi reference generator, buscmp.py diff tool, 8 opcode group tests (`tests/grp0.s`–`grp7.s`, `tb/cosim_grp_tb.sv`)
+77. Toni Wilen `.dat` replay harness: `tb/cosim_dat_tb.sv` (runtime hex load, eu_stop detection), `scripts/gen_init_hex.py` (reg-state init scaffold with NOP bubble after MOVE.W #,SR), `scripts/parse_dat.py` (.dat binary parser, --probe mode), `scripts/run_cosim.py` (50-vector synthetic suite, 50/50 PASS). RTL fixes: eu_stop exposed as top-level port; ext_count=1 for MOVE.W #,SR/CCR by direct opcode match (was broken f_ss field condition).
 
-**Current state**: 51/51 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi reference (`make cosim_grp`).
+**Current state**: 51/51 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`).
 
-**Next phase**: Phase 77 — Toni Wilen `.dat` suite replay harness (see `plans/cpu_phases_plan.md`).
+**Next phase**: Phase 78 — real Toni Wilen `.dat` file testing with WinUAE-generated vectors.
 
 ## Verification Commands
 
@@ -143,7 +144,7 @@ make test          # 51/51 unit + integration regression
 make buscmp        # smoke.s DUT vs Musashi bus log
 make cosim_grp     # all 8 opcode group bus comparisons (grp0–grp7)
 make buscmp-grp0   # single group (replace 0 with 1–7)
-make cosim_grp     # rebuild cosim_grp sim binary if needed
+make dat-synth     # 50-vector synthetic register-state cosim (DUT vs Musashi)
 ```
 
 Bus log format: `BUS R|W %08x %08x fc=%b siz=%b` (siz: 00=longword, 01=byte, 10=word, 11=line)
