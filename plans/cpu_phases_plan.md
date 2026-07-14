@@ -952,9 +952,13 @@ One `.s` file per MC68000 instruction group (groups 0–7 by bits [15:12] of the
 | `tests/grp6.s` | 6 | BRA/BSR/Bcc |
 | `tests/grp7.s` | 7 | MOVEQ |
 
-Each program: initialise registers with known values, perform operations, STOP at end. Run both through `cosim72_tb` (DUT) and WinUAE (ref), diff with `buscmp.py`. Target: 0 divergences per group.
+Each program: initialise registers with known values, perform operations, STOP at end. Run both through `cosim_grp_tb` (DUT) and Musashi (ref), diff with `buscmp.py`. Target: 0 divergences per group.
 
-Files: `tests/grpN.s` (N=0..7), Makefile rules for each
+Files: `tests/grpN.s` (N=0..7), `tb/cosim_grp_tb.sv`, Makefile `cosim_grp` / `buscmp-grpN` targets.
+
+**DONE** — All 8 groups pass (0 divergences). `make cosim_grp` runs the full suite.
+
+Key fix: `tools/m68ksim.c` `m68k_read_memory_32` now routes program-space reads through the 32-bit word cache (siz=10) when `g_instr_started` is set, so Musashi's extension-word fetches match DUT IFU bus cycles. Reset-vector reads (siz=00) are unaffected.
 
 ---
 

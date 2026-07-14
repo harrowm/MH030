@@ -204,6 +204,9 @@ $(SIM)/cosim72:    $(TOP_SRCS) tb/cosim72_tb.sv | $(SIM)
 $(SIM)/cosim73:    $(TOP_SRCS) tb/cosim73_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/cosim_grp:  $(TOP_SRCS) tb/cosim_grp_tb.sv | $(SIM)
+	$(IVCOMP)
+
 # ── Bare-metal test hex generation (requires vasmm68k_mot in PATH) ──────────
 tests/%.bin: tests/%.s
 	vasmm68k_mot -Fbin -m68030 $< -o $@
@@ -243,7 +246,9 @@ winuae/tests/smoke_ref.log: tools/m68ksim tests/smoke.hex | winuae/tests
 winuae/tests:
 	mkdir -p winuae/tests
 
-.PHONY: m68ksim ref-log buscmp
+.PHONY: m68ksim ref-log buscmp cosim_grp \
+        buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
+        buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7
 m68ksim: tools/m68ksim
 ref-log: winuae/tests/smoke_ref.log
 
@@ -253,6 +258,28 @@ buscmp: winuae/tests/smoke_ref.log
 	$(VVP) $(SIM)/cosim73 2>&1 | grep "^BUS" > /tmp/_dut_smoke.log || true
 	python3 tools/buscmp.py /tmp/_dut_smoke.log winuae/tests/smoke_ref.log \
 	    --reads-only --dut-may-continue
+
+# Phase 76: per-opcode-group bus comparison tests
+# Reference logs: generated on demand (make winuae/tests/grpN_ref.log)
+winuae/tests/grp%_ref.log: tools/m68ksim tests/grp%.hex | winuae/tests
+	./tools/m68ksim tests/grp$*.hex 300 > $@
+
+# Run DUT for one group and diff vs reference.  Usage: make buscmp-grp0
+GRP_REFS := $(patsubst %,winuae/tests/grp%_ref.log,0 1 2 3 4 5 6 7)
+GRP_HEXS := $(patsubst %,tests/grp%.hex,0 1 2 3 4 5 6 7)
+
+define GRP_RULE
+buscmp-grp$(1): $(SIM)/cosim_grp winuae/tests/grp$(1)_ref.log tests/grp$(1).hex
+	$$(VVP) $$(SIM)/cosim_grp +hexfile=tests/grp$(1).hex +grp=grp$(1) 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_grp$(1).log || true
+	python3 tools/buscmp.py /tmp/_dut_grp$(1).log winuae/tests/grp$(1)_ref.log \
+	    --reads-only $(if $(filter 6,$(1)),--max 6,--dut-may-continue)
+endef
+$(foreach n,0 1 2 3 4 5 6 7,$(eval $(call GRP_RULE,$(n))))
+
+# Run all 8 group tests
+cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
+           buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

@@ -4365,8 +4365,13 @@ module eu_seq (
                             (ex_valid && ex_updates_ccr) ||
                             (wb_valid && wb_updates_ccr));
     assign need_ext   = dec_needs_ext && !ext_valid;
-    // ex_mem_stall freezes the entire pipeline regardless of dec_valid
-    assign stall      = ex_mem_stall || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext));
+    // ex_mem_stall freezes the entire pipeline regardless of dec_valid.
+    // STOP stall: one-cycle bubble after STOP fires in EX so the following
+    // instruction never enters EX before stop_r is set.  Using the dec_valid
+    // path (not ex_mem_stall) ensures EX is cleared, not frozen.
+    logic stop_first_cycle;
+    assign stop_first_cycle = ex_valid && ex_is_stop && !stop_r;
+    assign stall      = ex_mem_stall || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext || stop_first_cycle));
     assign seq_busy  = stall;
     assign instr_ack = dec_valid && !stall;
 

@@ -50,6 +50,9 @@ static void print_fc(void) { putchar('0'+((g_fc>>2)&1)); putchar('0'+((g_fc>>1)&
 /* ── 32-bit bus cache for word reads ─────────────────────────────────────── */
 static uint32_t g_lw_addr = 0xFFFFFFFFu;
 static uint32_t g_lw_data = 0;
+/* Set to 1 after the first instruction word fetch; distinguishes reset-vector
+ * reads (which must log siz=00) from in-stream extension-word reads. */
+static int g_instr_started = 0;
 
 /* ── Musashi callbacks ────────────────────────────────────────────────────── */
 unsigned int m68k_read_memory_8(unsigned int a) {
@@ -63,6 +66,7 @@ unsigned int m68k_read_memory_8(unsigned int a) {
  * This matches what the DUT testbench produces for instruction fetch cycles. */
 unsigned int m68k_read_memory_16(unsigned int a) {
     uint32_t aligned = a & ~3u;
+    g_instr_started = 1;
     if (aligned != g_lw_addr) {
         g_lw_addr = aligned;
         g_lw_data = mem_r32(aligned);
@@ -71,7 +75,35 @@ unsigned int m68k_read_memory_16(unsigned int a) {
     return (a & 2) ? (g_lw_data & 0xFFFF) : (uint16_t)(g_lw_data >> 16);
 }
 
+/* 32-bit reads in program space (fc=2 user, fc=6 supervisor) that occur
+ * during instruction execution are 32-bit immediate extension words fetched
+ * by the IFU.  Route them through the 32-bit word cache so they appear as
+ * siz=10 (one log line per 4-byte-aligned block), matching DUT IFU behaviour.
+ * Reset-vector reads (before any instruction word fetch, g_instr_started==0)
+ * fall through to the normal siz=00 path. */
 unsigned int m68k_read_memory_32(unsigned int a) {
+    if (g_instr_started && (g_fc == 2 || g_fc == 6)) {
+        uint32_t aligned = a & ~3u;
+        if (aligned != g_lw_addr) {
+            g_lw_addr = aligned;
+            g_lw_data = mem_r32(aligned);
+            printf("BUS R %08x %08x fc=", aligned, g_lw_data); print_fc(); printf(" siz=10\n");
+        }
+        uint16_t hi = (a & 2) ? (uint16_t)(g_lw_data & 0xFFFF)
+                               : (uint16_t)(g_lw_data >> 16);
+        uint32_t next = (a + 2) & ~3u;
+        uint16_t lo;
+        if (next == aligned) {
+            lo = (a & 2) ? (uint16_t)(g_lw_data >> 16)
+                         : (uint16_t)(g_lw_data & 0xFFFF);
+        } else {
+            g_lw_addr = next;
+            g_lw_data = mem_r32(next);
+            printf("BUS R %08x %08x fc=", next, g_lw_data); print_fc(); printf(" siz=10\n");
+            lo = (uint16_t)(g_lw_data >> 16);
+        }
+        return ((uint32_t)hi << 16) | lo;
+    }
     uint32_t v = mem_r32(a);
     printf("BUS R %08x %08x fc=", a, v); print_fc(); printf(" siz=00\n");
     return v;
