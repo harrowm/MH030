@@ -210,6 +210,27 @@ $(SIM)/cosim_grp:  $(TOP_SRCS) tb/cosim_grp_tb.sv | $(SIM)
 $(SIM)/cosim_dat:  $(TOP_SRCS) tb/cosim_dat_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/mustest: $(TOP_SRCS) tb/mustest_tb.sv | $(SIM)
+	$(IVCOMP)
+
+# ── Verilator build for mustest (100-1000x faster than Icarus) ───────────────
+VLATOR       := verilator
+VOBJ         := obj_mustest
+VLATOR_FLAGS := --cc -sv --Mdir $(VOBJ) --top-module mustest_tb \
+                --x-assign 0 --x-initial 0 -Wno-fatal -Wno-WIDTHTRUNC \
+                -Wno-WIDTHEXPAND -Wno-CASEINCOMPLETE -Wno-INITIALDLY \
+                --public
+
+$(VOBJ)/Vmustest_tb: $(TOP_SRCS) tb/mustest_tb.sv tb/mustest_main.cpp | $(VOBJ)
+	$(VLATOR) $(VLATOR_FLAGS) --exe tb/mustest_main.cpp $(TOP_SRCS) tb/mustest_tb.sv
+	$(MAKE) -C $(VOBJ) -f Vmustest_tb.mk OPT_FAST="-O2"
+
+$(VOBJ):
+	mkdir -p $(VOBJ)
+
+sim/vmustest: $(VOBJ)/Vmustest_tb | $(SIM)
+	cp $< $@
+
 # ── Bare-metal test hex generation (requires vasmm68k_mot in PATH) ──────────
 tests/%.bin: tests/%.s
 	vasmm68k_mot -Fbin -m68030 $< -o $@
@@ -252,7 +273,7 @@ winuae/tests:
 .PHONY: m68ksim ref-log buscmp cosim_grp \
         buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
         buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7 \
-        dat-replay dat-synth
+        dat-replay dat-synth mustest mustest40 vmustest
 m68ksim: tools/m68ksim
 ref-log: winuae/tests/smoke_ref.log
 
@@ -266,6 +287,21 @@ dat-replay: $(SIM)/cosim_dat tools/m68ksim
 DAT_SYNTH_N ?= 50
 dat-synth: $(SIM)/cosim_dat tools/m68ksim
 	python3 scripts/run_cosim.py --synth $(DAT_SYNTH_N) $(VERBOSE)
+
+# Phase 78: Musashi instruction test suite — run all mc68000 .bin tests through DUT
+# Usage: make mustest [VERBOSE=-v]
+mustest: sim/vmustest tools/mustest
+	python3 scripts/run_mustest.py --sim sim/vmustest $(VERBOSE)
+
+# Phase 78: mc68040-specific tests (bit-field, CAS, CHK2, long mul/div, etc.)
+mustest40: sim/vmustest tools/mustest
+	python3 scripts/run_mustest.py --sim sim/vmustest --dir tools/musashi/test/mc68040 $(VERBOSE)
+
+# Convenience: just build the Verilator mustest binary
+vmustest: sim/vmustest
+
+tools/mustest: tools/musashi/test/test_driver.c $(MUSASHI_SRC)
+	gcc $(MUSASHI_FLAGS) -I tools/musashi/test -o $@ $^
 
 # Phase 75: compare DUT bus log to reference
 # Usage: make buscmp  (captures live DUT run and compares to reference)

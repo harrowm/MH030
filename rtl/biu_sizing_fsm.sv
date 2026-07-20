@@ -196,13 +196,16 @@ module biu_sizing_fsm (
     // The 68030 always drives read data on D[31:16] (16-bit port) or
     // D[31:24] (8-bit port), regardless of address.  We shift it right
     // based on how many bytes we have already accumulated.
+    // For 32-bit ports, byte/word data sits at the big-endian lane position
+    // determined by the byte address A[1:0]; we normalize to [7:0]/[15:0].
     // -----------------------------------------------------------------------
     function automatic logic [31:0] merge_rdata(
         input logic [31:0] accum,
         input logic [31:0] raw,       // raw data from bus
         input logic [1:0]  cur_siz,   // SIZ of this sub-cycle
         input logic [1:0]  orig_siz,
-        input logic [1:0]  port
+        input logic [1:0]  port,
+        input logic [1:0]  addr_lo    // A[1:0] of the first sub-cycle address
     );
         logic [2:0] orig_bytes, cur_bytes, done;
         logic [31:0] piece;
@@ -222,16 +225,37 @@ module biu_sizing_fsm (
 
         // Extract the piece from the raw data based on port width
         // and shift it to the correct position in the result
-        case ({port, done[1:0]})
-            // 16-bit port: data on D[31:16]
-            4'b01_00: piece = {raw[31:16], 16'h0};        // bytes 0,1 → top
-            4'b01_10: piece = {16'h0, raw[31:16]};        // bytes 2,3 → bottom
-            // 8-bit port: data on D[31:24]
-            4'b10_00: piece = {raw[31:24], 24'h0};        // byte 0 → top
-            4'b10_01: piece = {8'h0, raw[31:24], 16'h0};  // byte 1
-            4'b10_10: piece = {16'h0, raw[31:24], 8'h0};  // byte 2
-            4'b10_11: piece = {24'h0, raw[31:24]};        // byte 3
-            default:  piece = raw;                         // 32-bit: full word
+        case (port)
+            2'b01: begin  // 16-bit port: data on D[31:16]
+                case (done[1:0])
+                    2'b00: piece = {raw[31:16], 16'h0};  // bytes 0,1 → top
+                    2'b10: piece = {16'h0, raw[31:16]};  // bytes 2,3 → bottom
+                    default: piece = raw;
+                endcase
+            end
+            2'b10: begin  // 8-bit port: data on D[31:24]
+                case (done[1:0])
+                    2'b00: piece = {raw[31:24], 24'h0};        // byte 0 → top
+                    2'b01: piece = {8'h0, raw[31:24], 16'h0};  // byte 1
+                    2'b10: piece = {16'h0, raw[31:24], 8'h0};  // byte 2
+                    2'b11: piece = {24'h0, raw[31:24]};        // byte 3
+                    default: piece = raw;
+                endcase
+            end
+            default: begin  // 32-bit port: normalize byte/word from big-endian lane
+                case ({orig_siz, addr_lo})
+                    // Byte: extract from correct big-endian lane → normalize to [7:0]
+                    4'b01_00: piece = {24'h0, raw[31:24]};
+                    4'b01_01: piece = {24'h0, raw[23:16]};
+                    4'b01_10: piece = {24'h0, raw[15:8]};
+                    4'b01_11: piece = {24'h0, raw[7:0]};
+                    // Word: extract from correct half → normalize to [15:0]
+                    4'b10_00, 4'b10_01: piece = {16'h0, raw[31:16]};
+                    4'b10_10, 4'b10_11: piece = {16'h0, raw[15:0]};
+                    // Longword or line: full word pass-through
+                    default: piece = raw;
+                endcase
+            end
         endcase
         merge_rdata = accum | piece;
     endfunction
@@ -298,7 +322,7 @@ module biu_sizing_fsm (
                         if (sf_rw) begin
                             sf_accum <= merge_rdata(sf_accum, cyc_rdata,
                                                     sf_siz, sf_orig_siz,
-                                                    cyc_port_dsack);
+                                                    cyc_port_dsack, sf_addr[1:0]);
                         end
 
                         if (needs_more(sf_siz, cyc_port_dsack)) begin
@@ -308,7 +332,7 @@ module biu_sizing_fsm (
                             if (sf_rw)
                                 sf_rdata_r <= merge_rdata(sf_accum, cyc_rdata,
                                                           sf_siz, sf_orig_siz,
-                                                          cyc_port_dsack);
+                                                          cyc_port_dsack, sf_addr[1:0]);
                             else
                                 sf_rdata_r <= 32'h0;
                         end

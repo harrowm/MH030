@@ -57,6 +57,29 @@ module biu_cache_if (
     logic [23:0] tag_d   [0:15];
     logic [31:0] data_d  [0:15][0:3];
 
+    // Extract byte/word from raw longword into EU-convention LSB position.
+    // The cache always fetches full longwords; the EU expects byte in [7:0],
+    // word in [15:0], longword in [31:0].
+    function automatic logic [31:0] extract_rd(
+        input logic [31:0] raw,
+        input logic [1:0]  siz,
+        input logic [1:0]  addr_lo
+    );
+        case (siz)
+            2'b01: // byte
+                case (addr_lo)
+                    2'b00: extract_rd = {24'b0, raw[31:24]};
+                    2'b01: extract_rd = {24'b0, raw[23:16]};
+                    2'b10: extract_rd = {24'b0, raw[15:8]};
+                    2'b11: extract_rd = {24'b0, raw[7:0]};
+                endcase
+            2'b10: // word
+                extract_rd = addr_lo[1] ? {16'b0, raw[15:0]}
+                                        : {16'b0, raw[31:16]};
+            default: extract_rd = raw; // longword or line: passthrough
+        endcase
+    endfunction
+
     // sf_ack is a 1-tick pulse — edge detect is same as raw, but kept for safety
     logic sf_ack_prev_r;
     always_ff @(posedge clk_4x or negedge rst_n)
@@ -182,9 +205,11 @@ module biu_cache_if (
 
                 CI_D_MISS: begin
                     if (sf_ack_rise) begin
+                        // sizing_fsm already normalizes byte/word for 32-bit port;
+                        // for IFU (sf_siz=00 LW), sf_rdata is a full longword passthrough.
                         fill_rdata_r <= sf_rdata;
                         if (dcache_en && !mmu_ci) begin
-                            data_d[idx_r][woff_r] <= sf_rdata;
+                            data_d[idx_r][woff_r] <= sf_rdata; // cache stores full longword
                             tag_d[idx_r]          <= vtag_r;
                             valid_d[idx_r]        <= 1'b1;
                         end
@@ -229,9 +254,9 @@ module biu_cache_if (
             CI_HIT: begin
                 // Serve directly from cache; no sf_req
                 if (is_icache_r)
-                    eu_rdata = data_i[idx_r][woff_r];
+                    eu_rdata = data_i[idx_r][woff_r]; // I-cache: full longword (IFU uses it)
                 else
-                    eu_rdata = data_d[idx_r][woff_r];
+                    eu_rdata = extract_rd(data_d[idx_r][woff_r], siz_r, addr_r[1:0]);
                 eu_ack = 1'b1;
             end
 
@@ -261,7 +286,7 @@ module biu_cache_if (
             end
 
             CI_D_MISS: begin
-                sf_siz  = 2'b00;  // always fetch a full longword for cache fill
+                sf_siz  = siz_r;  // pass actual size; sizing_fsm normalizes byte/word
                 sf_rw   = 1'b1;
                 sf_req  = !sf_ack;
             end

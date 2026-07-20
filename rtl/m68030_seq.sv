@@ -29,13 +29,19 @@ module m68030_seq (
     // From m68030_ifu
     input  logic [15:0] instr_word,       // q[0] — current opcode word
     input  logic [31:0] ifu_ext_data,     // {q[1],q[2]} — two extension words
+    input  logic [15:0] ifu_q3_word,      // q[3] — third extension word
+    input  logic [31:0] ifu_ext34_data,   // {q[3],q[4]} — words 3+4
     input  logic        instr_valid,      // IFU has ≥1 word (q_cnt ≥ 1)
     input  logic        ifu_ext_valid,    // IFU has ≥3 words (q_cnt ≥ 3)
-    output logic [1:0]  drain,            // words to remove from IFU queue
+    input  logic        ifu_ext4_valid,   // IFU has ≥4 words (q_cnt ≥ 4)
+    input  logic        ifu_ext5_valid,   // IFU has ≥5 words (q_cnt ≥ 5)
+    output logic [2:0]  drain,            // words to remove from IFU queue
 
     // To m68030_eu
     output logic [15:0] eu_instr_word,
     output logic [31:0] eu_ext_data,      // immediate in low bits (EU convention)
+    output logic [15:0] eu_q3_word,       // q[3] pass-through for 3-ext instructions
+    output logic [31:0] eu_ext34_data,    // {q[3],q[4]} for 4-ext instructions
     output logic        eu_instr_valid,
     output logic        eu_ext_valid,
 
@@ -172,6 +178,19 @@ module m68030_seq (
                            (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
                            (f_dn != 3'b100 && f_dn != 3'b111);
 
+    // Phase 78: Group 0 imm ALU to (d16,An) or (xxx).W — 2 ext for byte/word, 3 for long
+    logic is_imm_g0_d16_or_absw;
+    assign is_imm_g0_d16_or_absw = (f_group == 4'h0) && !f_dir && (f_ss != 2'b11) &&
+                                   (f_dn != 3'b100 && f_dn != 3'b111) &&
+                                   (f_mode == 3'b101 ||
+                                    (f_mode == 3'b111 && f_reg == 3'b000));
+
+    // Phase 78: Group 0 imm ALU to (xxx).L — 3 ext for byte/word, 4 for long
+    logic is_imm_g0_absl;
+    assign is_imm_g0_absl = (f_group == 4'h0) && !f_dir && (f_ss != 2'b11) &&
+                             (f_dn != 3'b100 && f_dn != 3'b111) &&
+                             (f_mode == 3'b111 && f_reg == 3'b001);
+
     // Phase 57: ADDA/SUBA/CMPA #imm,An (groups 9/B/D, f_ss=11, f_mode=111, f_reg=100)
     logic is_adda_suba_cmpa_imm;
     assign is_adda_suba_cmpa_imm =
@@ -262,37 +281,46 @@ module m68030_seq (
     end
     assign move_mm_total_ext_w = {1'b0, move_mm_src_ext_w} + {1'b0, move_mm_dst_ext_w};
 
-    logic [1:0] ext_count;
+    logic [2:0] ext_count;
     always_comb begin
         if (is_imm_g0)
-            ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 2'd2 : 2'd1;
+            ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 3'd2 : 3'd1;
+        else if (is_imm_g0_absl)
+            ext_count = (f_ss == 2'b10) ? 3'd4 : 3'd3;  // long: 2 imm + 2 addr; byte/word: 1 imm + 2 addr
+        else if (is_imm_g0_d16_or_absw)
+            ext_count = (f_ss == 2'b10) ? 3'd3 : 3'd2;  // long: 2 imm + 1 ea; byte/word: 1 imm + 1 ea
         else if (is_imm_g0_mem)
-            ext_count = (f_ss == 2'b10) ? 2'd2 : 2'd1;  // long imm = 2 ext; byte/word = 1
-        // Phase 67: move_mm before is_move_d16/is_abs_short so dual-ext combos get ext_count=2
-        else if (is_move_mm && move_mm_total_ext_w >= 3'd2)
-            ext_count = 2'd2;
+            ext_count = (f_ss == 2'b10) ? 3'd2 : 3'd1;  // long imm = 2 ext; byte/word = 1
+        // Phase 67: move_mm before is_move_d16/is_abs_short so dual-ext combos get ext_count
+        // For MOVE #imm, abs.W/abs.L: total_ext_w is 3 or 4; use separate signals for dst EA
+        else if (is_move_mm && move_mm_total_ext_w >= 3'd4)
+            ext_count = 3'd4;  // e.g. MOVE.L #imm32, abs.L: 2 imm + 2 addr = 4
+        else if (is_move_mm && move_mm_total_ext_w == 3'd3)
+            ext_count = 3'd3;  // e.g. MOVE.L #imm32, abs.W: 2 imm + 1 addr = 3
+        else if (is_move_mm && move_mm_total_ext_w == 3'd2)
+            ext_count = 3'd2;
         else if (is_move_mm && move_mm_total_ext_w == 3'd1)
-            ext_count = 2'd1;
+            ext_count = 3'd1;
         // Phase 68: TRAPcc.L has 2-word operand
         else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b000))
-            ext_count = 2'd2;
+            ext_count = 3'd2;
         // Phase 71: CAS2 always needs 2 extension words (Rn1/Dc1/Du1 + Rn2/Dc2/Du2)
         else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
                  (f_dn == 3'b110 || f_dn == 3'b111) &&
                  (f_mode == 3'b111) && (f_reg == 3'b100))
-            ext_count = 2'd2;
+            ext_count = 3'd2;
         // MOVE/MOVEA #imm, Dn/An — immediate src (f_mode=111,f_reg=100) with register dst
         // is_move_mm doesn't fire when dst_mode is 000 (Dn) or 001 (An direct)
         else if ((f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
                  (f_mode == 3'b111) && (f_reg == 3'b100) &&
                  (f_move_dst_mode_s == 3'b000 || f_move_dst_mode_s == 3'b001))
-            ext_count = (f_group == 4'h2) ? 2'd2 : 2'd1;
+            ext_count = (f_group == 4'h2) ? 3'd2 : 3'd1;
         // MOVE.W #imm, SR (0x46FC) / MOVE.W #imm, CCR (0x44FC) — group 4, 1 ext word
         else if (instr_word == 16'h46FC || instr_word == 16'h44FC)
-            ext_count = 2'd1;
+            ext_count = 3'd1;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
-            ext_count = 2'd2;
+            ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
@@ -311,7 +339,7 @@ module m68030_seq (
                   (f_dn == 3'b101 || f_dn == 3'b011 || f_dn == 3'b111) && (f_mode == 3'b010)) ||
                  ((f_group == 4'h0) && !f_dir && (f_dn == 3'b100) &&
                   (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)))
-            ext_count = 2'd1;
+            ext_count = 3'd1;
         else
             ext_count = 2'd0;
     end
@@ -319,23 +347,32 @@ module m68030_seq (
     // -----------------------------------------------------------------------
     // IFU drain: advance queue when EU accepts the instruction
     // -----------------------------------------------------------------------
-    assign drain = eu_instr_ack ? (2'd1 + ext_count) : 2'd0;
+    assign drain = eu_instr_ack ? (3'd1 + ext_count) : 3'd0;
 
     // -----------------------------------------------------------------------
     // EU ext_data format conversion
-    //   2-ext-word (long imm, BRA.L): full 32-bit value unchanged
+    //   ≥2-ext-word (long imm, BRA.L, move_mm with 2+ ext): full 32-bit unchanged
     //   1-ext-word (byte/word imm, bit#, BRA.W, DBcc d16): first ext word in [15:0]
     // EU reads: byte/word imm → ext_data[15:0]; long imm/BRA.L → ext_data[31:0]
+    // For ext_count≥3 (MOVE.L #imm,abs.W/abs.L): ifu_ext_data = {q[1],q[2]} = 32-bit imm
     // -----------------------------------------------------------------------
-    assign eu_ext_data = (ext_count == 2'd2) ? ifu_ext_data
+    assign eu_ext_data = (ext_count >= 3'd2) ? ifu_ext_data
                                               : {16'h0, ifu_ext_data[31:16]};
+
+    // -----------------------------------------------------------------------
+    // ext_valid: ensure required words are present before EU dispatches
+    // -----------------------------------------------------------------------
+    assign eu_ext_valid = (ext_count >= 3'd4) ? ifu_ext5_valid :
+                          (ext_count == 3'd3) ? ifu_ext4_valid :
+                                                ifu_ext_valid;
 
     // -----------------------------------------------------------------------
     // Pass-through to EU
     // -----------------------------------------------------------------------
     assign eu_instr_word  = instr_word;
     assign eu_instr_valid = instr_valid;
-    assign eu_ext_valid   = ifu_ext_valid;
+    assign eu_q3_word     = ifu_q3_word;
+    assign eu_ext34_data  = ifu_ext34_data;
 
 endmodule
 

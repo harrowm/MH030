@@ -34,12 +34,16 @@ module ifu_tb;
     // -----------------------------------------------------------------------
     logic        pc_wr_en   = 0;
     logic [31:0] pc_wr_data = 0;
-    logic [1:0]  drain      = 0;
+    logic [2:0]  drain      = 0;
 
     logic [15:0] instr_word;
     logic [31:0] ext_data;
+    logic [15:0] q3_word;
+    logic [31:0] ext34_data;
     logic        instr_valid;
     logic        ext_valid;
+    logic        ext4_valid;
+    logic        ext5_valid;
     logic [31:0] decode_pc;
 
     logic [31:0] ifu_addr;
@@ -65,8 +69,12 @@ module ifu_tb;
         .drain       (drain),
         .instr_word  (instr_word),
         .ext_data    (ext_data),
+        .q3_word     (q3_word),
+        .ext34_data  (ext34_data),
         .instr_valid (instr_valid),
         .ext_valid   (ext_valid),
+        .ext4_valid  (ext4_valid),
+        .ext5_valid  (ext5_valid),
         .decode_pc   (decode_pc),
         .ifu_addr    (ifu_addr),
         .ifu_req     (ifu_req),

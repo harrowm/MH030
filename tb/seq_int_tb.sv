@@ -56,8 +56,9 @@ module seq_int_tb;
         // 0x100C: NOP (0x4E71) — stalls pipeline, acts as halt
         rom[3] = 32'h4E71_4E71;
     end
-    // ROM selected by address bits [3:2] (covers 0x1000–0x100C)
-    assign ifu_rdata = rom[ifu_addr[3:2]];
+    // ROM selected by address bits [3:2] (covers 0x1000–0x100C).
+    // For addresses ≥ 0x1010 (extra prefetches from the 6-word IFU), return NOP.
+    assign ifu_rdata = (ifu_addr >= 32'h1010) ? 32'h4E71_4E71 : rom[ifu_addr[3:2]];
     assign ifu_ack   = ifu_req;   // zero-latency stub
 
     // -----------------------------------------------------------------------
@@ -65,15 +66,21 @@ module seq_int_tb;
     // -----------------------------------------------------------------------
     logic [15:0] ifu_instr_word;
     logic [31:0] ifu_ext_data;
+    logic [15:0] ifu_q3_word;
+    logic [31:0] ifu_ext34_data;
     logic        ifu_instr_valid;
     logic        ifu_ext_valid;
-    logic [1:0]  drain;
+    logic        ifu_ext4_valid;
+    logic        ifu_ext5_valid;
+    logic [2:0]  drain;
 
     // -----------------------------------------------------------------------
     // SEQ ↔ EU wires
     // -----------------------------------------------------------------------
     logic [15:0] eu_instr_word;
     logic [31:0] eu_ext_data;
+    logic [15:0] eu_q3_word;
+    logic [31:0] eu_ext34_data;
     logic        eu_instr_valid;
     logic        eu_ext_valid;
     logic        eu_instr_ack;
@@ -119,8 +126,12 @@ module seq_int_tb;
         .drain        (drain),
         .instr_word   (ifu_instr_word),
         .ext_data     (ifu_ext_data),
+        .q3_word      (ifu_q3_word),
+        .ext34_data   (ifu_ext34_data),
         .instr_valid  (ifu_instr_valid),
         .ext_valid    (ifu_ext_valid),
+        .ext4_valid   (ifu_ext4_valid),
+        .ext5_valid   (ifu_ext5_valid),
         .decode_pc    (decode_pc),
         .ifu_addr     (ifu_addr),
         .ifu_req      (ifu_req),
@@ -138,17 +149,23 @@ module seq_int_tb;
     // m68030_seq
     // -----------------------------------------------------------------------
     m68030_seq u_seq (
-        .instr_word     (ifu_instr_word),
-        .ifu_ext_data   (ifu_ext_data),
-        .instr_valid    (ifu_instr_valid),
-        .ifu_ext_valid  (ifu_ext_valid),
-        .drain          (drain),
-        .eu_instr_word  (eu_instr_word),
-        .eu_ext_data    (eu_ext_data),
-        .eu_instr_valid (eu_instr_valid),
-        .eu_ext_valid   (eu_ext_valid),
-        .eu_instr_ack   (eu_instr_ack),
-        .eu_busy        (eu_busy)
+        .instr_word      (ifu_instr_word),
+        .ifu_ext_data    (ifu_ext_data),
+        .ifu_q3_word     (ifu_q3_word),
+        .ifu_ext34_data  (ifu_ext34_data),
+        .instr_valid     (ifu_instr_valid),
+        .ifu_ext_valid   (ifu_ext_valid),
+        .ifu_ext4_valid  (ifu_ext4_valid),
+        .ifu_ext5_valid  (ifu_ext5_valid),
+        .drain           (drain),
+        .eu_instr_word   (eu_instr_word),
+        .eu_ext_data     (eu_ext_data),
+        .eu_q3_word      (eu_q3_word),
+        .eu_ext34_data   (eu_ext34_data),
+        .eu_instr_valid  (eu_instr_valid),
+        .eu_ext_valid    (eu_ext_valid),
+        .eu_instr_ack    (eu_instr_ack),
+        .eu_busy         (eu_busy)
     );
 
     // -----------------------------------------------------------------------
@@ -161,6 +178,8 @@ module seq_int_tb;
         .instr_valid (eu_instr_valid),
         .ext_data    (eu_ext_data),
         .ext_valid   (eu_ext_valid),
+        .q3_word     (eu_q3_word),
+        .ext34_data  (eu_ext34_data),
         .instr_ack   (eu_instr_ack),
         .eu_busy     (eu_busy),
         .pc_wr_en    (pc_wr_en),

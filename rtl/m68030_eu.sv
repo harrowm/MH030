@@ -18,6 +18,8 @@ module m68030_eu (
     input  logic [15:0] instr_word,   // opcode word
     input  logic        instr_valid,  // opcode valid this cycle
     input  logic [31:0] ext_data,     // extension word / immediate (32-bit)
+    input  logic [15:0] q3_word,      // third extension word (for 3-ext instrs)
+    input  logic [31:0] ext34_data,   // ext words 3+4 (for 4-ext instrs like MOVE.L #,abs.L)
     input  logic        ext_valid,    // ext_data valid this cycle
     output logic        instr_ack,    // EU consumed instruction
     output logic        eu_busy,      // pipeline stall — IFU must hold instr
@@ -210,6 +212,8 @@ module m68030_eu (
         .instr_word   (instr_word),
         .instr_valid  (instr_valid),
         .ext_data     (ext_data),
+        .q3_word      (q3_word),
+        .ext34_data   (ext34_data),
         .ext_valid    (ext_valid),
         .rd_a_sel     (rd_a_sel),
         .rd_a_siz     (rd_a_siz),

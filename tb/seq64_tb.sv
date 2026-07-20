@@ -180,7 +180,12 @@ module seq64_tb;
             mem_rdata <= ram[mem_addr[13:2]];
         end else if (mem_req && !mem_rw) begin  // write: capture
             mem_ack   <= 1'b1;
-            ram[mem_addr[13:2]] <= mem_wdata;
+            // EU byte-lane convention: byte in [31:24], word in [31:16] — de-rotate for unit test
+            case (mem_siz)
+                2'b01: ram[mem_addr[13:2]] <= {24'h0, mem_wdata[31:24]};
+                2'b10: ram[mem_addr[13:2]] <= {16'h0, mem_wdata[31:16]};
+                default: ram[mem_addr[13:2]] <= mem_wdata;
+            endcase
         end else begin
             mem_ack   <= 1'b0;
             mem_rdata <= 32'h0;

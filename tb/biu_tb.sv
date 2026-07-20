@@ -1203,15 +1203,16 @@ module biu_tb;
         eu_read(.addr(32'h0000_0020), .fc(3'b101), .siz(2'b10), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(200));
         check("P3-5: Word SIZ=10 on bus", ext_siz === 2'b10 || rdata !== 32'h0);
-        // For 32-bit port, full word returned; EU extracts [31:16] = $5A5A
-        check32("P3-5: Word data correct", rdata, 32'h5A5A_0000);
+        // BIU normalizes: extracts [31:16] for word at even addr, returns in [15:0]
+        check32("P3-5: Word data correct", rdata, 32'h0000_5A5A);
 
         $display("--- P3-6: Byte read (SIZ=01) from 32-bit port ---");
         // Byte $00000030 = word_addr 12 byte 0
-        u_mem.mem[12] = 32'hAB000000;   // byte 0 = $AB
+        u_mem.mem[12] = 32'hAB000000;   // byte 0 = $AB at [31:24]
         eu_read(.addr(32'h0000_0030), .fc(3'b101), .siz(2'b01), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(200));
-        check32("P3-6: Byte data correct", rdata, 32'hAB000000);
+        // BIU normalizes: extracts [31:24] for byte at A[1:0]=00, returns in [7:0]
+        check32("P3-6: Byte data correct", rdata, 32'h0000_00AB);
 
         // ===================================================================
         // Phase 4: Error Handling and Special Cycles
@@ -1557,7 +1558,7 @@ module biu_tb;
             int t; logic saw_ack;
             // Pre-load: addr $130 → word 76, $132 → word 76, $134 → word 77, $136 → word 77
             u_mem.mem[76] = 32'hAABB_CCDD;
-            u_mem.mem[77] = 32'hEEFF_0011;
+            u_mem.mem[77] = 32'hEEFF_2211;  // 0x136→[15:8]=0x22 (avoid 0x00 for validity check)
             use_multiop         = 1;
             eu_mo_req_tb        = 1;
             eu_mo_start_addr_tb = 32'h0000_0130;
@@ -1575,11 +1576,11 @@ module biu_tb;
             use_multiop  = 0;
             while (!bus_idle) @(posedge clk_4x);
             check("P5-6: MOVEP.L read ack", saw_ack);
-            // 32-bit port returns full words; all 4 rdata should be non-zero
-            check("P5-6: rdata0 valid", eu_mo_rdata0_tb !== 32'h0);
-            check("P5-6: rdata1 valid", eu_mo_rdata1_tb !== 32'h0);
-            check("P5-6: rdata2 valid", eu_mo_rdata2_tb !== 32'h0);
-            check("P5-6: rdata3 valid", eu_mo_rdata3_tb !== 32'h0);
+            // BIU normalizes bytes: rdata = {24'h0, byte_at_address}
+            check32("P5-6: rdata0", eu_mo_rdata0_tb, 32'h0000_00AA);  // 0x130: [31:24]
+            check32("P5-6: rdata1", eu_mo_rdata1_tb, 32'h0000_00CC);  // 0x132: [15:8] of mem[76]
+            check32("P5-6: rdata2", eu_mo_rdata2_tb, 32'h0000_00EE);  // 0x134: [31:24]
+            check32("P5-6: rdata3", eu_mo_rdata3_tb, 32'h0000_0022);  // 0x136: [15:8] of mem[77]
         end
         repeat(8) @(posedge clk_4x);
 

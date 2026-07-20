@@ -11,11 +11,17 @@ module seq_tb;
 
     logic [15:0] instr_word;
     logic [31:0] ifu_ext_data;
+    logic [15:0] ifu_q3_word;
+    logic [31:0] ifu_ext34_data;
     logic        instr_valid;
     logic        ifu_ext_valid;
-    logic [1:0]  drain;
+    logic        ifu_ext4_valid;
+    logic        ifu_ext5_valid;
+    logic [2:0]  drain;
     logic [15:0] eu_instr_word;
     logic [31:0] eu_ext_data;
+    logic [15:0] eu_q3_word;
+    logic [31:0] eu_ext34_data;
     logic        eu_instr_valid;
     logic        eu_ext_valid;
     logic        eu_instr_ack;
