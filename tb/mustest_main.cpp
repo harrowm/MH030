@@ -142,6 +142,15 @@ int main(int argc, char** argv) {
     }
     if (do_trace) fprintf(stderr, "Total bus cycles seen: %d\n", bus_cyc);
 
+    // Debug: dump key memory locations to verify write data
+    if (do_trace) {
+        auto* r = top->rootp;
+        fprintf(stderr, "main_mem[0x6]  (addr 0x18)  = %08x\n", r->mustest_tb__DOT__main_mem[0x6]);
+        fprintf(stderr, "main_mem[0x7]  (addr 0x1C)  = %08x\n", r->mustest_tb__DOT__main_mem[0x7]);
+        fprintf(stderr, "main_mem[0xFB] (addr 0x3EC) = %08x\n", r->mustest_tb__DOT__main_mem[0xFB]);
+        fprintf(stderr, "ext_ram[0x3C00] (addr 0x30F000) = %08x\n", r->mustest_tb__DOT__ext_ram[0x3C00]);
+    }
+
     if (!stopped)
         printf("FAIL  %s (timeout after %d cycles)\n", testname, cycles);
     else if (top->fail_out)

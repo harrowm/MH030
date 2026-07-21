@@ -356,8 +356,8 @@ module seq69_tb;
         ram[32'h508 >> 2] = 32'h12345678;  // pre-fill
         set_an(3'h0, 32'h0000_0500);
         run_instr(16'h50E8, 1'b1, 32'h0000_0008);
-        // EU writes byte in mem_wdata[7:0]; simple write: ram = 32'h0000_00FF
-        chk("P69-06:byte_0x508", ram[32'h508 >> 2], 32'h0000_00FF);
+        // EU writes byte in mem_wdata[31:24] (EU convention: byte in high bits)
+        chk("P69-06:byte_0x508", ram[32'h508 >> 2], 32'hFF00_0000);
 
         // ====================================================================
         // P69-07: Scc (d8,A0,D1.W*1) — SF (always false) → write 0x00

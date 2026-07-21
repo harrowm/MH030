@@ -347,7 +347,7 @@ module seq61_tb;
         set_an(3'd0, 32'h0000_0158);   // A0=Ax=0x158
         base_cnt = an_wr_cnt;
         run_instr(16'hD149, 1'b0, 32'h0);
-        chk("P61-05:mem",   ram[8'h55],                       32'h0000_BE01);
+        chk("P61-05:mem",   ram[8'h55],                       32'hBE01_0000);  // word in bits[31:16] (EU convention)
         chk("P61-05:Ay",    an_wr_log[base_cnt % 16],         32'h0000_0158);
         chk("P61-05:Ax",    an_wr_log[(base_cnt+1) % 16],     32'h0000_0156);
         chk_ccr("P61-05", 1'b0, 1'b1, 1'b0, 1'b0, 1'b0);

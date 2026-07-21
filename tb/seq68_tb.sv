@@ -377,7 +377,7 @@ module seq68_tb;
         run_instr(16'h003C, 1'b1, 32'h0000_0000);  // ORI #0,CCR — clears nothing, X still 0
         run_instr(16'h4810, 1'b0, 32'h0);
         // NBCD(0x27) with X=0: 0x00 - 0x27 - 0 = 0x73 BCD (with borrow, C=1)
-        chk("P68-08:mem",  ram[32'h110>>2], 32'h0000_0073);
+        chk("P68-08:mem",  ram[32'h110>>2], 32'h7300_0000);  // byte 0x73 in bits[31:24] (EU convention)
         chk1("P68-08:C",   sr_out[0], 1'b1);   // C=1 (borrow)
         chk1("P68-08:Z",   sr_out[2], 1'b0);   // Z=0
 
@@ -453,7 +453,7 @@ module seq68_tb;
         ram[32'h400>>2] = 32'h0000_0000;
         set_an(3'd0, 32'h0000_0400);
         run_instr(16'h08D0, 1'b1, 32'h0003);
-        chk("P68-11:mem",  ram[32'h400>>2], 32'h0000_0008);
+        chk("P68-11:mem",  ram[32'h400>>2], 32'h0800_0000);  // byte 0x08 in bits[31:24] (EU convention)
         chk1("P68-11:Z",   sr_out[2], 1'b1);   // Z=1: bit was clear before
 
         // ====================================================================

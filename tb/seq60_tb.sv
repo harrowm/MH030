@@ -405,7 +405,7 @@ module seq60_tb;
         set_an(3'd1, 32'h0000_0120);
         run_instr(16'h4280, 1'b0, 32'h0);   // CLR.L D0 — sets Z=1
         run_instr(16'h57D1, 1'b0, 32'h0);   // SEQ (A1)
-        chk("P60-11:mem", ram[8'h48], 32'h0000_00FF);
+        chk("P60-11:mem", ram[8'h48], 32'hFF00_0000);  // byte 0xFF in bits[31:24] (EU convention)
 
         // ==================================================================
         // P60-12: ASL.W (A2)  — arithmetic shift left word, count=1
@@ -417,7 +417,7 @@ module seq60_tb;
         ram[8'h49] = 32'h0000_1234;   // M[0x124] — upper word doesn't matter
         set_an(3'd2, 32'h0000_0124);
         run_instr(16'hE1D2, 1'b0, 32'h0);
-        chk("P60-12:mem", ram[8'h49], 32'h0000_2468);
+        chk("P60-12:mem", ram[8'h49], 32'h2468_0000);  // word 0x2468 in bits[31:16] (EU convention)
         chk_ccr("P60-12", 1'b0, 1'b0, 1'b0, 1'b0);
 
         // ==================================================================
@@ -431,7 +431,7 @@ module seq60_tb;
         set_an(3'd3, 32'h0000_0128);   // set A3 first (set_an clobbers D0)
         set_dn(3'd0, 32'h0000_0003);   // D0 = bit number 3
         run_instr(16'h01D3, 1'b0, 32'h0);
-        chk("P60-13:mem", ram[8'h4A], 32'h0000_0008);
+        chk("P60-13:mem", ram[8'h4A], 32'h0800_0000);  // byte 0x08 in bits[31:24] (EU convention)
         chk1("P60-13:Z",  sr_out[2],  1'b1);   // original bit was 0
 
         // ==================================================================
