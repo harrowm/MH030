@@ -425,6 +425,9 @@ module eu_seq (
     logic        dec_is_idx;     // brief indexed EA mode active
     logic        dec_xn_wl;     // Xn size: 0=word(sign-ext to 32), 1=longword
     logic [1:0]  dec_xn_scale;  // Xn scale: 00=×1, 01=×2, 10=×4, 11=×8
+    // Phase 78+: dynamic bit op with indexed EA — Dn (bit count) supplied separately
+    logic        dec_is_dyn_bit_idx; // 1 when BTST/BCHG/BCLR/BSET Dn,(d8,An,Xn)
+    logic [2:0]  dec_dyn_bit_reg;   // f_dn register selector for the bit count
     // Phase 43: MOVEM register save/restore
     logic        dec_is_movem;      // MOVEM instruction
     logic        dec_movem_load;     // 1=mem→reg (load), 0=reg→mem (store)
@@ -612,9 +615,11 @@ module eu_seq (
         dec_return_pc   = 32'h0;
         dec_bsr_target  = 32'h0;
         dec_jump_offset = 32'h0;
-        dec_is_idx      = 1'b0;
-        dec_xn_wl       = 1'b0;
-        dec_xn_scale    = 2'b00;
+        dec_is_idx          = 1'b0;
+        dec_xn_wl           = 1'b0;
+        dec_xn_scale        = 2'b00;
+        dec_is_dyn_bit_idx  = 1'b0;
+        dec_dyn_bit_reg     = 3'b0;
         dec_is_movem      = 1'b0;
         dec_movem_load    = 1'b0;
         dec_movem_predec  = 1'b0;
@@ -839,6 +844,43 @@ module eu_seq (
                             end
                             default: ;
                         endcase
+                    // ── Phase 78+: immediate ALU ops to (d8,An,Xn) ──────────────
+                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (d8,An,Xn)
+                    // byte/word: ext_data={imm_word, brief_ext}; long: ext_data={hi_imm, lo_imm}, q3=brief_ext
+                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b110 &&
+                                 (f_dn != 3'b100 && f_dn != 3'b111)) begin
+                        dec_siz        = f_siz;
+                        dec_unit       = UNIT_ALU;
+                        dec_use_imm    = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_src_reg    = {1'b1, f_reg};
+                        dec_reads_src  = 1'b1;
+                        dec_is_idx     = 1'b1;
+                        dec_imm        = (f_ss == 2'b10) ? ext_data
+                                                         : {16'h0, ext_data[31:16]};
+                        // Long: brief_ext in q3_word; byte/word: brief_ext in ext_data[15:0]
+                        dec_dst_reg    = (f_ss == 2'b10) ? {q3_word[15], q3_word[14:12]}
+                                                         : {ext_data[15], ext_data[14:12]};
+                        dec_reads_dst  = 1'b1;
+                        dec_xn_wl      = (f_ss == 2'b10) ? q3_word[11] : ext_data[11];
+                        dec_xn_scale   = (f_ss == 2'b10) ? q3_word[10:9] : ext_data[10:9];
+                        dec_ea_offset  = (f_ss == 2'b10) ? {{24{q3_word[7]}}, q3_word[7:0]}
+                                                          : {{24{ext_data[7]}}, ext_data[7:0]};
+                        case (f_dn)
+                            3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            3'b110: begin
+                                dec_alu_op      = ALU_CMP;
+                                dec_x_unchanged = 1'b1;
+                                dec_updates_ccr = 1'b1;
+                                dec_valid       = 1'b1;
+                            end
+                            default: ;
+                        endcase
                     // ── Phase 78: immediate ALU ops to (xxx).W ────────────────────
                     // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (abs).W
                     // byte/word: ext_data={imm_word, abs_w}; long: ext_data={hi_imm, lo_imm}, q3=abs_w
@@ -899,20 +941,105 @@ module eu_seq (
                             end
                             default: ;
                         endcase
-                    // ── Phase 60: register bit ops to memory ea ───────────────────
-                    // BTST/BCHG/BCLR/BSET Dn, (An)/(An)+/-(An)  (f_dir=1)
+                    // ── Phase 60/78+: register bit ops to memory ea ──────────────
+                    // BTST/BCHG/BCLR/BSET Dn, ea  (f_dir=1)
+                    // Simple (An)/(An)+/-(An): rd_a=An, rd_b=Dn; d16/abs: same.
+                    // Indexed: rd_a=An (base), rd_b=Xn (index); Dn supplied separately
+                    // via ex_dyn_bit_reg override of rd_b_sel when bit op fires.
                     end else if (f_dir &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
                         dec_unit         = UNIT_BIT;
-                        dec_siz          = 2'b01;    // memory bit ops are always byte
-                        dec_src_reg      = {1'b1, f_reg};  // An → rd_a (EA base)
-                        dec_dst_reg      = {1'b0, f_dn};   // Dn → rd_b (bit count)
+                        dec_siz          = 2'b01;
                         dec_bit_from_reg = 1'b1;
-                        dec_reads_src    = 1'b1;
-                        dec_reads_dst    = 1'b1;
                         dec_updates_ccr  = 1'b1;
                         dec_x_unchanged  = 1'b1;
                         dec_is_mem_rd    = 1'b1;
+                        if (f_mode == 3'b110) begin
+                            // (d8,An,Xn): 3-register conflict — rd_a=An, rd_b=Xn, Dn via override
+                            dec_src_reg        = {1'b1, f_reg};
+                            dec_reads_src      = 1'b1;
+                            dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                            dec_reads_dst      = 1'b1;
+                            dec_is_idx         = 1'b1;
+                            dec_xn_wl          = ext_data[11];
+                            dec_xn_scale       = ext_data[10:9];
+                            dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext      = 1'b1;
+                            dec_is_dyn_bit_idx = 1'b1;
+                            dec_dyn_bit_reg    = f_dn;
+                        end else if (f_mode == 3'b111) begin
+                            // abs.W or abs.L: rd_b=Dn (no An needed)
+                            dec_dst_reg    = {1'b0, f_dn};
+                            dec_reads_dst  = 1'b1;
+                            dec_abs_ea_en  = 1'b1;
+                            dec_needs_ext  = 1'b1;
+                            dec_abs_ea_val = (f_reg == 3'b001) ? ext_data :
+                                             {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else begin
+                            // (An)/(An)+/-(An)/d16(An): rd_a=An (base), rd_b=Dn (bit count)
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_reads_src = 1'b1;
+                            dec_dst_reg   = {1'b0, f_dn};
+                            dec_reads_dst = 1'b1;
+                            case (f_mode)
+                                3'b011: begin  // (An)+
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
+                                end
+                                3'b100: begin  // -(An)
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
+                                    dec_ea_offset  = dec_an_delta;
+                                end
+                                3'b101: begin  // (d16,An)
+                                    dec_needs_ext  = 1'b1;
+                                    dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
+                                default: ;  // mode 010 (An)
+                            endcase
+                        end
+                        case (f_ss)
+                            2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; end
+                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                        endcase
+                    // ── Phase 68/78+: BTST/BCHG/BCLR/BSET #n, ea ───────────────────
+                    // Modes (An)/(An)+/-(An): ext_count=1, bit_num from ext_data[2:0]
+                    // Modes d16(An)/indexed/abs.W: ext_count=2, bit_num from ext_data[18:16]
+                    // Mode abs.L: ext_count=3, bit_num from ext_data[18:16]
+                    // CMP2.L shares opcode bits (f_dir=0, f_dn=100, f_ss=11) for modes 010/101/111.
+                    // For mode 010 (1-ext): disambiguate via ext_data[15:8]==0 && ext_data[2:0]!=0
+                    // For modes 101/111.000 (2-ext): disambiguate via ext_data[31:24]==0 && ext_data[18:16]!=0
+                    // When truly ambiguous (BSET #0 vs CMP2.L D0) CMP2 decode below takes precedence.
+                    end else if (!f_dir && f_dn == 3'b100 &&
+                                 (f_mode == 3'b011 || f_mode == 3'b100 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b010 &&
+                                   (f_ss != 2'b11 || (ext_data[15:8] == 8'h0 && ext_data[2:0] != 3'h0))) ||
+                                  (f_mode == 3'b101 &&
+                                   (f_ss != 2'b11 || (ext_data[31:24] == 8'h0 && ext_data[18:16] != 3'h0))) ||
+                                  (f_mode == 3'b111 &&
+                                   (f_reg == 3'b001 ||
+                                    (f_reg == 3'b000 &&
+                                     (f_ss != 2'b11 || (ext_data[31:24] == 8'h0 && ext_data[18:16] != 3'h0))))))) begin
+                        dec_unit         = UNIT_BIT;
+                        dec_siz          = 2'b01;
+                        dec_bit_from_reg = 1'b0;
+                        // For simple modes (An)/(An)+/-(An): bit_num in ext_data[2:0] (ext_count=1)
+                        // For extended modes: bit_num in ext_data[18:16] (ext_count=2 or 3)
+                        dec_bit_num      = (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) ?
+                                           {2'b00, ext_data[2:0]} : {2'b00, ext_data[18:16]};
+                        dec_is_mem_rd    = 1'b1;
+                        dec_needs_ext    = 1'b1;
+                        dec_x_unchanged  = 1'b1;
+                        if (f_mode != 3'b111) begin
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_reads_src = 1'b1;
+                        end
                         case (f_mode)
                             3'b011: begin  // (An)+
                                 dec_an_upd_en  = 1'b1;
@@ -925,44 +1052,24 @@ module eu_seq (
                                 dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
                                 dec_ea_offset  = dec_an_delta;
                             end
-                            default: ;
-                        endcase
-                        case (f_ss)
-                            2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; end  // BTST: WB fires CCR
-                            // BCHG/BCLR/BSET: CCR fires via mem_rmw_sr_wr_en, not WB
-                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
-                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
-                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
-                        endcase
-                    // ── Phase 68: BTST/BCHG/BCLR/BSET #n, (An)/(An)+/-(An) ─────────
-                    // f_ss==11 && f_dn==100 && f_mode==010 overlaps CMP2.L (An).
-                    // BSET #n has bit_number in ext[2:0] (1-7 for memory), always nonzero.
-                    // CMP2.L with D0 has ext=0 entirely. Require ext[2:0]!=0 for BSET.
-                    end else if (!f_dir && f_dn == 3'b100 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
-                                 (f_ss != 2'b11 || (ext_data[15:8] == 8'h0 && ext_data[2:0] != 3'h0))) begin
-                        dec_unit         = UNIT_BIT;
-                        dec_siz          = 2'b01;
-                        dec_src_reg      = {1'b1, f_reg};
-                        dec_reads_src    = 1'b1;
-                        dec_bit_from_reg = 1'b0;
-                        dec_bit_num      = {2'b00, ext_data[2:0]};
-                        dec_is_mem_rd    = 1'b1;
-                        dec_needs_ext    = 1'b1;
-                        dec_x_unchanged  = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
+                            3'b101: begin  // (d16,An): EA ext in ext_data[15:0]
+                                dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
                             end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
+                            3'b110: begin  // (d8,An,Xn): brief_ext in ext_data[15:0]
+                                dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst  = 1'b1;
+                                dec_is_idx     = 1'b1;
+                                dec_xn_wl      = ext_data[11];
+                                dec_xn_scale   = ext_data[10:9];
+                                dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
                             end
-                            default: ;
+                            3'b111: begin  // abs.W or abs.L
+                                dec_abs_ea_en  = 1'b1;
+                                dec_abs_ea_val = (f_reg == 3'b001) ?
+                                                 {ext_data[15:0], q3_word} :
+                                                 {{16{ext_data[15]}}, ext_data[15:0]};
+                            end
+                            default: ;  // mode 010 (An): no extra EA setup
                         endcase
                         case (f_ss)
                             2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; dec_updates_ccr=1'b1; end
@@ -1983,17 +2090,21 @@ module eu_seq (
                             end
                             default: ;
                         endcase
-                    // ── Phase 68: NBCD (An)/(An)+/-(An) ────────────────────────────
+                    // ── Phase 68/78+: NBCD memory ea ────────────────────────────────
                     end else if (!f_dir && f_ss == 2'b00 && f_dn == 3'b100 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_BCD;
                         dec_bcd_op      = BCD_NEG;
                         dec_siz         = 2'b01;
-                        dec_src_reg     = {1'b1, f_reg};
-                        dec_reads_src   = 1'b1;
                         dec_is_mem_rd   = 1'b1;
                         dec_is_mem_rmw  = 1'b1;
+                        dec_needs_ext   = (f_mode == 3'b111) ? 1'b1 : 1'b0;
+                        if (f_mode != 3'b111) begin
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_reads_src = 1'b1;
+                        end
                         case (f_mode)
                             3'b011: begin
                                 dec_an_upd_en  = 1'b1;
@@ -2005,6 +2116,11 @@ module eu_seq (
                                 dec_an_upd_reg = f_reg;
                                 dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
                                 dec_ea_offset  = dec_an_delta;
+                            end
+                            3'b111: begin  // abs.W or abs.L
+                                dec_abs_ea_en  = 1'b1;
+                                dec_abs_ea_val = (f_reg == 3'b001) ? ext_data :
+                                                 {{16{ext_data[15]}}, ext_data[15:0]};
                             end
                             default: ;
                         endcase
@@ -4359,6 +4475,9 @@ module eu_seq (
     logic        ex_is_idx;
     logic        ex_xn_wl;
     logic [1:0]  ex_xn_scale;
+    logic        ex_is_dyn_bit_idx; // dynamic bit op with indexed EA
+    logic [2:0]  ex_dyn_bit_reg;    // Dn register for bit count
+    logic [31:0] dyn_bit_ea_r;      // latched EA for RMW write-back addr fix
     // Phase 43: MOVEM
     logic        ex_is_movem;
     logic        ex_movem_load;
@@ -5007,14 +5126,16 @@ module eu_seq (
             ex_abs_ea_en      <= 1'b0;
             ex_abs_jmp_en     <= 1'b0;
             ex_abs_ea_val     <= 32'h0;
-            ex_is_idx         <= 1'b0;
-            ex_xn_wl          <= 1'b0;
-            ex_xn_scale       <= 2'b00;
-            ex_return_pc      <= 32'h0;
-            ex_bsr_target     <= 32'h0;
-            ex_jump_offset    <= 32'h0;
-            ex_is_movem       <= 1'b0;
-            ex_movem_load     <= 1'b0;
+            ex_is_idx             <= 1'b0;
+            ex_xn_wl              <= 1'b0;
+            ex_xn_scale           <= 2'b00;
+            ex_is_dyn_bit_idx     <= 1'b0;
+            ex_dyn_bit_reg        <= 3'b0;
+            ex_return_pc          <= 32'h0;
+            ex_bsr_target         <= 32'h0;
+            ex_jump_offset        <= 32'h0;
+            ex_is_movem           <= 1'b0;
+            ex_movem_load         <= 1'b0;
             ex_movem_predec   <= 1'b0;
             ex_movem_postinc  <= 1'b0;
             ex_movem_long     <= 1'b0;
@@ -5114,10 +5235,12 @@ module eu_seq (
             ex_is_rts         <= 1'b0;
             ex_is_rtr         <= 1'b0;
             ex_is_link        <= 1'b0;
-            ex_abs_ea_en      <= 1'b0;
-            ex_abs_jmp_en     <= 1'b0;
-            ex_is_idx         <= 1'b0;
-            ex_is_movem       <= 1'b0;
+            ex_abs_ea_en          <= 1'b0;
+            ex_abs_jmp_en         <= 1'b0;
+            ex_is_idx             <= 1'b0;
+            ex_is_dyn_bit_idx     <= 1'b0;
+            ex_dyn_bit_reg        <= 3'b0;
+            ex_is_movem           <= 1'b0;
             ex_movem_load     <= 1'b0;
             ex_movem_predec   <= 1'b0;
             ex_movem_postinc  <= 1'b0;
@@ -5245,6 +5368,8 @@ module eu_seq (
             ex_is_idx         <= dec_is_idx;
             ex_xn_wl          <= dec_xn_wl;
             ex_xn_scale       <= dec_xn_scale;
+            ex_is_dyn_bit_idx <= dec_is_dyn_bit_idx;
+            ex_dyn_bit_reg    <= dec_dyn_bit_reg;
             ex_return_pc      <= dec_return_pc;
             ex_bsr_target     <= dec_bsr_target;
             ex_jump_offset    <= dec_jump_offset;
@@ -5351,10 +5476,17 @@ module eu_seq (
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
                                                         ex_src_reg;
     assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea || ex_is_abcd_sbcd_mem) ? 2'b00 : ex_siz;
+    // Phase 78+: for indexed dynamic bit ops, override rd_b to Dn when bit op fires.
+    // For BSET/BCLR/BCHG (RMW): override at mem_rmw_read_ack; for BTST: at mem_ack.
+    logic dyn_bit_get_Dn;
+    assign dyn_bit_get_Dn = ex_is_dyn_bit_idx && ex_is_mem_rd &&
+                            (ex_is_mem_rmw ? mem_rmw_read_ack
+                                           : (mem_ack && !mem_rmw_run_r && !mem_rmw_after_r));
     assign rd_b_sel = cas_get_du_r     ? {1'b0, ex_cas_du_reg}  :
                       cas2_rd2_r       ? {1'b0, ex_cas2_dc2_reg} :  // Dc2 for inline compare
                       cas2_get_du1_r   ? {1'b0, ex_cas2_du1_reg} :
                       cas2_get_du2_r   ? {1'b0, ex_cas2_du2_reg} :
+                      dyn_bit_get_Dn   ? {1'b0, ex_dyn_bit_reg}  :  // Dn for bit count
                                          ex_dst_reg;
     // Phase 41: for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
     // Phase 53: memind post-indexed also needs full longword Xn in rd_b (for outer EA scaling)
@@ -6069,9 +6201,11 @@ module eu_seq (
     // For register bit ops targeting memory (BSET Dn,(An)): rd_a=An (EA base), rd_b=Dn (bit count).
     // bit_dst must be mem_rdata; bit_num must come from rd_b[4:0] not rd_a[4:0].
     assign bit_dst = ex_is_mem_rd ? mem_rdata : rd_b_data;
-    // Memory bit ops: bit# mod 8 (byte EA); reg-to-reg: mod 32 via [4:0]
-    assign bit_num = (ex_is_mem_rmw && ex_bit_from_reg) ? {2'b00, rd_b_data[2:0]} :
-                     ex_bit_from_reg                     ? rd_a_bit_num             : ex_bit_num;
+    // Memory bit ops: bit# mod 8 (byte EA); reg-to-reg: mod 32 via [4:0].
+    // For memory ops (is_mem_rd or is_mem_rmw): rd_b holds Dn (or is overridden to Dn for indexed).
+    // For register-to-register ops (!is_mem_rd): rd_a holds Dn1 (bit count from reg).
+    assign bit_num = (ex_bit_from_reg && (ex_is_mem_rd || ex_is_mem_rmw)) ? {2'b00, rd_b_data[2:0]} :
+                     ex_bit_from_reg                                        ? rd_a_bit_num : ex_bit_num;
     assign bit_op  = ex_bit_op;
 
     // -----------------------------------------------------------------------
@@ -6317,6 +6451,16 @@ module eu_seq (
     // drive a write cycle via mem_rmw_run_r.  CCR fires on write ack.
     // Placed here — after ex_result/ex_x/ex_n/ex_z/ex_v/ex_c are declared.
     // -----------------------------------------------------------------------
+    // Phase 78+: latch the correct EA for indexed dynamic bit RMW ops.
+    // When dyn_bit_get_Dn fires, rd_b_sel switches to Dn which corrupts ex_ea
+    // (changes xn_scaled). We pre-latch the correct EA each cycle before ack.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            dyn_bit_ea_r <= 32'h0;
+        else if (ex_is_dyn_bit_idx && ex_is_mem_rmw && !mem_rmw_run_r && !mem_rmw_after_r)
+            dyn_bit_ea_r <= ex_ea;
+    end
+
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             mem_rmw_run_r    <= 1'b0;
@@ -6333,7 +6477,9 @@ module eu_seq (
                                  : (ex_siz==2'b10) ? {ex_result[15:0], 16'h0}
                                  :                    ex_result;
                 mem_rmw_ccr_r    <= {ex_x, ex_n, ex_z, ex_v, ex_c};
-                mem_rmw_addr_r   <= ex_ea;
+                // For indexed dynamic bit ops, ex_ea is corrupted by rd_b override;
+                // use the pre-latched correct EA instead.
+                mem_rmw_addr_r   <= ex_is_dyn_bit_idx ? dyn_bit_ea_r : ex_ea;
                 mem_rmw_ccr_en_r <= ex_mem_rmw_ccr;  // capture: does this op update CCR?
             end else if (mem_rmw_run_r && mem_ack) begin
                 mem_rmw_run_r    <= 1'b0;
