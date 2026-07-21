@@ -318,6 +318,28 @@ module m68030_seq (
         // MOVE.W #imm, SR (0x46FC) / MOVE.W #imm, CCR (0x44FC) — group 4, 1 ext word
         else if (instr_word == 16'h46FC || instr_word == 16'h44FC)
             ext_count = 3'd1;
+        // Phase 78: MOVE.W EA,SR/CCR with abs.L source — 2 extension words
+        else if ((f_group == 4'h4) && !f_dir && (f_ss == 2'b11) &&
+                 (f_dn == 3'b011 || f_dn == 3'b010) &&
+                 (f_mode == 3'b111) && (f_reg == 3'b001))
+            ext_count = 3'd2;
+        // Phase 78: MOVE.W EA,SR/CCR with (d16,An)/(d8,An,Xn)/abs.W/(d16,PC)/(d8,PC,Xn) — 1 ext word
+        else if ((f_group == 4'h4) && !f_dir && (f_ss == 2'b11) &&
+                 (f_dn == 3'b011 || f_dn == 3'b010) &&
+                 (f_mode == 3'b101 || f_mode == 3'b110 ||
+                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011))))
+            ext_count = 3'd1;
+        // Phase 78: MOVE #imm, (d8,An,Xn) — indexed dst, immediate src
+        // MOVE.L: imm32=2 words + brief_ext=1 word = 3; MOVE.B/W: imm=1 + brief_ext=1 = 2
+        else if ((f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                 (f_move_dst_mode_s == 3'b110) &&
+                 (f_mode == 3'b111) && (f_reg == 3'b100))
+            ext_count = (f_group == 4'h2) ? 3'd3 : 3'd2;
+        // Phase 78: MOVE Dn/An, (d8,An,Xn) — indexed dst, register src (1 brief_ext)
+        else if ((f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+                 (f_move_dst_mode_s == 3'b110) &&
+                 (f_mode == 3'b000 || f_mode == 3'b001))
+            ext_count = 3'd1;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
             ext_count = 3'd2;

@@ -1637,6 +1637,36 @@ module eu_seq (
                                 default: ;
                             endcase
                         end
+                    end else if (f_move_dst_mode == 3'b110) begin
+                        // ── dst = (d8,An,Xn) indexed ──
+                        // Use RMW so rd_a=An_base and rd_b=Xn (pure write can't split them).
+                        // CCR fires from WB at RMW cleanup cycle (ex_mem_rmw_ccr=0 for UNIT_MOVE).
+                        if (f_mode == 3'b111 && f_reg == 3'b100) begin
+                            // MOVE #imm, (d8,An,Xn): MOVE.L has imm32 in ext_data, brief_ext
+                            // in q3_word; MOVE.B/W has imm in ext_data[31:16], brief_ext in ext_data[15:0].
+                            dec_valid      = 1'b1;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_is_mem_rmw = 1'b1;
+                            dec_unit       = UNIT_MOVE;
+                            dec_use_imm    = 1'b1;
+                            dec_imm        = (f_group == 4'h2) ? ext_data
+                                                                : {16'h0, ext_data[31:16]};
+                            dec_src_reg    = {1'b1, f_dn};
+                            dec_reads_src  = 1'b1;
+                            dec_dst_reg    = {(f_group == 4'h2) ? q3_word[15]    : ext_data[15],
+                                              (f_group == 4'h2) ? q3_word[14:12] : ext_data[14:12]};
+                            dec_reads_dst  = 1'b1;
+                            dec_is_idx     = 1'b1;
+                            dec_xn_wl      = (f_group == 4'h2) ? q3_word[11]   : ext_data[11];
+                            dec_xn_scale   = (f_group == 4'h2) ? q3_word[10:9] : ext_data[10:9];
+                            dec_ea_offset  = {{24{(f_group == 4'h2) ? q3_word[7] : ext_data[7]}},
+                                              (f_group == 4'h2) ? q3_word[7:0] : ext_data[7:0]};
+                            dec_writes_reg = 1'b0;
+                            dec_updates_ccr = 1'b1;
+                            dec_needs_ext  = 1'b1;
+                            dec_siz        = f_move_sz;
+                        end
+                        // MOVE Dn/An,(d8,An,Xn): not yet decoded; dec_valid stays 0
                     end else if (f_move_dst_mode == 3'b111) begin
                         // ── dst = absolute address ──
                         if (f_mode == 3'b000 || f_mode == 3'b001) begin
@@ -2215,6 +2245,126 @@ module eu_seq (
                             dec_xn_scale    = ext_data[10:9];
                             dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext   = 1'b1;
+                        end
+                    // ── Phase 78: MOVE.W EA, SR/CCR (memory src) and MOVE.W SR/CCR, (EA) ──
+                    end else if (!f_dir && f_ss == 2'b11 &&
+                                 (((f_dn == 3'b011 || f_dn == 3'b010) &&
+                                   (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                    f_mode == 3'b101 || f_mode == 3'b110 ||
+                                    (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
+                                                          f_reg == 3'b010 || f_reg == 3'b011)))) ||
+                                  (f_dn == 3'b000 &&
+                                   (f_mode == 3'b010 || f_mode == 3'b011)))) begin
+                        if (f_dn == 3'b000) begin
+                            // MOVE.W SR, (An) / (An)+  — supervisor only
+                            if (!sr_live[13]) begin
+                                dec_valid   = 1'b1;
+                                dec_is_priv = 1'b1;
+                            end else begin
+                                dec_valid       = 1'b1;
+                                dec_unit        = UNIT_MOVE;
+                                dec_is_mem_wr   = 1'b1;
+                                dec_siz         = 2'b10;
+                                dec_dst_reg     = {1'b1, f_reg};
+                                dec_reads_dst   = 1'b1;
+                                dec_use_imm     = 1'b1;
+                                dec_imm         = {16'h0, sr_live};
+                                dec_reads_ccr   = 1'b1;
+                                dec_x_unchanged = 1'b1;
+                                if (f_mode == 3'b011) begin
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = 32'd2;
+                                end
+                            end
+                        end else begin
+                            // MOVE.W EA, SR (f_dn=011) or MOVE.W EA, CCR (f_dn=010) — memory source
+                            if (f_dn == 3'b011 && !sr_live[13]) begin
+                                dec_valid   = 1'b1;
+                                dec_is_priv = 1'b1;
+                            end else begin
+                                dec_valid       = 1'b1;
+                                dec_unit        = UNIT_MOVE;
+                                dec_is_mem_rd   = 1'b1;
+                                dec_siz         = 2'b10;
+                                dec_reads_ccr   = 1'b1;
+                                dec_x_unchanged = 1'b1;
+                                if (f_dn == 3'b011) begin
+                                    dec_is_move_sr_w = 1'b1;
+                                    dec_updates_ccr  = 1'b1;
+                                end else begin
+                                    dec_is_move_ccr_w = 1'b1;
+                                    dec_updates_ccr   = 1'b1;
+                                end
+                                case (f_mode)
+                                    3'b010: begin  // (An)
+                                        dec_src_reg   = {1'b1, f_reg};
+                                        dec_reads_src = 1'b1;
+                                    end
+                                    3'b011: begin  // (An)+
+                                        dec_src_reg    = {1'b1, f_reg};
+                                        dec_reads_src  = 1'b1;
+                                        dec_an_upd_en  = 1'b1;
+                                        dec_an_upd_reg = f_reg;
+                                        dec_an_delta   = 32'd2;
+                                    end
+                                    3'b100: begin  // -(An)
+                                        dec_src_reg    = {1'b1, f_reg};
+                                        dec_reads_src  = 1'b1;
+                                        dec_an_upd_en  = 1'b1;
+                                        dec_an_upd_reg = f_reg;
+                                        dec_an_delta   = 32'hFFFF_FFFE;
+                                        dec_ea_offset  = 32'hFFFF_FFFE;
+                                    end
+                                    3'b101: begin  // (d16,An)
+                                        dec_src_reg   = {1'b1, f_reg};
+                                        dec_reads_src = 1'b1;
+                                        dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                        dec_needs_ext = 1'b1;
+                                    end
+                                    3'b110: begin  // (d8,An,Xn)
+                                        dec_src_reg    = {1'b1, f_reg};
+                                        dec_reads_src  = 1'b1;
+                                        dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_is_idx     = 1'b1;
+                                        dec_xn_wl      = ext_data[11];
+                                        dec_xn_scale   = ext_data[10:9];
+                                        dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                                        dec_needs_ext  = 1'b1;
+                                    end
+                                    3'b111: begin
+                                        dec_needs_ext = 1'b1;
+                                        case (f_reg)
+                                            3'b000: begin  // (xxx).W
+                                                dec_abs_ea_en  = 1'b1;
+                                                dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                            end
+                                            3'b001: begin  // (xxx).L
+                                                dec_abs_ea_en  = 1'b1;
+                                                dec_abs_ea_val = ext_data;
+                                            end
+                                            3'b010: begin  // (d16,PC)
+                                                dec_abs_ea_en  = 1'b1;
+                                                dec_abs_ea_val = decode_pc + 32'd2
+                                                               + {{16{ext_data[15]}}, ext_data[15:0]};
+                                            end
+                                            3'b011: begin  // (d8,PC,Xn)
+                                                dec_abs_ea_en  = 1'b1;
+                                                dec_abs_ea_val = decode_pc + 32'd2
+                                                               + {{24{ext_data[7]}}, ext_data[7:0]};
+                                                dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                                dec_reads_dst  = 1'b1;
+                                                dec_is_idx     = 1'b1;
+                                                dec_xn_wl      = ext_data[11];
+                                                dec_xn_scale   = ext_data[10:9];
+                                            end
+                                            default: ;
+                                        endcase
+                                    end
+                                    default: ;
+                                endcase
+                            end
                         end
                     end else if (instr_word == 16'h46FC) begin
                         // MOVE.W #imm, SR — supervisor-only; loads new SR from immediate
@@ -6179,7 +6329,9 @@ module eu_seq (
             mem_rmw_after_r <= mem_rmw_run_r && mem_ack;
             if (mem_rmw_read_ack) begin
                 mem_rmw_run_r    <= 1'b1;
-                mem_rmw_wdata_r  <= ex_result;
+                mem_rmw_wdata_r  <= (ex_siz==2'b01) ? {ex_result[7:0],  24'h0}
+                                 : (ex_siz==2'b10) ? {ex_result[15:0], 16'h0}
+                                 :                    ex_result;
                 mem_rmw_ccr_r    <= {ex_x, ex_n, ex_z, ex_v, ex_c};
                 mem_rmw_addr_r   <= ex_ea;
                 mem_rmw_ccr_en_r <= ex_mem_rmw_ccr;  // capture: does this op update CCR?
@@ -6889,7 +7041,10 @@ module eu_seq (
                      : (bcds_run_r && bcds_phase_r == 2'd2) ? {24'h0, bcd_result}
                      : mem_rmw_run_r            ? mem_rmw_wdata_r
                      : move_mm_run_r            ? move_mm_data_r
-                     : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ? ex_result
+                     : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ?
+                         ((ex_siz==2'b01) ? {ex_result[7:0],  24'h0}
+                        : (ex_siz==2'b10) ? {ex_result[15:0], 16'h0}
+                        :                    ex_result)
                      : (bf_mem_run_r && bf_mem_phase_r) ? bf_result_w
                      : (pack_mem_run_r && pack_mem_phase_r) ? pack_mem_wdata_w
                      : tas_run_r               ? {24'h0, tas_wdata_r}
