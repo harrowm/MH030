@@ -428,6 +428,7 @@ module eu_seq (
     // Phase 78+: dynamic bit op with indexed EA — Dn (bit count) supplied separately
     logic        dec_is_dyn_bit_idx; // 1 when BTST/BCHG/BCLR/BSET Dn,(d8,An,Xn)
     logic [2:0]  dec_dyn_bit_reg;   // f_dn register selector for the bit count
+    logic        dec_is_bit_imm;    // 1 when BTST Dn,#imm — immediate byte as bit_dst
     // Phase 43: MOVEM register save/restore
     logic        dec_is_movem;      // MOVEM instruction
     logic        dec_movem_load;     // 1=mem→reg (load), 0=reg→mem (store)
@@ -620,6 +621,7 @@ module eu_seq (
         dec_xn_scale        = 2'b00;
         dec_is_dyn_bit_idx  = 1'b0;
         dec_dyn_bit_reg     = 3'b0;
+        dec_is_bit_imm      = 1'b0;
         dec_is_movem      = 1'b0;
         dec_movem_load    = 1'b0;
         dec_movem_predec  = 1'b0;
@@ -949,7 +951,9 @@ module eu_seq (
                     end else if (f_dir &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                   f_mode == 3'b101 || f_mode == 3'b110 ||
-                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
+                                                        f_reg == 3'b010 || f_reg == 3'b011 ||
+                                                        f_reg == 3'b100)))) begin
                         dec_unit         = UNIT_BIT;
                         dec_siz          = 2'b01;
                         dec_bit_from_reg = 1'b1;
@@ -970,13 +974,49 @@ module eu_seq (
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;
                         end else if (f_mode == 3'b111) begin
-                            // abs.W or abs.L: rd_b=Dn (no An needed)
-                            dec_dst_reg    = {1'b0, f_dn};
-                            dec_reads_dst  = 1'b1;
                             dec_abs_ea_en  = 1'b1;
                             dec_needs_ext  = 1'b1;
-                            dec_abs_ea_val = (f_reg == 3'b001) ? ext_data :
-                                             {{16{ext_data[15]}}, ext_data[15:0]};
+                            case (f_reg)
+                                3'b000: begin  // abs.W
+                                    dec_dst_reg    = {1'b0, f_dn};
+                                    dec_reads_dst  = 1'b1;
+                                    dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
+                                3'b001: begin  // abs.L
+                                    dec_dst_reg    = {1'b0, f_dn};
+                                    dec_reads_dst  = 1'b1;
+                                    dec_abs_ea_val = ext_data;
+                                end
+                                3'b010: begin  // (d16,PC): EA = PC+2 + d16
+                                    dec_dst_reg    = {1'b0, f_dn};
+                                    dec_reads_dst  = 1'b1;
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
+                                3'b011: begin  // (d8,PC,Xn): EA = PC+2 + d8 + scaled(Xn)
+                                    dec_abs_ea_val    = decode_pc + 32'd2
+                                                      + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg       = {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst     = 1'b1;
+                                    dec_is_idx        = 1'b1;
+                                    dec_xn_wl         = ext_data[11];
+                                    dec_xn_scale      = ext_data[10:9];
+                                    dec_is_dyn_bit_idx = 1'b1;
+                                    dec_dyn_bit_reg   = f_dn;
+                                end
+                                3'b100: begin  // #imm — BTST Dn, #byte
+                                    // Immediate byte in ext_data[7:0]; bit count from Dn (f_dn)
+                                    // Clear memory-access flags set by outer block.
+                                    dec_is_mem_rd   = 1'b0;
+                                    dec_abs_ea_en   = 1'b0;
+                                    dec_src_reg     = {1'b0, f_dn};  // Dn → rd_a for bit count
+                                    dec_reads_src   = 1'b1;
+                                    dec_imm         = {24'h0, ext_data[7:0]};
+                                    dec_is_bit_imm  = 1'b1;
+                                    dec_needs_ext   = 1'b1;
+                                end
+                                default: ;
+                            endcase
                         end else begin
                             // (An)/(An)+/-(An)/d16(An): rd_a=An (base), rd_b=Dn (bit count)
                             dec_src_reg   = {1'b1, f_reg};
@@ -1009,23 +1049,16 @@ module eu_seq (
                             2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
                         endcase
                     // ── Phase 68/78+: BTST/BCHG/BCLR/BSET #n, ea ───────────────────
+                    // f_dn=100 selects static (immediate) bit number from extension word.
+                    // CMP2/CHK2 uses f_dn=000/001/010 (!f_dn[2]) — no overlap with f_dn=100.
                     // Modes (An)/(An)+/-(An): ext_count=1, bit_num from ext_data[2:0]
-                    // Modes d16(An)/indexed/abs.W: ext_count=2, bit_num from ext_data[18:16]
+                    // Modes d16(An)/indexed/abs.W/(d16,PC)/(d8,PC,Xn): ext_count=2, bit_num from ext_data[18:16]
                     // Mode abs.L: ext_count=3, bit_num from ext_data[18:16]
-                    // CMP2.L shares opcode bits (f_dir=0, f_dn=100, f_ss=11) for modes 010/101/111.
-                    // For mode 010 (1-ext): disambiguate via ext_data[15:8]==0 && ext_data[2:0]!=0
-                    // For modes 101/111.000 (2-ext): disambiguate via ext_data[31:24]==0 && ext_data[18:16]!=0
-                    // When truly ambiguous (BSET #0 vs CMP2.L D0) CMP2 decode below takes precedence.
                     end else if (!f_dir && f_dn == 3'b100 &&
-                                 (f_mode == 3'b011 || f_mode == 3'b100 || f_mode == 3'b110 ||
-                                  (f_mode == 3'b010 &&
-                                   (f_ss != 2'b11 || (ext_data[15:8] == 8'h0 && ext_data[2:0] != 3'h0))) ||
-                                  (f_mode == 3'b101 &&
-                                   (f_ss != 2'b11 || (ext_data[31:24] == 8'h0 && ext_data[18:16] != 3'h0))) ||
-                                  (f_mode == 3'b111 &&
-                                   (f_reg == 3'b001 ||
-                                    (f_reg == 3'b000 &&
-                                     (f_ss != 2'b11 || (ext_data[31:24] == 8'h0 && ext_data[18:16] != 3'h0))))))) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
+                                                        f_reg == 3'b010 || f_reg == 3'b011)))) begin
                         dec_unit         = UNIT_BIT;
                         dec_siz          = 2'b01;
                         dec_bit_from_reg = 1'b0;
@@ -1063,11 +1096,33 @@ module eu_seq (
                                 dec_xn_scale   = ext_data[10:9];
                                 dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
                             end
-                            3'b111: begin  // abs.W or abs.L
-                                dec_abs_ea_en  = 1'b1;
-                                dec_abs_ea_val = (f_reg == 3'b001) ?
-                                                 {ext_data[15:0], q3_word} :
-                                                 {{16{ext_data[15]}}, ext_data[15:0]};
+                            3'b111: begin
+                                case (f_reg)
+                                    3'b000: begin  // abs.W
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    3'b001: begin  // abs.L
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = {ext_data[15:0], q3_word};
+                                    end
+                                    3'b010: begin  // (d16,PC): EA = (PC+4) + d16
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = decode_pc + 32'd4
+                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    3'b011: begin  // (d8,PC,Xn): EA = (PC+4) + d8 + scaled(Xn)
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = decode_pc + 32'd4
+                                                       + {{24{ext_data[7]}}, ext_data[7:0]};
+                                        dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_is_idx     = 1'b1;
+                                        dec_xn_wl      = ext_data[11];
+                                        dec_xn_scale   = ext_data[10:9];
+                                    end
+                                    default: ;
+                                endcase
                             end
                             default: ;  // mode 010 (An): no extra EA setup
                         endcase
@@ -1122,11 +1177,11 @@ module eu_seq (
                             3'b011: dec_siz = 2'b10;
                             default: dec_siz = 2'b00;
                         endcase
-                    end else if (!f_dir && f_ss == 2'b11 && !f_dn[0] &&
-                                 f_dn != 3'b110 &&
+                    end else if (!f_dir && f_ss == 2'b11 && !f_dn[2] && f_dn != 3'b011 &&
                                  (f_mode == 3'b010 || f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010)))) begin
                         // CMP2/CHK2 <ea>,Rn — 0000 ss00 11 mmm rrr + ext
+                        // f_dn: 000=CMP2.B, 001=CMP2.W, 010=CMP2.L  (all have !f_dn[2])
                         // ext[15]=D/A, ext[14:12]=Rn, ext[11]=CHK2(1)/CMP2(0)
                         // Phase 48: (An) only.  Phase 69: + (d16,An), (xxx).W, (d16,PC)
                         // For 2-ext-word modes: ext_data[31:16]=cmp2_ext, ext_data[15:0]=disp
@@ -1142,11 +1197,11 @@ module eu_seq (
                         dec_x_unchanged = 1'b1;
                         dec_dst_reg     = {cmp2_ext_w[15], cmp2_ext_w[14:12]};  // Rn → rd_b
                         dec_reads_dst   = 1'b1;
-                        if (cmp2_two_ext) dec_imm = {16'h0, cmp2_ext_w};  // put spec in [15:0]
+                        dec_imm         = {16'h0, cmp2_ext_w};  // ex_imm[11]=CHK2 flag always
                         case (f_dn)
-                            3'b000: dec_siz = 2'b01;
-                            3'b010: dec_siz = 2'b10;
-                            default: dec_siz = 2'b00;
+                            3'b000: dec_siz = 2'b01;  // CMP2.B
+                            3'b001: dec_siz = 2'b10;  // CMP2.W
+                            default: dec_siz = 2'b00; // CMP2.L (f_dn=010)
                         endcase
                         case (f_mode)
                             3'b010: begin  // (An)
@@ -5077,6 +5132,7 @@ module eu_seq (
     logic [1:0]  ex_bit_op;
     logic [4:0]  ex_bit_num;
     logic        ex_bit_from_reg;
+    logic        ex_is_bit_imm;
     logic [3:0]  ex_src_reg, ex_dst_reg;
     logic [1:0]  ex_siz;
     logic [31:0] ex_imm;
@@ -5131,6 +5187,7 @@ module eu_seq (
             ex_xn_scale           <= 2'b00;
             ex_is_dyn_bit_idx     <= 1'b0;
             ex_dyn_bit_reg        <= 3'b0;
+            ex_is_bit_imm         <= 1'b0;
             ex_return_pc          <= 32'h0;
             ex_bsr_target         <= 32'h0;
             ex_jump_offset        <= 32'h0;
@@ -5240,6 +5297,7 @@ module eu_seq (
             ex_is_idx             <= 1'b0;
             ex_is_dyn_bit_idx     <= 1'b0;
             ex_dyn_bit_reg        <= 3'b0;
+            ex_is_bit_imm         <= 1'b0;
             ex_is_movem           <= 1'b0;
             ex_movem_load     <= 1'b0;
             ex_movem_predec   <= 1'b0;
@@ -5370,6 +5428,7 @@ module eu_seq (
             ex_xn_scale       <= dec_xn_scale;
             ex_is_dyn_bit_idx <= dec_is_dyn_bit_idx;
             ex_dyn_bit_reg    <= dec_dyn_bit_reg;
+            ex_is_bit_imm     <= dec_is_bit_imm;
             ex_return_pc      <= dec_return_pc;
             ex_bsr_target     <= dec_bsr_target;
             ex_jump_offset    <= dec_jump_offset;
@@ -6200,12 +6259,16 @@ module eu_seq (
     // Bitops datapath drives
     // For register bit ops targeting memory (BSET Dn,(An)): rd_a=An (EA base), rd_b=Dn (bit count).
     // bit_dst must be mem_rdata; bit_num must come from rd_b[4:0] not rd_a[4:0].
-    assign bit_dst = ex_is_mem_rd ? mem_rdata : rd_b_data;
+    // BTST Dn,#imm: immediate byte is the bit_dst; otherwise memory or register.
+    assign bit_dst = ex_is_bit_imm ? {24'h0, ex_imm[7:0]} :
+                     ex_is_mem_rd  ? mem_rdata             : rd_b_data;
     // Memory bit ops: bit# mod 8 (byte EA); reg-to-reg: mod 32 via [4:0].
     // For memory ops (is_mem_rd or is_mem_rmw): rd_b holds Dn (or is overridden to Dn for indexed).
+    // For immediate ops (ex_is_bit_imm): byte mode, Dn from rd_a → mask to [2:0].
     // For register-to-register ops (!is_mem_rd): rd_a holds Dn1 (bit count from reg).
-    assign bit_num = (ex_bit_from_reg && (ex_is_mem_rd || ex_is_mem_rmw)) ? {2'b00, rd_b_data[2:0]} :
-                     ex_bit_from_reg                                        ? rd_a_bit_num : ex_bit_num;
+    assign bit_num = (ex_bit_from_reg && ex_is_bit_imm)                          ? {2'b00, rd_a_bit_num[2:0]} :
+                     (ex_bit_from_reg && (ex_is_mem_rd || ex_is_mem_rmw))        ? {2'b00, rd_b_data[2:0]}    :
+                     ex_bit_from_reg                                              ? rd_a_bit_num : ex_bit_num;
     assign bit_op  = ex_bit_op;
 
     // -----------------------------------------------------------------------
