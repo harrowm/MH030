@@ -255,7 +255,7 @@ module exc_tb;
         bus_err_req = 0; illegal_req = 0;
         wait_idle;
 
-        chk32("EXC-3 push1_data",  t_wdata[1], 32'hA008_2700);  // vec=2, fmt=$A
+        chk32("EXC-3 push7_data",  t_wdata[7], 32'hA008_2700);  // vec=2, fmt=$A at step_rem=0
         if (trans_cnt !== 5'd9) begin
             $display("FAIL EXC-3 trans_cnt=%0d (exp 9)", trans_cnt);
             fail = fail + 1;
@@ -266,9 +266,9 @@ module exc_tb;
         // EXC-4: CHK → format $2, vec=6, 3 LW writes + 1 read = 4 trans
         //   ssp=0x3000, ssp_delta=12, new_ssp=0x2FF4
         //   fmtvec = {4'h2,2'b00,8'd6,2'b00} = 0x2018
-        //   push[0]: addr=0x2FFC  data=fault_pc
-        //   push[1]: addr=0x2FF8  data={0x2018,0x2700}
-        //   push[2]: addr=0x2FF4  data=fault_addr
+        //   push[0]: addr=0x2FFC  data=fault_addr  (step_rem=2)
+        //   push[1]: addr=0x2FF8  data=snap_pc_r   (step_rem=1)
+        //   push[2]: addr=0x2FF4  data={fmtvec,SR} (step_rem=0)
         // ================================================================
         $display("--- EXC-4: CHK format $2 ---");
         begin_test;
@@ -283,11 +283,11 @@ module exc_tb;
         wait_idle;
 
         chk32("EXC-4 push0_addr",  t_addr[0],  32'h0000_2FFC);
-        chk32("EXC-4 push0_data",  t_wdata[0], 32'h0000_2500);
+        chk32("EXC-4 push0_data",  t_wdata[0], 32'hDEAD_BEEF);   // fault_addr (step_rem=2)
         chk32("EXC-4 push1_addr",  t_addr[1],  32'h0000_2FF8);
-        chk32("EXC-4 push1_data",  t_wdata[1], 32'h2018_2700);
+        chk32("EXC-4 push1_data",  t_wdata[1], 32'h0000_2500);   // snap_pc_r  (step_rem=1)
         chk32("EXC-4 push2_addr",  t_addr[2],  32'h0000_2FF4);
-        chk32("EXC-4 push2_data",  t_wdata[2], 32'hDEAD_BEEF);
+        chk32("EXC-4 push2_data",  t_wdata[2], 32'h2018_2700);   // {fmtvec,SR}(step_rem=0)
         chk32("EXC-4 ssp_out",     last_ssp,   32'h0000_2FF4);
         if (trans_cnt !== 5'd4) begin
             $display("FAIL EXC-4 trans_cnt=%0d (exp 4)", trans_cnt);
@@ -363,10 +363,10 @@ module exc_tb;
         // ================================================================
         // EXC-8: Address error → format $3, vec=3, 4 LW writes
         //   ssp=0x8000, ssp_delta=16, new_ssp=0x7FF0
-        //   push[0]: 0x7FFC  data=fault_pc
-        //   push[1]: 0x7FF8  data={fmtvec,sr}  fmtvec={4'h3,2'b00,8'd3,2'b00}=0x300C
-        //   push[2]: 0x7FF4  data=fault_addr
-        //   push[3]: 0x7FF0  data={fault_ssw,16'h0}
+        //   push[0]: 0x7FFC  data={fault_ssw,0}  (step_rem=3)
+        //   push[1]: 0x7FF8  data=fault_addr      (step_rem=2)
+        //   push[2]: 0x7FF4  data=snap_pc_r       (step_rem=1)
+        //   push[3]: 0x7FF0  data={fmtvec,sr}     (step_rem=0)  fmtvec=0x300C
         // ================================================================
         $display("--- EXC-8: Address error format $3 ---");
         begin_test;
@@ -382,9 +382,9 @@ module exc_tb;
         wait_idle;
 
         // fmtvec = {4'h3,2'b00,8'd3,2'b00} = {0011_00_00000011_00} = 0x300C
-        chk32("EXC-8 push1_data",  t_wdata[1], 32'h300C_2000);
-        chk32("EXC-8 push2_data",  t_wdata[2], 32'h0000_0001);  // fault_addr
-        chk32("EXC-8 push3_data",  t_wdata[3], 32'h0041_0000);  // {ssw,0}
+        chk32("EXC-8 push1_data",  t_wdata[1], 32'h0000_0001);  // fault_addr (step_rem=2)
+        chk32("EXC-8 push2_data",  t_wdata[2], 32'h0000_7500);  // snap_pc_r  (step_rem=1)
+        chk32("EXC-8 push3_data",  t_wdata[3], 32'h300C_2000);  // {fmtvec,SR}(step_rem=0)
         chk32("EXC-8 ssp_out",     last_ssp,   32'h0000_7FF0);
         if (trans_cnt !== 5'd5) begin
             $display("FAIL EXC-8 trans_cnt=%0d (exp 5)", trans_cnt);
@@ -397,12 +397,12 @@ module exc_tb;
         //   fault_data = 0xD0B0_CAFE (Data Output Buffer)
         //   fault_ssw  = 0x9ABC
         //
-        //   step 0 @ 0x8FFC: fault_pc
-        //   step 1 @ 0x8FF8: {fmtvec,sr}  fmtvec={4'h9,2'b00,8'd2,2'b00}=0x9008
-        //   step 2 @ 0x8FF4: fault_addr
-        //   step 3 @ 0x8FF0: {fault_ssw,16'h0} = 0x9ABC_0000
-        //   step 4 @ 0x8FEC: fault_data = 0xD0B0_CAFE
-        //   step 5 @ 0x8FE8: 32'h0 (reserved)
+        //   step 0 @ 0x8FFC: reserved/0          (step_rem=5)
+        //   step 1 @ 0x8FF8: fault_data           (step_rem=4) fmtvec={4'h9,...}=0x9008
+        //   step 2 @ 0x8FF4: {fault_ssw,0}        (step_rem=3) = 0x9ABC_0000
+        //   step 3 @ 0x8FF0: fault_addr           (step_rem=2)
+        //   step 4 @ 0x8FEC: snap_pc_r            (step_rem=1)
+        //   step 5 @ 0x8FE8: {fmtvec,SR}          (step_rem=0)
         //   fetch  @ vec_addr = 2*4 = 0x8 (rw=1)
         //   ssp_out = 0x8FE8
         // ================================================================
@@ -423,13 +423,13 @@ module exc_tb;
 
         // fmtvec = {4'h9, 2'b00, 8'd2, 2'b00} = 0x9008
         chk32("EXC-9 push0_addr",  t_addr[0],  32'h0000_8FFC);
-        chk32("EXC-9 push0_data",  t_wdata[0], 32'h0000_8800);
+        chk32("EXC-9 push0_data",  t_wdata[0], 32'h0000_0000);   // reserved  (step_rem=5)
         chk32("EXC-9 push1_addr",  t_addr[1],  32'h0000_8FF8);
-        chk32("EXC-9 push1_data",  t_wdata[1], 32'h9008_2700);
-        chk32("EXC-9 push3_data",  t_wdata[3], 32'h9ABC_0000);  // {ssw,0}
+        chk32("EXC-9 push1_data",  t_wdata[1], 32'hD0B0_CAFE);   // fault_data(step_rem=4)
+        chk32("EXC-9 push3_data",  t_wdata[3], 32'hAABB_CCDD);   // fault_addr(step_rem=2)
         chk32("EXC-9 push4_addr",  t_addr[4],  32'h0000_8FEC);
-        chk32("EXC-9 push4_data",  t_wdata[4], 32'hD0B0_CAFE);  // DOB
-        chk32("EXC-9 push5_data",  t_wdata[5], 32'h0000_0000);  // reserved
+        chk32("EXC-9 push4_data",  t_wdata[4], 32'h0000_8800);   // snap_pc_r (step_rem=1)
+        chk32("EXC-9 push5_data",  t_wdata[5], 32'h9008_2700);   // {fmtvec,SR}(step_rem=0)
         chk32("EXC-9 fetch_addr",  t_addr[6],  32'h0000_0008);  // vec 2 @ 2*4
         chk_bit("EXC-9 fetch_rw", t_rw[6],    1'b1);
         chk32("EXC-9 ssp_out",    last_ssp,    32'h0000_8FE8);  // 0x9000-24
@@ -461,10 +461,11 @@ module exc_tb;
         bus_err_req = 0;
         wait_idle;
 
-        chk32("EXC-10 push1_data", t_wdata[1], 32'hA008_2300);  // fmt=$A, vec=2
-        chk32("EXC-10 push3_data", t_wdata[3], 32'h8100_0000);  // {ssw,0}
-        chk32("EXC-10 push4_addr", t_addr[4],  32'h0000_9FEC);  // 0x9FE0 + 12
-        chk32("EXC-10 push4_data", t_wdata[4], 32'hBEEF_1234);  // DOB
+        chk32("EXC-10 push1_data", t_wdata[1], 32'h0000_0000);   // reserved   (step_rem=6)
+        chk32("EXC-10 push3_data", t_wdata[3], 32'hBEEF_1234);  // fault_data (step_rem=4)
+        chk32("EXC-10 push4_addr", t_addr[4],  32'h0000_9FEC);  // 0x9FE0 + 12 (unchanged)
+        chk32("EXC-10 push4_data", t_wdata[4], 32'h8100_0000);  // {fault_ssw,0}(step_rem=3)
+        chk32("EXC-10 push7_data", t_wdata[7], 32'hA008_2300);  // {fmtvec,SR}(step_rem=0)
         chk32("EXC-10 ssp_out",    last_ssp,   32'h0000_9FE0);  // 0xA000-32
         if (trans_cnt !== 5'd9) begin
             $display("FAIL EXC-10 trans_cnt=%0d (exp 9: 8 writes + 1 read)", trans_cnt);
@@ -493,11 +494,14 @@ module exc_tb;
         wait_idle;
 
         // 0xB000 - 92 = 0xB000 - 0x5C = 0xAFA4
-        chk32("EXC-11 push1_data", t_wdata[1], 32'hB008_2700);  // fmt=$B, vec=2
-        chk32("EXC-11 push2_data", t_wdata[2], 32'hDEAD_C0DE);  // fault_addr
-        chk32("EXC-11 push3_data", t_wdata[3], 32'h0041_0000);  // {ssw,0}
-        chk32("EXC-11 push4_data", t_wdata[4], 32'h1234_ABCD);  // DOB
-        chk32("EXC-11 push5_data", t_wdata[5], 32'h0000_0000);  // reserved
+        // Data at step_rem=0..4 is in the LAST push transactions (high push_step_r)
+        chk32("EXC-11 push1_data",  t_wdata[1],  32'h0000_0000);  // reserved  (step_rem=21)
+        chk32("EXC-11 push5_data",  t_wdata[5],  32'h0000_0000);  // reserved  (step_rem=17)
+        chk32("EXC-11 push18_data", t_wdata[18], 32'h1234_ABCD);  // fault_data(step_rem=4)
+        chk32("EXC-11 push19_data", t_wdata[19], 32'h0041_0000);  // {ssw,0}   (step_rem=3)
+        chk32("EXC-11 push20_data", t_wdata[20], 32'hDEAD_C0DE);  // fault_addr(step_rem=2)
+        chk32("EXC-11 push21_data", t_wdata[21], 32'h0000_A100);  // snap_pc_r (step_rem=1)
+        chk32("EXC-11 push22_data", t_wdata[22], 32'hB008_2700);  // {fmtvec,SR}(step_rem=0)
         chk32("EXC-11 ssp_out",    last_ssp,   32'h0000_AFA4);  // 0xB000-92
         chk32("EXC-11 new_pc",     last_new_pc, 32'h0000_D000);
         if (trans_cnt !== 5'd24) begin

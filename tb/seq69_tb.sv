@@ -469,9 +469,9 @@ module seq69_tb;
 
         // ====================================================================
         // P69-14: CMP2.W (d16,A0),D0 — D0=5, lower=3, upper=10 → in-range C=0
-        //   CMP2.W (d16,An),Rn: 0000 010 0 11 101 rrr + ext
-        //   f_group=0, f_dn=010(=word, since case 010→siz=word), f_dir=0, f_ss=11
-        //   Opcode: 0000 0100 11 101 000 = 0x04E8
+        //   CMP2.W (d16,An),Rn: 0000 001 0 11 101 rrr + ext
+        //   f_group=0, f_dn=001(CMP2.W), f_dir=0, f_ss=11, f_mode=101
+        //   Opcode: 0000 0010 11 101 000 = 0x02E8
         //   ext = {cmp2_ext=[31:16], d16=[15:0]}
         //   cmp2_ext for D0 CMP2: [15]=0(Dn), [14:12]=000(D0), [11]=0(CMP2) = 0x0000
         //   d16=0x10 → EA=A0+0x10=0x910; lower at 0x910, upper at 0x912
@@ -483,7 +483,7 @@ module seq69_tb;
         ram[32'h910 >> 2] = 32'h0003_000A;
         set_an(3'h0, 32'h0000_0900);        // A0 first; set_an clobbers D0
         set_dn(0, 32'h0000_0005);           // D0=5 after A0 is set
-        run_instr(16'h04E8, 1'b1, 32'h0000_0010);  // cmp2_ext=0, d16=0x10
+        run_instr(16'h02E8, 1'b1, 32'h0000_0010);  // cmp2_ext=0, d16=0x10
         chk1("P69-14:C", sr_out[0], 1'b0);   // in-range → C=0
         chk1("P69-14:Z", sr_out[2], 1'b0);   // not equal to either bound
 

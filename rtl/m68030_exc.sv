@@ -239,12 +239,16 @@ module m68030_exc (
                           (snap_fmt_r == FMT_BUS_INS) ||
                           (snap_fmt_r == FMT_BUS_DAT);
 
+    // push_data is indexed by step_rem (= distance from lowest stack address).
+    // step_rem=0 → lowest address (first word read by RTE), step_rem=N-1 → highest.
+    // This is format-agnostic: each slot always carries the same semantic field
+    // regardless of total frame length, so FMT_SHORT/FMT_INST/FMT_ADDR all work.
     always_comb begin
-        case (push_step_r)
-            5'd0:    push_data = snap_pc_r;
-            5'd1:    push_data = {fmtvec, snap_sr_r};
-            5'd2:    push_data = fault_addr;
-            5'd3:    push_data = {fault_ssw, 16'h0};
+        case (step_rem)
+            5'd0:    push_data = {fmtvec, snap_sr_r};          // {format/vec, SR} — RTE phase 1
+            5'd1:    push_data = snap_pc_r;                    // return PC         — RTE phase 2
+            5'd2:    push_data = fault_addr;                   // instr/fault addr  — frame slot 2
+            5'd3:    push_data = {fault_ssw, 16'h0};           // fault SSW         — frame slot 3
             5'd4:    push_data = fmt_is_fault ? snap_dob_r : 32'h0;
             default: push_data = 32'h0;
         endcase

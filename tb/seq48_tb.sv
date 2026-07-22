@@ -305,7 +305,7 @@ module seq48_tb;
 
         // ============================================================
         // CMP2.L (A0),D0 — two memory reads: lower at A0, upper at A0+4
-        // CMP2.L (A0),D0: instr = 0000 100 0 11 010 000 = 0x08D0
+        // CMP2.L (A0),D0: instr = 0000 0100 11 010 000 = 0x04D0  (f_dn=010, !f_dn[2])
         //                 ext   = {D(0), D0(000), CMP2(0), ...} = 0x0000
         // Set up: mem_store[A0>>2] = lower_bound, mem_store[(A0>>2)+1] = upper_bound
         // ============================================================
@@ -317,35 +317,35 @@ module seq48_tb;
 
         // Test 10: D0=50, range [10..100] → in range, C=0, Z=0
         set_dn(3'd0, 32'd50);
-        run_instr(16'h08D0, 32'h0000, 1'b1);
+        run_instr(16'h04D0, 32'h0000, 1'b1);
         check(`SR_C, 1'b0, "CMP2.L in-range: C=0");
         check(`SR_Z, 1'b0, "CMP2.L in-range: Z=0");
 
         // Test 11: D0=10 (equals lower bound) → Z=1, C=0
         set_dn(3'd0, 32'd10);
-        run_instr(16'h08D0, 32'h0000, 1'b1);
+        run_instr(16'h04D0, 32'h0000, 1'b1);
         check(`SR_C, 1'b0, "CMP2.L eq lower: C=0");
         check(`SR_Z, 1'b1, "CMP2.L eq lower: Z=1");
 
         // Test 12: D0=100 (equals upper bound) → Z=1, C=0
         set_dn(3'd0, 32'd100);
-        run_instr(16'h08D0, 32'h0000, 1'b1);
+        run_instr(16'h04D0, 32'h0000, 1'b1);
         check(`SR_C, 1'b0, "CMP2.L eq upper: C=0");
         check(`SR_Z, 1'b1, "CMP2.L eq upper: Z=1");
 
         // Test 13: D0=5 (below lower) → C=1
         set_dn(3'd0, 32'd5);
-        run_instr(16'h08D0, 32'h0000, 1'b1);
+        run_instr(16'h04D0, 32'h0000, 1'b1);
         check(`SR_C, 1'b1, "CMP2.L below lower: C=1");
 
         // Test 14: D0=150 (above upper) → C=1
         set_dn(3'd0, 32'd150);
-        run_instr(16'h08D0, 32'h0000, 1'b1);
+        run_instr(16'h04D0, 32'h0000, 1'b1);
         check(`SR_C, 1'b1, "CMP2.L above upper: C=1");
 
         // ============================================================
         // CHK2.L (A0),D0 — same as CMP2 but ext[11]=1 → fires chk_trap if C=1
-        // CHK2.L (A0),D0: instr = 0x08D0, ext = 0x0800 (bit 11 set)
+        // CHK2.L (A0),D0: instr = 0x04D0, ext = 0x0800 (bit 11 set)
         // ============================================================
 
         // bounds still: lower=10, upper=100 (mem_store[2/3] unchanged)
@@ -353,14 +353,14 @@ module seq48_tb;
         // Test 15: D0=50 (in range) → no trap
         set_dn(3'd0, 32'd50);
         trap_before = chk_trap_cnt;
-        run_instr(16'h08D0, 32'h0800, 1'b1);
+        run_instr(16'h04D0, 32'h0800, 1'b1);
         check(`SR_C, 1'b0, "CHK2.L in-range: C=0");
         check(chk_trap_cnt - trap_before, 64'd0, "CHK2.L in-range: no trap");
 
         // Test 16: D0=5 (out of range) → trap fires, C=1
         set_dn(3'd0, 32'd5);
         trap_before = chk_trap_cnt;
-        run_instr(16'h08D0, 32'h0800, 1'b1);
+        run_instr(16'h04D0, 32'h0800, 1'b1);
         check(`SR_C, 1'b1, "CHK2.L out-range: C=1");
         check(chk_trap_cnt - trap_before, 64'd1, "CHK2.L out-range: trap");
 

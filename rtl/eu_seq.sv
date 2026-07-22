@@ -4646,6 +4646,7 @@ module eu_seq (
     logic        rte_phase_r;
     logic [15:0] rte_sr_r;
     logic [31:0] rte_a7_next_r;
+    logic  [7:0] rte_fmt_skip_r;  // extra bytes beyond base 8 determined by frame format
     logic        rte_sr_wr_en;    // combinational: fire full-SR write when phase-2 acks
     logic        rte_an_wr_en;    // combinational: update A7 when phase-2 acks
 
@@ -5722,10 +5723,12 @@ module eu_seq (
             rte_phase_r   <= 1'b0;
             rte_sr_r      <= 16'h0;
             rte_a7_next_r <= 32'h0;
+            rte_fmt_skip_r <= 8'h0;
         end else if (ex_valid && ex_is_rte && !rte_phase_r && mem_ack && !eu_fmt_err_req) begin
-            rte_phase_r   <= 1'b1;
-            rte_sr_r      <= mem_rdata[15:0];   // SR from {format_word, SR} longword at A7
-            rte_a7_next_r <= ex_ea + 32'd4;     // simplified: A7+4 (same convention as RTR)
+            rte_phase_r    <= 1'b1;
+            rte_sr_r       <= mem_rdata[15:0];   // SR from {format_word, SR} longword at A7
+            rte_a7_next_r  <= ex_ea + 32'd4;     // A7+4; phase 2 will add 4 + skip
+            rte_fmt_skip_r <= rte_frame_extra(mem_rdata[31:28]);
         end else if (ex_valid && ex_is_rte && rte_phase_r && mem_ack) begin
             rte_phase_r   <= 1'b0;
         end
@@ -7003,7 +7006,7 @@ module eu_seq (
                      :                        wb_an_upd_reg;
     assign an_wr_data = movem_an_wr_en       ? movem_an_final
                       : rtr_an_wr_en         ? rtr_an_wr_data
-                      : rte_an_wr_en         ? (rte_a7_next_r + 32'd4)
+                      : rte_an_wr_en         ? (rte_a7_next_r + 32'd4 + {24'h0, rte_fmt_skip_r})
                       : move16_an1_wr_en     ? move16_src_base_r + 32'd16
                       : move16_an2_wr_r      ? move16_dst_base_r + 32'd16
                       : addx_ay_wr_en        ? addx_ay_addr_r
@@ -7147,6 +7150,22 @@ module eu_seq (
             default: return 1'b0;
         endcase
     endfunction
+
+    // Extra bytes to pop beyond the base 8 (2 LW: {fmtvec,SR} + PC) already consumed.
+    // Frame sizes: $0=2LW $2=3LW $3=4LW $4=8LW $8=29LW $9=12LW $A=16LW $B=46LW
+    function automatic logic [7:0] rte_frame_extra(input logic [3:0] code);
+        case (code)
+            4'h0:    return 8'd0;    // 8 bytes total
+            4'h2:    return 8'd4;    // 12 bytes total (TRAPV, CHK)
+            4'h3:    return 8'd8;    // 16 bytes total
+            4'h4:    return 8'd24;   // 32 bytes total
+            4'h8:    return 8'd108;  // 116 bytes total
+            4'h9:    return 8'd40;   // 48 bytes total
+            4'hA:    return 8'd56;   // 64 bytes total
+            4'hB:    return 8'd176;  // 184 bytes total
+            default: return 8'd0;
+        endcase
+    endfunction
     assign eu_fmt_err_req = ex_valid && ex_is_rte && !rte_phase_r && mem_ack &&
                             !rte_fmt_valid(mem_rdata[31:28]);
 
@@ -7213,7 +7232,7 @@ module eu_seq (
                        bcds_run_r     ? 2'b01 :
                        (cas2_rd2_r || cas2_wr1_r || cas2_wr2_r) ? cas2_siz_r :
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
-                       (ex_is_rte && !rte_phase_r) ? 2'b10 :
+                       (ex_is_rte && !rte_phase_r) ? 2'b00 :  // longword: reads {format_word,SR} together
                        (ex_mem_rd_siz != 2'b00)    ? ex_mem_rd_siz :
                        ex_siz;
     // Phase 46: MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)

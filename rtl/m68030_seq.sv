@@ -344,19 +344,20 @@ module m68030_seq (
         else if ((f_group == 4'h0) && !f_dir && (f_dn == 3'b100) &&
                  (f_mode == 3'b111 && f_reg == 3'b001))
             ext_count = 3'd3;
-        // Phase 78+: static BTST/BCHG/BCLR/BSET #n with d16(An)/indexed/(xxx).W (bit_num + EA)
+        // Phase 78+: static BTST/BCHG/BCLR/BSET #n with d16(An)/indexed/abs.W/(d16,PC)/(d8,PC,Xn)
         else if ((f_group == 4'h0) && !f_dir && (f_dn == 3'b100) &&
                  (f_mode == 3'b101 || f_mode == 3'b110 ||
-                  (f_mode == 3'b111 && f_reg == 3'b000)))
+                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011))))
             ext_count = 3'd2;
         // Phase 78+: dynamic BTST/BCHG/BCLR/BSET Dn with abs.L (2 addr words)
         else if ((f_group == 4'h0) && f_dir &&
                  (f_mode == 3'b111 && f_reg == 3'b001))
             ext_count = 3'd2;
-        // Phase 78+: dynamic BTST/BCHG/BCLR/BSET Dn with d16(An)/indexed/(xxx).W (1 EA word)
+        // Phase 78+: dynamic BTST/BCHG/BCLR/BSET Dn with d16(An)/indexed/abs.W/(d16,PC)/(d8,PC,Xn)/#imm
         else if ((f_group == 4'h0) && f_dir &&
                  (f_mode == 3'b101 || f_mode == 3'b110 ||
-                  (f_mode == 3'b111 && f_reg == 3'b000)))
+                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 ||
+                                        f_reg == 3'b011 || f_reg == 3'b100))))
             ext_count = 3'd1;
         // Phase 78+: Scc abs.L — 2 ext words for 32-bit absolute address
         else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b001))
@@ -364,6 +365,14 @@ module m68030_seq (
         // Phase 78+: NBCD abs.W — 1 ext word for 16-bit absolute address
         else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b100) && (f_ss == 2'b00) &&
                  (f_mode == 3'b111 && f_reg == 3'b000))
+            ext_count = 3'd1;
+        // Phase 78+: CMP2/CHK2 (d16,An)/(xxx).W/(d16,PC) — 2 ext words
+        else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) && !f_dn[2] && (f_dn != 3'b011) &&
+                 (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010))))
+            ext_count = 3'd2;
+        // Phase 78+: CMP2/CHK2 (An) — 1 ext word (register descriptor)
+        else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) && !f_dn[2] && (f_dn != 3'b011) &&
+                 (f_mode == 3'b010))
             ext_count = 3'd1;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
