@@ -374,6 +374,14 @@ module m68030_seq (
         else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) && !f_dn[2] && (f_dn != 3'b011) &&
                  (f_mode == 3'b010))
             ext_count = 3'd1;
+        // Phase 48: CHK #imm, Dn — 1 ext word (word bound) or 2 (long bound)
+        else if ((f_group == 4'h4) && f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
+                 (f_mode == 3'b111) && (f_reg == 3'b100))
+            ext_count = (f_ss == 2'b10) ? 3'd1 : 3'd2;
+        // Phase 48: CHK (d16,An)/(xxx).W, Dn — 1 ext word for displacement/address
+        else if ((f_group == 4'h4) && f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
+                 (f_mode == 3'b101 || (f_mode == 3'b111 && f_reg == 3'b000)))
+            ext_count = 3'd1;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
             ext_count = 3'd2;
