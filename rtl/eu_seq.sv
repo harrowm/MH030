@@ -2992,6 +2992,7 @@ module eu_seq (
                                     dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
                                 end
                                 3'b111: begin  // (xxx).L: 2 ext words
+                                    dec_needs_ext  = 1'b1;
                                     dec_abs_ea_en  = 1'b1;
                                     dec_abs_ea_val = ext_data;  // full 32-bit from both ext words
                                 end
