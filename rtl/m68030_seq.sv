@@ -130,6 +130,11 @@ module m68030_seq (
                       (f_dn == 3'b100 || f_dn == 3'b110) &&
                       (f_mode == 3'b100 || f_mode == 3'b011 || f_mode == 3'b010);
 
+    // MOVEP: 0000 Dn 1 ss 001 An + d16 — exactly 1 extension word (displacement)
+    // f_mode==001 is An-direct, only legal as the MOVEP EA mode in group 0 with f_dir=1
+    logic is_movep;
+    assign is_movep = (f_group == 4'h0) && f_dir && (f_mode == 3'b001);
+
     // Phase 41: brief indexed EA (d8,An,Xn) — always 1 extension word
     logic is_move_idx_src;   // groups 1/2/3, src mode=110 (indexed)
     assign is_move_idx_src = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
@@ -387,7 +392,7 @@ module m68030_seq (
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
-                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem ||
+                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem || is_movep ||
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
                  is_rtd || is_stop_opcode || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||
