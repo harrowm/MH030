@@ -248,6 +248,32 @@ int main(int argc, char** argv) {
                         mp_av, mp_dv, mp_wb, iac, dim, rbd, mrq, mak);
             }
         }
+        // MOVEM-FSM trace: dump write-data path whenever movem_run_r is active
+        if (getenv("MUSTEST_MOVEM_TRACE")) {
+            auto* r = top->rootp;
+            uint8_t  mv_run  = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_run_r;
+            if (mv_run) {
+                uint8_t  mv_ld   = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_load_r;
+                uint8_t  mv_lng  = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_long_r;
+                uint16_t mv_msk  = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_mask_r;
+                uint8_t  mv_bidx = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_bit_idx;
+                uint8_t  mv_rsel = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_reg_sel;
+                uint32_t mv_addr = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__movem_addr_r;
+                uint8_t  ra_sel  = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__rd_a_sel;
+                uint32_t ra_data = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__rd_a_data;
+                uint32_t mem_wd  = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__mem_wdata;
+                uint32_t biu_wd  = r->mustest_tb__DOT__u_top__DOT__biu_eu_wdata;
+                uint8_t  mrq     = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__mem_req;
+                uint8_t  mak     = r->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_seq__DOT__mem_ack;
+                uint8_t  sf_st   = r->mustest_tb__DOT__u_top__DOT__u_biu__DOT__u_sf__DOT__sf;
+                uint32_t sf_wd   = r->mustest_tb__DOT__u_top__DOT__u_biu__DOT__u_sf__DOT__sf_wdata;
+                uint32_t d_out   = r->mustest_tb__DOT__ext_d_out;
+                fprintf(stderr, "[movem %7d] run=%d ld=%d lng=%d mask=%04x bidx=%d rsel=%d addr=%08x"
+                        " ra_sel=%d ra_data=%08x mwd=%08x biuwd=%08x mrq=%d mak=%d sf=%d sfwd=%08x dout=%08x\n",
+                        i, mv_run, mv_ld, mv_lng, mv_msk, mv_bidx, mv_rsel, mv_addr,
+                        ra_sel, ra_data, mem_wd, biu_wd, mrq, mak, sf_st, sf_wd, d_out);
+            }
+        }
         // Periodic D4 dump (every 2M cycles) if MUSTEST_REGDUMP set
         if (getenv("MUSTEST_REGDUMP") && (i % 2000000 == 0) && i > 0) {
             auto& dreg = top->rootp->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_rf__DOT__d_reg;

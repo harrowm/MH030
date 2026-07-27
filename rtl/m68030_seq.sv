@@ -135,6 +135,19 @@ module m68030_seq (
     logic is_movep;
     assign is_movep = (f_group == 4'h0) && f_dir && (f_mode == 3'b001);
 
+    // MOVEM with extended EA: group 4, !f_dir, f_ss[1]=1, f_dn=100/110
+    // 2-ext-word: (d16,An)/indexed/abs.W/(d16,PC)/(d8,PC,Xn)
+    logic is_movem_2ext;
+    assign is_movem_2ext = (f_group == 4'h4) && !f_dir && f_ss[1] &&
+                           (f_dn == 3'b100 || f_dn == 3'b110) &&
+                           (f_mode == 3'b101 || f_mode == 3'b110 ||
+                            (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011)));
+    // 3-ext-word: abs.L
+    logic is_movem_3ext;
+    assign is_movem_3ext = (f_group == 4'h4) && !f_dir && f_ss[1] &&
+                           (f_dn == 3'b100 || f_dn == 3'b110) &&
+                           (f_mode == 3'b111 && f_reg == 3'b001);
+
     // Phase 41: brief indexed EA (d8,An,Xn) — always 1 extension word
     logic is_move_idx_src;   // groups 1/2/3, src mode=110 (indexed)
     assign is_move_idx_src = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
@@ -387,8 +400,11 @@ module m68030_seq (
         else if ((f_group == 4'h4) && f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
                  (f_mode == 3'b101 || (f_mode == 3'b111 && f_reg == 3'b000)))
             ext_count = 3'd1;
+        else if (is_movem_3ext)
+            ext_count = 3'd3;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
-                 is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long)
+                 is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long ||
+                 is_movem_2ext)
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||

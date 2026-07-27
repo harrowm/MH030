@@ -2889,7 +2889,12 @@ module eu_seq (
                                     dec_abs_ea_en     = 1'b1;
                                     dec_abs_ea_val    = {{16{ext_data[15]}}, ext_data[15:0]};
                                 end
-                                // (xxx).L: 3 ext words — deferred
+                                3'b001: begin  // (xxx).L: 3 ext words — mask=[31:16], abs_h=[15:0], abs_l=q3_word
+                                    dec_valid         = 1'b1;
+                                    dec_movem_mask_hi = 1'b1;
+                                    dec_abs_ea_en     = 1'b1;
+                                    dec_abs_ea_val    = {ext_data[15:0], q3_word};
+                                end
                                 3'b010: begin  // (d16,PC) load: mask=[31:16], d16=[15:0]
                                     if (f_dn == 3'b110) begin
                                         dec_valid         = 1'b1;
@@ -3250,6 +3255,7 @@ module eu_seq (
                         dec_siz              = 2'b01;
                         dec_is_abcd_sbcd_mem = 1'b1;
                         dec_is_abcd_mem      = 1'b0;
+                        dec_updates_ccr      = 1'b1;
                         dec_src_reg          = {1'b1, f_reg};
                         dec_dst_reg          = {1'b1, f_dn};
                         dec_reads_src        = 1'b1;
@@ -3381,6 +3387,7 @@ module eu_seq (
                         dec_unit        = UNIT_ALU;
                         dec_alu_op      = ALU_SUBX;
                         dec_siz         = f_siz;
+                        dec_updates_ccr = 1'b1;
                         dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
                         dec_dst_reg     = {1'b1, f_dn};   // Ax → rd_b
                         dec_reads_src   = 1'b1;
@@ -3842,6 +3849,7 @@ module eu_seq (
                         dec_siz              = 2'b01;
                         dec_is_abcd_sbcd_mem = 1'b1;
                         dec_is_abcd_mem      = 1'b1;
+                        dec_updates_ccr      = 1'b1;
                         dec_src_reg          = {1'b1, f_reg};
                         dec_dst_reg          = {1'b1, f_dn};
                         dec_reads_src        = 1'b1;
@@ -4023,6 +4031,7 @@ module eu_seq (
                         dec_unit        = UNIT_ALU;
                         dec_alu_op      = ALU_ADDX;
                         dec_siz         = f_siz;
+                        dec_updates_ccr = 1'b1;
                         dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
                         dec_dst_reg     = {1'b1, f_dn};   // Ax → rd_b
                         dec_reads_src   = 1'b1;
@@ -4881,7 +4890,8 @@ module eu_seq (
                                             : (movem_addr_r + movem_step);
 
     // Phase 49: MOVEP byte-interleaved FSM state — declared early for ex_mem_stall
-    logic        movep_start_r;       // 1-cycle EA-capture stall
+    logic        movep_start_r;       // cycle 1: capture Dn/addr (ex_ea valid, rd_b_data valid)
+    logic        movep_pre_r;         // cycle 2: movep_wr_byte_r stable; assert movep_run_r next
     logic        movep_run_r;         // bus sequence active
     logic        movep_load_r;        // 1=mem→Dn (load), 0=Dn→mem (store)
     logic        movep_long_r;        // 1=longword (4 bytes), 0=word (2 bytes)
@@ -4891,7 +4901,7 @@ module eu_seq (
     logic [31:0] movep_dn_val_r;      // captured Dn value for stores
     logic [31:0] movep_acc_r;         // accumulated load data
     logic        movep_last;          // final byte this cycle
-    logic [7:0]  movep_wr_byte_w;     // byte to send for stores
+    logic [7:0]  movep_wr_byte_r;     // pre-registered byte to send (avoids comb ordering issue)
     logic [31:0] movep_rd_acc_w;      // accumulator updated with current byte
     logic        movep_wr_en;         // register writeback for loads
     logic [31:0] movep_wr_data;
@@ -4900,20 +4910,6 @@ module eu_seq (
     assign movep_last = movep_run_r && mem_ack &&
                         ((movep_long_r && movep_byte_r == 2'd3) ||
                          (!movep_long_r && movep_byte_r == 2'd1));
-
-    always_comb begin
-        movep_wr_byte_w = 8'h0;
-        if (movep_long_r) begin
-            case (movep_byte_r)
-                2'd0: movep_wr_byte_w = movep_dn_val_r[31:24];
-                2'd1: movep_wr_byte_w = movep_dn_val_r[23:16];
-                2'd2: movep_wr_byte_w = movep_dn_val_r[15:8];
-                2'd3: movep_wr_byte_w = movep_dn_val_r[7:0];
-            endcase
-        end else begin
-            movep_wr_byte_w = movep_byte_r[0] ? movep_dn_val_r[7:0] : movep_dn_val_r[15:8];
-        end
-    end
 
     always_comb begin
         movep_rd_acc_w = movep_acc_r;
@@ -5053,7 +5049,7 @@ module eu_seq (
     // During cmp2_after_r and tas_after_write_r cooldowns, suppress bus req and mem-wait
     // stall so EX can advance cleanly without a spurious bus cycle.
     assign ex_mem_stall = tas_run_r || tas_read_ack || movem_start_r || movem_run_r ||
-                          movep_start_r || movep_run_r ||
+                          movep_start_r || movep_pre_r || movep_run_r ||
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
@@ -5877,6 +5873,7 @@ module eu_seq (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             movep_start_r  <= 1'b0;
+            movep_pre_r    <= 1'b0;
             movep_run_r    <= 1'b0;
             movep_load_r   <= 1'b0;
             movep_long_r   <= 1'b0;
@@ -5885,23 +5882,42 @@ module eu_seq (
             movep_dn_r     <= 3'h0;
             movep_dn_val_r <= 32'h0;
             movep_acc_r    <= 32'h0;
-        end else if (!movep_start_r && !movep_run_r && instr_ack && dec_is_movep) begin
+            movep_wr_byte_r <= 8'h0;
+        end else if (!movep_start_r && !movep_pre_r && !movep_run_r && instr_ack && dec_is_movep) begin
             movep_start_r <= 1'b1;
             movep_load_r  <= dec_movep_load;
             movep_long_r  <= dec_movep_long;
             movep_dn_r    <= f_dn;
         end else if (movep_start_r) begin
+            // Cycle 1: EX stage holds MOVEP (ex_ea, rd_b_data valid).
+            // Capture Dn value and byte 0 — movep_wr_byte_r will be stable NEXT cycle.
             movep_start_r  <= 1'b0;
-            movep_run_r    <= 1'b1;
+            movep_pre_r    <= 1'b1;
             movep_byte_r   <= 2'd0;
             movep_addr_r   <= ex_ea;       // EA = An + d16 from EX combinatorial
-            movep_dn_val_r <= rd_b_data;   // Dn value for stores
+            movep_dn_val_r <= rd_b_data;   // Dn value for stores (full longword)
             movep_acc_r    <= 32'h0;
+            movep_wr_byte_r <= movep_long_r ? rd_b_data[31:24] : rd_b_data[15:8];
+        end else if (movep_pre_r) begin
+            // Cycle 2: movep_wr_byte_r is now stable from cycle 1.
+            // Assert movep_run_r so eu_req goes high with stable wdata.
+            movep_pre_r  <= 1'b0;
+            movep_run_r  <= 1'b1;
         end else if (movep_run_r && mem_ack) begin
             movep_byte_r  <= movep_byte_r + 2'd1;
             movep_addr_r  <= movep_addr_r + 32'd2;
             movep_acc_r   <= movep_rd_acc_w;
-            if (movep_last) movep_run_r <= 1'b0;
+            if (movep_last) begin
+                movep_run_r <= 1'b0;
+            end else begin
+                // Pre-register next byte — will be stable by the next bus cycle
+                if (movep_long_r)
+                    movep_wr_byte_r <= (movep_byte_r == 2'd0) ? movep_dn_val_r[23:16] :
+                                       (movep_byte_r == 2'd1) ? movep_dn_val_r[15:8]  :
+                                                                 movep_dn_val_r[7:0];
+                else
+                    movep_wr_byte_r <= movep_dn_val_r[7:0];
+            end
         end
     end
 
@@ -6146,8 +6162,8 @@ module eu_seq (
     // Write data for phase 1
     logic [31:0] pack_mem_wdata_w;
     assign pack_mem_wdata_w = pack_mem_is_unpk_r
-        ? {16'h0, pack_mem_temp_w}                                       // UNPK: write word
-        : {24'h0, pack_mem_temp_w[11:8], pack_mem_temp_w[3:0]};         // PACK: write byte
+        ? {pack_mem_temp_w, 16'h0}                                       // UNPK: write word in [31:16]
+        : {pack_mem_temp_w[11:8], pack_mem_temp_w[3:0], 24'h0};         // PACK: write byte in [31:24]
     // Phase 0 read size / phase 1 write size
     logic [1:0] pack_mem_cur_siz;
     assign pack_mem_cur_siz = pack_mem_phase_r
@@ -7094,6 +7110,32 @@ module eu_seq (
     assign dec_branch_taken = dec_valid && !stall && dec_is_branch &&
                               eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c);
 
+    // synthesis translate_off
+    integer _bcc1_tk, _bcc1_nt, _bcc2_tk, _bcc2_nt;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            _bcc1_tk <= 0; _bcc1_nt <= 0; _bcc2_tk <= 0; _bcc2_nt <= 0;
+        end else begin
+            if (dec_valid && !stall && dec_is_branch && dec_branch_cond == 4'h4) begin
+                if (decode_pc[15:0] == 16'h0082) begin
+                    if (dec_branch_taken) _bcc1_tk <= _bcc1_tk + 1;
+                    else                  _bcc1_nt <= _bcc1_nt + 1;
+                    if ((_bcc1_tk + _bcc1_nt + 1) % 5000 == 0)
+                        $display("BCC1_STAT iter=%0d taken=%0d notaken=%0d",
+                                 _bcc1_tk+_bcc1_nt+1, _bcc1_tk, _bcc1_nt);
+                end
+                if (decode_pc[15:0] == 16'h008c) begin
+                    if (dec_branch_taken) _bcc2_tk <= _bcc2_tk + 1;
+                    else                  _bcc2_nt <= _bcc2_nt + 1;
+                    if ((_bcc2_tk + _bcc2_nt + 1) % 5000 == 0)
+                        $display("BCC2_STAT iter=%0d taken=%0d notaken=%0d",
+                                 _bcc2_tk+_bcc2_nt+1, _bcc2_tk, _bcc2_nt);
+                end
+            end
+        end
+    end
+    // synthesis translate_on
+
     // -----------------------------------------------------------------------
     // DBcc branch — decided at EX stage (needs ALU result to check counter).
     // Branch taken when: condition is FALSE AND decremented counter != 0xFFFF.
@@ -7267,7 +7309,7 @@ module eu_seq (
     assign mem_wdata = cas2_wr1_r               ? cas2_du1_val_r
                      : cas2_wr2_r              ? cas2_du2_val_r
                      : cas_write_r             ? cas_du_val_r
-                     : (bcds_run_r && bcds_phase_r == 2'd2) ? {24'h0, bcd_result}
+                     : (bcds_run_r && bcds_phase_r == 2'd2) ? {bcd_result, 24'h0}
                      : mem_rmw_run_r            ? mem_rmw_wdata_r
                      : move_mm_run_r            ? move_mm_data_r
                      : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ?
@@ -7276,8 +7318,8 @@ module eu_seq (
                         :                    ex_result)
                      : (bf_mem_run_r && bf_mem_phase_r) ? bf_result_w
                      : (pack_mem_run_r && pack_mem_phase_r) ? pack_mem_wdata_w
-                     : tas_run_r               ? {24'h0, tas_wdata_r}
-                     : movep_run_r             ? {24'h0, movep_wr_byte_w}
+                     : tas_run_r               ? {tas_wdata_r, 24'h0}
+                     : movep_run_r             ? {movep_wr_byte_r, 24'h0}
                      : move16_run_r            ? move16_wdata_w
                      : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w
                      : (ex_is_pmove64 && ex_pmove_to_mem) ? pmove64_wr_data_w
@@ -7289,6 +7331,7 @@ module eu_seq (
                          ((ex_siz==2'b01) ? {ex_imm[7:0],  24'h0}
                         : (ex_siz==2'b10) ? {ex_imm[15:0], 16'h0}
                         :                    ex_imm)
+                     : (movem_run_r && !movem_load_r && !movem_long_r) ? {rd_a_data[15:0], 16'h0}
                      : (ex_siz==2'b01) ? {rd_a_data[7:0],  24'h0}
                      : (ex_siz==2'b10) ? {rd_a_data[15:0], 16'h0}
                      :                    rd_a_data;
