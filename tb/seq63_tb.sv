@@ -359,8 +359,8 @@ module seq63_tb;
         // Set ram[0x40] = 0x0000_ABCD so bits[15:0] = 0xABCD
         // temp = 0xABCD; result_byte = 0xBD
         // Predec A1 by 1 → A1=0x01FF, write byte 0xBD to M[0x01FF]
-        //   mem_wdata = {24'h0, 0xBD} = 0x000000BD
-        //   ram[0x01FC >> 2] = ram[0x7F] = 0x000000BD
+        //   mem_wdata = {0xBD, 24'h0} = 0xBD000000
+        //   ram[0x01FC >> 2] = ram[0x7F] = 0xBD000000
         // ==================================================================
         $display("--- P63-07: PACK -(A0),-(A1),#0 memory ---");
         ram[32'h0100 >> 2] = 32'h0000_ABCD;  // source longword; bits[15:0] = 0xABCD
@@ -378,7 +378,7 @@ module seq63_tb;
         run_instr(16'h2F09, 1'b0, 32'h0);  // MOVE.L A1,-(A7) → M[0x1FE8]
         chk("P63-07:A1", ram[32'h1FE8 >> 2], 32'h0000_01FF);
         // Written byte at M[0x01FF] → ram[0x01FC>>2]=ram[0x7F]
-        chk("P63-07:result", ram[32'h01FC >> 2], 32'h0000_00BD);
+        chk("P63-07:result", ram[32'h01FC >> 2], 32'hBD00_0000);
 
         // ==================================================================
         // P63-08: UNPK -(A0),-(A1),#0 — memory form
@@ -387,8 +387,8 @@ module seq63_tb;
         // Set ram[0x40] = 0x0000_00AB so bits[7:0] = 0xAB
         // temp = {0,A,0,B} = 0x0A0B
         // Predec A1 by 2 → A1=0x0200, write word 0x0A0B to M[0x0200]
-        //   mem_wdata = {16'h0, 0x0A0B}
-        //   ram[0x0200 >> 2] = ram[0x80] = 0x00000A0B
+        //   mem_wdata = {0x0A0B, 16'h0} = 0x0A0B0000
+        //   ram[0x0200 >> 2] = ram[0x80] = 0x0A0B0000
         // ==================================================================
         $display("--- P63-08: UNPK -(A0),-(A1),#0 memory ---");
         ram[32'h0100 >> 2] = 32'h0000_00AB;  // bits[7:0] = 0xAB
@@ -405,7 +405,7 @@ module seq63_tb;
         run_instr(16'h2F09, 1'b0, 32'h0);  // MOVE.L A1,-(A7)
         chk("P63-08:A1", ram[32'h1FE0 >> 2], 32'h0000_0200);
         // Written word at M[0x0200] → ram[0x0200>>2] = ram[0x80]
-        chk("P63-08:result", ram[32'h0200 >> 2], 32'h0000_0A0B);
+        chk("P63-08:result", ram[32'h0200 >> 2], 32'h0A0B_0000);
 
         // ==================================================================
         // P63-09: RESET — eu_reset_req pulses high for 2048 internal ticks

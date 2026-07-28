@@ -315,8 +315,8 @@ module seq47_tb;
         check(`SR_N, 1'b0, "TAS-5b N");
         check(`SR_V, 1'b0, "TAS-5c V");
         check(`SR_C, 1'b0, "TAS-5d C");
-        // Write: mem_wdata[7:0] should be 0x80
-        check(last_mem_wdata[7:0], 8'h80, "TAS-5e wdata");
+        // Write: mem_wdata[31:24] should be 0x80 (EU convention: byte in [31:24])
+        check(last_mem_wdata[31:24], 8'h80, "TAS-5e wdata");
         check(last_mem_waddr, 32'h0, "TAS-5f waddr");
 
         // ----------------------------------------------------------------
@@ -328,7 +328,7 @@ module seq47_tb;
         run_tas_an(3'd0);
         check(`SR_Z, 1'b0, "TAS-6a Z");
         check(`SR_N, 1'b0, "TAS-6b N");
-        check(last_mem_wdata[7:0], 8'hC2, "TAS-6c wdata");
+        check(last_mem_wdata[31:24], 8'hC2, "TAS-6c wdata");
 
         // ----------------------------------------------------------------
         // TAS-7: TAS.B (A0), memory byte at A0 = 0x80 (10000000)
@@ -339,7 +339,7 @@ module seq47_tb;
         run_tas_an(3'd0);
         check(`SR_Z, 1'b0, "TAS-7a Z");
         check(`SR_N, 1'b1, "TAS-7b N");
-        check(last_mem_wdata[7:0], 8'h80, "TAS-7c wdata");
+        check(last_mem_wdata[31:24], 8'h80, "TAS-7c wdata");
 
         // ----------------------------------------------------------------
         // TAS-8: TAS.B (A1), verify A1 unchanged after TAS
@@ -349,7 +349,7 @@ module seq47_tb;
         set_an(3'd1, 32'h00000030);
         run_tas_an(3'd1);
         check(u_eu.u_rf.a_reg[1], 32'h00000030, "TAS-8a A1 unchanged");
-        check(last_mem_wdata[7:0], 8'hD5, "TAS-8b wdata 0x55|0x80");
+        check(last_mem_wdata[31:24], 8'hD5, "TAS-8b wdata 0x55|0x80");
 
         // Done
         $display("");

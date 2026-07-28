@@ -73,7 +73,7 @@ module seq49_tb;
 
     always @(posedge clk_4x)
         if (mem_req && !mem_rw)
-            ram[mem_addr[10:0]] <= mem_wdata[7:0];  // byte write
+            ram[mem_addr[10:0]] <= mem_wdata[31:24];  // byte write (EU convention: byte in [31:24])
 
     logic        an_wr_en;
     logic [2:0]  an_wr_sel;

@@ -132,9 +132,17 @@ int main(int argc, char** argv) {
                                 e.cyc, e.rw ? 'R' : 'W', e.a, e.siz, e.d);
                     prebuf.clear();
                 }
-                if (track_tdev)
+                if (track_tdev) {
                     fprintf(stderr, "[cyc %7d] TDEV W %08x siz=%d d_out=%08x\n",
                             i, a, siz, d_out);
+                    // Dump all D and A registers at PASS/FAIL write
+                    auto& dr = top->rootp->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_rf__DOT__d_reg;
+                    auto& ar = top->rootp->mustest_tb__DOT__u_top__DOT__u_eu__DOT__u_rf__DOT__a_reg;
+                    fprintf(stderr, "  D0=%08x D1=%08x D2=%08x D3=%08x D4=%08x D5=%08x D6=%08x D7=%08x\n",
+                            dr[0], dr[1], dr[2], dr[3], dr[4], dr[5], dr[6], dr[7]);
+                    fprintf(stderr, "  A0=%08x A1=%08x A2=%08x A3=%08x A4=%08x A5=%08x A6=%08x A7=%08x\n",
+                            ar[0], ar[1], ar[2], ar[3], ar[4], ar[5], ar[6], ar[7]);
+                }
             }
             // Pre-buffer: accumulate bus events for MUSTEST_PREBUF
             if (prebuf_n > 0 && ds_active && !ds_n && !as_n) {

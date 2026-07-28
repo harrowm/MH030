@@ -475,6 +475,7 @@ module eu_seq (
 
     // Phase 70: new exception / trace decode signals
     logic        dec_is_jsr_idx;   // JSR (d8,An,Xn) or (d8,PC,Xn) — push via ex_cur_sp, not rd_b
+    logic        dec_is_pea_idx;   // PEA (d8,An,Xn) — push EA via ex_cur_sp; rd_b=Xn, rd_a=An
     logic        dec_is_trace;     // trace exception fires after this instruction retires
     logic        dec_is_priv;      // privilege violation (supervisor-only opcode in user mode)
     logic        dec_is_linea;     // Line-A opcode (Group A) → vector 10
@@ -657,6 +658,7 @@ module eu_seq (
         dec_pmove_preg     = 3'b0;
         dec_pmove_to_mem   = 1'b0;
         dec_is_jsr_idx    = 1'b0;
+        dec_is_pea_idx    = 1'b0;
         dec_is_priv       = 1'b0;
         dec_is_linea      = 1'b0;
         dec_is_linef      = 1'b0;
@@ -2819,6 +2821,19 @@ module eu_seq (
                             dec_reads_src   = 1'b1;
                             dec_jump_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                             dec_needs_ext   = 1'b1;
+                        end else if (f_mode == 3'b110) begin
+                            // PEA (d8,An,Xn): EA = An + d8 + Xn*scale, push to [A7-4]
+                            // rd_a=An (base), rd_b=Xn (index); A7 obtained via ex_cur_sp
+                            dec_valid       = 1'b1;
+                            dec_src_reg     = {1'b1, f_reg};                   // An → rd_a
+                            dec_dst_reg     = {ext_data[15], ext_data[14:12]}; // Xn → rd_b
+                            dec_reads_src   = 1'b1;
+                            dec_is_pea_idx  = 1'b1;
+                            dec_is_idx      = 1'b1;
+                            dec_xn_wl       = ext_data[11];
+                            dec_xn_scale    = ext_data[10:9];
+                            dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext   = 1'b1;
                         end else if (f_mode == 3'b111) begin
                             // PEA (xxx).W/.L / (d16,PC): EA = absolute value
                             dec_abs_jmp_en = 1'b1;  // carry absolute EA in abs_ea_val path
@@ -4591,6 +4606,7 @@ module eu_seq (
     logic        ex_is_illegal;
     // Phase 70: new exception outputs
     logic        ex_is_jsr_idx;   // JSR (d8,An,Xn) or (d8,PC,Xn) in EX
+    logic        ex_is_pea_idx;   // PEA (d8,An,Xn) in EX — push EA via ex_cur_sp
     logic        ex_is_trace;     // trace exception for this instruction
     logic        ex_is_priv;      // privilege violation
     logic        ex_is_linea;     // Line-A opcode
@@ -5226,6 +5242,7 @@ module eu_seq (
             ex_is_trapv       <= 1'b0;
             ex_is_illegal     <= 1'b0;
             ex_is_jsr_idx     <= 1'b0;
+            ex_is_pea_idx     <= 1'b0;
             ex_is_trace       <= 1'b0;
             ex_is_priv        <= 1'b0;
             ex_is_linea       <= 1'b0;
@@ -5335,6 +5352,7 @@ module eu_seq (
             ex_is_trapv       <= 1'b0;
             ex_is_illegal     <= 1'b0;
             ex_is_jsr_idx     <= 1'b0;
+            ex_is_pea_idx     <= 1'b0;
             ex_is_trace       <= 1'b0;
             ex_is_priv        <= 1'b0;
             ex_is_linea       <= 1'b0;
@@ -5471,6 +5489,7 @@ module eu_seq (
             ex_is_trapv       <= dec_is_trapv;
             ex_is_illegal     <= dec_is_illegal;
             ex_is_jsr_idx     <= dec_is_jsr_idx;
+            ex_is_pea_idx     <= dec_is_pea_idx;
             ex_is_trace       <= dec_is_trace;
             ex_is_priv        <= dec_is_priv;
             ex_is_linea       <= dec_is_linea;
@@ -5574,15 +5593,15 @@ module eu_seq (
     logic [31:0] ex_ea;       // effective address for bus cycle or LEA result
     // Phase 42: ex_xn_scaled always added — zero when !ex_is_idx; handles (d8,PC,Xn)
     // where ex_abs_ea_val = PC+2+d8 and ex_xn_scaled carries the scaled index.
-    // Phase 70: JSR (d8,An,Xn)/(d8,PC,Xn) — push address is SP-4; rd_b carries Xn (not A7).
-    assign ex_ea = ex_is_jsr_idx ? (ex_cur_sp - 32'd4)
+    // Phase 70: JSR/PEA (d8,An,Xn) — push address is SP-4; rd_b carries Xn (not A7).
+    assign ex_ea = (ex_is_jsr_idx || ex_is_pea_idx) ? (ex_cur_sp - 32'd4)
                  : ex_abs_ea_en  ? (ex_abs_ea_val + ex_xn_scaled)
                  :                 (ex_an_base + ex_ea_offset + ex_xn_scaled);
 
     logic [31:0] ex_an_new;   // updated An value for (An)+ / -(An)
-    // Phase 70: for JSR indexed, A7 update uses ex_cur_sp (rd_b holds Xn, not A7)
-    assign ex_an_new = ex_is_jsr_idx ? (ex_cur_sp + ex_an_delta)
-                                     : (ex_an_base + ex_an_delta);
+    // Phase 70: for JSR/PEA indexed, A7 update uses ex_cur_sp (rd_b holds Xn, not A7)
+    assign ex_an_new = (ex_is_jsr_idx || ex_is_pea_idx) ? (ex_cur_sp + ex_an_delta)
+                                                         : (ex_an_base + ex_an_delta);
 
     // Phase 38: jump target = An_jump + offset (rd_a is the An base for JMP/JSR)
     // Phase 40: absolute EA overrides; Phase 41/42: ex_xn_scaled adds index for (d8,PC,Xn)
@@ -7332,7 +7351,7 @@ module eu_seq (
                      : (ex_is_pmove64 && ex_pmove_to_mem) ? pmove64_wr_data_w
                      : (pmove64_run_r && pmove64_to_mem_r) ? pmove64_wr_data_w
                      : ex_is_pea               ? (ex_abs_jmp_en ? ex_abs_ea_val
-                                                                 : (rd_a_data + ex_jump_offset))
+                                                                 : (rd_a_data + ex_jump_offset + ex_xn_scaled))
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc
                      : (ex_is_mem_wr && ex_use_imm) ?
                          ((ex_siz==2'b01) ? {ex_imm[7:0],  24'h0}

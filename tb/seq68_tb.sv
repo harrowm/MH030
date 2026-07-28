@@ -417,7 +417,7 @@ module seq68_tb;
         set_an(3'd1, 32'h0000_0208);  // Ay=A1, starts at 0x0208; predec → 0x0207
         run_instr(16'hC109, 1'b0, 32'h0);
         // ABCD: dst(0x27) + src(0x38) + X=0 = 0x65 BCD
-        chk("P68-09:mem",  ram[32'h200>>2], 32'h0000_0065);
+        chk("P68-09:mem",  ram[32'h200>>2], 32'h6500_0000);
         chk1("P68-09:C",   sr_out[0], 1'b0);   // C=0 (no BCD carry)
         chk1("P68-09:Z",   sr_out[2], 1'b0);   // Z=0 (result non-zero)
 
@@ -438,7 +438,7 @@ module seq68_tb;
         set_an(3'd1, 32'h0000_0308);  // Ay=A1: predec → 0x0307
         run_instr(16'h8109, 1'b0, 32'h0);
         // SBCD: 0x73 - 0x28 - 0 = 0x45 BCD
-        chk("P68-10:mem",  ram[32'h300>>2], 32'h0000_0045);
+        chk("P68-10:mem",  ram[32'h300>>2], 32'h4500_0000);
         chk1("P68-10:C",   sr_out[0], 1'b0);   // C=0 (no borrow)
 
         // ====================================================================

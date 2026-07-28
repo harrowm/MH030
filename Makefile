@@ -219,7 +219,7 @@ VOBJ         := obj_mustest
 VLATOR_FLAGS := --cc -sv --Mdir $(VOBJ) --top-module mustest_tb \
                 --x-assign 0 --x-initial 0 -Wno-fatal -Wno-WIDTHTRUNC \
                 -Wno-WIDTHEXPAND -Wno-CASEINCOMPLETE -Wno-INITIALDLY \
-                --public
+                --public -fno-dfg
 
 $(VOBJ)/Vmustest_tb: $(TOP_SRCS) tb/mustest_tb.sv tb/mustest_main.cpp | $(VOBJ)
 	$(VLATOR) $(VLATOR_FLAGS) --exe tb/mustest_main.cpp $(TOP_SRCS) tb/mustest_tb.sv

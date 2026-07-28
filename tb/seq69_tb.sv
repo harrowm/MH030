@@ -385,8 +385,8 @@ module seq69_tb;
         ram[32'h600 >> 2] = 32'h00000042;  // byte 0x42 in [7:0] — EU reads mem_rdata[7:0]
         set_an(3'h0, 32'h0000_0600);
         run_instr(16'h4AD8, 1'b0, 32'h0);
-        // TAS sets bit7: wdata[7:0]=0xC2; simple write overwrites full longword
-        chk("P69-08:mem_set", ram[32'h600 >> 2], 32'h0000_00C2);
+        // TAS sets bit7: wdata[31:24]=0xC2 (EU convention); simple write overwrites full longword
+        chk("P69-08:mem_set", ram[32'h600 >> 2], 32'hC200_0000);
         chk1("P69-08:N", sr_out[3], 1'b0);
         chk1("P69-08:Z", sr_out[2], 1'b0);
         // A0 updated to 0x601 (byte step)
@@ -403,7 +403,7 @@ module seq69_tb;
         ram[32'h600 >> 2] = 32'h00000000;  // byte at 0x600 = 0
         set_an(3'h0, 32'h0000_0601);
         run_instr(16'h4AE0, 1'b0, 32'h0);
-        chk("P69-09:mem_set", ram[32'h600 >> 2], 32'h0000_0080);
+        chk("P69-09:mem_set", ram[32'h600 >> 2], 32'h8000_0000);
         chk1("P69-09:N", sr_out[3], 1'b0);
         chk1("P69-09:Z", sr_out[2], 1'b1);
         run_instr(16'h21C8, 1'b1, 32'h0000_0610);  // MOVE.L A0,(0x610).W
