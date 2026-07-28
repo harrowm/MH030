@@ -57,6 +57,13 @@ def dut_pass(binpath, cycles, sim_bin):
         hexpath.unlink(missing_ok=True)
 
 
+# Some tests run many iterations and need more cycles than the default.
+CYCLES_OVERRIDE = {
+    "abcd": 50_000_000,
+    "sbcd": 50_000_000,
+}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -86,7 +93,8 @@ def main():
             skipped += 1
             continue
 
-        dut_ok = dut_pass(b, args.cycles, args.sim)
+        cycles = CYCLES_OVERRIDE.get(name, args.cycles)
+        dut_ok = dut_pass(b, cycles, args.sim)
 
         if dut_ok:
             if args.verbose:

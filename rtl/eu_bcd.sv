@@ -5,6 +5,9 @@
 // Implements ABCD (add), SBCD (subtract), NBCD (negate).
 // All operate byte-wide only (8-bit src/dst).
 //
+// Algorithms match Musashi's implementation exactly, including behavior
+// for invalid BCD inputs (nibbles > 9).
+//
 // BCD Z-flag rule: Z is only cleared, never set.
 //   z_out = z_in & (result == 0)
 // C/X flag: set if decimal carry (ABCD) or borrow (SBCD/NBCD) occurred.
@@ -23,13 +26,15 @@ module eu_bcd (
     localparam [1:0] BCD_ADD = 2'b00, BCD_SUB = 2'b01, BCD_NEG = 2'b10;
 
     // -----------------------------------------------------------------------
-    // ABCD: dst + src + X
+    // ABCD: dst + src + X  (Musashi-accurate)
+    // Algorithm: compute low-nibble sum, apply correction if > 9,
+    // then add high nibbles in position; carry = result > 0x99.
     // -----------------------------------------------------------------------
-    // Low-nibble carry: if raw low-nibble sum > 9 → add 6 correction
     logic [4:0] add_lo;
-    assign add_lo  = {1'b0, dst[3:0]} + {1'b0, src[3:0]} + {4'b0, x_in};
+    assign add_lo = {1'b0, dst[3:0]} + {1'b0, src[3:0]} + {4'b0, x_in};
+
     logic        add_lc;
-    assign add_lc  = (add_lo > 5'd9);
+    assign add_lc = (add_lo > 5'd9);
 
     logic [8:0] add_bin;
     assign add_bin = {1'b0, dst} + {1'b0, src} + {8'b0, x_in};
@@ -37,42 +42,56 @@ module eu_bcd (
     logic [8:0] add_adj1;
     assign add_adj1 = add_lc ? (add_bin + 9'd6) : add_bin;
 
+    // Carry condition matches Musashi: res > 0x99 (not just bit[8] or high-nibble > 9).
+    // This correctly handles invalid BCD inputs where adj1 is in 0x9A-0x9F.
     logic add_hc;
-    assign add_hc = add_adj1[8] | (add_adj1[7:4] > 4'd9);
+    assign add_hc = (add_adj1 > 9'h099);
 
     logic [8:0] add_adj2;
-    assign add_adj2 = add_hc ? (add_adj1 + 9'h060) : add_adj1;
+    assign add_adj2 = add_hc ? (add_adj1 + 9'h060) : add_adj1;  // +0x60 ≡ -0xA0 mod 256
 
     logic [7:0] add_res; assign add_res = add_adj2[7:0];
     logic       add_c;   assign add_c   = add_hc;
 
     // -----------------------------------------------------------------------
-    // SBCD / NBCD: dst_s - src_s - X
-    // NBCD: src_s=dst, dst_s=0  (negate dst)
-    // SBCD: src_s=src, dst_s=dst
+    // SBCD / NBCD: dst_s - src_s - X  (Musashi-accurate, 16-bit intermediates)
+    //
+    // Musashi algorithm (C, 32-bit unsigned):
+    //   res = LOW(dst) - LOW(src) - X
+    //   if (res > 9) res -= 6               // low correction
+    //   res += HIGH_NIBBLE(dst) - HIGH_NIBBLE(src)   // HIGH = x & 0xF0 (in position)
+    //   carry = (res > 0x99)
+    //   if (carry) res += 0xA0
+    //   result = res & 0xFF
+    //
+    // 16-bit arithmetic naturally replicates the 32-bit wrapping behavior for
+    // all inputs in the 0x00–0xFF range that the test exercises.
     // -----------------------------------------------------------------------
     logic [7:0] sub_s, sub_d;
-    assign sub_s = (op == BCD_NEG) ? dst  : src;
+    assign sub_s = (op == BCD_NEG) ? dst  : src;   // NBCD: src=dst, dst=0
     assign sub_d = (op == BCD_NEG) ? 8'h0 : dst;
 
-    logic [4:0] sub_lo_rhs;
-    assign sub_lo_rhs = {1'b0, sub_s[3:0]} + {4'b0, x_in};
-    logic sub_lc;
-    assign sub_lc = ({1'b0, sub_d[3:0]} < sub_lo_rhs);
+    // Step 1: low-nibble subtraction (16-bit to handle unsigned-wrapping borrow)
+    logic [15:0] sbcd_lo;
+    assign sbcd_lo = {12'h0, sub_d[3:0]} - {12'h0, sub_s[3:0]} - {15'h0, x_in};
 
-    logic [8:0] sub_bin;
-    assign sub_bin = {1'b0, sub_d} - {1'b0, sub_s} - {8'b0, x_in};
+    // Low correction: if sbcd_lo > 9 (catches borrow and invalid BCD nibble > 9)
+    logic [15:0] sbcd_lo_adj;
+    assign sbcd_lo_adj = (sbcd_lo > 16'h0009) ? (sbcd_lo - 16'd6) : sbcd_lo;
 
-    logic [8:0] sub_adj1;
-    assign sub_adj1 = sub_lc ? (sub_bin - 9'd6) : sub_bin;
+    // Step 2: add high nibbles in position (16-bit)
+    logic [15:0] sbcd_mid;
+    assign sbcd_mid = sbcd_lo_adj + {8'h0, sub_d[7:4], 4'h0} - {8'h0, sub_s[7:4], 4'h0};
 
+    // Carry: result > 0x99 (catches borrow via 16-bit wrap and invalid BCD overflow)
     logic sub_hc;
-    assign sub_hc = sub_adj1[8];
+    assign sub_hc = (sbcd_mid > 16'h0099);
 
-    logic [8:0] sub_adj2;
-    assign sub_adj2 = sub_hc ? (sub_adj1 - 9'h060) : sub_adj1;
+    // High correction: add 0xA0 (matches Musashi)
+    logic [15:0] sbcd_adj;
+    assign sbcd_adj = sub_hc ? (sbcd_mid + 16'h00A0) : sbcd_mid;
 
-    logic [7:0] sub_res; assign sub_res = sub_adj2[7:0];
+    logic [7:0] sub_res; assign sub_res = sbcd_adj[7:0];
     logic       sub_c;   assign sub_c   = sub_hc;
 
     // -----------------------------------------------------------------------
