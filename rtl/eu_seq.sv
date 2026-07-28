@@ -6344,10 +6344,17 @@ module eu_seq (
             end
             UNIT_DIV: begin
                 ex_result = md_result_lo;
-                ex_n      = md_n;
-                ex_z      = md_z;
                 ex_v      = md_v;
-                ex_c      = md_c;
+                // DIVS.W / DIVU.W overflow: only V is set; N/Z/C unchanged (matches Musashi)
+                if (!ex_is_muldivl && md_v && !md_div_by_zero) begin
+                    ex_n = flag_n;
+                    ex_z = flag_z;
+                    ex_c = flag_c;
+                end else begin
+                    ex_n = md_n;
+                    ex_z = md_z;
+                    ex_c = md_c;
+                end
                 ex_x      = flag_x;
             end
             UNIT_MOVE: begin
