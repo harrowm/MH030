@@ -579,125 +579,105 @@ module eu_seq (
     end
 
     always_comb begin
+        // ── Decode valid / execution unit ──────────────────────────────────────
         dec_valid        = 1'b0;
         dec_unit         = UNIT_NONE;
+
+        // ── ALU / shifter / mul-div / BCD / bit-op ─────────────────────────────
         dec_alu_op       = ALU_ADD;
         dec_shf_op       = SHF_LSL;
+        dec_shf_imm_cnt  = 6'd1;
         dec_md_op        = MUL_UW;
+        dec_md_dst2      = 3'b0;
+        dec_md_64bit     = 1'b0;
         dec_bcd_op       = BCD_ADD;
         dec_bit_op       = BIT_TST;
         dec_bit_num      = 5'h0;
         dec_bit_from_reg = 1'b0;
+        dec_is_bit_imm   = 1'b0;
+
+        // ── Register operands ──────────────────────────────────────────────────
         dec_src_reg      = 4'h0;
         dec_dst_reg      = 4'h0;
         dec_dest_reg     = 4'h0;
-        dec_siz          = 2'b00;
-        dec_imm          = ext_data;
-        dec_use_imm      = 1'b0;
-        dec_use_reg_cnt  = 1'b0;
-        dec_writes_reg   = 1'b0;
-        dec_updates_ccr  = 1'b0;
-        dec_x_unchanged  = 1'b0;
-        dec_needs_ext    = 1'b0;
         dec_reads_src    = 1'b0;
         dec_reads_dst    = 1'b0;
-        dec_shf_imm_cnt    = 6'd1;
-        dec_is_branch      = 1'b0;
-        dec_is_dbcc        = 1'b0;
-        dec_reads_ccr      = 1'b0;
-        dec_branch_cond    = 4'h0;
-        dec_branch_disp    = 32'h0;
-        dec_is_swap        = 1'b0;
-        dec_sext           = 1'b0;
+        dec_writes_reg   = 1'b0;
+        dec_sext_src     = 1'b0;
+
+        // ── Size / CCR / flags ─────────────────────────────────────────────────
+        dec_siz          = 2'b00;
+        dec_updates_ccr  = 1'b0;
+        dec_reads_ccr    = 1'b0;
+        dec_x_unchanged  = 1'b0;
+        dec_sext         = 1'b0;
         dec_sext_from_byte = 1'b0;
-        dec_is_mem_rd  = 1'b0;
-        dec_is_mem_wr  = 1'b0;
-        dec_is_lea     = 1'b0;
-        dec_is_movea_w = 1'b0;
-        dec_ea_offset  = 32'h0;
-        dec_an_delta   = 32'h0;
-        dec_an_upd_en  = 1'b0;
-        dec_an_upd_reg = 3'h0;
-        dec_is_jmp      = 1'b0;
-        dec_is_jsr      = 1'b0;
-        dec_is_bsr      = 1'b0;
-        dec_is_rts      = 1'b0;
-        dec_is_rtr      = 1'b0;
-        dec_is_link     = 1'b0;
-        dec_is_unlk     = 1'b0;
-        dec_abs_ea_en   = 1'b0;
-        dec_abs_jmp_en  = 1'b0;
-        dec_abs_ea_val  = 32'h0;
-        dec_return_pc   = 32'h0;
-        dec_bsr_target  = 32'h0;
-        dec_jump_offset = 32'h0;
-        dec_is_idx          = 1'b0;
-        dec_xn_wl           = 1'b0;
-        dec_xn_scale        = 2'b00;
-        dec_is_dyn_bit_idx  = 1'b0;
-        dec_dyn_bit_reg     = 3'b0;
-        dec_is_bit_imm      = 1'b0;
+        dec_use_reg_cnt  = 1'b0;
+
+        // ── Immediate / extension word ─────────────────────────────────────────
+        dec_imm          = ext_data;
+        dec_use_imm      = 1'b0;
+        dec_needs_ext    = 1'b0;
+
+        // ── EA / addressing ────────────────────────────────────────────────────
+        dec_ea_offset    = 32'h0;
+        dec_an_delta     = 32'h0;
+        dec_an_upd_en    = 1'b0;
+        dec_an_upd_reg   = 3'h0;
+        dec_abs_ea_en    = 1'b0;
+        dec_abs_ea_val   = 32'h0;
+        dec_is_idx       = 1'b0;
+        dec_xn_wl        = 1'b0;
+        dec_xn_scale     = 2'b00;
+        dec_is_dyn_bit_idx = 1'b0;
+        dec_dyn_bit_reg  = 3'b0;
+
+        // ── Memory access ──────────────────────────────────────────────────────
+        dec_is_mem_rd    = 1'b0;
+        dec_is_mem_wr    = 1'b0;
+        dec_is_mem_rmw   = 1'b0;
+        dec_is_mem_src   = 1'b0;
+        dec_mem_rd_siz   = 2'b00;
+
+        // ── Branches / jumps ───────────────────────────────────────────────────
+        dec_is_branch    = 1'b0;
+        dec_is_dbcc      = 1'b0;
+        dec_branch_cond  = 4'h0;
+        dec_branch_disp  = 32'h0;
+        dec_is_jmp       = 1'b0;
+        dec_is_jsr       = 1'b0;
+        dec_is_jsr_idx   = 1'b0;
+        dec_is_bsr       = 1'b0;
+        dec_is_rts       = 1'b0;
+        dec_is_rtr       = 1'b0;
+        dec_abs_jmp_en   = 1'b0;
+        dec_return_pc    = 32'h0;
+        dec_bsr_target   = 32'h0;
+        dec_jump_offset  = 32'h0;
+
+        // ── Multi-operand / stack ops ──────────────────────────────────────────
+        dec_is_swap      = 1'b0;
+        dec_is_lea       = 1'b0;
+        dec_is_movea_w   = 1'b0;
+        dec_is_pea       = 1'b0;
+        dec_is_pea_idx   = 1'b0;
+        dec_is_link      = 1'b0;
+        dec_is_unlk      = 1'b0;
+        dec_is_exg       = 1'b0;
+        dec_exg_dd       = 1'b0;
+        dec_is_cmpm      = 1'b0;
+        dec_is_addx_mem  = 1'b0;
+        dec_is_muldivl   = 1'b0;
+
+        // ── MOVEM ──────────────────────────────────────────────────────────────
         dec_is_movem      = 1'b0;
         dec_movem_load    = 1'b0;
         dec_movem_predec  = 1'b0;
         dec_movem_postinc = 1'b0;
         dec_movem_long    = 1'b0;
         dec_movem_mask_hi = 1'b0;
-        dec_is_movec      = 1'b0;
-        dec_movec_to_ctrl = 1'b0;
-        dec_is_moves      = 1'b0;
-        dec_moves_load    = 1'b0;
-        dec_is_tas        = 1'b0;
-        dec_is_chk        = 1'b0;
-        dec_chk_word      = 1'b0;
-        dec_is_cmp2chk2   = 1'b0;
-        dec_is_movep      = 1'b0;
-        dec_movep_load    = 1'b0;
-        dec_movep_long    = 1'b0;
-        dec_is_move16     = 1'b0;
-        dec_move16_form   = 2'b0;
-        dec_is_fpu        = 1'b0;
-        dec_is_memind      = 1'b0;
-        dec_memind_is_post = 1'b0;
-        dec_memind_od      = 32'h0;
-        dec_is_pflush      = 1'b0;
-        dec_pflush_all     = 1'b0;
-        dec_pflush_fc      = 3'b0;
-        dec_is_ptest       = 1'b0;
-        dec_ptest_fc       = 3'b0;
-        dec_is_pmove       = 1'b0;
-        dec_is_pmove64     = 1'b0;
-        dec_is_mem_src     = 1'b0;
-        dec_mem_rd_siz     = 2'b00;
-        dec_pmove_preg     = 3'b0;
-        dec_pmove_to_mem   = 1'b0;
-        dec_is_jsr_idx    = 1'b0;
-        dec_is_pea_idx    = 1'b0;
-        dec_is_priv       = 1'b0;
-        dec_is_linea      = 1'b0;
-        dec_is_linef      = 1'b0;
-        dec_is_rte        = 1'b0;
-        dec_is_stop       = 1'b0;
-        dec_stop_sr       = 16'h0;
-        dec_is_trap       = 1'b0;
-        dec_trap_num      = 4'h0;
-        dec_is_trapv      = 1'b0;
-        dec_is_illegal    = 1'b0;
-        dec_is_move_sr_r  = 1'b0;
-        dec_is_move_ccr_r = 1'b0;
-        dec_is_move_sr_w  = 1'b0;
-        dec_is_move_ccr_w = 1'b0;
-        dec_is_move_usp   = 1'b0;
-        dec_sext_src      = 1'b0;
-        dec_is_muldivl    = 1'b0;
-        dec_is_pea        = 1'b0;
-        dec_is_exg        = 1'b0;
-        dec_exg_dd        = 1'b0;
-        dec_is_cmpm       = 1'b0;
-        dec_md_dst2       = 3'b0;
-        dec_md_64bit      = 1'b0;
-        dec_is_mem_rmw    = 1'b0;
-        dec_is_addx_mem   = 1'b0;
+
+        // ── MOVE mem→mem ───────────────────────────────────────────────────────
         dec_is_move_mm        = 1'b0;
         dec_is_move_mm_idx_dst = 1'b0;
         dec_dst_ea_offset = 32'h0;
@@ -706,23 +686,82 @@ module eu_seq (
         dec_dst_an_upd_en = 1'b0;
         dec_dst_an_upd_reg= 3'b0;
         dec_dst_an_delta  = 32'h0;
-        dec_is_bf         = 1'b0;
-        dec_bf_op         = 3'b0;
-        dec_bf_reg_ea     = 1'b0;
-        dec_bf_mutates    = 1'b0;
-        dec_is_pack       = 1'b0;
-        dec_is_unpk       = 1'b0;
-        dec_is_pack_mem   = 1'b0;
-        dec_is_reset      = 1'b0;
-        dec_is_cas        = 1'b0;
-        dec_cas_du_reg    = 3'b0;
-        dec_is_cas2       = 1'b0;
-        dec_cas2_du1_reg  = 3'b0;
-        dec_cas2_rn2_reg  = 4'h0;
-        dec_cas2_dc2_reg  = 3'b0;
-        dec_cas2_du2_reg  = 3'b0;
+
+        // ── Bit-field ──────────────────────────────────────────────────────────
+        dec_is_bf        = 1'b0;
+        dec_bf_op        = 3'b0;
+        dec_bf_reg_ea    = 1'b0;
+        dec_bf_mutates   = 1'b0;
+
+        // ── PACK / UNPK ────────────────────────────────────────────────────────
+        dec_is_pack      = 1'b0;
+        dec_is_unpk      = 1'b0;
+        dec_is_pack_mem  = 1'b0;
+
+        // ── CAS / CAS2 ─────────────────────────────────────────────────────────
+        dec_is_cas       = 1'b0;
+        dec_cas_du_reg   = 3'b0;
+        dec_is_cas2      = 1'b0;
+        dec_cas2_du1_reg = 3'b0;
+        dec_cas2_rn2_reg = 4'h0;
+        dec_cas2_dc2_reg = 3'b0;
+        dec_cas2_du2_reg = 3'b0;
+
+        // ── TAS / CHK / CMP2 / MOVEP / MOVE16 ─────────────────────────────────
+        dec_is_tas       = 1'b0;
+        dec_is_chk       = 1'b0;
+        dec_chk_word     = 1'b0;
+        dec_is_cmp2chk2  = 1'b0;
+        dec_is_movep     = 1'b0;
+        dec_movep_load   = 1'b0;
+        dec_movep_long   = 1'b0;
+        dec_is_move16    = 1'b0;
+        dec_move16_form  = 2'b0;
+
+        // ── MOVEC / MOVES / USP / SR / CCR ────────────────────────────────────
+        dec_is_movec     = 1'b0;
+        dec_movec_to_ctrl = 1'b0;
+        dec_is_moves     = 1'b0;
+        dec_moves_load   = 1'b0;
+        dec_is_move_usp  = 1'b0;
+        dec_is_move_sr_r  = 1'b0;
+        dec_is_move_ccr_r = 1'b0;
+        dec_is_move_sr_w  = 1'b0;
+        dec_is_move_ccr_w = 1'b0;
+
+        // ── BCD / ABCD / SBCD ──────────────────────────────────────────────────
         dec_is_abcd_sbcd_mem = 1'b0;
-        dec_is_abcd_mem   = 1'b0;
+        dec_is_abcd_mem  = 1'b0;
+
+        // ── FPU / memory-indirect ──────────────────────────────────────────────
+        dec_is_fpu       = 1'b0;
+        dec_is_memind    = 1'b0;
+        dec_memind_is_post = 1'b0;
+        dec_memind_od    = 32'h0;
+
+        // ── MMU instructions ───────────────────────────────────────────────────
+        dec_is_pflush    = 1'b0;
+        dec_pflush_all   = 1'b0;
+        dec_pflush_fc    = 3'b0;
+        dec_is_ptest     = 1'b0;
+        dec_ptest_fc     = 3'b0;
+        dec_is_pmove     = 1'b0;
+        dec_is_pmove64   = 1'b0;
+        dec_pmove_preg   = 3'b0;
+        dec_pmove_to_mem = 1'b0;
+
+        // ── Exceptions / privilege ─────────────────────────────────────────────
+        dec_is_priv      = 1'b0;
+        dec_is_linea     = 1'b0;
+        dec_is_linef     = 1'b0;
+        dec_is_illegal   = 1'b0;
+        dec_is_rte       = 1'b0;
+        dec_is_stop      = 1'b0;
+        dec_stop_sr      = 16'h0;
+        dec_is_trap      = 1'b0;
+        dec_trap_num     = 4'h0;
+        dec_is_trapv     = 1'b0;
+        dec_is_reset     = 1'b0;
 
         if (instr_valid) begin
             case (f_group)
