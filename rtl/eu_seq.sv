@@ -338,6 +338,19 @@ module eu_seq (
         endcase
     endfunction
 
+    // Shift data to the correct EU bus lane: byte→[31:24], word→[31:16], long→[31:0].
+    // Matches the convention expected by biu_byte_lane_ctrl on the write side.
+    function automatic logic [31:0] eu_lane(
+        input logic [31:0] d,
+        input logic [1:0]  siz
+    );
+        case (siz)
+            2'b01:   eu_lane = {d[7:0],  24'h0};
+            2'b10:   eu_lane = {d[15:0], 16'h0};
+            default: eu_lane = d;
+        endcase
+    endfunction
+
     // Pre-extract bit-selects used by BCD and bitops to avoid Icarus issues
     logic [7:0] rd_a_byte, rd_b_byte;
     logic [4:0] rd_a_bit_num;
@@ -7483,13 +7496,9 @@ module eu_seq (
                      : cas_write_r             ? cas_du_val_r
                      : (bcds_run_r && bcds_phase_r == 2'd2) ? {bcd_result, 24'h0}
                      : mem_rmw_run_r            ? mem_rmw_wdata_r
-                     : move_mm_run_r            ? ((move_mm_siz_r==2'b01) ? {move_mm_data_r[7:0],  24'h0}
-                                                  : (move_mm_siz_r==2'b10) ? {move_mm_data_r[15:0], 16'h0}
-                                                  :                           move_mm_data_r)
+                     : move_mm_run_r            ? eu_lane(move_mm_data_r, move_mm_siz_r)
                      : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ?
-                         ((ex_siz==2'b01) ? {ex_result[7:0],  24'h0}
-                        : (ex_siz==2'b10) ? {ex_result[15:0], 16'h0}
-                        :                    ex_result)
+                                                  eu_lane(ex_result, ex_siz)
                      : (bf_mem_run_r && bf_mem_phase_r) ? bf_result_w
                      : (pack_mem_run_r && pack_mem_phase_r) ? pack_mem_wdata_w
                      : tas_run_r               ? {tas_wdata_r, 24'h0}
@@ -7501,14 +7510,9 @@ module eu_seq (
                      : ex_is_pea               ? (ex_abs_jmp_en ? ex_abs_ea_val
                                                                  : (rd_a_data + ex_jump_offset + ex_xn_scaled))
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc
-                     : (ex_is_mem_wr && ex_use_imm) ?
-                         ((ex_siz==2'b01) ? {ex_imm[7:0],  24'h0}
-                        : (ex_siz==2'b10) ? {ex_imm[15:0], 16'h0}
-                        :                    ex_imm)
+                     : (ex_is_mem_wr && ex_use_imm) ? eu_lane(ex_imm, ex_siz)
                      : (movem_run_r && !movem_load_r && !movem_long_r) ? {rd_a_data[15:0], 16'h0}
-                     : (ex_siz==2'b01) ? {rd_a_data[7:0],  24'h0}
-                     : (ex_siz==2'b10) ? {rd_a_data[15:0], 16'h0}
-                     :                    rd_a_data;
+                     :                                                    eu_lane(rd_a_data, ex_siz);
     // Phase 47: RMW — assert during TAS (An) read phase (not during write or cooldown).
     assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
 
