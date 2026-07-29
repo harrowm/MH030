@@ -792,167 +792,81 @@ module eu_seq (
                             2'b10: begin dec_bit_op=BIT_CLR; dec_writes_reg=1'b1; dec_valid=1'b1; end
                             2'b11: begin dec_bit_op=BIT_SET; dec_writes_reg=1'b1; dec_valid=1'b1; end
                         endcase
-                    // ── Phase 60: immediate ALU ops to memory ea ─────────────────
-                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (An)/(An)+/-(An)
-                    // Exclude f_ss=11 (overlaps CMP2 encoding) and f_dn=100 (bit subop).
+                    // ── Phase 60/78: immediate ALU ops to memory EA ──────────────
+                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, <ea>
+                    // <ea>: (An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/(xxx).W/(xxx).L
+                    // Excludes f_ss=11 (CMP2 overlap) and f_dn=100/111 (non-ALU subops).
+                    // imm packing: byte/word in ext_data[31:16]; long in ext_data[31:0].
+                    //   (d16,An)/(d8,An,Xn)/(xxx).W long: imm=ext_data, d16/brief/abs=q3_word.
+                    //   (xxx).L long: imm=ext_data, abs64=ext34_data.
                     end else if (!f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001))) &&
                                  (f_dn != 3'b100 && f_dn != 3'b111)) begin
-                        dec_siz        = f_siz;
-                        dec_unit       = UNIT_ALU;
-                        dec_use_imm    = 1'b1;
-                        dec_needs_ext  = 1'b1;
-                        dec_src_reg    = {1'b1, f_reg};  // An → rd_a (EA base)
-                        dec_reads_src  = 1'b1;
-                        dec_is_mem_rd  = 1'b1;
-                        case (f_mode)
-                            3'b011: begin  // (An)+
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin  // -(An)
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
-                        case (f_dn)
-                            3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b110: begin  // CMPI: read + CCR update, no write back
-                                dec_alu_op      = ALU_CMP;
-                                dec_x_unchanged = 1'b1;
-                                dec_updates_ccr = 1'b1;  // CCR fires normally from WB
-                                dec_valid       = 1'b1;
-                            end
-                            default: ;
-                        endcase
-                    // ── Phase 78: immediate ALU ops to (d16,An) ──────────────────
-                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (d16,An)
-                    // byte/word: ext_data={imm_word, d16}; long: ext_data={hi_imm, lo_imm}, q3=d16
-                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b101 &&
-                                 (f_dn != 3'b100 && f_dn != 3'b111)) begin
+                        // Common preamble: shared by all five EA modes
                         dec_siz       = f_siz;
                         dec_unit      = UNIT_ALU;
                         dec_use_imm   = 1'b1;
                         dec_needs_ext = 1'b1;
                         dec_is_mem_rd = 1'b1;
-                        dec_src_reg   = {1'b1, f_reg};
-                        dec_reads_src = 1'b1;
-                        dec_imm       = (f_ss == 2'b10) ? ext_data
-                                                        : {16'h0, ext_data[31:16]};
-                        dec_ea_offset = (f_ss == 2'b10) ? {{16{q3_word[15]}}, q3_word}
-                                                        : {{16{ext_data[15]}}, ext_data[15:0]};
+                        // EA-mode-specific setup
+                        if (f_mode == 3'b111) begin
+                            // Absolute address: (xxx).W (f_reg=0) or (xxx).L (f_reg=1)
+                            dec_abs_ea_en  = 1'b1;
+                            dec_imm        = (f_ss == 2'b10) ? ext_data
+                                                             : {16'h0, ext_data[31:16]};
+                            dec_abs_ea_val = (f_reg == 3'b000)
+                                ? ((f_ss == 2'b10) ? {{16{q3_word[15]}},  q3_word}
+                                                   : {{16{ext_data[15]}}, ext_data[15:0]})
+                                : ((f_ss == 2'b10) ? ext34_data
+                                                   : {ext_data[15:0], ext34_data[31:16]});
+                        end else begin
+                            // Register-based EA: An is the memory base
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_reads_src = 1'b1;
+                            case (f_mode)
+                                3'b010: ;  // (An): no extra setup
+                                3'b011: begin  // (An)+
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                                end
+                                3'b100: begin  // -(An)
+                                    dec_an_upd_en  = 1'b1;
+                                    dec_an_upd_reg = f_reg;
+                                    dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                    dec_ea_offset  = dec_an_delta;
+                                end
+                                3'b101: begin  // (d16,An): long→q3, byte/word→ext_data[15:0]
+                                    dec_imm       = (f_ss == 2'b10) ? ext_data
+                                                                     : {16'h0, ext_data[31:16]};
+                                    dec_ea_offset = (f_ss == 2'b10) ? {{16{q3_word[15]}},  q3_word}
+                                                                     : {{16{ext_data[15]}}, ext_data[15:0]};
+                                end
+                                3'b110: begin  // (d8,An,Xn): long→q3_word, byte/word→ext_data[15:0]
+                                    dec_is_idx    = 1'b1;
+                                    dec_imm       = (f_ss == 2'b10) ? ext_data
+                                                                     : {16'h0, ext_data[31:16]};
+                                    dec_dst_reg   = (f_ss == 2'b10) ? {q3_word[15],  q3_word[14:12]}
+                                                                     : {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst  = 1'b1;
+                                    dec_xn_wl     = (f_ss == 2'b10) ? q3_word[11]    : ext_data[11];
+                                    dec_xn_scale  = (f_ss == 2'b10) ? q3_word[10:9]  : ext_data[10:9];
+                                    dec_ea_offset = (f_ss == 2'b10) ? {{24{q3_word[7]}},  q3_word[7:0]}
+                                                                     : {{24{ext_data[7]}}, ext_data[7:0]};
+                                end
+                                default: ;
+                            endcase
+                        end
+                        // Shared op decode — identical for all five EA modes above
                         case (f_dn)
                             3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b110: begin
-                                dec_alu_op      = ALU_CMP;
-                                dec_x_unchanged = 1'b1;
-                                dec_updates_ccr = 1'b1;
-                                dec_valid       = 1'b1;
-                            end
-                            default: ;
-                        endcase
-                    // ── Phase 78+: immediate ALU ops to (d8,An,Xn) ──────────────
-                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (d8,An,Xn)
-                    // byte/word: ext_data={imm_word, brief_ext}; long: ext_data={hi_imm, lo_imm}, q3=brief_ext
-                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b110 &&
-                                 (f_dn != 3'b100 && f_dn != 3'b111)) begin
-                        dec_siz        = f_siz;
-                        dec_unit       = UNIT_ALU;
-                        dec_use_imm    = 1'b1;
-                        dec_needs_ext  = 1'b1;
-                        dec_is_mem_rd  = 1'b1;
-                        dec_src_reg    = {1'b1, f_reg};
-                        dec_reads_src  = 1'b1;
-                        dec_is_idx     = 1'b1;
-                        dec_imm        = (f_ss == 2'b10) ? ext_data
-                                                         : {16'h0, ext_data[31:16]};
-                        // Long: brief_ext in q3_word; byte/word: brief_ext in ext_data[15:0]
-                        dec_dst_reg    = (f_ss == 2'b10) ? {q3_word[15], q3_word[14:12]}
-                                                         : {ext_data[15], ext_data[14:12]};
-                        dec_reads_dst  = 1'b1;
-                        dec_xn_wl      = (f_ss == 2'b10) ? q3_word[11] : ext_data[11];
-                        dec_xn_scale   = (f_ss == 2'b10) ? q3_word[10:9] : ext_data[10:9];
-                        dec_ea_offset  = (f_ss == 2'b10) ? {{24{q3_word[7]}}, q3_word[7:0]}
-                                                          : {{24{ext_data[7]}}, ext_data[7:0]};
-                        case (f_dn)
-                            3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b110: begin
-                                dec_alu_op      = ALU_CMP;
-                                dec_x_unchanged = 1'b1;
-                                dec_updates_ccr = 1'b1;
-                                dec_valid       = 1'b1;
-                            end
-                            default: ;
-                        endcase
-                    // ── Phase 78: immediate ALU ops to (xxx).W ────────────────────
-                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (abs).W
-                    // byte/word: ext_data={imm_word, abs_w}; long: ext_data={hi_imm, lo_imm}, q3=abs_w
-                    end else if (!f_dir && f_ss != 2'b11 &&
-                                 f_mode == 3'b111 && f_reg == 3'b000 &&
-                                 (f_dn != 3'b100 && f_dn != 3'b111)) begin
-                        dec_siz        = f_siz;
-                        dec_unit       = UNIT_ALU;
-                        dec_use_imm    = 1'b1;
-                        dec_needs_ext  = 1'b1;
-                        dec_is_mem_rd  = 1'b1;
-                        dec_abs_ea_en  = 1'b1;
-                        dec_imm        = (f_ss == 2'b10) ? ext_data
-                                                         : {16'h0, ext_data[31:16]};
-                        dec_abs_ea_val = (f_ss == 2'b10) ? {{16{q3_word[15]}}, q3_word}
-                                                         : {{16{ext_data[15]}}, ext_data[15:0]};
-                        case (f_dn)
-                            3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b110: begin
-                                dec_alu_op      = ALU_CMP;
-                                dec_x_unchanged = 1'b1;
-                                dec_updates_ccr = 1'b1;
-                                dec_valid       = 1'b1;
-                            end
-                            default: ;
-                        endcase
-                    // ── Phase 78: immediate ALU ops to (xxx).L ────────────────────
-                    // ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm, (abs).L
-                    // byte/word: ext_data={imm_word, addr_hi}, ext34={addr_lo,...}; long: ext_data=imm, ext34=addr
-                    end else if (!f_dir && f_ss != 2'b11 &&
-                                 f_mode == 3'b111 && f_reg == 3'b001 &&
-                                 (f_dn != 3'b100 && f_dn != 3'b111)) begin
-                        dec_siz        = f_siz;
-                        dec_unit       = UNIT_ALU;
-                        dec_use_imm    = 1'b1;
-                        dec_needs_ext  = 1'b1;
-                        dec_is_mem_rd  = 1'b1;
-                        dec_abs_ea_en  = 1'b1;
-                        dec_imm        = (f_ss == 2'b10) ? ext_data
-                                                         : {16'h0, ext_data[31:16]};
-                        dec_abs_ea_val = (f_ss == 2'b10) ? ext34_data
-                                                         : {ext_data[15:0], ext34_data[31:16]};
-                        case (f_dn)
-                            3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b001: begin dec_alu_op=ALU_AND; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b010: begin dec_alu_op=ALU_SUB; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b011: begin dec_alu_op=ALU_ADD; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b101: begin dec_alu_op=ALU_EOR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b110: begin
+                            3'b110: begin  // CMPI: compare only, no write-back
                                 dec_alu_op      = ALU_CMP;
                                 dec_x_unchanged = 1'b1;
                                 dec_updates_ccr = 1'b1;
