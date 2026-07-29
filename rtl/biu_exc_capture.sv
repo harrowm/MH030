@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 `default_nettype none
 
 // MC68030 BIU — Exception Frame Capture (Phase 7 + Phase 12)

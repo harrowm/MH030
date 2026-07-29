@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 `default_nettype none
 
 // E-clock generator — MC68030 BIU, Phase 1

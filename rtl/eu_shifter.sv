@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 `default_nettype none
 
 // MC68030 shift/rotate unit — purely combinational.

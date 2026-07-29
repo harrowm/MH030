@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 `default_nettype none
 
 // eu_bitfield — combinational bit-field unit.

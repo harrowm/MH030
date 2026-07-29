@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 `default_nettype none
 
 // MC68030 BIU — Multi-Operation FSM (Phase 5)

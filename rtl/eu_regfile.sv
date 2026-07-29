@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 `default_nettype none
 
 module eu_regfile (
