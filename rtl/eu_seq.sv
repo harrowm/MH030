@@ -7329,21 +7329,23 @@ module eu_seq (
     // Phase 48: cmp2_run_r drives the CMP2/CHK2 second read (upper bound at EA+size).
     // Phase 49: movep_run_r drives byte bus cycles for MOVEP.
     // Phase 50: move16_run_r drives 4 longword reads then 4 longword writes.
-    // During cooldown periods, suppress normal mem_req so no spurious bus cycle fires.
-    assign mem_req   = movem_run_r || tas_run_r || cmp2_run_r || movep_run_r || move16_run_r ||
+    // True when no multi-cycle bus op is active or cooling down; gate for the normal EU mem path.
+    logic no_special_bus_op;
+    assign no_special_bus_op = !tas_after_write_r && !cmp2_run_r   && !cmp2_after_r   &&
+                                !memind_start_r   && !memind_inner_r && !memind_outer_r &&
+                                !mem_rmw_run_r    && !mem_rmw_after_r && !pmove64_run_r &&
+                                !move_mm_run_r    && !move_mm_after_r &&
+                                !cas_get_du_r     && !cas_write_r  && !cas_after_r  && !ex_cas_mem_done_r &&
+                                !cas2_rd2_r       && !cas2_get_du1_r && !cas2_wr1_r &&
+                                !cas2_get_du2_r   && !cas2_wr2_r  && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
+                                !cas2_after_r     && !ex_cas2_done_r;
+
+    assign mem_req   = movem_run_r || tas_run_r  || cmp2_run_r  || movep_run_r || move16_run_r ||
                        memind_inner_r || memind_outer_r || mem_rmw_run_r || move_mm_run_r ||
                        addx_mem_run_r || bf_mem_run_r || pack_mem_run_r || pmove64_run_r ||
                        cas_write_r || bcds_run_r ||
                        cas2_rd2_r || cas2_wr1_r || cas2_wr2_r ||
-                       (!tas_after_write_r && !cmp2_run_r && !cmp2_after_r &&
-                        !memind_start_r && !memind_inner_r && !memind_outer_r &&
-                        !mem_rmw_run_r && !mem_rmw_after_r && !pmove64_run_r &&
-                        !move_mm_run_r && !move_mm_after_r &&
-                        !cas_get_du_r && !cas_write_r && !cas_after_r && !ex_cas_mem_done_r &&
-                        !cas2_rd2_r && !cas2_get_du1_r && !cas2_wr1_r &&
-                        !cas2_get_du2_r && !cas2_wr2_r && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
-                        !cas2_after_r && !ex_cas2_done_r &&
-                        ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
+                       (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
     assign mem_rw    = movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
                      : cmp2_run_r     ? 1'b1

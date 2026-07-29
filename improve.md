@@ -93,7 +93,7 @@ Removes one nesting level; makes coverage obviously complete.
 
 ---
 
-## #7 — `inside{}` for state-group predicates (biu_cycle_gen.sv ~309–330)
+## #7 — `inside{}` for state-group predicates (biu_cycle_gen.sv ~309–330) [BLOCKED]
 
 **Problem:** Six predicates written as 4–8 explicit `|` comparisons:
 ```sv
@@ -106,6 +106,10 @@ assign is_init_ssp = state inside {ST_INIT_SSP_S0, ..., ST_INIT_SSP_S7};
 ```
 
 **Risk:** Very low — semantically identical.
+
+**Note:** Attempted but reverted — Icarus Verilog (simulator used in `make test`) does not
+support `inside` in continuous `assign` statements ("sorry: inside expressions not supported
+yet"). Would work with Verilator or ModelSim. Skip unless toolchain changes.
 
 ---
 
