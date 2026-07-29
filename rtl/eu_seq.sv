@@ -7106,38 +7106,27 @@ module eu_seq (
                        bcds_ay_wr_en || bcds_ax_wr_en ||
                        mem_rmw_an_wr_en || move_mm_dst_an_wr_en ||
                        (wb_valid && wb_an_upd_en);
-    assign an_wr_sel = movem_an_wr_en       ? movem_an_r
-                     : rtr_an_wr_en         ? 3'b111
-                     : rte_an_wr_en         ? 3'b111
-                     : move16_an1_wr_en     ? move16_src_an_r
-                     : move16_an2_wr_r      ? move16_dst_an_r
-                     : addx_ay_wr_en        ? addx_ay_reg_r
-                     : addx_ax_wr_en        ? addx_ax_reg_r
-                     : pack_ay_wr_en        ? pack_mem_ay_reg_r
-                     : pack_ax_wr_en        ? pack_mem_ax_reg_r
-                     : cmpm_ay_wr_en        ? ex_src_reg[2:0]
-                     : cmpm_ax_wr_en        ? cmpm_ax_reg_r
-                     : bcds_ay_wr_en        ? bcds_ay_reg_r
-                     : bcds_ax_wr_en        ? bcds_ax_reg_r
-                     : mem_rmw_an_wr_en     ? ex_an_upd_reg
-                     : move_mm_dst_an_wr_en ? move_mm_dst_an_reg_r
-                     :                        wb_an_upd_reg;
-    assign an_wr_data = movem_an_wr_en       ? movem_an_final
-                      : rtr_an_wr_en         ? rtr_an_wr_data
-                      : rte_an_wr_en         ? (rte_a7_next_r + 32'd4 + {24'h0, rte_fmt_skip_r})
-                      : move16_an1_wr_en     ? move16_src_base_r + 32'd16
-                      : move16_an2_wr_r      ? move16_dst_base_r + 32'd16
-                      : addx_ay_wr_en        ? addx_ay_addr_r
-                      : addx_ax_wr_en        ? addx_ax_addr_r
-                      : pack_ay_wr_en        ? pack_mem_ay_addr_r
-                      : pack_ax_wr_en        ? pack_mem_ax_addr_r
-                      : cmpm_ay_wr_en        ? (rd_a_data + ex_an_delta)
-                      : cmpm_ax_wr_en        ? (cmpm_ax_addr_r + cmpm_step_r)
-                      : bcds_ay_wr_en        ? bcds_ay_addr_r
-                      : bcds_ax_wr_en        ? bcds_ax_addr_r
-                      : mem_rmw_an_wr_en     ? (rd_a_data + ex_an_delta)
-                      : move_mm_dst_an_wr_en ? move_mm_dst_an_new_r
-                      :                        wb_an_upd_new;
+    // an_wr_sel and an_wr_data share the same 15-arm priority — kept together
+    // in one always_comb so they can never get out of sync.
+    always_comb begin
+        an_wr_sel  = wb_an_upd_reg;   // default: writeback path
+        an_wr_data = wb_an_upd_new;
+        if      (movem_an_wr_en)       begin an_wr_sel = movem_an_r;           an_wr_data = movem_an_final;                              end
+        else if (rtr_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rtr_an_wr_data;                              end
+        else if (rte_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rte_a7_next_r + 32'd4 + {24'h0, rte_fmt_skip_r}; end
+        else if (move16_an1_wr_en)     begin an_wr_sel = move16_src_an_r;      an_wr_data = move16_src_base_r + 32'd16;                  end
+        else if (move16_an2_wr_r)      begin an_wr_sel = move16_dst_an_r;      an_wr_data = move16_dst_base_r + 32'd16;                  end
+        else if (addx_ay_wr_en)        begin an_wr_sel = addx_ay_reg_r;        an_wr_data = addx_ay_addr_r;                              end
+        else if (addx_ax_wr_en)        begin an_wr_sel = addx_ax_reg_r;        an_wr_data = addx_ax_addr_r;                              end
+        else if (pack_ay_wr_en)        begin an_wr_sel = pack_mem_ay_reg_r;    an_wr_data = pack_mem_ay_addr_r;                          end
+        else if (pack_ax_wr_en)        begin an_wr_sel = pack_mem_ax_reg_r;    an_wr_data = pack_mem_ax_addr_r;                          end
+        else if (cmpm_ay_wr_en)        begin an_wr_sel = ex_src_reg[2:0];      an_wr_data = rd_a_data + ex_an_delta;                     end
+        else if (cmpm_ax_wr_en)        begin an_wr_sel = cmpm_ax_reg_r;        an_wr_data = cmpm_ax_addr_r + cmpm_step_r;                end
+        else if (bcds_ay_wr_en)        begin an_wr_sel = bcds_ay_reg_r;        an_wr_data = bcds_ay_addr_r;                              end
+        else if (bcds_ax_wr_en)        begin an_wr_sel = bcds_ax_reg_r;        an_wr_data = bcds_ax_addr_r;                              end
+        else if (mem_rmw_an_wr_en)     begin an_wr_sel = ex_an_upd_reg;        an_wr_data = rd_a_data + ex_an_delta;                     end
+        else if (move_mm_dst_an_wr_en) begin an_wr_sel = move_mm_dst_an_reg_r; an_wr_data = move_mm_dst_an_new_r;                        end
+    end
 
     // -----------------------------------------------------------------------
     // CCR / SR write outputs
