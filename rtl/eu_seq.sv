@@ -516,6 +516,7 @@ module eu_seq (
 
     // Phase 67: MOVE memory→memory (2-phase: read src EA, write to dst EA)
     logic        dec_is_move_mm;
+    logic        dec_is_move_mm_idx_dst; // dst is (d8,An,Xi); src is abs.L
     logic [31:0] dec_dst_ea_offset;
     logic        dec_abs_dst_ea_en;
     logic [31:0] dec_abs_dst_ea_val;
@@ -684,7 +685,8 @@ module eu_seq (
         dec_md_64bit      = 1'b0;
         dec_is_mem_rmw    = 1'b0;
         dec_is_addx_mem   = 1'b0;
-        dec_is_move_mm    = 1'b0;
+        dec_is_move_mm        = 1'b0;
+        dec_is_move_mm_idx_dst = 1'b0;
         dec_dst_ea_offset = 32'h0;
         dec_abs_dst_ea_en = 1'b0;
         dec_abs_dst_ea_val= 32'h0;
@@ -945,6 +947,28 @@ module eu_seq (
                             end
                             default: ;
                         endcase
+                    // ── CMPI #imm, (d16,PC) ───────────────────────────────────────
+                    // Only CMPI uses PC-relative EA (other imm ops use data-alterable EAs).
+                    // byte/word: ext_data={imm_word, d16}; long: ext_data={hi_imm,lo_imm}, q3=d16.
+                    // EA = address_of_d16_word + sign_ext(d16).
+                    end else if (!f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && f_reg == 3'b010 &&
+                                 f_dn == 3'b110) begin
+                        dec_siz        = f_siz;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = ALU_CMP;
+                        dec_use_imm    = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_abs_ea_en  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_x_unchanged = 1'b1;
+                        dec_valid      = 1'b1;
+                        dec_imm        = (f_ss == 2'b10) ? ext_data
+                                                          : {16'h0, ext_data[31:16]};
+                        // byte/word: d16 at decode_pc+4; long: d16 at decode_pc+6
+                        dec_abs_ea_val = (f_ss == 2'b10) ? decode_pc + 32'd6 + {{16{q3_word[15]}}, q3_word}
+                                                          : decode_pc + 32'd4 + {{16{ext_data[15]}}, ext_data[15:0]};
                     // ── Phase 60/78+: register bit ops to memory ea ──────────────
                     // BTST/BCHG/BCLR/BSET Dn, ea  (f_dir=1)
                     // Simple (An)/(An)+/-(An): rd_a=An, rd_b=Dn; d16/abs: same.
@@ -1829,8 +1853,32 @@ module eu_seq (
                             dec_updates_ccr = 1'b1;
                             dec_needs_ext  = 1'b1;
                             dec_siz        = f_move_sz;
+                        end else if (f_mode == 3'b111 && f_reg == 3'b001) begin
+                            // MOVE (xxx).L, (d8,An,Xn): abs.L src, indexed dst.
+                            // ext_data={abs_hi,abs_lo}, q3_word=brief_ext for dst.
+                            // rd_a=dst An (f_dn), rd_b=dst Xi (q3_word[15:12]).
+                            // dec_is_idx NOT set (would corrupt abs read addr); instead
+                            // ex_is_move_mm_idx_dst flags indexed dst EA at read_ack.
+                            dec_valid              = 1'b1;
+                            dec_is_move_mm         = 1'b1;
+                            dec_is_move_mm_idx_dst = 1'b1;
+                            dec_is_mem_rd          = 1'b1;
+                            dec_unit               = UNIT_MOVE;
+                            dec_writes_reg         = 1'b0;
+                            dec_needs_ext          = 1'b1;
+                            dec_abs_ea_en          = 1'b1;
+                            dec_abs_ea_val         = ext_data; // abs.L src address
+                            dec_src_reg            = {1'b1, f_dn}; // dst An base
+                            dec_reads_src          = 1'b1;
+                            dec_dst_reg            = {q3_word[15], q3_word[14:12]}; // dst Xi
+                            dec_reads_dst          = 1'b1;
+                            // Xi scale/wl and d8 for indexed dst EA (no dec_is_idx)
+                            dec_xn_wl              = q3_word[11];
+                            dec_xn_scale           = q3_word[10:9];
+                            dec_ea_offset          = {{24{q3_word[7]}}, q3_word[7:0]};
+                            dec_siz                = f_move_sz;
                         end
-                        // MOVE Dn/An,(d8,An,Xn): not yet decoded; dec_valid stays 0
+                        // Other src modes (Dn/An, indirect, pre/post-inc/dec) not yet decoded
                     end else if (f_move_dst_mode == 3'b111) begin
                         // ── dst = absolute address ──
                         if (f_mode == 3'b000 || f_mode == 3'b001) begin
@@ -1849,18 +1897,26 @@ module eu_seq (
                             dec_needs_ext   = 1'b1;
                         end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
                             // MOVE #imm, (xxx).W/(xxx).L — immediate source, absolute destination
+                            // B/W: ext_data={imm_word, abs.W addr}; for abs.L: ext_data={imm_word, abs.L_hi}, q3=abs.L_lo
+                            // L:   ext_data={imm_hi, imm_lo};       for abs.W: q3=abs.W addr; abs.L: ext34=abs.L
                             dec_valid       = 1'b1;
                             dec_is_mem_wr   = 1'b1;
                             dec_unit        = UNIT_MOVE;
                             dec_use_imm     = 1'b1;
+                            dec_siz         = f_move_sz;
                             dec_abs_ea_en   = 1'b1;
-                            dec_abs_ea_val  = (f_dn == 3'b001) ? ext34_data
-                                           : {{16{q3_word[15]}}, q3_word};
+                            dec_abs_ea_val  = (f_dn == 3'b001)
+                                           ? ((f_move_sz == 2'b00) ? ext34_data
+                                                                    : {ext_data[15:0], q3_word})
+                                           : ((f_move_sz == 2'b00) ? {{16{q3_word[15]}}, q3_word}
+                                                                    : {{16{ext_data[15]}}, ext_data[15:0]});
+                            dec_imm         = (f_move_sz == 2'b00) ? ext_data
+                                           :                          {16'h0, ext_data[31:16]};
                             dec_writes_reg  = 1'b0;
                             dec_updates_ccr = 1'b1;
                             dec_needs_ext   = 1'b1;
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
-                                     f_mode == 3'b101 || f_mode == 3'b111) begin
+                                     f_mode == 3'b101 || f_mode == 3'b110 || f_mode == 3'b111) begin
                             // Phase 67: src = memory → MOVE (src),(xxx).W/(xxx).L
                             dec_valid          = 1'b1;
                             dec_is_move_mm     = 1'b1;
@@ -1870,8 +1926,12 @@ module eu_seq (
                             dec_x_unchanged    = 1'b1;
                             dec_abs_dst_ea_en  = 1'b1;
                             dec_needs_ext      = 1'b1;
-                            // dst abs EA: always in low slot (last ext words)
-                            dec_abs_dst_ea_val = (f_dn == 3'b001) ? ext_data
+                            // dst abs EA: for mode 110 (indexed src) abs.L case, ext_data =
+                            // {brief_ext, abs.L_hi} so we must use {ext_data[15:0], q3_word}.
+                            // All other modes: abs.L dst uses ext_data directly; abs.W uses low word.
+                            dec_abs_dst_ea_val = (f_mode == 3'b110 && f_dn == 3'b001)
+                                               ? {ext_data[15:0], q3_word}
+                                               : (f_dn == 3'b001) ? ext_data
                                                : {{16{ext_data[15]}}, ext_data[15:0]};
                             // src EA setup (abs.L dst takes 2 ext words → src must have 0)
                             if (f_mode == 3'b111) begin
@@ -1885,6 +1945,20 @@ module eu_seq (
                                     3'b010: dec_abs_ea_val = (f_dn == 3'b001)
                                         ? 32'h0
                                         : decode_pc + 32'd2 + {{16{ext_data[31]}}, ext_data[31:16]};
+                                    3'b011: begin
+                                        // (d8,PC,Xi): ext_data={brief_ext, abs.W/abs.L_hi}
+                                        // EA = PC+2 + Xi*scale + d8 (brief_ext in hi word)
+                                        dec_is_idx     = 1'b1;
+                                        dec_dst_reg    = {ext_data[31], ext_data[30:28]};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_xn_wl      = ext_data[27];
+                                        dec_xn_scale   = ext_data[26:25];
+                                        dec_abs_ea_val = decode_pc + 32'd2
+                                                       + {{24{ext_data[23]}}, ext_data[23:16]};
+                                        // abs.L dst: real dst EA is {ext_data[15:0], q3_word}
+                                        if (f_dn == 3'b001)
+                                            dec_abs_dst_ea_val = {ext_data[15:0], q3_word};
+                                    end
                                     default: ;
                                 endcase
                             end else begin
@@ -1909,6 +1983,16 @@ module eu_seq (
                                         dec_ea_offset = (f_dn == 3'b001)
                                             ? {{16{ext_data[15]}}, ext_data[15:0]} // abs.L dst: src alone in lo
                                             : {{16{ext_data[31]}}, ext_data[31:16]}; // abs.W dst: src in hi
+                                    end
+                                    3'b110: begin
+                                        // MOVE (d8,An,Xi),(xxx).W/L — indexed src, abs dst
+                                        // ext_data[31:16]=brief_ext, ext_data[15:0]=abs.W or abs.L_hi
+                                        dec_dst_reg   = {ext_data[31], ext_data[30:28]}; // Xi → rd_b
+                                        dec_reads_dst = 1'b1;
+                                        dec_is_idx    = 1'b1;
+                                        dec_xn_wl     = ext_data[27];
+                                        dec_xn_scale  = ext_data[26:25];
+                                        dec_ea_offset = {{24{ext_data[23]}}, ext_data[23:16]}; // d8
                                     end
                                     default: ;
                                 endcase
@@ -2427,28 +2511,83 @@ module eu_seq (
                                     (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
                                                           f_reg == 3'b010 || f_reg == 3'b011)))) ||
                                   (f_dn == 3'b000 &&
-                                   (f_mode == 3'b010 || f_mode == 3'b011)))) begin
+                                   (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                    f_mode == 3'b101 || f_mode == 3'b110 ||
+                                    (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))))) begin
                         if (f_dn == 3'b000) begin
-                            // MOVE.W SR, (An) / (An)+  — supervisor only
+                            // MOVE.W SR, EA — supervisor only
                             if (!sr_live[13]) begin
                                 dec_valid   = 1'b1;
                                 dec_is_priv = 1'b1;
                             end else begin
                                 dec_valid       = 1'b1;
                                 dec_unit        = UNIT_MOVE;
-                                dec_is_mem_wr   = 1'b1;
                                 dec_siz         = 2'b10;
-                                dec_dst_reg     = {1'b1, f_reg};
-                                dec_reads_dst   = 1'b1;
                                 dec_use_imm     = 1'b1;
                                 dec_imm         = {16'h0, sr_live};
                                 dec_reads_ccr   = 1'b1;
                                 dec_x_unchanged = 1'b1;
-                                if (f_mode == 3'b011) begin
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = 32'd2;
-                                end
+                                case (f_mode)
+                                    3'b010: begin  // (An)
+                                        dec_is_mem_wr = 1'b1;
+                                        dec_dst_reg   = {1'b1, f_reg};
+                                        dec_reads_dst = 1'b1;
+                                    end
+                                    3'b011: begin  // (An)+
+                                        dec_is_mem_wr  = 1'b1;
+                                        dec_dst_reg    = {1'b1, f_reg};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_an_upd_en  = 1'b1;
+                                        dec_an_upd_reg = f_reg;
+                                        dec_an_delta   = 32'd2;
+                                    end
+                                    3'b100: begin  // -(An)
+                                        dec_is_mem_wr  = 1'b1;
+                                        dec_dst_reg    = {1'b1, f_reg};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_an_upd_en  = 1'b1;
+                                        dec_an_upd_reg = f_reg;
+                                        dec_an_delta   = 32'hFFFF_FFFE;
+                                        dec_ea_offset  = 32'hFFFF_FFFE;
+                                    end
+                                    3'b101: begin  // (d16,An)
+                                        dec_is_mem_wr = 1'b1;
+                                        dec_dst_reg   = {1'b1, f_reg};
+                                        dec_reads_dst = 1'b1;
+                                        dec_needs_ext = 1'b1;
+                                        dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    3'b110: begin  // (d8,An,Xn) — RMW trick: rd_a=An, rd_b=Xn
+                                        dec_is_mem_rd  = 1'b1;
+                                        dec_is_mem_rmw = 1'b1;
+                                        dec_src_reg    = {1'b1, f_reg};
+                                        dec_reads_src  = 1'b1;
+                                        dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_is_idx     = 1'b1;
+                                        dec_xn_wl      = ext_data[11];
+                                        dec_xn_scale   = ext_data[10:9];
+                                        dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                                        dec_needs_ext  = 1'b1;
+                                    end
+                                    3'b111: begin
+                                        dec_needs_ext = 1'b1;
+                                        case (f_reg)
+                                            3'b000: begin  // (xxx).W
+                                                dec_is_mem_wr  = 1'b1;
+                                                dec_abs_ea_en  = 1'b1;
+                                                dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                            end
+                                            3'b001: begin  // (xxx).L
+                                                dec_is_mem_wr  = 1'b1;
+                                                dec_abs_ea_en  = 1'b1;
+                                                dec_abs_ea_val = ext_data;
+                                            end
+                                            default: ;
+                                        endcase
+                                    end
+                                    default: ;
+                                endcase
                             end
                         end else begin
                             // MOVE.W EA, SR (f_dn=011) or MOVE.W EA, CCR (f_dn=010) — memory source
@@ -4631,6 +4770,7 @@ module eu_seq (
     logic        ex_is_addx_mem;      // ADDX/SUBX -(Ay),-(Ax) in EX stage
     // Phase 67
     logic        ex_is_move_mm;
+    logic        ex_is_move_mm_idx_dst;
     logic [31:0] ex_dst_ea_offset;
     logic        ex_abs_dst_ea_en;
     logic [31:0] ex_abs_dst_ea_val;
@@ -5260,7 +5400,8 @@ module eu_seq (
             ex_is_cmpm        <= 1'b0;
             ex_is_mem_rmw     <= 1'b0;
             ex_is_addx_mem    <= 1'b0;
-            ex_is_move_mm     <= 1'b0;
+            ex_is_move_mm         <= 1'b0;
+            ex_is_move_mm_idx_dst <= 1'b0;
             ex_dst_ea_offset  <= 32'h0;
             ex_abs_dst_ea_en  <= 1'b0;
             ex_abs_dst_ea_val <= 32'h0;
@@ -5370,7 +5511,8 @@ module eu_seq (
             ex_is_cmpm        <= 1'b0;
             ex_is_mem_rmw     <= 1'b0;
             ex_is_addx_mem    <= 1'b0;
-            ex_is_move_mm     <= 1'b0;
+            ex_is_move_mm         <= 1'b0;
+            ex_is_move_mm_idx_dst <= 1'b0;
             ex_dst_ea_offset  <= 32'h0;
             ex_abs_dst_ea_en  <= 1'b0;
             ex_abs_dst_ea_val <= 32'h0;
@@ -5507,7 +5649,8 @@ module eu_seq (
             ex_is_cmpm        <= dec_is_cmpm;
             ex_is_mem_rmw     <= dec_is_mem_rmw;
             ex_is_addx_mem    <= dec_is_addx_mem;
-            ex_is_move_mm     <= dec_is_move_mm;
+            ex_is_move_mm         <= dec_is_move_mm;
+            ex_is_move_mm_idx_dst <= dec_is_move_mm_idx_dst;
             ex_dst_ea_offset  <= dec_dst_ea_offset;
             ex_abs_dst_ea_en  <= dec_abs_dst_ea_en;
             ex_abs_dst_ea_val <= dec_abs_dst_ea_val;
@@ -6622,7 +6765,12 @@ module eu_seq (
                 move_mm_run_r        <= 1'b1;
                 move_mm_data_r       <= mem_rdata;
                 move_mm_dst_addr_r   <= ex_abs_dst_ea_en ? ex_abs_dst_ea_val
-                                                         : (rd_b_data + ex_dst_ea_offset);
+                                     : ex_is_move_mm_idx_dst
+                                       ? (rd_a_data +
+                                          ((ex_xn_wl ? rd_b_data
+                                                     : {{16{rd_b_data[15]}}, rd_b_data[15:0]})
+                                           << ex_xn_scale) + ex_ea_offset)
+                                       : (rd_b_data + ex_dst_ea_offset);
                 move_mm_siz_r        <= ex_siz;
                 // CCR: {X unchanged, N, Z, 0, 0}; N/Z from sized read data
                 move_mm_ccr_r        <= {sr_live[4],
@@ -7114,7 +7262,7 @@ module eu_seq (
                       : cas_sr_wr_en        ? {sr_live[15:8], 3'b000, cas_ccr_r}
                       : bcds_sr_wr_en       ? {sr_live[15:8], 3'b000, bcd_c, bcd_result[7], bcd_z, 1'b0, bcd_c}
                       : cas2_sr_wr_en       ? {sr_live[15:8], 3'b000, cas2_ccr_r}
-                      : wb_is_move_sr_w     ? wb_result[15:0]
+                      : wb_is_move_sr_w     ? (wb_result[15:0] & 16'hF71F)
                       : wb_is_move_ccr_w    ? {sr_live[15:8], 3'b000, wb_result[4:0]}
                       :                       {sr_live[15:8], 3'b000, final_ccr};
     assign sr_ccr_only = (rte_sr_wr_en || stop_sr_wr_en ||
@@ -7160,8 +7308,6 @@ module eu_seq (
             end
         end
     end
-    // synthesis translate_on
-
     // -----------------------------------------------------------------------
     // DBcc branch — decided at EX stage (needs ALU result to check counter).
     // Branch taken when: condition is FALSE AND decremented counter != 0xFFFF.
@@ -7337,7 +7483,9 @@ module eu_seq (
                      : cas_write_r             ? cas_du_val_r
                      : (bcds_run_r && bcds_phase_r == 2'd2) ? {bcd_result, 24'h0}
                      : mem_rmw_run_r            ? mem_rmw_wdata_r
-                     : move_mm_run_r            ? move_mm_data_r
+                     : move_mm_run_r            ? ((move_mm_siz_r==2'b01) ? {move_mm_data_r[7:0],  24'h0}
+                                                  : (move_mm_siz_r==2'b10) ? {move_mm_data_r[15:0], 16'h0}
+                                                  :                           move_mm_data_r)
                      : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ?
                          ((ex_siz==2'b01) ? {ex_result[7:0],  24'h0}
                         : (ex_siz==2'b10) ? {ex_result[15:0], 16'h0}

@@ -196,12 +196,12 @@ module m68030_seq (
                            (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
                            (f_dn != 3'b100 && f_dn != 3'b111);
 
-    // Phase 78: Group 0 imm ALU to (d16,An) or (xxx).W — 2 ext for byte/word, 3 for long
+    // Phase 78: Group 0 imm ALU to (d16,An)/(xxx).W/(d16,PC)/(d8,PC,Xn) — 2 ext for byte/word, 3 for long
     logic is_imm_g0_d16_or_absw;
     assign is_imm_g0_d16_or_absw = (f_group == 4'h0) && !f_dir && (f_ss != 2'b11) &&
                                    (f_dn != 3'b100 && f_dn != 3'b111) &&
                                    (f_mode == 3'b101 || f_mode == 3'b110 ||
-                                    (f_mode == 3'b111 && f_reg == 3'b000));
+                                    (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011)));
 
     // Phase 78: Group 0 imm ALU to (xxx).L — 3 ext for byte/word, 4 for long
     logic is_imm_g0_absl;
@@ -271,15 +271,16 @@ module m68030_seq (
     assign is_move_mm = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
         (f_move_dst_mode_s == 3'b010 || f_move_dst_mode_s == 3'b011 ||
          f_move_dst_mode_s == 3'b100 || f_move_dst_mode_s == 3'b101 ||
-         f_move_dst_mode_s == 3'b111) &&
+         f_move_dst_mode_s == 3'b110 || f_move_dst_mode_s == 3'b111) &&
         (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
-         f_mode == 3'b101 || f_mode == 3'b111);
+         f_mode == 3'b101 || f_mode == 3'b110 || f_mode == 3'b111);
 
     // Number of extension words needed by src EA and dst EA independently
     logic [1:0] move_mm_src_ext_w, move_mm_dst_ext_w;
     logic [2:0] move_mm_total_ext_w;  // sum; 3+ = unsupported (not decoded)
     always_comb begin
-        if (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010)))
+        if (f_mode == 3'b101 || f_mode == 3'b110 ||
+            (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011)))
             move_mm_src_ext_w = 2'd1;
         else if (f_mode == 3'b111 && f_reg == 3'b001)
             move_mm_src_ext_w = 2'd2;
@@ -289,7 +290,7 @@ module m68030_seq (
             move_mm_src_ext_w = 2'd0;
     end
     always_comb begin
-        if (f_move_dst_mode_s == 3'b101 ||
+        if (f_move_dst_mode_s == 3'b101 || f_move_dst_mode_s == 3'b110 ||
             (f_move_dst_mode_s == 3'b111 && f_dn == 3'b000))
             move_mm_dst_ext_w = 2'd1;
         else if (f_move_dst_mode_s == 3'b111 && f_dn == 3'b001)
@@ -336,14 +337,14 @@ module m68030_seq (
         // MOVE.W #imm, SR (0x46FC) / MOVE.W #imm, CCR (0x44FC) — group 4, 1 ext word
         else if (instr_word == 16'h46FC || instr_word == 16'h44FC)
             ext_count = 3'd1;
-        // Phase 78: MOVE.W EA,SR/CCR with abs.L source — 2 extension words
+        // Phase 78: MOVE.W SR,EA abs.L dst / EA→SR/CCR abs.L src — 2 extension words
         else if ((f_group == 4'h4) && !f_dir && (f_ss == 2'b11) &&
-                 (f_dn == 3'b011 || f_dn == 3'b010) &&
+                 (f_dn == 3'b000 || f_dn == 3'b011 || f_dn == 3'b010) &&
                  (f_mode == 3'b111) && (f_reg == 3'b001))
             ext_count = 3'd2;
-        // Phase 78: MOVE.W EA,SR/CCR with (d16,An)/(d8,An,Xn)/abs.W/(d16,PC)/(d8,PC,Xn) — 1 ext word
+        // Phase 78: MOVE.W SR,EA (d16,An)/(d8,An,Xn)/(xxx).W / EA→SR/CCR displacement/absW — 1 ext word
         else if ((f_group == 4'h4) && !f_dir && (f_ss == 2'b11) &&
-                 (f_dn == 3'b011 || f_dn == 3'b010) &&
+                 (f_dn == 3'b000 || f_dn == 3'b011 || f_dn == 3'b010) &&
                  (f_mode == 3'b101 || f_mode == 3'b110 ||
                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011))))
             ext_count = 3'd1;

@@ -179,14 +179,46 @@ module seq67_tb;
     );
 
     // ─── Memory model (combinatorial ack, 8K x 32) ───────────────────────────
+    // Simulates BIU byte-lane behaviour: reads are normalised (word→[15:0],
+    // byte→[7:0]) and writes are byte-selective, matching biu_cache_if extract_rd
+    // and biu_byte_lane_ctrl conventions so EU size-shift logic is exercised
+    // the same way as in the full-chip (mustest) flow.
     logic [31:0] ram [0:8191];
 
+    function automatic logic [31:0] extract_rd(
+        input logic [31:0] raw,
+        input logic [1:0]  siz,
+        input logic [1:0]  lo
+    );
+        case (siz)
+            2'b01: case (lo)
+                2'b00: extract_rd = {24'h0, raw[31:24]};
+                2'b01: extract_rd = {24'h0, raw[23:16]};
+                2'b10: extract_rd = {24'h0, raw[15:8]};
+                2'b11: extract_rd = {24'h0, raw[7:0]};
+            endcase
+            2'b10: extract_rd = lo[1] ? {16'h0, raw[15:0]} : {16'h0, raw[31:16]};
+            default: extract_rd = raw;
+        endcase
+    endfunction
+
     assign mem_ack   = mem_req;
-    assign mem_rdata = (mem_req && mem_rw) ? ram[mem_addr[14:2]] : 32'h0;
+    assign mem_rdata = (mem_req && mem_rw)
+                     ? extract_rd(ram[mem_addr[14:2]], mem_siz, mem_addr[1:0])
+                     : 32'h0;
 
     always_ff @(posedge clk) begin
-        if (mem_req && !mem_rw)
-            ram[mem_addr[14:2]] <= mem_wdata;
+        if (mem_req && !mem_rw) begin
+            case ({mem_siz, mem_addr[1:0]})
+                4'b10_00: ram[mem_addr[14:2]][31:16] <= mem_wdata[31:16];
+                4'b10_10: ram[mem_addr[14:2]][15:0]  <= mem_wdata[15:0];
+                4'b01_00: ram[mem_addr[14:2]][31:24] <= mem_wdata[31:24];
+                4'b01_01: ram[mem_addr[14:2]][23:16] <= mem_wdata[23:16];
+                4'b01_10: ram[mem_addr[14:2]][15:8]  <= mem_wdata[15:8];
+                4'b01_11: ram[mem_addr[14:2]][7:0]   <= mem_wdata[7:0];
+                default:  ram[mem_addr[14:2]]        <= mem_wdata;
+            endcase
+        end
     end
 
     // ─── An write logger ─────────────────────────────────────────────────────
@@ -354,14 +386,16 @@ module seq67_tb;
         //   = 0011_001_101_101_000 = 0x3368
         //   ext_data = {src_d16=0x0004, dst_d16=0x0008}
         //   A0=0x0100: src addr=0x0104, A1=0x0200: dst addr=0x0208
-        //   Value at 0x104: 0x1234_5678, word: mem_rdata[15:0]=0x5678 → N(15)=0
+        //   Value at 0x104: 0x1234_5678, BIU normalises word at A[1]=0 → 0x1234 in [15:0]
+        //   EU shifts to [31:16] for write; byte-selective model stores upper word only.
+        //   N(15) of moved word 0x1234 = 0
         // ==================================================================
         $display("--- P67-05: MOVE.W (d16,A0),(d16,A1) ---");
         set_an(3'd0, 32'h0000_0100);
         set_an(3'd1, 32'h0000_0200);
         run_instr(16'h3368, 1'b1, {16'h0004, 16'h0008});
-        chk("P67-05:mem",  ram[32'h208>>2], 32'h1234_5678); // full lword written
-        chk_ccr("P67-05",  1'b0, 1'b0, 1'b0, 1'b0); // N=0 (mem_rdata[15]=0x5678[15]=0)
+        chk("P67-05:mem",  ram[32'h208>>2], 32'h1234_0000); // upper word written; lower remains 0
+        chk_ccr("P67-05",  1'b0, 1'b0, 1'b0, 1'b0); // N=0 (word 0x1234 bit15=0)
 
         // ==================================================================
         // P67-06: MOVE.L (xxx).L,(A1) — abs.L src, 2 ext words
