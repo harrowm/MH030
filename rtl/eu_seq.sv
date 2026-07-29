@@ -811,54 +811,60 @@ module eu_seq (
                         dec_needs_ext = 1'b1;
                         dec_is_mem_rd = 1'b1;
                         // EA-mode-specific setup
-                        if (f_mode == 3'b111) begin
-                            // Absolute address: (xxx).W (f_reg=0) or (xxx).L (f_reg=1)
-                            dec_abs_ea_en  = 1'b1;
-                            dec_imm        = (f_ss == 2'b10) ? ext_data
-                                                             : {16'h0, ext_data[31:16]};
-                            dec_abs_ea_val = (f_reg == 3'b000)
-                                ? ((f_ss == 2'b10) ? {{16{q3_word[15]}},  q3_word}
-                                                   : {{16{ext_data[15]}}, ext_data[15:0]})
-                                : ((f_ss == 2'b10) ? ext34_data
-                                                   : {ext_data[15:0], ext34_data[31:16]});
-                        end else begin
-                            // Register-based EA: An is the memory base
-                            dec_src_reg   = {1'b1, f_reg};
-                            dec_reads_src = 1'b1;
-                            case (f_mode)
-                                3'b010: ;  // (An): no extra setup
-                                3'b011: begin  // (An)+
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                                end
-                                3'b100: begin  // -(An)
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                    dec_ea_offset  = dec_an_delta;
-                                end
-                                3'b101: begin  // (d16,An): long→q3, byte/word→ext_data[15:0]
-                                    dec_imm       = (f_ss == 2'b10) ? ext_data
-                                                                     : {16'h0, ext_data[31:16]};
-                                    dec_ea_offset = (f_ss == 2'b10) ? {{16{q3_word[15]}},  q3_word}
-                                                                     : {{16{ext_data[15]}}, ext_data[15:0]};
-                                end
-                                3'b110: begin  // (d8,An,Xn): long→q3_word, byte/word→ext_data[15:0]
-                                    dec_is_idx    = 1'b1;
-                                    dec_imm       = (f_ss == 2'b10) ? ext_data
-                                                                     : {16'h0, ext_data[31:16]};
-                                    dec_dst_reg   = (f_ss == 2'b10) ? {q3_word[15],  q3_word[14:12]}
-                                                                     : {ext_data[15], ext_data[14:12]};
-                                    dec_reads_dst  = 1'b1;
-                                    dec_xn_wl     = (f_ss == 2'b10) ? q3_word[11]    : ext_data[11];
-                                    dec_xn_scale  = (f_ss == 2'b10) ? q3_word[10:9]  : ext_data[10:9];
-                                    dec_ea_offset = (f_ss == 2'b10) ? {{24{q3_word[7]}},  q3_word[7:0]}
-                                                                     : {{24{ext_data[7]}}, ext_data[7:0]};
-                                end
-                                default: ;
-                            endcase
-                        end
+                        case (f_mode)
+                            3'b010: begin  // (An)
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                            end
+                            3'b011: begin  // (An)+
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
+                            end
+                            3'b100: begin  // -(An)
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            3'b101: begin  // (d16,An): long→q3, byte/word→ext_data[15:0]
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_imm       = (f_ss == 2'b10) ? ext_data
+                                                                 : {16'h0, ext_data[31:16]};
+                                dec_ea_offset = (f_ss == 2'b10) ? {{16{q3_word[15]}},  q3_word}
+                                                                 : {{16{ext_data[15]}}, ext_data[15:0]};
+                            end
+                            3'b110: begin  // (d8,An,Xn): long→q3_word, byte/word→ext_data[15:0]
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_is_idx    = 1'b1;
+                                dec_imm       = (f_ss == 2'b10) ? ext_data
+                                                                 : {16'h0, ext_data[31:16]};
+                                dec_dst_reg   = (f_ss == 2'b10) ? {q3_word[15],  q3_word[14:12]}
+                                                                 : {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst  = 1'b1;
+                                dec_xn_wl     = (f_ss == 2'b10) ? q3_word[11]    : ext_data[11];
+                                dec_xn_scale  = (f_ss == 2'b10) ? q3_word[10:9]  : ext_data[10:9];
+                                dec_ea_offset = (f_ss == 2'b10) ? {{24{q3_word[7]}},  q3_word[7:0]}
+                                                                 : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
+                            3'b111: begin  // (xxx).W (f_reg=0) or (xxx).L (f_reg=1)
+                                dec_abs_ea_en  = 1'b1;
+                                dec_imm        = (f_ss == 2'b10) ? ext_data
+                                                                 : {16'h0, ext_data[31:16]};
+                                dec_abs_ea_val = (f_reg == 3'b000)
+                                    ? ((f_ss == 2'b10) ? {{16{q3_word[15]}},  q3_word}
+                                                       : {{16{ext_data[15]}}, ext_data[15:0]})
+                                    : ((f_ss == 2'b10) ? ext34_data
+                                                       : {ext_data[15:0], ext34_data[31:16]});
+                            end
+                            default: ;
+                        endcase
                         // Shared op decode — identical for all five EA modes above
                         case (f_dn)
                             3'b000: begin dec_alu_op=ALU_OR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
@@ -913,88 +919,98 @@ module eu_seq (
                         dec_updates_ccr  = 1'b1;
                         dec_x_unchanged  = 1'b1;
                         dec_is_mem_rd    = 1'b1;
-                        if (f_mode == 3'b110) begin
-                            // (d8,An,Xn): 3-register conflict — rd_a=An, rd_b=Xn, Dn via override
-                            dec_src_reg        = {1'b1, f_reg};
-                            dec_reads_src      = 1'b1;
-                            dec_dst_reg        = {ext_data[15], ext_data[14:12]};
-                            dec_reads_dst      = 1'b1;
-                            dec_is_idx         = 1'b1;
-                            dec_xn_wl          = ext_data[11];
-                            dec_xn_scale       = ext_data[10:9];
-                            dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
-                            dec_needs_ext      = 1'b1;
-                            dec_is_dyn_bit_idx = 1'b1;
-                            dec_dyn_bit_reg    = f_dn;
-                        end else if (f_mode == 3'b111) begin
-                            dec_abs_ea_en  = 1'b1;
-                            dec_needs_ext  = 1'b1;
-                            case (f_reg)
-                                3'b000: begin  // abs.W
-                                    dec_dst_reg    = {1'b0, f_dn};
-                                    dec_reads_dst  = 1'b1;
-                                    dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
-                                end
-                                3'b001: begin  // abs.L
-                                    dec_dst_reg    = {1'b0, f_dn};
-                                    dec_reads_dst  = 1'b1;
-                                    dec_abs_ea_val = ext_data;
-                                end
-                                3'b010: begin  // (d16,PC): EA = PC+2 + d16
-                                    dec_dst_reg    = {1'b0, f_dn};
-                                    dec_reads_dst  = 1'b1;
-                                    dec_abs_ea_val = decode_pc + 32'd2
-                                                   + {{16{ext_data[15]}}, ext_data[15:0]};
-                                end
-                                3'b011: begin  // (d8,PC,Xn): EA = PC+2 + d8 + scaled(Xn)
-                                    dec_abs_ea_val    = decode_pc + 32'd2
-                                                      + {{24{ext_data[7]}}, ext_data[7:0]};
-                                    dec_dst_reg       = {ext_data[15], ext_data[14:12]};
-                                    dec_reads_dst     = 1'b1;
-                                    dec_is_idx        = 1'b1;
-                                    dec_xn_wl         = ext_data[11];
-                                    dec_xn_scale      = ext_data[10:9];
-                                    dec_is_dyn_bit_idx = 1'b1;
-                                    dec_dyn_bit_reg   = f_dn;
-                                end
-                                3'b100: begin  // #imm — BTST Dn, #byte
-                                    // Immediate byte in ext_data[7:0]; bit count from Dn (f_dn)
-                                    // Clear memory-access flags set by outer block.
-                                    dec_is_mem_rd   = 1'b0;
-                                    dec_abs_ea_en   = 1'b0;
-                                    dec_src_reg     = {1'b0, f_dn};  // Dn → rd_a for bit count
-                                    dec_reads_src   = 1'b1;
-                                    dec_imm         = {24'h0, ext_data[7:0]};
-                                    dec_is_bit_imm  = 1'b1;
-                                    dec_needs_ext   = 1'b1;
-                                end
-                                default: ;
-                            endcase
-                        end else begin
-                            // (An)/(An)+/-(An)/d16(An): rd_a=An (base), rd_b=Dn (bit count)
-                            dec_src_reg   = {1'b1, f_reg};
-                            dec_reads_src = 1'b1;
-                            dec_dst_reg   = {1'b0, f_dn};
-                            dec_reads_dst = 1'b1;
-                            case (f_mode)
-                                3'b011: begin  // (An)+
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
-                                end
-                                3'b100: begin  // -(An)
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
-                                    dec_ea_offset  = dec_an_delta;
-                                end
-                                3'b101: begin  // (d16,An)
-                                    dec_needs_ext  = 1'b1;
-                                    dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
-                                end
-                                default: ;  // mode 010 (An)
-                            endcase
-                        end
+                        case (f_mode)
+                            3'b010: begin  // (An): rd_a=An, rd_b=Dn
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_dst_reg   = {1'b0, f_dn};
+                                dec_reads_dst = 1'b1;
+                            end
+                            3'b011: begin  // (An)+
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_dst_reg   = {1'b0, f_dn};
+                                dec_reads_dst = 1'b1;
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
+                            end
+                            3'b100: begin  // -(An)
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_dst_reg   = {1'b0, f_dn};
+                                dec_reads_dst = 1'b1;
+                                dec_an_upd_en  = 1'b1;
+                                dec_an_upd_reg = f_reg;
+                                dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
+                                dec_ea_offset  = dec_an_delta;
+                            end
+                            3'b101: begin  // (d16,An)
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                                dec_dst_reg   = {1'b0, f_dn};
+                                dec_reads_dst = 1'b1;
+                                dec_needs_ext  = 1'b1;
+                                dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
+                            end
+                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn, Dn via override
+                                dec_src_reg        = {1'b1, f_reg};
+                                dec_reads_src      = 1'b1;
+                                dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst      = 1'b1;
+                                dec_is_idx         = 1'b1;
+                                dec_xn_wl          = ext_data[11];
+                                dec_xn_scale       = ext_data[10:9];
+                                dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                                dec_needs_ext      = 1'b1;
+                                dec_is_dyn_bit_idx = 1'b1;
+                                dec_dyn_bit_reg    = f_dn;
+                            end
+                            3'b111: begin
+                                dec_abs_ea_en  = 1'b1;
+                                dec_needs_ext  = 1'b1;
+                                case (f_reg)
+                                    3'b000: begin  // abs.W
+                                        dec_dst_reg    = {1'b0, f_dn};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    3'b001: begin  // abs.L
+                                        dec_dst_reg    = {1'b0, f_dn};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_abs_ea_val = ext_data;
+                                    end
+                                    3'b010: begin  // (d16,PC): EA = PC+2 + d16
+                                        dec_dst_reg    = {1'b0, f_dn};
+                                        dec_reads_dst  = 1'b1;
+                                        dec_abs_ea_val = decode_pc + 32'd2
+                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    3'b011: begin  // (d8,PC,Xn): EA = PC+2 + d8 + scaled(Xn)
+                                        dec_abs_ea_val    = decode_pc + 32'd2
+                                                          + {{24{ext_data[7]}}, ext_data[7:0]};
+                                        dec_dst_reg       = {ext_data[15], ext_data[14:12]};
+                                        dec_reads_dst     = 1'b1;
+                                        dec_is_idx        = 1'b1;
+                                        dec_xn_wl         = ext_data[11];
+                                        dec_xn_scale      = ext_data[10:9];
+                                        dec_is_dyn_bit_idx = 1'b1;
+                                        dec_dyn_bit_reg   = f_dn;
+                                    end
+                                    3'b100: begin  // #imm — BTST Dn, #byte (clears mem-rd flags)
+                                        dec_is_mem_rd   = 1'b0;
+                                        dec_abs_ea_en   = 1'b0;
+                                        dec_src_reg     = {1'b0, f_dn};
+                                        dec_reads_src   = 1'b1;
+                                        dec_imm         = {24'h0, ext_data[7:0]};
+                                        dec_is_bit_imm  = 1'b1;
+                                        dec_needs_ext   = 1'b1;
+                                    end
+                                    default: ;
+                                endcase
+                            end
+                            default: ;
+                        endcase
                         case (f_ss)
                             2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; end
                             2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
