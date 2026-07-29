@@ -57,7 +57,7 @@ arm. Lets each case have an explanatory comment and makes sync-errors impossible
 
 ---
 
-## #4 — Default-init block grouping (eu_seq.sv ~568–713)
+## #4 — Default-init block grouping (eu_seq.sv ~568–713) [DONE]
 
 **Problem:** ~80 signals initialised to zero in a single wall of text before `if (instr_valid)`.
 Hard to find a specific signal and check its default.
@@ -69,7 +69,7 @@ with blank lines between groups and a brief category comment.
 
 ---
 
-## #5 — `ext_count` flat if-else → `case(f_group)` (m68030_seq.sv ~304–430)
+## #5 — `ext_count` flat if-else → `case(f_group)` (m68030_seq.sv ~304–430) [SKIPPED]
 
 **Problem:** 130-line flat if-else chain testing `f_group`, `f_ss`, `f_mode`, `f_reg`
 independently with implicit ordering dependencies that aren't visible.
@@ -79,9 +79,14 @@ the decode structure in eu_seq.sv.
 
 **Risk:** Medium-high — ordering dependencies must be preserved exactly.
 
+**Note:** Attempted analysis found that roughly half the conditions are group-independent
+predicates (`is_movem_3ext`, `is_branch_l`, `is_abs_long`, etc.) spanning multiple groups.
+A `case(f_group)` outer shell cannot express these without duplicating them in every arm.
+The restructure would add complexity rather than remove it. Skipping.
+
 ---
 
-## #6 — Inner `if/else if` → `case(f_mode)` in Group 0 (eu_seq.sv ~714–1050)
+## #6 — Inner `if/else if` → `case(f_mode)` in Group 0 (eu_seq.sv ~714–1050) [DONE]
 
 **Problem:** Third and fourth nesting levels both use `if/else if` chains on `f_mode`
 (a 3-bit value). Four levels of nesting makes control flow hard to follow.
@@ -124,7 +129,7 @@ yet"). Would work with Verilator or ModelSim. Skip unless toolchain changes.
 
 ---
 
-## #9 — Named `normal_bus_idle` signal (eu_seq.sv ~7406–7414)
+## #9 — Named `no_special_bus_op` signal (eu_seq.sv ~7406–7414) [DONE]
 
 **Problem:** `mem_req` gate has 12 negations joined by AND — reads as a wall of `!foo_r`.
 
