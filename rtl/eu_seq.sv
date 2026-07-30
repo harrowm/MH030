@@ -352,6 +352,14 @@ module eu_seq (
         endcase
     endfunction
 
+    // ALU base op (SUB or ADD) and extend op (SUBX or ADDX) for Groups 9/D.
+    function automatic [3:0] grp_aop(input logic [3:0] grp);
+        return (grp == 4'h9) ? ALU_SUB : ALU_ADD;
+    endfunction
+    function automatic [3:0] grp_xop(input logic [3:0] grp);
+        return (grp == 4'h9) ? ALU_SUBX : ALU_ADDX;
+    endfunction
+
     // Sets dec_an_upd_* and dec_ea_offset for (An)+ and -(An) EA modes.
     task setup_mem_incdec(
         input  logic [1:0]  siz,
@@ -3451,13 +3459,13 @@ module eu_seq (
                 end
 
                 // ----------------------------------------------------------------
-                // Group 1001: SUB / SUBA
+                // Group 1001/1101: SUB/ADD / SUBA/ADDA
                 // ----------------------------------------------------------------
-                4'h9: begin
+                4'h9, 4'hd: begin
                     if (f_mode == 3'b000 && f_ss != 2'b11) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_SUB;
+                        dec_alu_op      = grp_aop(f_group);
                         dec_siz         = f_siz;
                         dec_writes_reg  = 1'b1;
                         dec_updates_ccr = 1'b1;
@@ -3470,7 +3478,7 @@ module eu_seq (
                             dec_dest_reg = {1'b0, f_dn};
                         end else begin
                             // SUBX Dy,Dx: Dx ← Dx − Dy − X (register form)
-                            dec_alu_op   = ALU_SUBX;
+                            dec_alu_op   = grp_xop(f_group);
                             dec_src_reg  = {1'b0, f_reg};  // Dy
                             dec_dst_reg  = {1'b0, f_dn};   // Dx
                             dec_dest_reg = {1'b0, f_dn};
@@ -3480,7 +3488,7 @@ module eu_seq (
                         dec_valid       = 1'b1;
                         dec_is_addx_mem = 1'b1;
                         dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_SUBX;
+                        dec_alu_op      = grp_xop(f_group);
                         dec_siz         = f_siz;
                         dec_updates_ccr = 1'b1;
                         dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
@@ -3491,7 +3499,7 @@ module eu_seq (
                     end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b001) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_SUB;
+                        dec_alu_op      = grp_aop(f_group);
                         dec_siz         = f_siz;
                         dec_writes_reg  = 1'b1;
                         dec_updates_ccr = 1'b1;
@@ -3505,7 +3513,7 @@ module eu_seq (
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_SUB;
+                        dec_alu_op      = grp_aop(f_group);
                         dec_siz         = f_siz;
                         dec_is_mem_rd   = 1'b1;
                         dec_is_mem_rmw  = 1'b1;
@@ -3521,7 +3529,7 @@ module eu_seq (
                         dec_is_mem_src  = 1'b1;
                         dec_is_mem_rd   = 1'b1;
                         dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_SUB;
+                        dec_alu_op      = grp_aop(f_group);
                         dec_siz         = f_siz;
                         dec_writes_reg  = 1'b1;
                         dec_updates_ccr = 1'b1;
@@ -3541,7 +3549,7 @@ module eu_seq (
                         dec_is_mem_src  = 1'b1;
                         dec_is_mem_rd   = 1'b1;
                         dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_SUB;
+                        dec_alu_op      = grp_aop(f_group);
                         dec_siz         = f_siz;
                         dec_writes_reg  = 1'b1;
                         dec_updates_ccr = 1'b1;
@@ -3564,10 +3572,10 @@ module eu_seq (
                             endcase
                         end
                     end else if (f_ss == 2'b11) begin
-                        // SUBA.W (f_dir=0) / SUBA.L (f_dir=1): An ← An − src; CCR unchanged
+                        // SUBA/ADDA .W (f_dir=0) / .L (f_dir=1): An ← An ± src; CCR unchanged
                         dec_valid      = 1'b1;
                         dec_unit       = UNIT_ALU;
-                        dec_alu_op     = ALU_SUB;
+                        dec_alu_op     = grp_aop(f_group);
                         dec_siz        = 2'b00;
                         dec_dst_reg    = {1'b1, f_dn};
                         dec_dest_reg   = {1'b1, f_dn};
@@ -3586,7 +3594,7 @@ module eu_seq (
                             dec_needs_ext = 1'b1;
                             dec_imm       = f_dir ? ext_data[31:0]
                                                   : {{16{ext_data[15]}}, ext_data[15:0]};
-                        // ── Phase 66: SUBA.W/L from memory EA ───────────────────
+                        // ── Phase 66: SUBA/ADDA .W/L from memory EA ─────────────
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                      f_mode == 3'b101 ||
                                      (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
@@ -4015,191 +4023,6 @@ module eu_seq (
                         end
                     end
                 end
-
-                // ----------------------------------------------------------------
-                // Group 1101: ADD / ADDA
-                // ----------------------------------------------------------------
-                4'hd: begin
-                    if (f_mode == 3'b000 && f_ss != 2'b11) begin
-                        dec_valid       = 1'b1;
-                        dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_ADD;
-                        dec_siz         = f_siz;
-                        dec_writes_reg  = 1'b1;
-                        dec_updates_ccr = 1'b1;
-                        dec_reads_src   = 1'b1;
-                        dec_reads_dst   = 1'b1;
-                        if (!f_dir) begin
-                            // ADD Dm,Dn: Dn ← Dn + Dm
-                            dec_src_reg  = {1'b0, f_reg};
-                            dec_dst_reg  = {1'b0, f_dn};
-                            dec_dest_reg = {1'b0, f_dn};
-                        end else begin
-                            // ADDX Dy,Dx: Dx ← Dx + Dy + X (register form)
-                            dec_alu_op   = ALU_ADDX;
-                            dec_src_reg  = {1'b0, f_reg};  // Dy
-                            dec_dst_reg  = {1'b0, f_dn};   // Dx
-                            dec_dest_reg = {1'b0, f_dn};
-                        end
-                    // ── Phase 61: ADDX -(Ay),-(Ax) ───────────────────────────────
-                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b001) begin
-                        dec_valid       = 1'b1;
-                        dec_is_addx_mem = 1'b1;
-                        dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_ADDX;
-                        dec_siz         = f_siz;
-                        dec_updates_ccr = 1'b1;
-                        dec_src_reg     = {1'b1, f_reg};  // Ay → rd_a
-                        dec_dst_reg     = {1'b1, f_dn};   // Ax → rd_b
-                        dec_reads_src   = 1'b1;
-                        dec_reads_dst   = 1'b1;
-                    // ── ADD An,Dn — address register source ───────────────────────
-                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b001) begin
-                        dec_valid       = 1'b1;
-                        dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_ADD;
-                        dec_siz         = f_siz;
-                        dec_writes_reg  = 1'b1;
-                        dec_updates_ccr = 1'b1;
-                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a
-                        dec_dst_reg     = {1'b0, f_dn};   // Dn → rd_b
-                        dec_reads_src   = 1'b1;
-                        dec_reads_dst   = 1'b1;
-                        dec_dest_reg    = {1'b0, f_dn};
-                    // ── Phase 60: ADD Dn, (An)/(An)+/-(An) ──────────────────────
-                    end else if (f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
-                        dec_valid       = 1'b1;
-                        dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_ADD;
-                        dec_siz         = f_siz;
-                        dec_is_mem_rd   = 1'b1;
-                        dec_is_mem_rmw  = 1'b1;
-                        dec_src_reg     = {1'b1, f_reg};
-                        dec_dst_reg     = {1'b0, f_dn};
-                        dec_reads_src   = 1'b1;
-                        dec_reads_dst   = 1'b1;
-                        // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
-                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
-                    // ── ADD (An)/(An)+/-(An), Dn — memory source → register dest ──
-                    end else if (!f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
-                        dec_valid       = 1'b1;
-                        dec_is_mem_src  = 1'b1;
-                        dec_is_mem_rd   = 1'b1;
-                        dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_ADD;
-                        dec_siz         = f_siz;
-                        dec_writes_reg  = 1'b1;
-                        dec_updates_ccr = 1'b1;
-                        dec_dst_reg     = {1'b0, f_dn};
-                        dec_reads_dst   = 1'b1;
-                        dec_dest_reg    = {1'b0, f_dn};
-                        dec_src_reg     = {1'b1, f_reg};
-                        dec_reads_src   = 1'b1;
-                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
-                    // ── Phase 65: ADD (ea),Dn — memory source → register dest ────
-                    end else if (!f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b101 ||
-                                  (f_mode == 3'b111 && (f_reg == 3'b000 ||
-                                                        f_reg == 3'b001 ||
-                                                        f_reg == 3'b010)))) begin
-                        dec_valid       = 1'b1;
-                        dec_is_mem_src  = 1'b1;
-                        dec_is_mem_rd   = 1'b1;
-                        dec_unit        = UNIT_ALU;
-                        dec_alu_op      = ALU_ADD;
-                        dec_siz         = f_siz;
-                        dec_writes_reg  = 1'b1;
-                        dec_updates_ccr = 1'b1;
-                        dec_dst_reg     = {1'b0, f_dn};
-                        dec_reads_dst   = 1'b1;
-                        dec_dest_reg    = {1'b0, f_dn};
-                        dec_needs_ext   = 1'b1;
-                        if (f_mode == 3'b101) begin
-                            dec_src_reg   = {1'b1, f_reg};
-                            dec_reads_src = 1'b1;
-                            dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
-                        end else begin
-                            dec_abs_ea_en = 1'b1;
-                            case (f_reg)
-                                3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
-                                3'b001: dec_abs_ea_val = ext_data;
-                                3'b010: dec_abs_ea_val = decode_pc + 32'd2
-                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
-                                default: ;
-                            endcase
-                        end
-                    end else if (f_ss == 2'b11) begin
-                        // ADDA.W (f_dir=0) / ADDA.L (f_dir=1): An ← An + src; CCR unchanged
-                        dec_valid      = 1'b1;
-                        dec_unit       = UNIT_ALU;
-                        dec_alu_op     = ALU_ADD;
-                        dec_siz        = 2'b00;           // 32-bit operation
-                        dec_dst_reg    = {1'b1, f_dn};    // An destination → rd_b
-                        dec_dest_reg   = {1'b1, f_dn};
-                        dec_reads_dst  = 1'b1;
-                        dec_writes_reg = 1'b1;
-                        // dec_updates_ccr stays 0 — ADDA never affects CCR
-                        if (f_mode == 3'b000) begin
-                            dec_reads_src = 1'b1;
-                            dec_src_reg   = {1'b0, f_reg}; // Dn → rd_a
-                            dec_sext_src  = !f_dir;        // sign-extend low 16 bits for .W
-                        end else if (f_mode == 3'b001) begin
-                            dec_reads_src = 1'b1;
-                            dec_src_reg   = {1'b1, f_reg}; // An → rd_a
-                            dec_sext_src  = !f_dir;
-                        end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
-                            dec_use_imm   = 1'b1;
-                            dec_needs_ext = 1'b1;
-                            dec_imm       = f_dir ? ext_data[31:0]
-                                                  : {{16{ext_data[15]}}, ext_data[15:0]};
-                        // ── Phase 66: ADDA.W/L from memory EA ───────────────────
-                        end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
-                                     f_mode == 3'b101 ||
-                                     (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
-                                                           f_reg == 3'b010))) begin
-                            dec_is_mem_src  = 1'b1;
-                            dec_is_mem_rd   = 1'b1;
-                            dec_sext_src    = !f_dir;
-                            dec_mem_rd_siz  = f_dir ? 2'b00 : 2'b10;
-                            if (f_mode != 3'b111) begin
-                                dec_src_reg   = {1'b1, f_reg};
-                                dec_reads_src = 1'b1;
-                            end
-                            case (f_mode)
-                                3'b011: begin
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = calc_step(f_dir ? 2'b00 : 2'b10, f_reg == 3'b111);
-                                end
-                                3'b100: begin
-                                    dec_an_upd_en  = 1'b1;
-                                    dec_an_upd_reg = f_reg;
-                                    dec_an_delta   = ~calc_step(f_dir ? 2'b00 : 2'b10, f_reg == 3'b111) + 32'h1;
-                                    dec_ea_offset  = dec_an_delta;
-                                end
-                                3'b101: begin
-                                    dec_needs_ext  = 1'b1;
-                                    dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
-                                end
-                                3'b111: begin
-                                    dec_needs_ext  = 1'b1;
-                                    dec_abs_ea_en  = 1'b1;
-                                    case (f_reg)
-                                        3'b000: dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
-                                        3'b001: dec_abs_ea_val = ext_data;
-                                        3'b010: dec_abs_ea_val = decode_pc + 32'd2
-                                                               + {{16{ext_data[15]}}, ext_data[15:0]};
-                                        default: ;
-                                    endcase
-                                end
-                                default: ;
-                            endcase
-                        end
-                    end
-                end
-
                 // ----------------------------------------------------------------
                 // Group 1110: shifts
                 // Format: 1110 ccc d ss i tt rrr

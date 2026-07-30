@@ -1,7 +1,7 @@
 # RTL Line-Count Reduction Plan
 
-Current: 15,776 lines across 29 RTL files. eu_seq.sv is 7,549 lines (48%).
-Target: ~14,000 lines (-1,800).
+Original: 15,776 lines across 29 RTL files. eu_seq.sv was 7,549 lines (48%).
+After items #2 and #1: eu_seq.sv = 7,226 lines; total RTL = 15,453 lines (-323).
 
 Run `make test` (51/51) **and** `make mustest` (60/60) after each item. Commit and push before starting the next.
 
@@ -58,21 +58,22 @@ offsets, dec_abs_ea_val expressions) that vary too much for a single task.
 
 ---
 
-## #1 — Parameterised ALU-group decoder (eu_seq.sv) [TODO]
+## #1 — Merge Groups 9/D (SUB/ADD) into shared arm (eu_seq.sv) [DONE]
 
-**Lines saved:** ~850  **Risk:** Medium
+**Lines saved:** 177  **Risk:** Medium
 
-**Problem:** Groups 9/B/C/D (SUB/AND/ADD/EOR) each contain 200–220 lines of
-near-identical decode structure. Only `dec_alu_op` and flags like `has_x`
-(ADDX/SUBX), `has_a` (ADDA/SUBA) differ.
+**Problem:** Groups 9 (SUB/SUBX/SUBA) and D (ADD/ADDX/ADDA) were structurally
+identical — same EA modes, same ADDX/SUBX memory form, same SUBA/ADDA block.
+Only `dec_alu_op` differed: ALU_SUB/SUBX vs ALU_ADD/ADDX.
 
-**Fix:** Extract a shared `task decode_alu_grp(alu_op_t op, logic has_x, logic has_a)`
-that handles all EA modes and sub-variants. Each group becomes a 5-line
-call. ~850 lines collapse to ~200 (shared task) + ~30 (dispatch).
+**Fix:** Merged into a single `4'h9, 4'hd: begin` arm. Added two pure helper
+functions `grp_aop(f_group)` and `grp_xop(f_group)` that select the right op
+based on which group is active. All 8 ALU_SUB/SUBX assignments replaced with
+function calls. Group D arm deleted.
 
-**Risk:** Medium — must preserve all per-group quirks: CMPA sign-extension,
-ADDA/SUBA .W vs .L sign-extension rules, ADDX/SUBX memory mode, byte vs
-word vs long size encoding. Careful testing required after each group.
+**Note:** Groups B (CMP/EOR) and C (AND+MUL+BCD+EXG) could not be merged with
+9/D — Group B uses both ALU_CMP and ALU_EOR in asymmetric ways (f_dir selects
+which), and Group C has MULU/MULS/ABCD/EXG sub-cases unique to that group.
 
 ---
 
@@ -84,4 +85,4 @@ word vs long size encoding. Careful testing required after each group.
 | 5 | biu_cycle_gen S4/S5 dedup        | ~150  | Low    | SKIPPED |
 | 4 | Group 4 unary-to-memory EA merge | ~150  | Low-med| SKIPPED |
 | 2 | Shared EA auto-inc/dec task      | 146   | Low    | DONE    |
-| 1 | Parameterised ALU decoder        | ~180  | Medium | TODO    |
+| 1 | Merge Groups 9/D (SUB/ADD)       | 177   | Medium | DONE    |
