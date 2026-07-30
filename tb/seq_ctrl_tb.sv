@@ -1,13 +1,13 @@
 `default_nettype none
 `timescale 1ns/1ps
 
-// m68030_seq standalone testbench — Phase 32
+// m68030_seq standalone testbench
 // Verifies drain count, ext_data format conversion, and EU-busy stall.
 //
-// Run: iverilog -g2012 -o /tmp/phase32.vvp -I rtl rtl/m68030_seq.sv tb/seq_tb.sv
-//      vvp /tmp/phase32.vvp
+// Run: iverilog -g2012 -o  -I rtl rtl/m68030_seq.sv tb/seq_tb.sv
+//      vvp 
 
-module seq_tb;
+module seq_ctrl_tb;
 
     logic [15:0] instr_word;
     logic [31:0] ifu_ext_data;

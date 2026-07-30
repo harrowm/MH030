@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ns / 1ps
 
-// m68030_biu integration testbench — Phase 13
+// m68030_biu integration testbench
 //
 // Tests m68030_biu as a black box via its external-pin interface.
 // All async inputs (DSACK#, BERR# etc.) are raw active-low signals
@@ -21,7 +21,7 @@
 //       rtl/biu_config.sv rtl/biu_pin_driver.sv rtl/biu_error_handler.sv \
 //       tb/mem_model.sv && vvp phase13.vvp
 
-module m68030_biu_tb;
+module biu_int_tb;
 
     // -----------------------------------------------------------------------
     // Clock — 100 MHz 4× clock (10 ns period)
@@ -322,7 +322,7 @@ module m68030_biu_tb;
     // -----------------------------------------------------------------------
     initial begin
         $dumpfile("biu_phase13.vcd");
-        $dumpvars(0, m68030_biu_tb);
+        $dumpvars(0, biu_int_tb);
 
         // ===================================================================
         // Reset

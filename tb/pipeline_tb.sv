@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ns/1ps
 
-// m68030_seq integration testbench — Phase 32
+// m68030_seq integration testbench
 // Wires m68030_ifu + m68030_seq + m68030_eu and runs a tiny program:
 //
 //   0x1000: CLR.L  D0          (1 word;  0x4280)
@@ -13,14 +13,14 @@
 // Expected final state: D0=42, D1=42.
 //
 // Compile:
-//   iverilog -g2012 -o /tmp/phase32i.vvp -I rtl \
+//   iverilog -g2012 -o  -I rtl \
 //     rtl/m68030_ifu.sv rtl/m68030_seq.sv rtl/m68030_eu.sv \
 //     rtl/eu_seq.sv rtl/eu_regfile.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
 //     rtl/eu_mul_div.sv rtl/eu_bcd.sv rtl/eu_bitops.sv \
 //     tb/seq_int_tb.sv
-//   vvp /tmp/phase32i.vvp
+//   vvp 
 
-module seq_int_tb;
+module pipeline_tb;
 
     // -----------------------------------------------------------------------
     // Clock and reset

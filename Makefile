@@ -169,11 +169,11 @@ $(SIM)/seq71:      $(EU_SRCS)                         tb/seq71_tb.sv      | $(SI
 $(SIM)/ifu:        rtl/m68030_ifu.sv                  tb/ifu_tb.sv        | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/seq_m:      rtl/m68030_seq.sv                  tb/seq_tb.sv        | $(SIM)
+$(SIM)/seq_ctrl:      rtl/m68030_seq.sv                  tb/seq_ctrl_tb.sv        | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/seq_int:    rtl/m68030_ifu.sv rtl/m68030_seq.sv $(EU_SRCS) \
-                   tb/seq_int_tb.sv | $(SIM)
+$(SIM)/pipeline:    rtl/m68030_ifu.sv rtl/m68030_seq.sv $(EU_SRCS) \
+                   tb/pipeline_tb.sv | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/exc:        rtl/m68030_exc.sv                  tb/exc_tb.sv        | $(SIM)
@@ -186,8 +186,8 @@ $(SIM)/mmu:        rtl/m68030_mmu.sv rtl/biu_mmu_if.sv tb/mmu_tb.sv        | $(S
 $(SIM)/biu:        $(BIU_SRCS) tb/mem_model.sv        tb/biu_tb.sv        | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/m68030_biu: rtl/m68030_biu.sv $(BIU_SRCS) \
-                   tb/mem_model.sv tb/m68030_biu_tb.sv | $(SIM)
+$(SIM)/biu_int: rtl/m68030_biu.sv $(BIU_SRCS) \
+                   tb/mem_model.sv tb/biu_int_tb.sv | $(SIM)
 	$(IVCOMP)
 
 # ── Top integration ────────────────────────────────────────────────────────
@@ -198,10 +198,10 @@ TOP_SRCS := rtl/m68030_top.sv rtl/m68030_biu.sv $(BIU_SRCS) \
 $(SIM)/top:        $(TOP_SRCS) tb/mem_model.sv tb/top_tb.sv | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/cosim72:    $(TOP_SRCS) tb/cosim72_tb.sv | $(SIM)
+$(SIM)/cosim_boot:    $(TOP_SRCS) tb/cosim_boot_tb.sv | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/cosim73:    $(TOP_SRCS) tb/cosim73_tb.sv | $(SIM)
+$(SIM)/cosim_smoke:   $(TOP_SRCS) tb/cosim_smoke_tb.sv | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/cosim_grp:  $(TOP_SRCS) tb/cosim_grp_tb.sv | $(SIM)
@@ -245,9 +245,9 @@ ALL_TESTS := \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/seq36 $(SIM)/seq37 $(SIM)/seq38 $(SIM)/seq39 $(SIM)/seq40 \
     $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 $(SIM)/seq56 $(SIM)/seq57 $(SIM)/seq58 $(SIM)/seq59 $(SIM)/seq60 $(SIM)/seq61 $(SIM)/seq62 $(SIM)/seq63 $(SIM)/seq64 $(SIM)/seq65 $(SIM)/seq66 $(SIM)/seq67 $(SIM)/seq68 $(SIM)/seq69 $(SIM)/seq70 $(SIM)/seq71 \
-    $(SIM)/ifu $(SIM)/seq_m $(SIM)/seq_int $(SIM)/exc $(SIM)/mmu \
-    $(SIM)/biu $(SIM)/m68030_biu \
-    $(SIM)/top $(SIM)/cosim72 $(SIM)/cosim73
+    $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/exc $(SIM)/mmu \
+    $(SIM)/biu $(SIM)/biu_int \
+    $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke
 
 # ── Phase 74: Musashi reference log ─────────────────────────────────────────
 MUSASHI_DIR := tools/musashi
@@ -306,7 +306,7 @@ tools/mustest: tools/musashi/test/test_driver.c $(MUSASHI_SRC)
 # Phase 75: compare DUT bus log to reference
 # Usage: make buscmp  (captures live DUT run and compares to reference)
 buscmp: winuae/tests/smoke_ref.log
-	$(VVP) $(SIM)/cosim73 2>&1 | grep "^BUS" > /tmp/_dut_smoke.log || true
+	$(VVP) $(SIM)/cosim_smoke 2>&1 | grep "^BUS" > /tmp/_dut_smoke.log || true
 	python3 tools/buscmp.py /tmp/_dut_smoke.log winuae/tests/smoke_ref.log \
 	    --reads-only --dut-may-continue
 

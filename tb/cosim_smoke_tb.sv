@@ -1,21 +1,25 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 72: tb/cosim72_tb.sv
-// Full-chip co-simulation bus testbench — instantiates m68030_top.
+// Bare-metal toolchain verification testbench
 //
-// Inline 4KB memory model: 32-bit port, 0 wait states.
-// ROM loaded from tests/boot.hex via $readmemh at elaboration time.
-// Every completed bus cycle is logged: BUS R|W addr data fc=FCfcfc siz=SZsz
+// Loads tests/smoke.hex (assembled from tests/smoke.s via vasmm68k_mot + bin2hex.py).
+// smoke.s: NOP → MOVEQ #42,D0 → ADD.L D0,D0 → STOP #$2700
+//   0x0008: 0x4E71 (NOP)
+//   0x000A: 0x702A (MOVEQ #42,D0)
+//   0x000C: 0xD080 (ADD.L D0,D0)  ← requires second bus fetch at 0x000C
+//   0x000E: 0x4E72 (STOP opcode)   stop_seen fires on second fetch (rd_word=0xD0804E72)
+//   0x0010: 0x2700 (STOP immediate)
 //
-// P72-01: STOP opcode (0x4E72) fetched on a program-space read within 3000 cycles.
-// P72-02: No eu_addr_err / ifu_addr_err asserted during execution.
+// P73-01: STOP opcode fetched within 3000 cycles (toolchain produced valid code).
+// P73-02: D0 = 84 after NOP+MOVEQ+ADD.L sequence executes correctly.
+// P73-03: No address errors.
 
-module cosim72_tb;
+module cosim_smoke_tb;
 
     // ── Clock & reset ────────────────────────────────────────────────────────
     logic clk_4x = 0;
-    always #5 clk_4x = ~clk_4x;   // 100 MHz internal (25 MHz external bus)
+    always #5 clk_4x = ~clk_4x;
 
     logic rst_n = 0;
 
@@ -41,44 +45,40 @@ module cosim72_tb;
     logic        cback_n  = 1'b0;
 
     // ── Inline memory model (32-bit port, 0 wait states, 4KB) ────────────────
-    localparam int MEM_WORDS = 1024;   // 1024 × 32 bit = 4096 bytes
+    localparam int MEM_WORDS = 1024;
     logic [31:0] rom [0:MEM_WORDS-1];
 
     initial begin : rom_init
         integer i;
-        for (i = 0; i < MEM_WORDS; i++) rom[i] = 32'h4E714E71;  // NOP fill
-        $readmemh("tests/boot.hex", rom);
+        for (i = 0; i < MEM_WORDS; i++) rom[i] = 32'h4E714E71;
+        $readmemh("tests/smoke.hex", rom);
     end
 
-    // Read data: drive full longword at the word-aligned address
     wire [31:0] rd_word = (ext_a[11:2] < MEM_WORDS) ? rom[ext_a[11:2]] : 32'hDEAD_DEAD;
 
-    // DSACK: assert one internal tick after DS# asserts (0 wait states, 32-bit port)
     logic ds_active_r;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) ds_active_r <= 1'b0;
         else        ds_active_r <= !ext_ds_n & !ext_as_n;
     end
 
-    wire dsack0_n = ~ds_active_r;   // both low → 32-bit port acknowledged
+    wire dsack0_n = ~ds_active_r;
     wire dsack1_n = ~ds_active_r;
 
-    // ext_d_in: drive read data onto bus when BIU is doing a read
     wire [31:0] ext_d_in = (!ext_ds_n & ext_rw) ? rd_word : {32{1'bz}};
 
-    // Write capture: commit to correct byte lanes when DSACK fires
     always_ff @(posedge clk_4x) begin
         if (ds_active_r && !ext_ds_n && !ext_as_n && !ext_rw && ext_d_oe) begin
             if (ext_a[11:2] < MEM_WORDS) begin
                 case ({ext_siz, ext_a[1:0]})
-                    4'b00_00: rom[ext_a[11:2]]        <= ext_d_out;             // longword
-                    4'b10_00: rom[ext_a[11:2]][31:16] <= ext_d_out[31:16];     // word A[1]=0
-                    4'b10_10: rom[ext_a[11:2]][15:0]  <= ext_d_out[15:0];      // word A[1]=1
-                    4'b01_00: rom[ext_a[11:2]][31:24] <= ext_d_out[31:24];     // byte 0
-                    4'b01_01: rom[ext_a[11:2]][23:16] <= ext_d_out[23:16];     // byte 1
-                    4'b01_10: rom[ext_a[11:2]][15:8]  <= ext_d_out[15:8];      // byte 2
-                    4'b01_11: rom[ext_a[11:2]][7:0]   <= ext_d_out[7:0];       // byte 3
-                    default:  rom[ext_a[11:2]]        <= ext_d_out;             // burst/line
+                    4'b00_00: rom[ext_a[11:2]]        <= ext_d_out;
+                    4'b10_00: rom[ext_a[11:2]][31:16] <= ext_d_out[31:16];
+                    4'b10_10: rom[ext_a[11:2]][15:0]  <= ext_d_out[15:0];
+                    4'b01_00: rom[ext_a[11:2]][31:24] <= ext_d_out[31:24];
+                    4'b01_01: rom[ext_a[11:2]][23:16] <= ext_d_out[23:16];
+                    4'b01_10: rom[ext_a[11:2]][15:8]  <= ext_d_out[15:8];
+                    4'b01_11: rom[ext_a[11:2]][7:0]   <= ext_d_out[7:0];
+                    default:  rom[ext_a[11:2]]        <= ext_d_out;
                 endcase
             end
         end
@@ -119,8 +119,7 @@ module cosim72_tb;
         .cback_n      (cback_n)
     );
 
-    // ── Bus transaction logger ────────────────────────────────────────────────
-    // Captures one line per completed bus cycle on AS# rising edge.
+    // ── Bus logger ───────────────────────────────────────────────────────────
     logic        as_prev_r;
     logic [31:0] log_addr_r;
     logic [2:0]  log_fc_r;
@@ -160,8 +159,6 @@ module cosim72_tb;
     end
 
     // ── STOP detection ───────────────────────────────────────────────────────
-    // stop_seen goes high when the STOP opcode (0x4E72) appears in any
-    // instruction-space read word (either the high or low halfword position).
     logic stop_seen = 1'b0;
 
     always_ff @(posedge clk_4x) begin
@@ -191,22 +188,25 @@ module cosim72_tb;
         repeat(20) @(posedge clk_4x);
         #1; rst_n = 1;
 
+        // Wait until STOP fetched or timeout
         fork
             begin : blk_timeout
                 repeat(3000) @(posedge clk_4x);
             end
             begin : blk_stop
                 wait(stop_seen == 1'b1);
-                repeat(30) @(posedge clk_4x);
+                // 500 cycles: enough for EU to drain NOP+MOVEQ+ADD.L+STOP
+                repeat(500) @(posedge clk_4x);
                 disable blk_timeout;
             end
         join
 
-        check("P72-01 STOP opcode fetched", stop_seen);
-        check("P72-02 No address errors",   ~any_addr_err);
+        check("P73-01 STOP opcode fetched",        stop_seen);
+        check("P73-02 D0 = 84 after NOP+MOVEQ+ADD",  u_top.u_eu.u_rf.d_reg[0] == 32'd84);
+        check("P73-03 No address errors",           ~any_addr_err);
 
-        if (fail_count == 0) $display("PASS  cosim72");
-        else                 $display("FAIL  cosim72 (%0d)", fail_count);
+        if (fail_count == 0) $display("PASS  cosim73");
+        else                 $display("FAIL  cosim73 (%0d)", fail_count);
         $finish;
     end
 
