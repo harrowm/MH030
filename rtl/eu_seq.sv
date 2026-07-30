@@ -352,6 +352,30 @@ module eu_seq (
         endcase
     endfunction
 
+    // Sets dec_an_upd_* and dec_ea_offset for (An)+ and -(An) EA modes.
+    task setup_mem_incdec(
+        input  logic [1:0]  siz,
+        inout  logic        en,
+        inout  logic [2:0]  areg,
+        inout  logic [31:0] adelta,
+        inout  logic [31:0] eaoff
+    );
+        case (f_mode)
+            3'b011: begin
+                en     = 1'b1;
+                areg   = f_reg;
+                adelta = calc_step(siz, f_reg == 3'b111);
+            end
+            3'b100: begin
+                en     = 1'b1;
+                areg   = f_reg;
+                adelta = ~calc_step(siz, f_reg == 3'b111) + 32'h1;
+                eaoff  = adelta;
+            end
+            default: ;
+        endcase
+    endtask
+
     // Pre-extract bit-selects used by BCD and bitops to avoid Icarus issues
     logic [7:0] rd_a_byte, rd_b_byte;
     logic [4:0] rd_a_bit_num;
@@ -1261,21 +1285,7 @@ module eu_seq (
                             dec_reads_src  = 1'b1;
                             dec_reads_dst  = 1'b1;
                         end
-                        case (f_mode)
-                            3'b010: ;  // (An): offset = 0
-                            3'b011: begin  // (An)+
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg==3'b111);
-                            end
-                            3'b100: begin  // -(An)
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg==3'b111)+32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b101) begin
                         // Phase 64: MOVES (d16,An) — ext_count=2
                         // ext[31:16]=MOVES desc, ext[15:0]=d16
@@ -2187,20 +2197,7 @@ module eu_seq (
                         dec_src_reg     = {1'b1, f_reg};  // An → rd_a (EA base)
                         dec_reads_src   = 1'b1;
                         dec_is_mem_rd   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                         case (f_dn)
                             3'b000: begin dec_alu_op=ALU_NEGX; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b001: begin dec_alu_op=ALU_CLR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
@@ -2893,20 +2890,7 @@ module eu_seq (
                         dec_updates_ccr = 1'b0;  // CCR fires via tas_sr_wr path
                         dec_x_unchanged = 1'b1;
                         dec_is_tas      = 1'b1;
-                        case (f_mode)
-                            3'b011: begin  // (An)+
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(2'b01, f_reg == 3'b111);
-                            end
-                            3'b100: begin  // -(An)
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(2'b01, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
 
                     // ----------------------------------------------------------------
                     // Phase 43: MOVEM — register list save/restore
@@ -3370,20 +3354,7 @@ module eu_seq (
                         dec_dst_reg     = {1'b0, f_dn};   // Dn → rd_b (ALU src via redirect)
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── Phase 68: SBCD -(Ay),-(Ax): 1000 Ax 1 00 001 Ay
                     end else if (f_dir && f_ss == 2'b00 && f_mode == 3'b001) begin
                         dec_valid            = 1'b1;
@@ -3426,20 +3397,7 @@ module eu_seq (
                         dec_dest_reg    = {1'b0, f_dn};
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── Phase 65: OR/DIVU/DIVS (ea),Dn — memory source ────────────
                     end else if ((f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
@@ -3555,20 +3513,7 @@ module eu_seq (
                         dec_dst_reg     = {1'b0, f_dn};
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── SUB (An)/(An)+/-(An), Dn — memory source → register dest ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -3585,20 +3530,7 @@ module eu_seq (
                         dec_dest_reg    = {1'b0, f_dn};
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── Phase 65: SUB (ea),Dn — memory source → register dest ────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
@@ -3770,20 +3702,7 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── CMP (An)/(An)+/-(An), Dn — memory source, flags only ───────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -3799,20 +3718,7 @@ module eu_seq (
                         dec_reads_dst   = 1'b1;
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── Phase 65: CMP (ea),Dn — memory source, flags only ──────────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
@@ -4005,20 +3911,7 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     end else if (f_dir &&
                                  ((f_ss == 2'b01 && f_mode == 3'b000) ||   // EXG Dx,Dy (handled above)
                                   (f_ss == 2'b01 && f_mode == 3'b001) ||   // EXG Ax,Ay
@@ -4070,20 +3963,7 @@ module eu_seq (
                         dec_dest_reg    = {1'b0, f_dn};
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── Phase 65: AND/MULU/MULS (ea),Dn — memory source ───────────
                     end else if ((f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
@@ -4200,20 +4080,7 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── ADD (An)/(An)+/-(An), Dn — memory source → register dest ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -4230,20 +4097,7 @@ module eu_seq (
                         dec_dest_reg    = {1'b0, f_dn};
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
-                        case (f_mode)
-                            3'b011: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = calc_step(f_siz, f_reg == 3'b111);
-                            end
-                            3'b100: begin
-                                dec_an_upd_en  = 1'b1;
-                                dec_an_upd_reg = f_reg;
-                                dec_an_delta   = ~calc_step(f_siz, f_reg == 3'b111) + 32'h1;
-                                dec_ea_offset  = dec_an_delta;
-                            end
-                            default: ;
-                        endcase
+                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
                     // ── Phase 65: ADD (ea),Dn — memory source → register dest ────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
