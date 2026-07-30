@@ -69,16 +69,10 @@ $(SIM)/eu_seq_tb:  $(EU_SRCS)                         tb/eu_seq_tb.sv     | $(SI
 $(SIM)/eu_tb:      $(EU_SRCS)                         tb/eu_tb.sv         | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/seq36:      $(EU_SRCS)                         tb/seq36_tb.sv      | $(SIM)
+$(SIM)/ctrl_flow:  $(EU_SRCS)                         tb/ctrl_flow_tb.sv  | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/seq37:      $(EU_SRCS)                         tb/seq37_tb.sv      | $(SIM)
-	$(IVCOMP)
-
-$(SIM)/seq38:      $(EU_SRCS)                         tb/seq38_tb.sv      | $(SIM)
-	$(IVCOMP)
-
-$(SIM)/seq39:      $(EU_SRCS)                         tb/seq39_tb.sv      | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/seq40:      $(EU_SRCS)                         tb/seq40_tb.sv      | $(SIM)
@@ -124,9 +118,6 @@ $(SIM)/seq57:      $(EU_SRCS)                         tb/seq57_tb.sv      | $(SI
 	$(IVCOMP)
 
 $(SIM)/seq58:      $(EU_SRCS)                         tb/seq58_tb.sv      | $(SIM)
-	$(IVCOMP)
-
-$(SIM)/seq59:      $(EU_SRCS)                         tb/seq59_tb.sv      | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/seq60:      $(EU_SRCS)                         tb/seq60_tb.sv      | $(SIM)
@@ -243,8 +234,8 @@ ALL_TESTS := \
     $(SIM)/eu_regfile $(SIM)/eu_alu $(SIM)/eu_shifter $(SIM)/eu_mul_div \
     $(SIM)/eu_bcd $(SIM)/eu_bitops $(SIM)/agu \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
-    $(SIM)/seq36 $(SIM)/seq37 $(SIM)/seq38 $(SIM)/seq39 $(SIM)/seq40 \
-    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 $(SIM)/seq56 $(SIM)/seq57 $(SIM)/seq58 $(SIM)/seq59 $(SIM)/seq60 $(SIM)/seq61 $(SIM)/seq62 $(SIM)/seq63 $(SIM)/seq64 $(SIM)/seq65 $(SIM)/seq66 $(SIM)/seq67 $(SIM)/seq68 $(SIM)/seq69 $(SIM)/seq70 $(SIM)/seq71 \
+    $(SIM)/ctrl_flow $(SIM)/seq37 $(SIM)/seq40 \
+    $(SIM)/seq41 $(SIM)/seq42 $(SIM)/seq43 $(SIM)/seq46 $(SIM)/seq47 $(SIM)/seq48 $(SIM)/seq49 $(SIM)/seq50 $(SIM)/seq52 $(SIM)/seq53 $(SIM)/seq54 $(SIM)/seq56 $(SIM)/seq57 $(SIM)/seq58 $(SIM)/seq60 $(SIM)/seq61 $(SIM)/seq62 $(SIM)/seq63 $(SIM)/seq64 $(SIM)/seq65 $(SIM)/seq66 $(SIM)/seq67 $(SIM)/seq68 $(SIM)/seq69 $(SIM)/seq70 $(SIM)/seq71 \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke
