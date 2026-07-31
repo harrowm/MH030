@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Pin Driver (Phase 9)
+// MC68030 BIU — Pin Driver
 //
 // Manages the output enable for the bidirectional D[31:0] bus.
 // In real hardware D[31:0] is truly bidirectional; in simulation we model

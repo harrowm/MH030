@@ -2,12 +2,12 @@
 `default_nettype none
 
 // MC68030 BIU — Core Bus Cycle Generator
-// Phase 4 adds: STERM fast termination (BIU-049/050/150), BERR fault capture
+// Implements: normal read/write (S0-S7), STERM fast termination,
 // (BIU-015/090/093), BERR+HALT retry (BIU-148), IACK cycles (BIU-043-048),
 // and RESET instruction RSTOUT assertion (BIU-063/012).
-// Phase 5 adds: RMW atomic lock (BIU-035), CAS2 four-cycle lock (BIU-057),
+//   RMW atomic lock, CAS2 four-cycle lock, MOVEM/MOVEP multi-op,
 // bus_lock output to suppress DMA during locked sequences.
-// Phase 7 adds: true burst read (CBREQ#/CBACK# handshake, AS held across 4 beats),
+//   burst read (CBREQ#/CBACK# handshake), MOVE16 burst write, CAS2,
 // MOVE16 burst write, MMU walk FC codes, CAS2 conditional gating.
 
 module biu_cycle_gen #(
@@ -154,7 +154,7 @@ module biu_cycle_gen #(
     output logic        eu_m16_ack,
     output logic        eu_m16_berr,
 
-    // Coprocessor (FPU) CPU Space interface (Phase 10)
+    // Coprocessor (FPU) CPU Space interface 
     // FC=111, A[19:16]=0010 (coprocessor category), A[15:13]=primitive type
     // Distinct from IACK (eu_iack_req / A[19:16]=1111) by address pattern.
     input  logic        eu_coproc_req,
@@ -167,7 +167,7 @@ module biu_cycle_gen #(
     output logic        eu_coproc_ack,
     output logic        eu_coproc_berr,
 
-    // Address error detection (Phase 19)
+    // Address error detection 
     // Asserted combinationally for one cycle when a request is rejected at IDLE.
     // EU/IFU must deassert their req on the next cycle after seeing this.
     output logic        eu_addr_err,    // 1 = word access to odd address
@@ -473,7 +473,7 @@ module biu_cycle_gen #(
 
     // Burst data path delegated to biu_burst_ctrl (wires declared below)
 
-    // Coprocessor cycle parameter latches and discriminator flag (Phase 10)
+    // Coprocessor cycle parameter latches and discriminator flag 
     logic [31:0] coproc_addr_r;
     logic [2:0]  coproc_fc_r;
     logic [1:0]  coproc_siz_r;
@@ -521,7 +521,7 @@ module biu_cycle_gen #(
     logic vpa_terminate;
     assign vpa_terminate = !vpa_s && (eclk_cnt == 4'd9);
 
-    // Address error conditions (Phase 19).
+    // Address error conditions .
     // eu_ae_cond:  word access (SIZ=10) to odd address.  Byte is always legal;
     //              longword misalignment is resolved by the BIU via multiple cycles.
     // ifu_ae_cond: any instruction fetch to an odd address; instructions are

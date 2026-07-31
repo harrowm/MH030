@@ -60,7 +60,7 @@ module eu_regfile (
     input  logic [2:0]  dfc_wr_data,
     output logic [2:0]  dfc_out,
 
-    // CACR / CAAR — cache control registers (Phase 46: stored but not decoded)
+    // CACR / CAAR — cache control registers (stored; decoded in eu_seq)
     input  logic        cacr_wr_en,
     input  logic [31:0] cacr_wr_data,
     output logic [31:0] cacr_out,

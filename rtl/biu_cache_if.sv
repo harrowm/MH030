@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Cache Interface (Phase 6)
+// MC68030 BIU — Cache Interface
 // Implements I-cache + D-cache hit/miss detection and linefill sequencing.
 // On I-cache miss (EI+IBE): issues 4 sequential longword reads (linefill).
 // On D-cache read miss (ED): issues 1 longword read, stores one word.

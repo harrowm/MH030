@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 Top Level — Phase 55 Final Integration
+// MC68030 Top Level — full chip integration
 //
 // Integrates: m68030_biu, m68030_ifu, m68030_seq, m68030_eu, m68030_exc,
 // m68030_mmu. All EU control registers (TC/TT0/TT1/CACR/CAAR) are wired
@@ -15,7 +15,7 @@
 // Exception bus mux:
 //   When exc_active is asserted, EXC drives the BIU's eu_req port
 //   (supervisor-data FC=101) for stack-frame pushes and vector fetch.
-//   EU normal data requests (Phase 30+) are stubbed to zero here; the
+//   EU normal data requests are wired through eu_seq; the
 //   OR logic means EXC always wins while active.
 
 module m68030_top #(
@@ -212,7 +212,7 @@ module m68030_top #(
     logic        eu_an_wr_en;
     logic [2:0]  eu_an_wr_sel;
     logic [31:0] eu_an_wr_data;
-    // Phase 46: CACR/CAAR from EU (wired to BIU instead of reset stubs)
+    // CACR/CAAR from EU (wired to BIU instead of reset stubs)
     logic [31:0] eu_cacr_out, eu_caar_out;
 
     // ───────────────────────────────────────────────────────────────────────
@@ -272,7 +272,7 @@ module m68030_top #(
     logic [15:0] mmu_mmusr;
     logic        mmu_active;
 
-    // EU ↔ MMU Phase 54 wires
+    // EU ↔ MMU wires
     logic        eu_pflush_req_w, eu_pflush_all_w;
     logic [2:0]  eu_pflush_fc_w;
     logic [31:0] eu_pflush_va_w;
@@ -387,7 +387,7 @@ module m68030_top #(
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
-        // Phase 54: MMU instruction interface
+        // MMU instruction interface
         .eu_pflush_req   (eu_pflush_req_w),
         .eu_pflush_all   (eu_pflush_all_w),
         .eu_pflush_fc    (eu_pflush_fc_w),
@@ -425,7 +425,7 @@ module m68030_top #(
         .eu_trapv_req  (eu_trapv_req_w),
         .eu_illegal_req(eu_illegal_req_w),
         .eu_stop       (eu_stop),
-        .eu_reset_req  (),              // wired to BIU RSTOUT in Phase 55
+        .eu_reset_req  (),              // wired to BIU RSTOUT via eu_reset_req
         .eu_priv_req    (eu_priv_req_w),
         .eu_trace_req   (eu_trace_req_w),
         .eu_linea_req   (eu_linea_req_w),
@@ -495,8 +495,8 @@ module m68030_top #(
     m68030_mmu u_mmu (
         .clk_4x         (clk_4x),
         .rst_n          (rst_n),
-        .tc             (eu_tc_w),           // Phase 54: TC register from EU
-        // EU translation (stub: no EU mem requests yet — Phase 30)
+        .tc             (eu_tc_w),           // TC register from EU
+        // EU virtual address for MMU translation
         .va_in          (32'h0),
         .fc_in          (3'b0),
         .rw_in          (1'b1),
@@ -505,13 +505,13 @@ module m68030_top #(
         .ack_out        (mmu_ack),
         .fault_out      (mmu_fault_mmu),
         .ci_out         (mmu_ci_mmu),
-        // Phase 54: EU PFLUSH
+        // EU PFLUSH
         .pflush_req     (eu_pflush_req_w),
         .pflush_all     (eu_pflush_all_w),
         .pflush_fc      (eu_pflush_fc_w),
         .pflush_va      (eu_pflush_va_w),
         .pflush_ack     (mmu_pflush_ack_w),
-        // Phase 54: EU PTEST
+        // EU PTEST
         .ptest_req      (eu_ptest_req_w),
         .ptest_va       (eu_ptest_va_w),
         .ptest_fc       (eu_ptest_fc_w),
@@ -573,7 +573,7 @@ module m68030_top #(
         .br_n            (br_n),
         .bgack_n         (bgack_n),
         .cback_n         (cback_n),
-        // EU normal data interface (EXC mux or future Phase 30 EU)
+        // EU normal data interface (EXC mux)
         .eu_addr         (biu_eu_addr),
         .eu_wdata        (biu_eu_wdata),
         .eu_rdata        (eu_rdata),
@@ -670,11 +670,11 @@ module m68030_top #(
         // Control registers (MMU/cache disabled)
         .cacr            (eu_cacr_out),
         .caar            (eu_caar_out),
-        .tc              (eu_tc_w),       // Phase 54/55: TC register from EU
-        .crp             (eu_crp_w),      // Phase 64: CRP from EU PMOVE
+        .tc              (eu_tc_w),       // TC register from EU
+        .crp             (eu_crp_w),      // CRP from EU PMOVE
         .srp             (eu_srp_w),
-        .tt0             (eu_tt0_w),      // Phase 54/55: TT0 register from EU
-        .tt1             (eu_tt1_w),      // Phase 54/55: TT1 register from EU
+        .tt0             (eu_tt0_w),      // TT0 register from EU
+        .tt1             (eu_tt1_w),      // TT1 register from EU
         // Status outputs
         .bus_idle        (bus_idle),
         .bus_halted      (bus_halted),

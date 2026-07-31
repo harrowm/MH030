@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 29: eu_agu testbench
+// eu_agu (Address Generation Unit) testbench
 // Tests all addressing modes including brief and full extension word formats.
 //
 // Register setup: A0=0x1000, A1=0x2000, A7=0x7FFC
@@ -111,7 +111,7 @@ module agu_tb;
         ext0 = 16'h0; ext1 = 16'h0; ext2 = 16'h0;
         siz  = 2'b00; // default: long
 
-        $display("=== Phase 29: eu_agu ===");
+        $display("=== eu_agu unit tests ===");
 
         // ================================================================
         // A: Register-direct modes

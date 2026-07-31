@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ns/1ps
 
-// m68030_exc testbench — Phase 33
+// m68030_exc (exception/interrupt controller) testbench
 //
 // Compile:
 //   iverilog -g2012 -o /tmp/phase33.vvp -I rtl rtl/m68030_exc.sv tb/exc_tb.sv

@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ns/1ps
 
-// eu_bitops standalone testbench — Phase 28
+// eu_bitops testbench
 // Verifies BTST, BCHG, BCLR, BSET.
 // Run: iverilog -g2012 -o /tmp/phase28b.vvp -I rtl rtl/eu_bitops.sv tb/eu_bitops_tb.sv
 //      vvp /tmp/phase28b.vvp

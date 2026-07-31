@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 Bus Interface Unit — Integration Wrapper (Phase 13)
+// MC68030 Bus Interface Unit — Integration Wrapper 
 //
 // Instantiates and interconnects all biu_* submodules.  This is the
 // boundary between the chip's internal bus-management logic and the
@@ -135,7 +135,7 @@ module m68030_biu #(
     output logic        eu_coproc_ack,
     output logic        eu_coproc_berr,
 
-    // Address error outputs (Phase 19)
+    // Address error outputs 
     output logic        eu_addr_err,    // word access to odd address
     output logic        ifu_addr_err,   // instruction fetch to odd address
 

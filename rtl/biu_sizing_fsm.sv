@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Dynamic Bus Sizing FSM (Phase 3)
+// MC68030 BIU — Dynamic Bus Sizing FSM
 //
 // Sits between the EU and biu_cycle_gen's EU port.  When a bus cycle
 // completes with DSACK=01 (16-bit port) or DSACK=10 (8-bit port) the

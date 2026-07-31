@@ -13,7 +13,7 @@
 // second extension word in bits[15:0].  This is the hardware-accurate
 // layout (MSW first, matching 68030 big-endian memory).
 // eu_seq currently uses ext_data[31:0] as a full 32-bit immediate
-// (zero-extended by testbench convention); Phase 32 integration aligns
+// (zero-extended by testbench convention); integrated through m68030_top.
 // the two conventions.
 //
 // BIU request protocol: ifu_req = fetch_pend_r.  Assert ifu_req and hold

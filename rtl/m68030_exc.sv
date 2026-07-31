@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 Exception Controller (Phase 44)
+// MC68030 Exception Controller 
 //
 // Handles all exception types, pushes the appropriate stack frame format,
 // fetches the handler vector, and loads the new PC/SR into the EU.
@@ -17,7 +17,7 @@
 // Formats $0/$2/$3 are fully populated.
 // Formats $9/$A/$B: steps 0-3 carry the core fault snapshot; step 4 carries
 // the Data Output Buffer (DOB) captured from the BIU at fault time; steps 5+
-// are zero (internal pipeline state — stubbed until Phase 52 FPU).
+// are zero (internal pipeline state — FPU not implemented).
 // The bus-error frame format code ($9/$A/$B) is determined by biu_exc_capture
 // and passed in via bus_err_fmt; the EU/EXC module just consumes it.
 //
@@ -232,7 +232,7 @@ module m68030_exc (
     //   step 2: fault_addr  (instruction address for $2/$3; fault addr for others)
     //   step 3: {fault_ssw, 16'h0}  (SSW + reserved; used by $3/$A/$B)
     //   step 4: snap_dob_r (Data Output Buffer; formats $9/$A/$B only)
-    //   step 5+: zeros (internal pipeline state; stubbed until Phase 52)
+    //   step 5+: zeros (internal pipeline state; FPU not implemented)
     // -----------------------------------------------------------------------
     logic [31:0] push_data;
     logic        fmt_is_fault;

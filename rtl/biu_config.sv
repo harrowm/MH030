@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Configuration / Input Synchronizer (Phase 9 + 51)
+// MC68030 BIU — Configuration / Input Synchronizer
 //
 // Two-stage synchroniser flip-flops for every asynchronous input pin.
 // This prevents metastability from propagating into the synchronous FSM.

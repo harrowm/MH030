@@ -321,7 +321,7 @@ module data_move_tb;
         $display("--- MOVEM ---");
         for (int i = 0; i < 2048; i++) ram[i] = 32'hDEAD_BEEF;
 
-        // P43-1: MOVEM.L {D0,D1,D2},-(A0) predecrement store
+        // MOVEM.L {D0,D1,D2},-(A0) predecrement store
         // A0=0x30; writes D2→0x2C, D1→0x28, D0→0x24; A0_new=0x24
         set_an(3'd0, 32'h0000_0030);
         set_dn(0, 32'hAAAA_0000);
@@ -333,7 +333,7 @@ module data_move_tb;
         chk("M43-1 mem[0x2C]=D2", ram[32'h2C>>2],   32'hCCCC_0002);
         chk("M43-1 A0_new=0x24",  `AR(0),            32'h0000_0024);
 
-        // P43-2: MOVEM.L (A0)+,{D0,D1,D2} post-increment load
+        // MOVEM.L (A0)+,{D0,D1,D2} post-increment load
         // A0=0x40; reads D0←M[0x40], D1←M[0x44], D2←M[0x48]; A0_new=0x4C
         ram[32'h40>>2] = 32'h1111_1111;
         ram[32'h44>>2] = 32'h2222_2222;
@@ -345,7 +345,7 @@ module data_move_tb;
         chk("M43-2 D2", `DR(2), 32'h3333_3333);
         chk("M43-2 A0_new=0x4C", `AR(0), 32'h0000_004C);
 
-        // P43-3: MOVEM.L {A1,A2},-(A3) predec store of A registers
+        // MOVEM.L {A1,A2},-(A3) predec store of A registers
         // A3=0x50; writes A2→0x4C, A1→0x48; A3_new=0x48
         set_an(3'd1, 32'hA1A1_A1A1);
         set_an(3'd2, 32'hA2A2_A2A2);
@@ -355,21 +355,21 @@ module data_move_tb;
         chk("M43-3 mem[0x4C]=A2", ram[32'h4C>>2], 32'hA2A2_A2A2);
         chk("M43-3 A3_new=0x48",  `AR(3),          32'h0000_0048);
 
-        // P43-4: MOVEM.L (A1),{D5} fixed (An) load, no An update
+        // MOVEM.L (A1),{D5} fixed (An) load, no An update
         ram[32'h80>>2] = 32'h5555_5555;
         set_an(3'd1, 32'h0000_0080);
         run_movem(16'h4CD1, 16'h0020, 1);
         chk("M43-4 D5",        `DR(5),  32'h5555_5555);
         chk("M43-4 A1 unchanged", `AR(1), 32'h0000_0080);
 
-        // P43-5: MOVEM.L {D3},(A2) fixed (An) store, no An update
+        // MOVEM.L {D3},(A2) fixed (An) store, no An update
         set_dn(3, 32'hFACE_BEEF);
         set_an(3'd2, 32'h0000_00C0);
         run_movem(16'h48D2, 16'h0008, 1);
         chk("M43-5 mem[0xC0]=D3", ram[32'hC0>>2], 32'hFACE_BEEF);
         chk("M43-5 A2 unchanged", `AR(2),           32'h0000_00C0);
 
-        // P43-6: MOVEM.W (A0)+,{D4,D5} word load with sign-extension
+        // MOVEM.W (A0)+,{D4,D5} word load with sign-extension
         // extract_rd for lo=00 returns raw[31:16]; lo=10 returns raw[15:0]
         // Both reads map to same longword; set both halves to 0x8001 for sign-ext
         ram[32'h100>>2] = 32'h8001_8001;
@@ -379,7 +379,7 @@ module data_move_tb;
         chk("M43-6 D5 sign-ext", `DR(5), 32'hFFFF_8001);
         chk("M43-6 A0_new=0x104", `AR(0), 32'h0000_0104);
 
-        // P43-7: MOVEM.L {D4-D7},-(A7) 4-reg predec to ISP
+        // MOVEM.L {D4-D7},-(A7) 4-reg predec to ISP
         // ISP=0x200; D7→0x1FC, D6→0x1F8, D5→0x1F4, D4→0x1F0; ISP_new=0x1F0
         set_dn(4, 32'h0000_0004);
         set_dn(5, 32'h0000_0005);
@@ -393,7 +393,7 @@ module data_move_tb;
         chk("M43-7 mem[0x1FC]=D7", ram[32'h1FC>>2], 32'h0000_0007);
         chk("M43-7 ISP_new=0x1F0", isp_out,          32'h0000_01F0);
 
-        // P43-8: MOVEM.L (A7)+,{D4-D7} restore D4-D7 from stack
+        // MOVEM.L (A7)+,{D4-D7} restore D4-D7 from stack
         set_dn(4, 32'h0); set_dn(5, 32'h0); set_dn(6, 32'h0); set_dn(7, 32'h0);
         set_isp(32'h0000_01F0);
         run_movem(16'h4CDF, 16'h00F0, 4);
@@ -418,10 +418,10 @@ module data_move_tb;
         set_an(3'd0, 32'h0000_0100);
         set_dn(1, 32'h1234_5678);
         run_movep(16'h0388, 16'h0000, 2);
-        chk("MP49-1 byte0@0x100", {24'h0, ram[32'h100>>2][31:24]}, 32'h56);
-        chk("MP49-1 byte1@0x102", {24'h0, ram[32'h100>>2][15:8]},  32'h78);
-        chk("MP49-1 0x101=0",     {24'h0, ram[32'h100>>2][23:16]}, 32'h00);
-        chk("MP49-1 0x103=0",     {24'h0, ram[32'h100>>2][7:0]},   32'h00);
+        chk("byte0@0x100", {24'h0, ram[32'h100>>2][31:24]}, 32'h56);
+        chk("byte1@0x102", {24'h0, ram[32'h100>>2][15:8]},  32'h78);
+        chk("0x101=0",     {24'h0, ram[32'h100>>2][23:16]}, 32'h00);
+        chk("0x103=0",     {24'h0, ram[32'h100>>2][7:0]},   32'h00);
 
         // Test 2: MOVEP.L D1,(0,A0) store longword (4 bytes)
         // D1=0xAABBCCDD; bytes AA@0x200, BB@0x202, CC@0x204, DD@0x206
@@ -429,12 +429,12 @@ module data_move_tb;
         set_an(3'd0, 32'h0000_0200);
         set_dn(1, 32'hAABBCCDD);
         run_movep(16'h03C8, 16'h0000, 4);
-        chk("MP49-2 AA@0x200", {24'h0, ram[32'h200>>2][31:24]}, 32'hAA);
-        chk("MP49-2 BB@0x202", {24'h0, ram[32'h200>>2][15:8]},  32'hBB);
-        chk("MP49-2 CC@0x204", {24'h0, ram[32'h204>>2][31:24]}, 32'hCC);
-        chk("MP49-2 DD@0x206", {24'h0, ram[32'h204>>2][15:8]},  32'hDD);
-        chk("MP49-2 0x201=0",  {24'h0, ram[32'h200>>2][23:16]}, 32'h00);
-        chk("MP49-2 0x203=0",  {24'h0, ram[32'h200>>2][7:0]},   32'h00);
+        chk("AA@0x200", {24'h0, ram[32'h200>>2][31:24]}, 32'hAA);
+        chk("BB@0x202", {24'h0, ram[32'h200>>2][15:8]},  32'hBB);
+        chk("CC@0x204", {24'h0, ram[32'h204>>2][31:24]}, 32'hCC);
+        chk("DD@0x206", {24'h0, ram[32'h204>>2][15:8]},  32'hDD);
+        chk("0x201=0",  {24'h0, ram[32'h200>>2][23:16]}, 32'h00);
+        chk("0x203=0",  {24'h0, ram[32'h200>>2][7:0]},   32'h00);
 
         // Test 3: MOVEP.W (0,A0),D1 load word from 0x300; pre-init bytes
         // D1=0xFFFF_0000 (upper half should be preserved)
@@ -443,7 +443,7 @@ module data_move_tb;
         set_an(3'd0, 32'h0000_0300);
         set_dn(1, 32'hFFFF_0000);
         run_movep(16'h0308, 16'h0000, 2);
-        chk("MP49-3 D1 word load", `DR(1), 32'hFFFF_ABCD);
+        chk("D1 word load", `DR(1), 32'hFFFF_ABCD);
 
         // Test 4: MOVEP.L (0,A0),D1 load longword from 0x400
         // Opcode: f_ss=01 = 0x0348
@@ -452,7 +452,7 @@ module data_move_tb;
         set_an(3'd0, 32'h0000_0400);
         set_dn(1, 32'hDEAD_BEEF);
         run_movep(16'h0348, 16'h0000, 4);
-        chk("MP49-4 D1 lw load", `DR(1), 32'h11223344);
+        chk("D1 lw load", `DR(1), 32'h11223344);
 
         // Test 5: MOVEP.W D2,(4,A1) with non-zero displacement
         // D2=0x0000_AABB; A1=0x500; writes 0xAA@0x504, 0xBB@0x506
@@ -460,9 +460,9 @@ module data_move_tb;
         set_an(3'd1, 32'h0000_0500);
         set_dn(2, 32'h0000_AABB);
         run_movep(16'h0589, 16'h0004, 2);
-        chk("MP49-5 AA@0x504", {24'h0, ram[32'h504>>2][31:24]}, 32'hAA);
-        chk("MP49-5 BB@0x506", {24'h0, ram[32'h504>>2][15:8]},  32'hBB);
-        chk("MP49-5 A1 unchanged", `AR(1), 32'h0000_0500);
+        chk("AA@0x504", {24'h0, ram[32'h504>>2][31:24]}, 32'hAA);
+        chk("BB@0x506", {24'h0, ram[32'h504>>2][15:8]},  32'hBB);
+        chk("A1 unchanged", `AR(1), 32'h0000_0500);
 
         // Test 6: MOVEP.L D0,(-8,A0) negative displacement
         // D0=0x11223344; A0=0x610; writes to 0x608, 0x60A, 0x60C, 0x60E
@@ -470,10 +470,10 @@ module data_move_tb;
         set_an(3'd0, 32'h0000_0610);
         set_dn(0, 32'h11223344);
         run_movep(16'h01C8, 16'hFFF8, 4);
-        chk("MP49-6 11@0x608", {24'h0, ram[32'h608>>2][31:24]}, 32'h11);
-        chk("MP49-6 22@0x60A", {24'h0, ram[32'h608>>2][15:8]},  32'h22);
-        chk("MP49-6 33@0x60C", {24'h0, ram[32'h60C>>2][31:24]}, 32'h33);
-        chk("MP49-6 44@0x60E", {24'h0, ram[32'h60C>>2][15:8]},  32'h44);
+        chk("11@0x608", {24'h0, ram[32'h608>>2][31:24]}, 32'h11);
+        chk("22@0x60A", {24'h0, ram[32'h608>>2][15:8]},  32'h22);
+        chk("33@0x60C", {24'h0, ram[32'h60C>>2][31:24]}, 32'h33);
+        chk("44@0x60E", {24'h0, ram[32'h60C>>2][15:8]},  32'h44);
 
         // Test 7: Round-trip store then load
         // Store D3=0xCAFEBABE via MOVEP.L, load back into D4
@@ -484,7 +484,7 @@ module data_move_tb;
         run_movep(16'h07C8, 16'h0000, 4);
         set_dn(4, 32'h0);
         run_movep(16'h0948, 16'h0000, 4);
-        chk("MP49-7 round-trip D4", `DR(4), 32'hCAFEBABE);
+        chk("round-trip D4", `DR(4), 32'hCAFEBABE);
     endtask
 
     // ─── MOVE16 tests (seq50) ─────────────────────────────────────────────────
@@ -571,20 +571,20 @@ module data_move_tb;
         ram[32'h108>>2] = 32'hCAFE_BABE;
         ram[32'h1C0>>2] = 32'hFEED_FACE;
 
-        // P67-01: MOVE.L (A0),(A1) basic indirect
+        // MOVE.L (A0),(A1) basic indirect
         // opcode: group=2, dst_reg=1(A1), dst_mode=010, src_mode=010, src_reg=0(A0)
         // = 0010_001_010_010_000 = 0x2290
-        $display("--- P67-01: MOVE.L (A0),(A1) ---");
+        $display("--- MOVE.L (A0),(A1) ---");
         set_an(3'd0, 32'h0000_0100);
         set_an(3'd1, 32'h0000_0200);
         run_instr(16'h2290, 1'b0, 32'h0);
         chk("MM67-01 mem",  ram[32'h200>>2], 32'hDEAD_BEEF);
         chk_ccr("MM67-01",  1'b1, 1'b0, 1'b0, 1'b0);
 
-        // P67-02: MOVE.L (A0)+,(A1)+ postincrement both
+        // MOVE.L (A0)+,(A1)+ postincrement both
         // opcode: 0010_001_011_011_000 = 0x22D8
         // dst A1 updates first (at write ack), src A0 from WB
-        $display("--- P67-02: MOVE.L (A0)+,(A1)+ ---");
+        $display("--- MOVE.L (A0)+,(A1)+ ---");
         set_an(3'd0, 32'h0000_0104);
         set_an(3'd1, 32'h0000_0204);
         base_cnt = an_wr_cnt;
@@ -594,9 +594,9 @@ module data_move_tb;
         chk("MM67-02 A1",   an_wr_log[(base_cnt)   % 16], 32'h0000_0208);
         chk("MM67-02 A0",   an_wr_log[(base_cnt+1) % 16], 32'h0000_0108);
 
-        // P67-03: MOVE.L -(A0),(A1) src predecrement
+        // MOVE.L -(A0),(A1) src predecrement
         // opcode: 0010_001_010_100_000 = 0x22A0; A0=0x108→EA=0x104
-        $display("--- P67-03: MOVE.L -(A0),(A1) ---");
+        $display("--- MOVE.L -(A0),(A1) ---");
         set_an(3'd0, 32'h0000_0108);
         set_an(3'd1, 32'h0000_0308);
         base_cnt = an_wr_cnt;
@@ -605,9 +605,9 @@ module data_move_tb;
         chk("MM67-03 A0",   an_wr_log[base_cnt % 16],     32'h0000_0104);
         chk_ccr("MM67-03",  1'b0, 1'b0, 1'b0, 1'b0);
 
-        // P67-04: MOVE.L (A0),-(A1) dst predecrement
+        // MOVE.L (A0),-(A1) dst predecrement
         // opcode: 0010_001_100_010_000 = 0x2310; A1=0x030C→EA=0x0308
-        $display("--- P67-04: MOVE.L (A0),-(A1) ---");
+        $display("--- MOVE.L (A0),-(A1) ---");
         set_an(3'd0, 32'h0000_0100);
         set_an(3'd1, 32'h0000_030C);
         base_cnt = an_wr_cnt;
@@ -616,27 +616,27 @@ module data_move_tb;
         chk("MM67-04 A1",   an_wr_log[base_cnt % 16],     32'h0000_0308);
         chk_ccr("MM67-04",  1'b1, 1'b0, 1'b0, 1'b0);
 
-        // P67-05: MOVE.W (d16,A0),(d16,A1) dual displacement, 2 ext words
+        // MOVE.W (d16,A0),(d16,A1) dual displacement, 2 ext words
         // opcode: 0011_001_101_101_000 = 0x3368; ext={src_d16=0x0004, dst_d16=0x0008}
         // src: 0x0100+4=0x0104; value=0x1234_5678; EU reads upper word 0x1234
-        $display("--- P67-05: MOVE.W (d16,A0),(d16,A1) ---");
+        $display("--- MOVE.W (d16,A0),(d16,A1) ---");
         set_an(3'd0, 32'h0000_0100);
         set_an(3'd1, 32'h0000_0200);
         run_instr(16'h3368, 1'b1, {16'h0004, 16'h0008});
         chk("MM67-05 mem",  ram[32'h208>>2], 32'h1234_0000);
         chk_ccr("MM67-05",  1'b0, 1'b0, 1'b0, 1'b0);
 
-        // P67-06: MOVE.L (xxx).L,(A1) abs.L src, 2 ext words
+        // MOVE.L (xxx).L,(A1) abs.L src, 2 ext words
         // opcode: 0010_001_010_111_001 = 0x22B9; ext={0x0000, 0x01C0}
-        $display("--- P67-06: MOVE.L (xxx).L,(A1) ---");
+        $display("--- MOVE.L (xxx).L,(A1) ---");
         set_an(3'd1, 32'h0000_0400);
         run_instr(16'h22B9, 1'b1, {16'h0000, 16'h01C0});
         chk("MM67-06 mem",  ram[32'h400>>2], 32'hFEED_FACE);
         chk_ccr("MM67-06",  1'b1, 1'b0, 1'b0, 1'b0);
 
-        // P67-07: MOVE.L (A0),(xxx).W abs.W dst; data=0 → Z=1
+        // MOVE.L (A0),(xxx).W abs.W dst; data=0 → Z=1
         // opcode: 0010_000_111_010_000 = 0x21D0; ext={16'h0, 0x0500}
-        $display("--- P67-07: MOVE.L (A0),(xxx).W ---");
+        $display("--- MOVE.L (A0),(xxx).W ---");
         ram[32'h120>>2] = 32'h0000_0000;
         set_an(3'd0, 32'h0000_0120);
         run_instr(16'h21D0, 1'b1, {16'h0, 16'h0500});

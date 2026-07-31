@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 26: eu_mul_div testbench
+// eu_mul_div unit testbench
 // Tests: MULU.W, MULS.W, MULU.L, MULS.L, DIVU.W, DIVS.W
 
 module eu_mul_div_tb;
@@ -50,7 +50,7 @@ module eu_mul_div_tb;
     endtask
 
     initial begin
-        $display("=== Phase 26: eu_mul_div ===");
+        $display("=== eu_mul_div unit tests ===");
 
         // ================================================================
         // A: MULU.W — unsigned 16×16→32

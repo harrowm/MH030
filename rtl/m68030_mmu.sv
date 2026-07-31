@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 MMU — Phase 35
+// MC68030 MMU
 //
 // EU-facing wrapper around the BIU's biu_mmu_if ATC + table walker.
 // Provides:

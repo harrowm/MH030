@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Exception Frame Capture (Phase 7 + Phase 12)
+// MC68030 BIU — Exception Frame Capture
 //
 // Captures fault snapshot from biu_cycle_gen at the moment fault_valid asserts
 // and determines which of the 9 68030 exception stack frame formats applies.
@@ -11,7 +11,7 @@
 //   !fault_rw                            →  $B  (bus error during write)
 //   otherwise (read or fetch BERR)       →  $A  (bus error during read/fetch)
 //
-// Phase 12 adds: SSW (Special Status Word) for formats $9/$A/$B.
+// SSW (Special Status Word) for bus-fault formats $9/$A/$B.
 //
 // SSW bit layout (68030 hardware definition):
 //   [15:13] FC[2:0]         — function code at fault time
@@ -37,7 +37,7 @@ module biu_exc_capture (
     input  logic        fault_rw,
     input  logic [1:0]  fault_siz,
 
-    // Phase 12 fault qualifiers (from biu_cycle_gen)
+    // Fault qualifiers (from biu_cycle_gen)
     input  logic        fault_retry,     // 1 = fault occurred during a retry cycle (RC bit)
     input  logic        fault_is_rmw,    // 1 = fault occurred during RMW write phase (RM bit)
 
@@ -62,7 +62,7 @@ module biu_exc_capture (
     //   [11:0]  = vector offset (bus error = 0x008)
     output logic [15:0] frame_word0,
 
-    // Phase 12: Special Status Word for stack frame population
+    // Special Status Word for stack frame population
     output logic [15:0] ssw
 );
 

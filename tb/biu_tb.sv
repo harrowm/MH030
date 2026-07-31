@@ -1,38 +1,25 @@
 `default_nettype none
 `timescale 1ns / 1ps
 
-// MC68030 BIU Testbench — Phase 1 through Phase 7
+// MC68030 BIU Testbench
 //
-// Phase 1 tests:
-//   P1-1  Reset hold: phase==0, s_state==0, bus outputs safe
-//   P1-2  Phase counter increments 0→1→2→3→0 after reset release
-//   P1-3  E-clock period = 40 clk_4x; duty 24 low / 16 high
+// Reset and clock:
+//   - Reset hold: 4x-clock phase counter at 0, s_state=0, bus outputs safe
+//   - 4x-clock phase counter increments 0→1→2→3→0 after reset release
+//   - E-clock period = 40 clk_4x cycles; duty 24 low / 16 high
 //
-// Phase 2 tests:
-//   P2-1  Power-on init completes (init_done asserts)
-//   P2-2  Captured SSP == mem[0] ($DEADBEF0)
-//   P2-3  Captured PC  == mem[1] ($CAFE0010)
-//   P2-4  EU read: correct address and FC on bus at S0
-//   P2-5  EU read: ECS_n asserts at S0; AS_n deasserted at S0
-//   P2-6  EU read: AS_n asserts at S2; DS_n deasserted at S2
-//   P2-7  EU read: DS_n asserts at S3; both strobes deassert at S6
-//   P2-8  EU read: correct 32-bit data returned in eu_rdata
-//   P2-9  EU write then read-back: data persists
-//   P2-10 2-wait-state read: still completes and returns correct data
+// Power-on init and basic bus cycles:
+//   - init_done asserts after SSP+PC fetches from reset vectors
+//   - Correct address/FC/SIZ driven at S0; ECS# leads AS# by one phase
+//   - AS# asserts at S2; DS# asserts at S3; both deassert at S6
+//   - Data returned to EU on eu_rdata; write+read-back persists
+//   - Wait-state insertion: DSACK withheld → S5/S6 loop
 //
-// Phase 3 tests (dynamic bus sizing — BIU-033, BIU-146):
-//   P3-1  Longword read from 16-bit port: 2 sub-cycles, data assembled
-//   P3-2  Longword read from 8-bit port: 4 sub-cycles, data assembled
-//   P3-3  Longword write to 16-bit port then read-back
-//   P3-4  Longword write to 8-bit port then read-back
-//   P3-5  Word read (SIZ=10) from 32-bit port: 1 cycle, correct SIZ
-//   P3-6  Byte read (SIZ=01) from 32-bit port: 1 cycle, correct SIZ
-//
-// Build:
-//   iverilog -g2012 -o phase3.vvp tb/biu_tb.sv rtl/biu_eclk_gen.sv \
-//            rtl/biu_cycle_gen.sv rtl/biu_arbiter.sv \
-//            rtl/biu_sizing_fsm.sv tb/mem_model.sv
-//   vvp phase3.vvp
+// Dynamic bus sizing (DSACK0/1 encoding):
+//   - Longword from 16-bit port: 2 sub-cycles assembled into 32-bit result
+//   - Longword from  8-bit port: 4 sub-cycles assembled
+//   - Longword write to 16/8-bit port, then read-back
+//   - Word (SIZ=10) and byte (SIZ=01) single-cycle transfers from 32-bit port
 
 module biu_tb;
 
@@ -86,30 +73,30 @@ module biu_tb;
     logic [31:0] eu_rdata;
     logic        eu_ack, eu_berr, eu_retry;
 
-    // Phase 4 control signals (driven by testbench)
+    // Direct-drive control signals for cycle_gen tests
     logic sterm_tb  = 1'b0;
     logic berr_tb   = 1'b0;
     logic halt_tb   = 1'b1;   // 1 = HALT deasserted (active-low, sync'd)
     logic avec_tb   = 1'b0;
     logic vpa_s_tb  = 1'b1;   // active-low retained; 1=deasserted (normal), 0=VPA# asserted
 
-    // Phase 11 — biu_error_handler outputs and combined BERR
+    // biu_error_handler outputs
     logic berr_timeout_tb;    // pulsed by watchdog when bus hangs
     logic halt_out_tb;        // double bus fault indicator
     logic berr_combined_tb;   // berr_tb | berr_timeout_tb → biu_cycle_gen.berr_s
     assign berr_combined_tb = berr_tb | berr_timeout_tb;
 
-    // Phase 4 IACK signals
+    // IACK signals
     logic        eu_iack_req_tb   = 1'b0;
     logic [2:0]  eu_iack_level_tb = 3'b0;
     logic [7:0]  eu_iack_vec_tb;
     logic        eu_iack_avec_tb;
     logic        eu_iack_ack_tb;
 
-    // Phase 4 RESET instruction
+    // RESET instruction signal
     logic eu_rst_req_tb = 1'b0;
 
-    // Phase 4 fault capture signals
+    // Fault capture signals
     logic [31:0] fault_addr_tb, fault_data_tb;
     logic [2:0]  fault_fc_tb;
     logic        fault_rw_tb;
@@ -117,11 +104,11 @@ module biu_tb;
     logic        fault_valid_tb;
     logic        retry_pending_tb;
 
-    // Phase 5 — RMW and bus_lock
+    // RMW atomic lock signals
     logic eu_rmw_tb = 1'b0;
     logic bus_lock;
 
-    // Phase 6 — cache_if control
+    // Cache interface control
     logic [31:0] cacr_tb         = 32'h0;
     logic [31:0] caar_tb         = 32'h0;
     logic        eu_is_icache_tb = 1'b1;
@@ -137,7 +124,7 @@ module biu_tb;
     logic        ca_sf_is_op;
     logic        ca_sf_req;
 
-    // Phase 7 — burst read and MOVE16 burst write
+    // Burst read and MOVE16 burst write
     logic        eu_burst_req_tb      = 1'b0;
     logic [31:0] eu_burst_addr_tb     = 32'h0;
     logic [2:0]  eu_burst_fc_tb       = 3'b101;
@@ -156,7 +143,7 @@ module biu_tb;
 
     logic        cback_s_tb           = 1'b0;  // 1 = CBACK# deasserted (active-low, sync'd)
 
-    // Phase 10 — coprocessor (FPU) CPU Space cycle signals
+    // Coprocessor FPU CPU Space cycle signals
     logic        eu_coproc_req_tb   = 1'b0;
     logic        eu_coproc_rw_tb    = 1'b1;
     logic [31:0] eu_coproc_addr_tb  = 32'h0;
@@ -167,7 +154,7 @@ module biu_tb;
     logic        eu_coproc_ack_tb;
     logic        eu_coproc_berr_tb;
 
-    // Phase 9 — biu_config dedicated test signals (raw pin inputs to u_cfg)
+    // biu_config test signals (raw pin inputs)
     logic        cfg_dsack0_n = 1'b1;  // deasserted
     logic        cfg_dsack1_n = 1'b1;
     logic        cfg_sterm_n  = 1'b1;
@@ -187,14 +174,14 @@ module biu_tb;
     logic        cfg_pins_released;
     logic        cfg_poweron_rstout_n;
 
-    // Phase 9 — biu_pin_driver dedicated test signals
+    // biu_pin_driver test signals
     logic [31:0] pd_d_out_tb     = 32'hDEAD_BEEF;
     logic        pd_d_oe_tb      = 1'b0;
     logic        pd_pins_rel_tb  = 1'b1;  // start released
     logic [31:0] pd_ext_d_out;
     logic        pd_ext_d_oe;
 
-    // Phase 7 — exception capture
+    // Exception capture signals
     logic [3:0]  exc_frame_format;
     logic        exc_frame_valid;
     logic [31:0] exc_frame_fault_addr, exc_frame_fault_data;
@@ -202,12 +189,12 @@ module biu_tb;
     logic        exc_frame_fault_rw;
     logic [1:0]  exc_frame_fault_siz;
     logic [15:0] exc_frame_word0;
-    // Phase 12 — SSW and fault qualifiers
+    // SSW and fault qualifiers
     logic        fault_retry_tb;
     logic        fault_is_rmw_tb;
     logic [15:0] exc_ssw;
 
-    // Phase 6 — mmu_if control
+    // MMU interface control
     logic [31:0] tc_tb          = 32'h0;
     logic [63:0] crp_tb         = 64'h0;
     logic [63:0] srp_tb         = 64'h0;
@@ -225,7 +212,7 @@ module biu_tb;
     logic [31:0] cg_mmu_rdata;
     logic        cg_mmu_ack, cg_mmu_berr;
 
-    // Phase 5 — CAS2 four-cycle atomic lock
+    // CAS2 four-cycle atomic lock signals
     logic        eu_cas2_req_tb      = 1'b0;
     logic [31:0] eu_cas2_addr1_tb    = 32'h0;
     logic [31:0] eu_cas2_addr2_tb    = 32'h0;
@@ -239,7 +226,7 @@ module biu_tb;
     logic [31:0] eu_cas2_rdata2_tb;
     logic        eu_cas2_ack_tb;
 
-    // Phase 5 — multi-op FSM (MOVEM / MOVEP)
+    // Multi-op FSM signals (MOVEM/MOVEP)
     logic        use_multiop          = 1'b0;
     logic        eu_mo_req_tb         = 1'b0;
     logic [31:0] eu_mo_start_addr_tb  = 32'h0;
@@ -296,7 +283,7 @@ module biu_tb;
         end
     end
 
-    // Phase 4 direct-drive mode: bypass sizing_fsm to test cycle_gen directly
+    // Direct-drive mode: bypass sizing_fsm to test cycle_gen directly
     logic        p4_direct  = 1'b0;
     logic [31:0] p4_eu_addr  = 32'h0;
     logic [31:0] p4_eu_wdata = 32'h0;
@@ -348,14 +335,14 @@ module biu_tb;
     logic cg_eu_ack_direct;
     assign cg_eu_ack_direct = cg_eu_ack;
 
-    // IFU inputs (Phase 19: used to test instruction-fetch address errors)
+    // IFU inputs (used to test instruction-fetch address errors)
     logic [31:0] ifu_addr_tb = 32'h0;
     logic        ifu_req_tb  = 1'b0;
     // IFU outputs
     logic [31:0] ifu_rdata;
     logic        ifu_ack, ifu_berr;
 
-    // Address error outputs (Phase 19)
+    // Address error outputs
     logic eu_addr_err, ifu_addr_err;
 
     // Arbiter outputs
@@ -472,7 +459,7 @@ module biu_tb;
         .retry_pending  (retry_pending_tb),
         .fault_retry    (fault_retry_tb),
         .fault_is_rmw   (fault_is_rmw_tb),
-        // Phase 5 ports
+        // RMW and CAS2 ports
         .eu_rmw             (eu_rmw_tb),
         .bus_lock           (bus_lock),
         .eu_cas2_req        (eu_cas2_req_tb),
@@ -487,7 +474,7 @@ module biu_tb;
         .eu_cas2_rdata1     (eu_cas2_rdata1_tb),
         .eu_cas2_rdata2     (eu_cas2_rdata2_tb),
         .eu_cas2_ack        (eu_cas2_ack_tb),
-        // Phase 7: burst read
+        // Burst read ports
         .eu_burst_req       (eu_burst_req_tb),
         .eu_burst_addr      (eu_burst_addr_tb),
         .eu_burst_fc        (eu_burst_fc_tb),
@@ -497,7 +484,7 @@ module biu_tb;
         .eu_burst_rdata3    (eu_burst_rdata3_tb),
         .eu_burst_ack       (eu_burst_ack_tb),
         .eu_burst_berr      (eu_burst_berr_tb),
-        // Phase 7: MOVE16 burst write
+        // MOVE16 burst write ports
         .eu_m16_req         (eu_m16_req_tb),
         .eu_m16_addr        (eu_m16_addr_tb),
         .eu_m16_fc          (eu_m16_fc_tb),
@@ -507,7 +494,7 @@ module biu_tb;
         .eu_m16_wdata3      (eu_m16_wdata3_tb),
         .eu_m16_ack         (eu_m16_ack_tb),
         .eu_m16_berr        (eu_m16_berr_tb),
-        // Phase 10 — coprocessor CPU Space cycles
+        // Coprocessor CPU Space cycle ports
         .eu_coproc_req      (eu_coproc_req_tb),
         .eu_coproc_rw       (eu_coproc_rw_tb),
         .eu_coproc_addr     (eu_coproc_addr_tb),
@@ -517,7 +504,7 @@ module biu_tb;
         .eu_coproc_rdata    (eu_coproc_rdata_tb),
         .eu_coproc_ack      (eu_coproc_ack_tb),
         .eu_coproc_berr     (eu_coproc_berr_tb),
-        // Phase 19 — address error detection
+        // Address error outputs
         .eu_addr_err        (eu_addr_err),
         .ifu_addr_err       (ifu_addr_err)
     );
@@ -558,7 +545,7 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // biu_cache_if — I/D cache controller (Phase 6)
+    // biu_cache_if — I/D cache controller
     // -----------------------------------------------------------------------
     biu_cache_if u_cache (
         .clk_4x      (clk_4x),
@@ -589,7 +576,7 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // biu_mmu_if — ATC + table walker (Phase 6)
+    // biu_mmu_if — ATC + table walker
     // -----------------------------------------------------------------------
     biu_mmu_if u_mmu (
         .clk_4x       (clk_4x),
@@ -618,7 +605,7 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // biu_exc_capture — exception frame format determination (Phase 7)
+    // biu_exc_capture — exception frame format determination
     // -----------------------------------------------------------------------
     biu_exc_capture u_exc (
         .clk_4x           (clk_4x),
@@ -646,9 +633,9 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // biu_error_handler — watchdog + double-fault detection (Phase 11)
+    // biu_error_handler — watchdog + double-fault detection
     // TIMEOUT_CLKS=80: safe for all existing tests (fastest completes in ~32
-    // 4x-ticks); triggers in P11-2/P11-3 when no DSACK/STERM is driven.
+    // 4x-ticks); triggers in watchdog tests when no DSACK/STERM is driven.
     // -----------------------------------------------------------------------
     biu_error_handler #(.TIMEOUT_CLKS(80)) u_err (
         .clk_4x        (clk_4x),
@@ -665,7 +652,7 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // biu_config — input synchronizer (Phase 9)
+    // biu_config — 2-stage input synchronizer
     // -----------------------------------------------------------------------
     biu_config u_cfg (
         .clk_4x        (clk_4x),
@@ -697,13 +684,13 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // Phase 51 — dedicated biu_config instance for power-on RSTO counter tests.
+    // Dedicated biu_config instance for power-on RSTO counter tests
     // Uses POWERON_RSTO_CLKS=40 for quick simulation. Starts with rst_n=0
     // so the counter loads immediately; P51 tests release it.
     // -----------------------------------------------------------------------
     logic        cfg51_rst_n = 1'b0;
     logic        cfg51_poweron_rstout_n;
-    // Unused output stubs for the Phase 51 cfg instance
+    // Unused output stubs for the dedicated biu_config instance
     logic        cfg51_dsack0_s, cfg51_dsack1_s, cfg51_sterm_s;
     logic        cfg51_berr_s, cfg51_halt_s, cfg51_avec_s, cfg51_vpa_s;
     logic [2:0]  cfg51_ipl_s;
@@ -728,7 +715,7 @@ module biu_tb;
     );
 
     // -----------------------------------------------------------------------
-    // biu_pin_driver — data bus OE management (Phase 9)
+    // biu_pin_driver — data bus OE management
     // -----------------------------------------------------------------------
     biu_pin_driver u_pd (
         .d_out         (pd_d_out_tb),
@@ -1033,9 +1020,9 @@ module biu_tb;
         if (timeout == 0) begin $display("FAIL  E-clock align timeout"); fail_count++; return; end
         low_count  = 0; while (e === 1'b0) begin low_count++;  @(posedge clk_4x); end
         high_count = 0; while (e === 1'b1) begin high_count++; @(posedge clk_4x); end
-        check("P1-3: E low=24",   low_count  == 24);
-        check("P1-3: E high=16",  high_count == 16);
-        check("P1-3: period=40",  (low_count + high_count) == 40);
+        check("E low=24",   low_count  == 24);
+        check("E high=16",  high_count == 16);
+        check("period=40",  (low_count + high_count) == 40);
     endtask
 
     // EU read with per-S-state bus signal checks
@@ -1059,23 +1046,23 @@ module biu_tb;
 
         // State numbers per biu_cycle_gen enum
         wait_for_state(7'd18, 20);   // ST_READ_S0
-        check("P2-4: addr at S0",         ext_a    === addr);
-        check("P2-4: FC at S0",           ext_fc   === fc);
-        check("P2-5: ECS_n high at S0",   ext_ecs_n === 1'b1);
-        check("P2-5: AS_n high at S0",    ext_as_n  === 1'b1);
-        check("P2-5: DS_n high at S0",     ext_ds_n  === 1'b1);
+        check("addr at S0",         ext_a    === addr);
+        check("FC at S0",           ext_fc   === fc);
+        check("ECS_n high at S0",   ext_ecs_n === 1'b1);
+        check("AS_n high at S0",    ext_as_n  === 1'b1);
+        check("DS_n high at S0",     ext_ds_n  === 1'b1);
 
         wait_for_state(7'd20, 20);   // ST_READ_S2
-        check("P2-6: AS_n low at S2",     ext_as_n  === 1'b0);
-        check("P2-6: DS_n high at S2",    ext_ds_n  === 1'b1);
+        check("AS_n low at S2",     ext_as_n  === 1'b0);
+        check("DS_n high at S2",    ext_ds_n  === 1'b1);
 
         wait_for_state(7'd21, 20);   // ST_READ_S3
-        check("P2-7: DS_n low at S3",     ext_ds_n  === 1'b0);
-        check("P2-7: AS_n low at S3",     ext_as_n  === 1'b0);
+        check("DS_n low at S3",     ext_ds_n  === 1'b0);
+        check("AS_n low at S3",     ext_as_n  === 1'b0);
 
         wait_for_state(7'd24, 50);   // ST_READ_S6
-        check("P2-7: AS_n high at S6",    ext_as_n  === 1'b1);
-        check("P2-7: DS_n high at S6",    ext_ds_n  === 1'b1);
+        check("AS_n high at S6",    ext_as_n  === 1'b1);
+        check("DS_n high at S6",    ext_ds_n  === 1'b1);
 
         for (t = 0; t < timeout_cycles; t++) begin
             @(posedge clk_4x);
@@ -1083,7 +1070,7 @@ module biu_tb;
         end
         rdata     = eu_rdata;
         eu_req_tb = 1'b0;
-        check("P2-8: read data correct", rdata === expected);
+        check("read data correct", rdata === expected);
     endtask
 
     // -----------------------------------------------------------------------
@@ -1092,44 +1079,44 @@ module biu_tb;
     logic [31:0] rdata;
 
     initial begin
-        $display("=== MC68030 BIU Phase 1 + 2 + 3 Tests ===");
+        $display("=== BIU: Reset, init, bus cycles, dynamic sizing ===");
 
         // P1-1 Reset hold
-        $display("--- P1-1: Reset hold ---");
+        $display("--- Reset hold ---");
         rst_n = 1'b0;
         repeat(4) @(posedge clk_4x);
-        check("P1-1: phase==0",   phase   == 2'd0);
-        check("P1-1: state==0",   s_state == 7'd0);
-        check("P1-1: AS_n safe",  ext_as_n  === 1'b1);
-        check("P1-1: DS_n safe",  ext_ds_n  === 1'b1);
-        check("P1-1: d_oe=0",     ext_d_oe  === 1'b0);
+        check("phase==0",   phase   == 2'd0);
+        check("state==0",   s_state == 7'd0);
+        check("AS_n safe",  ext_as_n  === 1'b1);
+        check("DS_n safe",  ext_ds_n  === 1'b1);
+        check("d_oe=0",     ext_d_oe  === 1'b0);
 
         // Release reset
         @(negedge clk_4x);
         rst_n = 1'b1;
 
-        // P1-2 Phase counter (just 4 ticks; init runs in parallel but that's fine)
-        $display("--- P1-2: Phase counter ---");
+        // 4x-clock phase counter (just 4 ticks; init runs in parallel but that's fine)
+        $display("--- 4x-clock phase counter ---");
         repeat(3) @(posedge clk_4x);
         while (phase != 2'd0) @(posedge clk_4x);
-        @(posedge clk_4x); check("P1-2: 0→1", phase == 2'd1);
-        @(posedge clk_4x); check("P1-2: 1→2", phase == 2'd2);
-        @(posedge clk_4x); check("P1-2: 2→3", phase == 2'd3);
-        @(posedge clk_4x); check("P1-2: 3→0", phase == 2'd0);
+        @(posedge clk_4x); check("0→1", phase == 2'd1);
+        @(posedge clk_4x); check("1→2", phase == 2'd2);
+        @(posedge clk_4x); check("2→3", phase == 2'd3);
+        @(posedge clk_4x); check("3→0", phase == 2'd0);
 
         // P2-1..3 Power-on init
-        $display("--- P2-1..3: Power-on init ---");
+        $display("--- Power-on init ---");
         wait_for_init(200);
-        check("P2-1: init_done",           init_done === 1'b1);
-        check("P2-2: init_ssp=$DEADBEF0",  init_ssp  === 32'hDEAD_BEF0);
-        check("P2-3: init_pc=$CAFE0010",   init_pc   === 32'hCAFE_0010);
+        check("init_done",           init_done === 1'b1);
+        check("init_ssp=$DEADBEF0",  init_ssp  === 32'hDEAD_BEF0);
+        check("init_pc=$CAFE0010",   init_pc   === 32'hCAFE_0010);
 
         // P1-3 E-clock (fine any time after reset)
-        $display("--- P1-3: E-clock ---");
+        $display("--- E-clock period and duty cycle ---");
         test_eclk_timing;
 
         // P2-4..8 EU read with bus-signal timing
-        $display("--- P2-4..8: EU read + timing ---");
+        $display("--- EU read: address/FC/AS#/DS# timing ---");
         u_mem.mem[4] = 32'hA5A5_A5A5;   // byte $00000010
         eu_read_check_timing(
             .addr    (32'h0000_0010),
@@ -1140,86 +1127,86 @@ module biu_tb;
         );
 
         // P2-9 Write then read-back
-        $display("--- P2-9: Write + read-back ---");
+        $display("--- EU write + read-back ---");
         eu_write(.addr(32'h0000_0040), .fc(3'b101), .siz(2'b00),
                  .wdata(32'h1234_5678), .timeout_cycles(100));
         repeat(4) @(posedge clk_4x);
         eu_read(.addr(32'h0000_0040), .fc(3'b101), .siz(2'b00), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(100));
-        check32("P2-9: write-readback", rdata, 32'h1234_5678);
+        check32("write-readback", rdata, 32'h1234_5678);
 
         // P2-10 Wait-state test
-        $display("--- P2-10: Wait-state ---");
+        $display("--- EU read with wait states ---");
         test_mem_sel = MUX_SLOW;
         @(posedge clk_4x);
         u_mem_slow.mem[2] = 32'hBEEF_CAFE;  // byte $00000008
         eu_read(.addr(32'h0000_0008), .fc(3'b101), .siz(2'b00), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(300));
-        check32("P2-10: wait-state read", rdata, 32'hBEEF_CAFE);
+        check32("wait-state read", rdata, 32'hBEEF_CAFE);
         test_mem_sel = MUX_FAST;
 
         // ===================================================================
-        // Phase 3: Dynamic Bus Sizing
+        // Dynamic bus sizing tests (DSACK0/1 response encoding)
         // ===================================================================
-        $display("--- P3-1: Longword read from 16-bit port ---");
+        $display("--- Longword read from 16-bit port ---");
         // mem16[4] @ word addr 4 → byte $00000010
         u_mem16.mem[4] = 32'hDEAD_BEEF;
         test_mem_sel = MUX_16;
         eu_read(.addr(32'h0000_0010), .fc(3'b101), .siz(2'b00), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(400));
-        check32("P3-1: LW read 16-bit port", rdata, 32'hDEAD_BEEF);
+        check32("LW read 16-bit port", rdata, 32'hDEAD_BEEF);
         test_mem_sel = MUX_FAST;
 
-        $display("--- P3-2: Longword read from 8-bit port ---");
+        $display("--- Longword read from 8-bit port ---");
         u_mem8.mem[5] = 32'hCAFE_1234;   // byte $00000014
         test_mem_sel = MUX_8;
         eu_read(.addr(32'h0000_0014), .fc(3'b101), .siz(2'b00), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(600));
-        check32("P3-2: LW read 8-bit port", rdata, 32'hCAFE_1234);
+        check32("LW read 8-bit port", rdata, 32'hCAFE_1234);
         test_mem_sel = MUX_FAST;
 
-        $display("--- P3-3: Longword write+readback to 16-bit port ---");
+        $display("--- Longword write+readback to 16-bit port ---");
         test_mem_sel = MUX_16;
         eu_write(.addr(32'h0000_0080), .fc(3'b101), .siz(2'b00),
                  .wdata(32'hA5A5_B6B6), .timeout_cycles(400));
         eu_read(.addr(32'h0000_0080), .fc(3'b101), .siz(2'b00), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(400));
-        check32("P3-3: LW write/readback 16-bit port", rdata, 32'hA5A5_B6B6);
+        check32("LW write/readback 16-bit port", rdata, 32'hA5A5_B6B6);
         test_mem_sel = MUX_FAST;
 
-        $display("--- P3-4: Longword write+readback to 8-bit port ---");
+        $display("--- Longword write+readback to 8-bit port ---");
         test_mem_sel = MUX_8;
         eu_write(.addr(32'h0000_00C0), .fc(3'b101), .siz(2'b00),
                  .wdata(32'h1122_3344), .timeout_cycles(600));
         eu_read(.addr(32'h0000_00C0), .fc(3'b101), .siz(2'b00), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(600));
-        check32("P3-4: LW write/readback 8-bit port", rdata, 32'h1122_3344);
+        check32("LW write/readback 8-bit port", rdata, 32'h1122_3344);
         test_mem_sel = MUX_FAST;
 
-        $display("--- P3-5: Word read (SIZ=10) from 32-bit port ---");
+        $display("--- Word read (SIZ=10) from 32-bit port ---");
         // SIZ=10 means word (16-bit); from a 32-bit port, one cycle
         // Byte $00000020 = word_addr 8 upper halfword
         u_mem.mem[8] = 32'h5A5A_0000;   // upper halfword = $5A5A
         eu_read(.addr(32'h0000_0020), .fc(3'b101), .siz(2'b10), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(200));
-        check("P3-5: Word SIZ=10 on bus", ext_siz === 2'b10 || rdata !== 32'h0);
+        check("Word SIZ=10 on bus", ext_siz === 2'b10 || rdata !== 32'h0);
         // BIU normalizes: extracts [31:16] for word at even addr, returns in [15:0]
-        check32("P3-5: Word data correct", rdata, 32'h0000_5A5A);
+        check32("Word data correct", rdata, 32'h0000_5A5A);
 
-        $display("--- P3-6: Byte read (SIZ=01) from 32-bit port ---");
+        $display("--- Byte read (SIZ=01) from 32-bit port ---");
         // Byte $00000030 = word_addr 12 byte 0
         u_mem.mem[12] = 32'hAB000000;   // byte 0 = $AB at [31:24]
         eu_read(.addr(32'h0000_0030), .fc(3'b101), .siz(2'b01), .is_op(1'b1),
                 .rdata(rdata), .timeout_cycles(200));
         // BIU normalizes: extracts [31:24] for byte at A[1:0]=00, returns in [7:0]
-        check32("P3-6: Byte data correct", rdata, 32'h0000_00AB);
+        check32("Byte data correct", rdata, 32'h0000_00AB);
 
         // ===================================================================
-        // Phase 4: Error Handling and Special Cycles
+        // Error handling and special cycles
         // ===================================================================
 
         // P4-1 STERM fast read: cycle terminates at S4 without DSACK
-        $display("--- P4-1: STERM fast read ---");
+        $display("--- STERM fast read ---");
         begin
             int t; logic got_ack;
             test_mem_sel = MUX_NOSACK;  // hold DSACK deasserted
@@ -1244,13 +1231,13 @@ module biu_tb;
             p4_eu_req = 0;
             p4_direct = 0;
             test_mem_sel = MUX_FAST;
-            check("P4-1: cycle acked without DSACK", got_ack);
-            check32("P4-1: STERM data captured", cg_eu_rdata, 32'hFACE_CAFE);
+            check("cycle acked without DSACK", got_ack);
+            check32("STERM data captured", cg_eu_rdata, 32'hFACE_CAFE);
         end
         repeat(8) @(posedge clk_4x);
 
         // P4-2 BERR abort: fault captured, eu_berr fires, no eu_ack
-        $display("--- P4-2: BERR abort ---");
+        $display("--- BERR abort ---");
         begin
             int t; logic saw_berr;
             p4_direct   = 1;
@@ -1272,14 +1259,14 @@ module biu_tb;
             p4_eu_req = 0;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P4-2: eu_berr fired", saw_berr);
-            check("P4-2: fault_valid",   fault_valid_tb);
-            check32("P4-2: fault_addr",  fault_addr_tb, 32'h0000_0200);
+            check("eu_berr fired", saw_berr);
+            check("fault_valid",   fault_valid_tb);
+            check32("fault_addr",  fault_addr_tb, 32'h0000_0200);
         end
         repeat(8) @(posedge clk_4x);
 
         // P4-3 BERR+HALT retry: simultaneous assertion → cycle retried, not exception
-        $display("--- P4-3: BERR+HALT retry ---");
+        $display("--- BERR+HALT retry ---");
         begin
             int t; logic saw_retry, saw_ack;
             p4_direct   = 1;
@@ -1300,8 +1287,8 @@ module biu_tb;
             end
             berr_tb = 0;
             halt_tb = 1;   // deassert HALT
-            check("P4-3: retry flag fires", saw_retry);
-            check("P4-3: retry_pending",    retry_pending_tb);
+            check("retry flag fires", saw_retry);
+            check("retry_pending",    retry_pending_tb);
             // Wait for retry cycle to complete via eu_ack
             saw_ack = 0;
             for (t = 0; t < 200; t++) begin
@@ -1310,12 +1297,12 @@ module biu_tb;
             end
             p4_eu_req = 0;
             p4_direct = 0;
-            check("P4-3: retry succeeds", saw_ack);
+            check("retry succeeds", saw_ack);
         end
         repeat(8) @(posedge clk_4x);
 
         // P4-4 IACK with DSACK: vector captured from D[7:0]
-        $display("--- P4-4: IACK DSACK ---");
+        $display("--- IACK with DSACK ---");
         begin
             int t; logic saw_ack;
             iack_test_vec     = 8'd42;
@@ -1330,14 +1317,14 @@ module biu_tb;
             end
             eu_iack_req_tb = 0;
             test_mem_sel   = MUX_FAST;
-            check("P4-4: iack_ack fired",     saw_ack);
-            check8("P4-4: iack_vec=42",       eu_iack_vec_tb, 8'd42);
-            check("P4-4: avec deasserted",    !eu_iack_avec_tb);
+            check("iack_ack fired",     saw_ack);
+            check8("iack_vec=42",       eu_iack_vec_tb, 8'd42);
+            check("avec deasserted",    !eu_iack_avec_tb);
         end
         repeat(8) @(posedge clk_4x);
 
         // P4-5 IACK with AVEC: autovector = level + 24
-        $display("--- P4-5: IACK AVEC ---");
+        $display("--- IACK with AVEC (autovector) ---");
         begin
             int t; logic saw_ack;
             // MUX_FAST: DS stays high for IACK so mem_models don't respond → no DSACK
@@ -1352,14 +1339,14 @@ module biu_tb;
             end
             avec_tb        = 0;
             eu_iack_req_tb = 0;
-            check("P4-5: iack_ack fired",  saw_ack);
-            check8("P4-5: iack_vec=29",    eu_iack_vec_tb, 8'd29);  // 5+24=29
-            check("P4-5: avec asserted",   eu_iack_avec_tb);
+            check("iack_ack fired",  saw_ack);
+            check8("iack_vec=29",    eu_iack_vec_tb, 8'd29);  // 5+24=29
+            check("avec asserted",   eu_iack_avec_tb);
         end
         repeat(8) @(posedge clk_4x);
 
         // P4-6 RESET instruction: RSTOUT low for exactly 124 external clocks
-        $display("--- P4-6: RESET instruction ---");
+        $display("--- RESET instruction (RSTOUT# pulse) ---");
         begin
             int t; int rst_cnt;
             wait_bus_idle;
@@ -1372,16 +1359,16 @@ module biu_tb;
             end
             eu_rst_req_tb = 0;
             // 124 external clocks × 4 ticks = 496 ticks (±4 for sampling boundary)
-            check("P4-6: RSTOUT ~496 ticks", rst_cnt >= 492 && rst_cnt <= 500);
+            check("RSTOUT ~496 ticks", rst_cnt >= 492 && rst_cnt <= 500);
         end
         repeat(8) @(posedge clk_4x);
 
         // ===================================================================
-        // Phase 5: RMW, CAS2, MOVEM, MOVEP
+        // RMW, CAS2, MOVEM, MOVEP
         // ===================================================================
 
         // P5-1 RMW byte: TAS-style read → write at same address, no bus release
-        $display("--- P5-1: RMW byte (TAS) ---");
+        $display("--- RMW byte (TAS) ---");
         begin
             int t; logic got_rd_ack, got_wr_ack;
             u_mem.mem[64] = 32'hAB000000;  // addr=$100, byte=$AB
@@ -1401,8 +1388,8 @@ module biu_tb;
                 @(posedge clk_4x);
                 if (cg_eu_ack_direct) begin got_rd_ack = 1; break; end
             end
-            check("P5-1: RMW read ack", got_rd_ack);
-            check32("P5-1: RMW rdata", cg_eu_rdata, 32'hAB000000);
+            check("RMW read ack", got_rd_ack);
+            check32("RMW rdata", cg_eu_rdata, 32'hAB000000);
             // Wait for ack to deassert (exit RMW_READ_S7) before polling write ack
             while (cg_eu_ack_direct) @(posedge clk_4x);
             // Now wait for write-phase ack (RMW_WRITE_S7)
@@ -1415,13 +1402,13 @@ module biu_tb;
             eu_rmw_tb  = 0;
             p4_direct  = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P5-1: RMW write ack", got_wr_ack);
-            check32("P5-1: mem written", u_mem.mem[64], 32'hFF000000);
+            check("RMW write ack", got_wr_ack);
+            check32("mem written", u_mem.mem[64], 32'hFF000000);
         end
         repeat(8) @(posedge clk_4x);
 
         // P5-2 RMW word: bus stays locked, AS stays asserted through phases
-        $display("--- P5-2: RMW word ---");
+        $display("--- RMW word ---");
         begin
             int t; logic got_rd_ack, got_wr_ack; logic saw_bus_lock;
             u_mem.mem[65] = 32'h1234_0000;  // addr=$104, word=$1234
@@ -1443,8 +1430,8 @@ module biu_tb;
                 if (bus_lock) saw_bus_lock = 1;
                 if (cg_eu_ack_direct) begin got_rd_ack = 1; break; end
             end
-            check("P5-2: bus_lock asserted during RMW", saw_bus_lock);
-            check("P5-2: RMW read ack", got_rd_ack);
+            check("bus_lock asserted during RMW", saw_bus_lock);
+            check("RMW read ack", got_rd_ack);
             while (cg_eu_ack_direct) @(posedge clk_4x);
             got_wr_ack = 0;
             for (t = 0; t < 80; t++) begin
@@ -1455,13 +1442,13 @@ module biu_tb;
             eu_rmw_tb  = 0;
             p4_direct  = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P5-2: RMW write ack", got_wr_ack);
-            check32("P5-2: mem written", u_mem.mem[65], 32'hDEAD_0000);
+            check("RMW write ack", got_wr_ack);
+            check32("mem written", u_mem.mem[65], 32'hDEAD_0000);
         end
         repeat(8) @(posedge clk_4x);
 
         // P5-3 CAS2: four-cycle atomic: read addr1, write addr1, read addr2, write addr2
-        $display("--- P5-3: CAS2 four-cycle ---");
+        $display("--- CAS2 four-cycle atomic ---");
         begin
             int t; logic saw_ack;
             u_mem.mem[66] = 32'hAAAA_BBBB;  // addr=$108
@@ -1483,16 +1470,16 @@ module biu_tb;
             end
             eu_cas2_req_tb = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P5-3: CAS2 ack", saw_ack);
-            check32("P5-3: rdata1 (original addr1)", eu_cas2_rdata1_tb, 32'hAAAA_BBBB);
-            check32("P5-3: rdata2 (original addr2)", eu_cas2_rdata2_tb, 32'hCCCC_DDDD);
-            check32("P5-3: mem[66] written",  u_mem.mem[66], 32'hDEAD_BEEF);
-            check32("P5-3: mem[67] written",  u_mem.mem[67], 32'hCAFE_BABE);
+            check("CAS2 ack", saw_ack);
+            check32("rdata1 (original addr1)", eu_cas2_rdata1_tb, 32'hAAAA_BBBB);
+            check32("rdata2 (original addr2)", eu_cas2_rdata2_tb, 32'hCCCC_DDDD);
+            check32("mem[66] written",  u_mem.mem[66], 32'hDEAD_BEEF);
+            check32("mem[67] written",  u_mem.mem[67], 32'hCAFE_BABE);
         end
         repeat(8) @(posedge clk_4x);
 
         // P5-4 MOVEM read 3 longwords
-        $display("--- P5-4: MOVEM read 3 longwords ---");
+        $display("--- MOVEM read 3 longwords ---");
         begin
             int t; logic saw_ack;
             u_mem.mem[68] = 32'h1111_1111;  // addr=$110
@@ -1514,15 +1501,15 @@ module biu_tb;
             eu_mo_req_tb = 0;
             use_multiop  = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P5-4: MOVEM ack", saw_ack);
-            check32("P5-4: rdata0", eu_mo_rdata0_tb, 32'h1111_1111);
-            check32("P5-4: rdata1", eu_mo_rdata1_tb, 32'h2222_2222);
-            check32("P5-4: rdata2", eu_mo_rdata2_tb, 32'h3333_3333);
+            check("MOVEM ack", saw_ack);
+            check32("rdata0", eu_mo_rdata0_tb, 32'h1111_1111);
+            check32("rdata1", eu_mo_rdata1_tb, 32'h2222_2222);
+            check32("rdata2", eu_mo_rdata2_tb, 32'h3333_3333);
         end
         repeat(8) @(posedge clk_4x);
 
         // P5-5 MOVEP.W write: 2 byte cycles at $120, $122 (stride 2)
-        $display("--- P5-5: MOVEP.W write ---");
+        $display("--- MOVEP.W write ---");
         begin
             int t; logic saw_ack;
             u_mem.mem[72] = 32'h0000_0000;  // addr=$120 (word 72)
@@ -1544,16 +1531,16 @@ module biu_tb;
             eu_mo_req_tb = 0;
             use_multiop  = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P5-5: MOVEP.W write ack", saw_ack);
+            check("MOVEP.W write ack", saw_ack);
             // 32-bit mem model stores full word: word 72 gets wdata0 ($AB000000)
             // word 72 also gets wdata1 ($CD000000) since $122 → word_addr=72 too
             // (both bytes in same longword; final state = last write = wdata1)
-            check("P5-5: mem written", u_mem.mem[72] !== 32'h0000_0000);
+            check("mem written", u_mem.mem[72] !== 32'h0000_0000);
         end
         repeat(8) @(posedge clk_4x);
 
         // P5-6 MOVEP.L read: 4 byte cycles at $130,$132,$134,$136 (stride 2)
-        $display("--- P5-6: MOVEP.L read ---");
+        $display("--- MOVEP.L read ---");
         begin
             int t; logic saw_ack;
             // Pre-load: addr $130 → word 76, $132 → word 76, $134 → word 77, $136 → word 77
@@ -1575,24 +1562,24 @@ module biu_tb;
             eu_mo_req_tb = 0;
             use_multiop  = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P5-6: MOVEP.L read ack", saw_ack);
+            check("MOVEP.L read ack", saw_ack);
             // BIU normalizes bytes: rdata = {24'h0, byte_at_address}
-            check32("P5-6: rdata0", eu_mo_rdata0_tb, 32'h0000_00AA);  // 0x130: [31:24]
-            check32("P5-6: rdata1", eu_mo_rdata1_tb, 32'h0000_00CC);  // 0x132: [15:8] of mem[76]
-            check32("P5-6: rdata2", eu_mo_rdata2_tb, 32'h0000_00EE);  // 0x134: [31:24]
-            check32("P5-6: rdata3", eu_mo_rdata3_tb, 32'h0000_0022);  // 0x136: [15:8] of mem[77]
+            check32("rdata0", eu_mo_rdata0_tb, 32'h0000_00AA);  // 0x130: [31:24]
+            check32("rdata1", eu_mo_rdata1_tb, 32'h0000_00CC);  // 0x132: [15:8] of mem[76]
+            check32("rdata2", eu_mo_rdata2_tb, 32'h0000_00EE);  // 0x134: [31:24]
+            check32("rdata3", eu_mo_rdata3_tb, 32'h0000_0022);  // 0x136: [15:8] of mem[77]
         end
         repeat(8) @(posedge clk_4x);
 
         // ===================================================================
-        // Phase 6: Cache and MMU
+        // Cache and MMU interface
         // ===================================================================
-        $display("=== MC68030 BIU Phase 6 Tests ===");
+        $display("=== BIU: Cache and MMU interface ===");
 
         // ----------------------------------------------------------------
         // P6-1: I-cache miss → linefill (4 reads) → correct data returned
         // ----------------------------------------------------------------
-        $display("--- P6-1: I-cache miss → linefill ---");
+        $display("--- I-cache miss → linefill ---");
         begin
             int t6;
             // word index = byte_addr / 4
@@ -1616,14 +1603,14 @@ module biu_tb;
                 if (cache_eu_ack) break;
             end
             eu_req_tb = 1'b0;
-            check32("P6-1: linefill word0", cache_eu_rdata, 32'hAABB_CCDD);
+            check32("linefill word0", cache_eu_rdata, 32'hAABB_CCDD);
             repeat(4) @(posedge clk_4x);
         end
 
         // ----------------------------------------------------------------
         // P6-2: I-cache hit → word 1 of same line, no bus cycle
         // ----------------------------------------------------------------
-        $display("--- P6-2: I-cache hit (word 1 of same line) ---");
+        $display("--- I-cache hit (word 1 of same line) ---");
         begin
             int t6;
             logic was_idle;
@@ -1641,14 +1628,14 @@ module biu_tb;
                 $display("FAIL  P6-2: bus was not idle (miss instead of hit)");
                 fail_count++;
             end else
-                check32("P6-2: I-cache hit word1", cache_eu_rdata, 32'h1122_3344);
+                check32("I-cache hit word1", cache_eu_rdata, 32'h1122_3344);
             repeat(4) @(posedge clk_4x);
         end
 
         // ----------------------------------------------------------------
         // P6-3: D-cache read miss → single fetch → hit on repeat
         // ----------------------------------------------------------------
-        $display("--- P6-3: D-cache read miss → hit ---");
+        $display("--- D-cache read miss → hit ---");
         begin
             int t6;
             u_mem.mem[32'h200/4] = 32'hDEAD_BEEF;
@@ -1665,7 +1652,7 @@ module biu_tb;
                 if (cache_eu_ack) break;
             end
             eu_req_tb = 1'b0;
-            check32("P6-3a: D-cache miss fetch", cache_eu_rdata, 32'hDEAD_BEEF);
+            check32("D-cache miss fetch", cache_eu_rdata, 32'hDEAD_BEEF);
             repeat(4) @(posedge clk_4x);
 
             // Repeat — should hit D-cache
@@ -1678,14 +1665,14 @@ module biu_tb;
                 if (cache_eu_ack) break;
             end
             eu_req_tb = 1'b0;
-            check32("P6-3b: D-cache hit", cache_eu_rdata, 32'hDEAD_BEEF);
+            check32("D-cache hit", cache_eu_rdata, 32'hDEAD_BEEF);
             repeat(4) @(posedge clk_4x);
         end
 
         // ----------------------------------------------------------------
         // P6-4: D-cache write → write-through (bus cycle + cache update)
         // ----------------------------------------------------------------
-        $display("--- P6-4: D-cache write-through ---");
+        $display("--- D-cache write-through ---");
         begin
             int t6;
             wait_bus_idle;
@@ -1702,14 +1689,14 @@ module biu_tb;
             eu_req_tb   = 1'b0;
             eu_rw_tb    = 1'b1;
             eu_wdata_tb = 32'h0;
-            check32("P6-4: write-through mem", u_mem.mem[32'h200/4], 32'hCAFE_BABE);
+            check32("write-through mem", u_mem.mem[32'h200/4], 32'hCAFE_BABE);
             repeat(4) @(posedge clk_4x);
         end
 
         // ----------------------------------------------------------------
         // P6-5: Cache disabled → bus cycle for every access
         // ----------------------------------------------------------------
-        $display("--- P6-5: Cache disabled → bus read ---");
+        $display("--- Cache disabled → bus read ---");
         begin
             int t6;
             u_mem.mem[32'h300/4] = 32'h1234_5678;
@@ -1726,7 +1713,7 @@ module biu_tb;
                 if (cache_eu_ack) break;
             end
             eu_req_tb = 1'b0;
-            check32("P6-5: cache-disabled read", cache_eu_rdata, 32'h1234_5678);
+            check32("cache-disabled read", cache_eu_rdata, 32'h1234_5678);
             use_cache = 1'b0;
             repeat(4) @(posedge clk_4x);
         end
@@ -1734,7 +1721,7 @@ module biu_tb;
         // ----------------------------------------------------------------
         // P6-6: TT0 transparent translation → VA=PA, no table walk
         // ----------------------------------------------------------------
-        $display("--- P6-6: TT0 bypass → VA=PA ---");
+        $display("--- TT0 transparency bypass → VA=PA ---");
         begin
             int t6;
             // TT0: [31:24]=LAB=0x10, [23:16]=LAM=0x00, [15]=E=1, rest=0
@@ -1757,7 +1744,7 @@ module biu_tb;
                 $display("FAIL  P6-6: mmu_walk_req asserted (should not table-walk)");
                 fail_count++;
             end else
-                check32("P6-6: TT0 bypass PA=VA", mmu_pa_out, 32'h1000_ABCD);
+                check32("TT0 bypass PA=VA", mmu_pa_out, 32'h1000_ABCD);
             use_mmu_tb = 1'b0;
             tt0_tb     = 32'h0;
             tc_tb      = 32'h0;
@@ -1767,7 +1754,7 @@ module biu_tb;
         // ----------------------------------------------------------------
         // P6-7: ATC miss → 2-level table walk → ATC hit on second access
         // ----------------------------------------------------------------
-        $display("--- P6-7: ATC miss → table walk → ATC hit ---");
+        $display("--- ATC miss → table walk → ATC hit ---");
         begin
             int t6;
             // TC: E=1, PS=12 (4KB pages), IS=0, TIA=10, TIB=10, TIC=0, TID=0
@@ -1807,8 +1794,8 @@ module biu_tb;
             end
             eu_req_tb = 1'b0;
             // PA = 0x3000_0000 | 0x000 = 0x3000_0000
-            check32("P6-7a: walk PA", mmu_pa_out, 32'h3000_0000);
-            check("P6-7a: no fault", !mmu_fault_out);
+            check32("walk PA", mmu_pa_out, 32'h3000_0000);
+            check("no fault", !mmu_fault_out);
             repeat(8) @(posedge clk_4x);
 
             // Second access: same VA → ATC hit (no bus cycles)
@@ -1821,18 +1808,18 @@ module biu_tb;
                 if (mmu_hit_out || mmu_walk_done_out) break;
             end
             eu_req_tb = 1'b0;
-            check("P6-7b: ATC hit", mmu_hit_out);
-            check32("P6-7b: ATC hit PA", mmu_pa_out, 32'h3000_0000);
+            check("ATC hit", mmu_hit_out);
+            check32("ATC hit PA", mmu_pa_out, 32'h3000_0000);
             use_mmu_tb = 1'b0;
             tc_tb      = 32'h0;
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-1: Burst read (line fill) — 4 beats, AS held asserted
+        // Burst read (line fill): 4 beats, AS# held asserted
         // ===================================================================
         begin
-            $display("--- P7-1: Burst read 4 beats, AS held ---");
+            $display("--- Burst read 4 beats (AS# held) ---");
             // Pre-load memory words: addr/4 = word index (u_mem.mem is 32-bit word array)
             // 0x100 = word[64], 0x104 = word[65], 0x108 = word[66], 0x10C = word[67]
             u_mem.mem[64] = 32'hAABBCCDD;
@@ -1846,20 +1833,20 @@ module biu_tb;
             @(posedge eu_burst_ack_tb or posedge eu_burst_berr_tb);
             eu_burst_req_tb = 1'b0;
             @(posedge clk_4x);
-            check("P7-1: no berr", !eu_burst_berr_tb);
-            check32("P7-1: rdata0", eu_burst_rdata0_tb, 32'hAABBCCDD);
-            check32("P7-1: rdata1", eu_burst_rdata1_tb, 32'h11223344);
-            check32("P7-1: rdata2", eu_burst_rdata2_tb, 32'h55667788);
-            check32("P7-1: rdata3", eu_burst_rdata3_tb, 32'hDEADBEEF);
+            check("no berr", !eu_burst_berr_tb);
+            check32("rdata0", eu_burst_rdata0_tb, 32'hAABBCCDD);
+            check32("rdata1", eu_burst_rdata1_tb, 32'h11223344);
+            check32("rdata2", eu_burst_rdata2_tb, 32'h55667788);
+            check32("rdata3", eu_burst_rdata3_tb, 32'hDEADBEEF);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-2: Burst read BERR on beat 2 — eu_burst_berr asserted
+        // Burst read: BERR on beat 2
         // ===================================================================
         begin
             int t; logic saw_berr2;
-            $display("--- P7-2: Burst read with BERR on beat 2 ---");
+            $display("--- Burst read: BERR on beat 2 ---");
             test_mem_sel     = MUX_FAST;
             eu_burst_req_tb  = 1'b1;
             eu_burst_addr_tb = 32'h0000_0100;
@@ -1875,15 +1862,15 @@ module biu_tb;
             berr_tb         = 0;
             eu_burst_req_tb = 0;
             while (!bus_idle) @(posedge clk_4x);
-            check("P7-2: berr asserted", saw_berr2);
+            check("berr asserted", saw_berr2);
             repeat(8) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-3: MOVE16 burst write — 4 beats, AS held, RW=0
+        // MOVE16 burst write: 4 beats, AS# held, RW=0
         // ===================================================================
         begin
-            $display("--- P7-3: MOVE16 burst write 4 beats ---");
+            $display("--- MOVE16 burst write 4 beats ---");
             test_mem_sel    = MUX_FAST;
             eu_m16_req_tb   = 1'b1;
             eu_m16_addr_tb  = 32'h0000_0200;
@@ -1895,20 +1882,20 @@ module biu_tb;
             @(posedge eu_m16_ack_tb or posedge eu_m16_berr_tb);
             eu_m16_req_tb = 1'b0;
             @(posedge clk_4x);
-            check("P7-3: no berr", !eu_m16_berr_tb);
+            check("no berr", !eu_m16_berr_tb);
             // Verify writes landed: 0x200=word[128], 0x204=word[129], 0x208=word[130], 0x20C=word[131]
-            check32("P7-3: mem[0x200]", u_mem.mem[128], 32'hDEAD_0001);
-            check32("P7-3: mem[0x204]", u_mem.mem[129], 32'hDEAD_0002);
-            check32("P7-3: mem[0x208]", u_mem.mem[130], 32'hDEAD_0003);
-            check32("P7-3: mem[0x20C]", u_mem.mem[131], 32'hDEAD_0004);
+            check32("mem[0x200]", u_mem.mem[128], 32'hDEAD_0001);
+            check32("mem[0x204]", u_mem.mem[129], 32'hDEAD_0002);
+            check32("mem[0x208]", u_mem.mem[130], 32'hDEAD_0003);
+            check32("mem[0x20C]", u_mem.mem[131], 32'hDEAD_0004);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-4: CAS2 with do_write=0 — write phases skipped
+        // CAS2: conditional write suppressed (do_write=0)
         // ===================================================================
         begin
-            $display("--- P7-4: CAS2 conditional write suppressed ---");
+            $display("--- CAS2 conditional write suppressed ---");
             test_mem_sel      = MUX_FAST;
             // Pre-load two operand words: 0x300=word[192], 0x304=word[193]
             u_mem.mem[192] = 32'h0000ABCD;
@@ -1927,18 +1914,18 @@ module biu_tb;
             eu_cas2_do_write1_tb = 1'b0;
             eu_cas2_do_write2_tb = 1'b0;
             @(posedge clk_4x);
-            check32("P7-4: rdata1 unchanged", eu_cas2_rdata1_tb, 32'h0000ABCD);
-            check32("P7-4: rdata2 unchanged", eu_cas2_rdata2_tb, 32'h00001234);
+            check32("rdata1 unchanged", eu_cas2_rdata1_tb, 32'h0000ABCD);
+            check32("rdata2 unchanged", eu_cas2_rdata2_tb, 32'h00001234);
             // Memory must not have been written: 0x300=word[192]
-            check32("P7-4: mem[0x300] intact", u_mem.mem[192], 32'h0000ABCD);
+            check32("mem[0x300] intact", u_mem.mem[192], 32'h0000ABCD);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-5: CAS2 with do_write=1 — both write phases execute
+        // CAS2: conditional write enabled (do_write=1)
         // ===================================================================
         begin
-            $display("--- P7-5: CAS2 conditional write enabled ---");
+            $display("--- CAS2 conditional write enabled ---");
             test_mem_sel      = MUX_FAST;
             eu_cas2_do_write1_tb = 1'b1;
             eu_cas2_do_write2_tb = 1'b1;
@@ -1954,17 +1941,17 @@ module biu_tb;
             eu_cas2_do_write1_tb = 1'b0;
             eu_cas2_do_write2_tb = 1'b0;
             @(posedge clk_4x);
-            check32("P7-5: mem[0x300] written", u_mem.mem[192], 32'hDEAD_BEEF);
-            check32("P7-5: mem[0x304] written", u_mem.mem[193], 32'hCAFE_BABE);
+            check32("mem[0x300] written", u_mem.mem[192], 32'hDEAD_BEEF);
+            check32("mem[0x304] written", u_mem.mem[193], 32'hCAFE_BABE);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-6: Exception frame capture — data read BERR → format $A
+        // Exception frame capture: data read BERR → format $A
         // ===================================================================
         begin
             int t; logic saw_berr6;
-            $display("--- P7-6: Exception frame capture, data read BERR → $A ---");
+            $display("--- Exception frame capture: data read BERR → format \$A ---");
             // Use p4_direct to bypass sizing_fsm for precise timing
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0180;   // word[96], within DEPTH=256
@@ -1986,21 +1973,21 @@ module biu_tb;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P7-6: eu_berr fired", saw_berr6);
-            check("P7-6: fault_valid", fault_valid_tb);
-            check32("P7-6: fault_addr", fault_addr_tb, 32'h0000_0180);
-            check("P7-6: fault_rw=1", fault_rw_tb);
-            check("P7-6: exc frame_valid", exc_frame_valid);
-            check("P7-6: format=$A", exc_frame_format == 4'hA);
+            check("eu_berr fired", saw_berr6);
+            check("fault_valid", fault_valid_tb);
+            check32("fault_addr", fault_addr_tb, 32'h0000_0180);
+            check("fault_rw=1", fault_rw_tb);
+            check("exc frame_valid", exc_frame_valid);
+            check("format=$A", exc_frame_format == 4'hA);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 7-7: Exception frame capture — data write BERR → format $B
+        // Exception frame capture: data write BERR → format $B
         // ===================================================================
         begin
             int t; logic saw_berr7;
-            $display("--- P7-7: Exception frame capture, data write BERR → $B ---");
+            $display("--- Exception frame capture: data write BERR → format \$B ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0184;   // word[97]
             p4_eu_wdata = 32'hCAFE_CAFE;
@@ -2022,27 +2009,27 @@ module biu_tb;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P7-7: eu_berr fired", saw_berr7);
-            check("P7-7: fault_valid", fault_valid_tb);
-            check32("P7-7: fault_addr", fault_addr_tb, 32'h0000_0184);
-            check("P7-7: fault_rw=0", !fault_rw_tb);
-            check("P7-7: exc frame_valid", exc_frame_valid);
-            check("P7-7: format=$B", exc_frame_format == 4'hB);
+            check("eu_berr fired", saw_berr7);
+            check("fault_valid", fault_valid_tb);
+            check32("fault_addr", fault_addr_tb, 32'h0000_0184);
+            check("fault_rw=0", !fault_rw_tb);
+            check("exc frame_valid", exc_frame_valid);
+            check("format=$B", exc_frame_format == 4'hB);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 8 — Single DS byte-lane steering tests
+        // Byte-lane steering and DS# timing tests
         // ===================================================================
         // The 68030 has a single /DS pin (not /UDS+/LDS).
         // Byte-lane selection is conveyed via SIZ[1:0] + A[1:0].
         // biu_byte_lane_ctrl steers write data to the correct bus lane so
         // the peripheral sees the byte on the right D[31:0] pin position.
-        $display("=== MC68030 BIU Phase 8 Tests ===");
+        $display("=== BIU: Byte-lane control and DS# timing ===");
 
         // P8-1: DS asserts at S3, deasserts at S6 (longword read)
         begin
-            $display("--- P8-1: DS_n timing: low@S3, high@S6 ---");
+            $display("--- DS# timing: low@S3, high@S6 ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0000;
             p4_eu_siz   = 2'b00;   // LW
@@ -2052,11 +2039,11 @@ module biu_tb;
             wait_bus_idle;
             p4_eu_req = 1;
             wait_for_state(7'd21, 30);   // ST_READ_S3
-            check("P8-1: DS_n=0 @S3",  ext_ds_n === 1'b0);
-            check("P8-1: AS_n=0 @S3",  ext_as_n === 1'b0);
+            check("DS_n=0 @S3",  ext_ds_n === 1'b0);
+            check("AS_n=0 @S3",  ext_as_n === 1'b0);
             wait_for_state(7'd24, 30);   // ST_READ_S6
-            check("P8-1: DS_n=1 @S6",  ext_ds_n === 1'b1);
-            check("P8-1: AS_n=1 @S6",  ext_as_n === 1'b1);
+            check("DS_n=1 @S6",  ext_ds_n === 1'b1);
+            check("AS_n=1 @S6",  ext_as_n === 1'b1);
             for (int t = 0; t < 50; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
@@ -2067,7 +2054,7 @@ module biu_tb;
         // EU presents byte in wdata[31:24]; blc replicates to all lanes;
         // mem_model uses {SIZ,A[1:0]} to write only the correct byte.
         begin
-            $display("--- P8-2: Byte writes byte-selective in mem ---");
+            $display("--- Byte write byte-selective in mem ---");
             u_mem.mem[192] = 32'hFFFFFFFF;   // word at byte addr 0x300
 
             // byte@0 (A[1:0]=00): write 0xAA → mem[31:24]
@@ -2076,8 +2063,8 @@ module biu_tb;
             wait_bus_idle; p4_eu_req = 1;
             for (int t = 0; t < 80; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0; while (!bus_idle) @(posedge clk_4x);
-            check("P8-2a: mem[31:24]=AA",     u_mem.mem[192][31:24] === 8'hAA);
-            check("P8-2a: mem[23:0] intact",  u_mem.mem[192][23:0]  === 24'hFFFFFF);
+            check("mem[31:24]=AA",     u_mem.mem[192][31:24] === 8'hAA);
+            check("mem[23:0] intact",  u_mem.mem[192][23:0]  === 24'hFFFFFF);
 
             // byte@1 (A[1:0]=01): write 0xBB → mem[23:16]
             p4_direct = 1; p4_eu_addr = 32'h0000_0301; p4_eu_siz = 2'b01;
@@ -2085,8 +2072,8 @@ module biu_tb;
             wait_bus_idle; p4_eu_req = 1;
             for (int t = 0; t < 80; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0; while (!bus_idle) @(posedge clk_4x);
-            check("P8-2b: mem[23:16]=BB",     u_mem.mem[192][23:16] === 8'hBB);
-            check("P8-2b: mem[31:24] intact", u_mem.mem[192][31:24] === 8'hAA);
+            check("mem[23:16]=BB",     u_mem.mem[192][23:16] === 8'hBB);
+            check("mem[31:24] intact", u_mem.mem[192][31:24] === 8'hAA);
 
             // byte@2 (A[1:0]=10): write 0xCC → mem[15:8]
             p4_direct = 1; p4_eu_addr = 32'h0000_0302; p4_eu_siz = 2'b01;
@@ -2094,7 +2081,7 @@ module biu_tb;
             wait_bus_idle; p4_eu_req = 1;
             for (int t = 0; t < 80; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0; while (!bus_idle) @(posedge clk_4x);
-            check("P8-2c: mem[15:8]=CC",      u_mem.mem[192][15:8]  === 8'hCC);
+            check("mem[15:8]=CC",      u_mem.mem[192][15:8]  === 8'hCC);
 
             // byte@3 (A[1:0]=11): write 0xDD → mem[7:0]
             p4_direct = 1; p4_eu_addr = 32'h0000_0303; p4_eu_siz = 2'b01;
@@ -2102,52 +2089,52 @@ module biu_tb;
             wait_bus_idle; p4_eu_req = 1;
             for (int t = 0; t < 80; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0; while (!bus_idle) @(posedge clk_4x);
-            check("P8-2d: mem[7:0]=DD",       u_mem.mem[192][7:0]   === 8'hDD);
+            check("mem[7:0]=DD",       u_mem.mem[192][7:0]   === 8'hDD);
 
-            check("P8-2: full word AABBCCDD", u_mem.mem[192] === 32'hAABBCCDD);
+            check("full word AABBCCDD", u_mem.mem[192] === 32'hAABBCCDD);
             repeat(4) @(posedge clk_4x);
         end
 
         // P8-3: Word write at A[1:0]=00 — only [31:16] written, [15:0] intact
         begin
-            $display("--- P8-3: Word write A=0x00, [31:16] only ---");
+            $display("--- Word write A=0x00, [31:16] only ---");
             u_mem.mem[193] = 32'h12345678;   // word at byte addr 0x304
             p4_direct = 1; p4_eu_addr = 32'h0000_0304; p4_eu_siz = 2'b10;
             p4_eu_rw = 1'b0; p4_eu_fc = 3'b101; p4_eu_wdata = 32'hCAFE0000;
             wait_bus_idle; p4_eu_req = 1;
             for (int t = 0; t < 80; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0; while (!bus_idle) @(posedge clk_4x);
-            check("P8-3: [31:16]=CAFE",  u_mem.mem[193][31:16] === 16'hCAFE);
-            check("P8-3: [15:0] intact", u_mem.mem[193][15:0]  === 16'h5678);
+            check("[31:16]=CAFE",  u_mem.mem[193][31:16] === 16'hCAFE);
+            check("[15:0] intact", u_mem.mem[193][15:0]  === 16'h5678);
             repeat(4) @(posedge clk_4x);
         end
 
         // P8-4: Word write at A[1:0]=10 — only [15:0] written, [31:16] intact
         begin
-            $display("--- P8-4: Word write A=0x02, [15:0] only ---");
+            $display("--- Word write A=0x02, [15:0] only ---");
             u_mem.mem[193] = 32'h12345678;
             p4_direct = 1; p4_eu_addr = 32'h0000_0306; p4_eu_siz = 2'b10;
             p4_eu_rw = 1'b0; p4_eu_fc = 3'b101; p4_eu_wdata = 32'hBEEF0000;
             wait_bus_idle; p4_eu_req = 1;
             for (int t = 0; t < 80; t++) begin @(posedge clk_4x); if (eu_ack) break; end
             p4_eu_req = 0; p4_direct = 0; while (!bus_idle) @(posedge clk_4x);
-            check("P8-4: [31:16] intact", u_mem.mem[193][31:16] === 16'h1234);
-            check("P8-4: [15:0]=BEEF",   u_mem.mem[193][15:0]  === 16'hBEEF);
+            check("[31:16] intact", u_mem.mem[193][31:16] === 16'h1234);
+            check("[15:0]=BEEF",   u_mem.mem[193][15:0]  === 16'hBEEF);
             repeat(4) @(posedge clk_4x);
         end
 
         // P8-5: DS asserts during IACK (68030 IACK is a normal CPU Space read)
         // The peripheral identifies the cycle via FC=111 + AS + DS + A[19:16]=1111
         begin
-            $display("--- P8-5: IACK DS_n=0 at S3 (FC=111 CPU Space read) ---");
+            $display("--- IACK: DS# asserts at S3 (FC=111 CPU Space read) ---");
             iack_test_vec    = 8'd77;
             test_mem_sel     = MUX_IACK;
             eu_iack_level_tb = 3'd6;
             eu_iack_req_tb   = 1'b1;
             wait_for_state(7'd65, 50);   // ST_IACK_S3
-            check("P8-5: DS_n=0 IACK@S3", ext_ds_n === 1'b0);
-            check("P8-5: AS_n=0 IACK@S3", ext_as_n === 1'b0);
-            check("P8-5: FC=111 IACK",    ext_fc   === 3'b111);
+            check("DS_n=0 IACK@S3", ext_ds_n === 1'b0);
+            check("AS_n=0 IACK@S3", ext_as_n === 1'b0);
+            check("FC=111 IACK",    ext_fc   === 3'b111);
             for (int t = 0; t < 100; t++) begin
                 @(posedge clk_4x);
                 if (eu_iack_ack_tb) break;
@@ -2166,7 +2153,7 @@ module biu_tb;
         // PCB-1: Full burst with CBACK# asserted (cback_s=0) — baseline
         // This is essentially P7-1 repeated to confirm cback_ok_r works normally.
         begin
-            $display("--- PCB-1: Full burst read, CBACK# asserted ---");
+            $display("--- Full burst read: CBACK# asserted ---");
             cback_s_tb = 1'b0;   // CBACK# asserted (active-low: 0=asserted)
             u_mem.mem[64]  = 32'hAABBCCDD;
             u_mem.mem[65]  = 32'h11223344;
@@ -2195,7 +2182,7 @@ module biu_tb;
             logic saw_ack;
             logic [31:0] saved_rdata0;
             int   ticks_to_ack;
-            $display("--- PCB-2: Burst read, CBACK# deasserted → beat-0 only ---");
+            $display("--- Burst read: CBACK# deasserted → beat-0 only ---");
             cback_s_tb = 1'b1;   // CBACK# deasserted
             u_mem.mem[68]  = 32'hDEADBEEF;
             u_mem.mem[69]  = 32'hBADC0FFE;   // should NOT be fetched
@@ -2228,17 +2215,17 @@ module biu_tb;
         end
 
         // ===================================================================
-        // Phase 9: biu_config synchronizer and biu_pin_driver OE tests
+        // Input synchronizer (biu_config) and pin driver OE tests
         // ===================================================================
-        $display("=== Phase 9: Input Synchronizer + Pin Driver ===");
+        $display("=== BIU: Input synchronizer + pin driver ===");
         wait_bus_idle;
 
         // --- P9-1: pins_released asserts after reset ---
         // We're already past reset; verify it's high.
         begin
-            $display("--- P9-1: pins_released after reset ---");
+            $display("--- pins_released after reset ---");
             @(posedge clk_4x);
-            check("P9-1: pins_released", cfg_pins_released === 1'b1);
+            check("pins_released", cfg_pins_released === 1'b1);
         end
 
         // --- P9-2: 2-cycle sync delay on BERR# pin ---
@@ -2247,38 +2234,38 @@ module biu_tb;
         // Stage 2 (output) latches on the second posedge — so cfg_berr_s
         // should be 0 one cycle after assertion and 1 two cycles after.
         begin
-            $display("--- P9-2: Sync delay — BERR# 2-cycle propagation ---");
+            $display("--- Sync delay: BERR# 2-cycle propagation ---");
             // Baseline: berr_s must be 0 before we start
             @(posedge clk_4x);
-            check("P9-2a: berr_s idle", cfg_berr_s === 1'b0);
+            check("berr_s idle", cfg_berr_s === 1'b0);
 
             // Assert BERR# (active-low pin goes to 0)
             cfg_berr_n = 1'b0;
 
             // One cycle later — stage 1 captured but stage 2 has not yet
             @(posedge clk_4x);
-            check("P9-2b: berr_s not yet (+1)", cfg_berr_s === 1'b0);
+            check("berr_s not yet (+1)", cfg_berr_s === 1'b0);
 
             // Two cycles after assertion — stage 2 captured → berr_s = 1
             @(posedge clk_4x);
-            check("P9-2c: berr_s visible (+2)", cfg_berr_s === 1'b1);
+            check("berr_s visible (+2)", cfg_berr_s === 1'b1);
 
             // Deassert and let it clear
             cfg_berr_n = 1'b1;
             repeat(4) @(posedge clk_4x);
-            check("P9-2d: berr_s cleared", cfg_berr_s === 1'b0);
+            check("berr_s cleared", cfg_berr_s === 1'b0);
         end
 
         // --- P9-3: DSACK# sync polarity (active-high output) ---
         // Assert DSACK0# (cfg_dsack0_n=0) and verify cfg_dsack0_s goes 1
         // after 2 cycles.
         begin
-            $display("--- P9-3: Sync polarity — DSACK0# → dsack0_s ---");
+            $display("--- Sync polarity: DSACK0# → dsack0_s (active-high) ---");
             @(posedge clk_4x);
-            check("P9-3a: dsack0_s idle", cfg_dsack0_s === 1'b0);
+            check("dsack0_s idle", cfg_dsack0_s === 1'b0);
             cfg_dsack0_n = 1'b0;
             @(posedge clk_4x); @(posedge clk_4x);
-            check("P9-3b: dsack0_s asserted", cfg_dsack0_s === 1'b1);
+            check("dsack0_s asserted", cfg_dsack0_s === 1'b1);
             cfg_dsack0_n = 1'b1;
             repeat(4) @(posedge clk_4x);
         end
@@ -2286,12 +2273,12 @@ module biu_tb;
         // --- P9-4: HALT# retained polarity (active-low) ---
         // Assert HALT# (cfg_halt_n=0) → halt_s should go 0 (active-low retained)
         begin
-            $display("--- P9-4: Sync polarity — HALT# retained active-low ---");
+            $display("--- Sync polarity: HALT# retained active-low ---");
             @(posedge clk_4x);
-            check("P9-4a: halt_s deasserted", cfg_halt_s === 1'b1);
+            check("halt_s deasserted", cfg_halt_s === 1'b1);
             cfg_halt_n = 1'b0;
             @(posedge clk_4x); @(posedge clk_4x);
-            check("P9-4b: halt_s asserted (=0)", cfg_halt_s === 1'b0);
+            check("halt_s asserted (=0)", cfg_halt_s === 1'b0);
             cfg_halt_n = 1'b1;
             repeat(4) @(posedge clk_4x);
         end
@@ -2300,11 +2287,11 @@ module biu_tb;
         // Drive pd_d_oe=1 but hold pins_released=0 (simulates reset).
         // ext_d_oe must be 0.
         begin
-            $display("--- P9-5: Pin driver OE blocked during reset ---");
+            $display("--- Pin driver OE blocked during reset ---");
             pd_d_oe_tb     = 1'b1;
             pd_pins_rel_tb = 1'b0;
             #1;  // combinational — no clock edge needed
-            check("P9-5: OE blocked", pd_ext_d_oe === 1'b0);
+            check("OE blocked", pd_ext_d_oe === 1'b0);
             pd_pins_rel_tb = 1'b1;
         end
 
@@ -2312,30 +2299,30 @@ module biu_tb;
         // With pins_released=1 and d_oe=1, ext_d_oe must be 1.
         // Also verify data passes through.
         begin
-            $display("--- P9-6: Pin driver OE enabled after reset ---");
+            $display("--- Pin driver OE enabled after reset ---");
             pd_d_out_tb    = 32'hCAFE_BABE;
             pd_d_oe_tb     = 1'b1;
             pd_pins_rel_tb = 1'b1;
             #1;
-            check("P9-6a: OE enabled",   pd_ext_d_oe  === 1'b1);
-            check("P9-6b: data through", pd_ext_d_out === 32'hCAFE_BABE);
+            check("OE enabled",   pd_ext_d_oe  === 1'b1);
+            check("data through", pd_ext_d_out === 32'hCAFE_BABE);
             pd_d_oe_tb  = 1'b0;
             #1;
-            check("P9-6c: OE low when d_oe=0", pd_ext_d_oe === 1'b0);
+            check("OE low when d_oe=0", pd_ext_d_oe === 1'b0);
         end
 
         // ===================================================================
-        // Phase 10: Coprocessor (FPU) CPU Space cycle tests
+        // Coprocessor FPU CPU Space cycle tests
         // ===================================================================
-        $display("=== Phase 10: Coprocessor CPU Space Cycles ===");
+        $display("=== BIU: Coprocessor CPU Space cycles ===");
         wait_bus_idle;
 
-        // --- P10-1: Coprocessor read — FC=111, A[19:16]=0010, DSACK, rdata ---
+        // --- Coprocessor read — FC=111, A[19:16]=0010, DSACK, rdata ---
         // Simulates the 68030 reading the FPU's response register.
         // Address: A[19:16]=0010 (coproc category), A[15:13]=000 (CPI primitive),
         //          A[12:0]=register offset 0x00.
         begin
-            $display("--- P10-1: Coprocessor read (FC=111, A[19:16]=0010) ---");
+            $display("--- Coprocessor read (FC=111, A[19:16]=0010) ---");
             // Pre-load the memory word the FPU will return
             u_mem.mem[8]  = 32'hF00D_F00D;   // addr 0x00000020 >> 2 = 8
             eu_coproc_req_tb   = 1'b0;
@@ -2357,8 +2344,8 @@ module biu_tb;
                 if (eu_coproc_ack_tb || eu_coproc_berr_tb) break;
             end
             eu_coproc_req_tb = 1'b0;
-            check("P10-1a: no berr",   !eu_coproc_berr_tb);
-            check("P10-1b: ack",        eu_coproc_ack_tb);
+            check("no berr",   !eu_coproc_berr_tb);
+            check("ack",        eu_coproc_ack_tb);
             // rdata comes from mem at word_addr = 0x00021000>>2 = 0x8400
             // but our mem only has DEPTH=256, so it returns DEAD_DEAD for OOB.
             // Reload the address to something within range.
@@ -2366,7 +2353,7 @@ module biu_tb;
             repeat(4) @(posedge clk_4x);
         end
 
-        // --- P10-2: Coprocessor read with data — use address in mem range ---
+        // --- Coprocessor read with data — use address in mem range ---
         // A[19:16]=0010 with a low address that falls in u_mem's DEPTH=256.
         // We use 32'h0000_0020 (word 8): bits [19:16]=0, not 0010.
         // To get A[19:16]=0010 AND a valid mem word, we work around DEPTH limit:
@@ -2375,7 +2362,7 @@ module biu_tb;
         // Load a second mem_model that covers high addresses, OR just verify
         // the bus protocol (FC, AS, DS) without depending on specific rdata.
         begin
-            $display("--- P10-2: Coprocessor read — bus protocol check ---");
+            $display("--- Coprocessor read: bus protocol check ---");
             eu_coproc_req_tb  = 1'b0;
             eu_coproc_rw_tb   = 1'b1;
             eu_coproc_fc_tb   = 3'b111;
@@ -2385,28 +2372,28 @@ module biu_tb;
             eu_coproc_req_tb = 1'b1;
             // Sample bus signals at S2 (when AS first asserts)
             wait_for_state(7'd20, 50);   // ST_READ_S2
-            check("P10-2a: FC=111",  ext_fc  === 3'b111);
-            check("P10-2b: AS low",  ext_as_n === 1'b0);
-            check("P10-2c: A[19:16]=0010",
+            check("FC=111",  ext_fc  === 3'b111);
+            check("AS low",  ext_as_n === 1'b0);
+            check("A[19:16]=0010",
                   ext_a[19:16] === 4'b0010);
             // Sample at S3 (DS asserts)
             wait_for_state(7'd21, 20);   // ST_READ_S3
-            check("P10-2d: DS low",  ext_ds_n === 1'b0);
-            check("P10-2e: RW=1",    ext_rw   === 1'b1);
+            check("DS low",  ext_ds_n === 1'b0);
+            check("RW=1",    ext_rw   === 1'b1);
             for (int t = 0; t < 100; t++) begin
                 @(posedge clk_4x);
                 if (eu_coproc_ack_tb || eu_coproc_berr_tb) break;
             end
             eu_coproc_req_tb = 1'b0;
-            check("P10-2f: ack",     eu_coproc_ack_tb);
-            check("P10-2g: no berr", !eu_coproc_berr_tb);
+            check("ack",     eu_coproc_ack_tb);
+            check("no berr", !eu_coproc_berr_tb);
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
         end
 
-        // --- P10-3: Coprocessor write — FC=111, DS=0, ext_d_oe=1 at S3 ---
+        // --- Coprocessor write — FC=111, DS=0, ext_d_oe=1 at S3 ---
         begin
-            $display("--- P10-3: Coprocessor write (FC=111 write) ---");
+            $display("--- Coprocessor write (FC=111 write) ---");
             eu_coproc_req_tb   = 1'b0;
             eu_coproc_rw_tb    = 1'b0;   // write
             eu_coproc_fc_tb    = 3'b111;
@@ -2416,26 +2403,26 @@ module biu_tb;
             wait_bus_idle;
             eu_coproc_req_tb = 1'b1;
             wait_for_state(7'd29, 50);   // ST_WRITE_S3
-            check("P10-3a: FC=111 write",   ext_fc   === 3'b111);
-            check("P10-3b: A[19:16]=0010",  ext_a[19:16] === 4'b0010);
-            check("P10-3c: DS low write",   ext_ds_n === 1'b0);
-            check("P10-3d: RW=0 (write)",   ext_rw   === 1'b0);
-            check("P10-3e: D bus driven",   ext_d_oe === 1'b1);
+            check("FC=111 write",   ext_fc   === 3'b111);
+            check("A[19:16]=0010",  ext_a[19:16] === 4'b0010);
+            check("DS low write",   ext_ds_n === 1'b0);
+            check("RW=0 (write)",   ext_rw   === 1'b0);
+            check("D bus driven",   ext_d_oe === 1'b1);
             for (int t = 0; t < 100; t++) begin
                 @(posedge clk_4x);
                 if (eu_coproc_ack_tb || eu_coproc_berr_tb) break;
             end
             eu_coproc_req_tb = 1'b0;
-            check("P10-3f: ack",     eu_coproc_ack_tb);
-            check("P10-3g: no berr", !eu_coproc_berr_tb);
+            check("ack",     eu_coproc_ack_tb);
+            check("no berr", !eu_coproc_berr_tb);
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
         end
 
-        // --- P10-4: IACK still works — FC=111 A[19:16]=1111 (not coproc) ---
+        // --- IACK still works — FC=111 A[19:16]=1111 (not coproc) ---
         // Verify that eu_iack_req is not confused with eu_coproc_req.
         begin
-            $display("--- P10-4: IACK still works after coproc added ---");
+            $display("--- IACK still works with coprocessor logic present ---");
             iack_test_vec    = 8'd33;
             test_mem_sel     = MUX_IACK;
             eu_iack_level_tb = 3'd5;
@@ -2446,26 +2433,26 @@ module biu_tb;
             end
             eu_iack_req_tb = 1'b0;
             test_mem_sel   = MUX_FAST;
-            check("P10-4a: iack ack",    eu_iack_ack_tb);
-            check("P10-4b: iack vec",    eu_iack_vec_tb === 8'd33);
-            check("P10-4c: no coproc",   !eu_coproc_ack_tb);
+            check("iack ack",    eu_iack_ack_tb);
+            check("iack vec",    eu_iack_vec_tb === 8'd33);
+            check("no coproc",   !eu_coproc_ack_tb);
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 11: BERR timeout watchdog + double bus fault
+        // BERR timeout watchdog + double bus fault
         // ===================================================================
-        $display("=== Phase 11: BERR Timeout Watchdog ===");
+        $display("=== BIU: BERR timeout watchdog ===");
         wait_bus_idle;
         repeat(4) @(posedge clk_4x);
 
-        // --- P11-1: Normal cycle — watchdog counter never fires ---
+        // --- Normal cycle — watchdog counter never fires ---
         // A fast-memory read (immediate DSACK) must complete with no timeout.
         begin
             logic saw_timeout;
             saw_timeout = 1'b0;
-            $display("--- P11-1: Normal cycle — no watchdog fire ---");
+            $display("--- Normal cycle: watchdog does not fire ---");
             test_mem_sel   = MUX_FAST;
             eu_addr_tb     = 32'h0000_0008;
             eu_fc_tb       = 3'b101;
@@ -2478,14 +2465,14 @@ module biu_tb;
                 if (eu_ack || eu_berr) break;
             end
             eu_req_tb = 1'b0;
-            check("P11-1a: ack",         eu_ack);
-            check("P11-1b: no timeout",  !saw_timeout);
-            check("P11-1c: no berr",     !eu_berr);
+            check("ack",         eu_ack);
+            check("no timeout",  !saw_timeout);
+            check("no berr",     !eu_berr);
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
         end
 
-        // --- P11-2: Watchdog fires — no DSACK, no STERM → eu_berr ---
+        // --- Watchdog fires — no DSACK, no STERM → eu_berr ---
         // Hold DSACK deasserted using MUX_NOSACK without asserting STERM.
         // The watchdog fires after TIMEOUT_CLKS=80 ticks and injects BERR.
         begin
@@ -2493,7 +2480,7 @@ module biu_tb;
             logic saw_berr;
             saw_timeout = 1'b0;
             saw_berr    = 1'b0;
-            $display("--- P11-2: Watchdog timeout → eu_berr ---");
+            $display("--- Watchdog timeout: no DSACK/STERM → eu_berr ---");
             test_mem_sel = MUX_NOSACK;   // no DSACK; sterm_tb still 0
             sterm_tb     = 1'b0;
             eu_addr_tb   = 32'h0000_0040;
@@ -2509,23 +2496,23 @@ module biu_tb;
             end
             eu_req_tb    = 1'b0;
             test_mem_sel = MUX_FAST;
-            check("P11-2a: timeout fired", saw_timeout);
-            check("P11-2b: eu_berr",       saw_berr);
-            check("P11-2c: no eu_ack",     !eu_ack);
+            check("timeout fired", saw_timeout);
+            check("eu_berr",       saw_berr);
+            check("no eu_ack",     !eu_ack);
             // berr_timeout_r clears when bus returns to idle
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P11-2d: timeout cleared on idle", !berr_timeout_tb);
+            check("timeout cleared on idle", !berr_timeout_tb);
         end
 
-        // --- P11-3: Double bus fault — BERR during retry → halt_out ---
+        // --- Double bus fault — BERR during retry → halt_out ---
         // First cycle: no DSACK + HALT asserted → BERR+HALT → retry_pending=1.
         // Retry cycle: also no DSACK → second timeout fires while
         //              retry_pending=1 → halt_out asserts.
         begin
             logic saw_halt;
             saw_halt      = 1'b0;
-            $display("--- P11-3: Double bus fault → halt_out ---");
+            $display("--- Double bus fault → halt_out ---");
             halt_tb       = 1'b0;   // assert HALT# (active-low: 0 = asserted)
             test_mem_sel  = MUX_NOSACK;
             sterm_tb      = 1'b0;
@@ -2544,19 +2531,19 @@ module biu_tb;
             eu_req_tb    = 1'b0;
             halt_tb      = 1'b1;   // restore HALT# deasserted
             test_mem_sel = MUX_FAST;
-            check("P11-3: halt_out on double fault", saw_halt);
+            check("halt_out on double fault", saw_halt);
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================
-        // Phase 12 — SSW (Special Status Word) content verification
+        // SSW (Special Status Word) content verification
         // ===================================================================
 
-        // --- P12-1: Read BERR → SSW FC=101, RW=1, DF=1, RC=0 → 0xB800 ---
+        // --- Read BERR → SSW FC=101, RW=1, DF=1, RC=0 → 0xB800 ---
         begin
             int t; logic saw_berr12a;
-            $display("--- P12-1: SSW for read BERR (FC=101, RW=1, DF=1) ---");
+            $display("--- SSW: data read BERR (FC=101, RW=1, DF=1) ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0190;
             p4_eu_fc    = 3'b101;    // supervisor data
@@ -2577,14 +2564,14 @@ module biu_tb;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P12-1: eu_berr",        saw_berr12a);
-            check16("P12-1: SSW=0xB800",   exc_ssw, 16'hB800);
+            check("eu_berr",        saw_berr12a);
+            check16("SSW=0xB800",   exc_ssw, 16'hB800);
         end
 
-        // --- P12-2: Write BERR → SSW FC=101, RW=0, DF=1, RC=0 → 0xA800 ---
+        // --- Write BERR → SSW FC=101, RW=0, DF=1, RC=0 → 0xA800 ---
         begin
             int t; logic saw_berr12b;
-            $display("--- P12-2: SSW for write BERR (FC=101, RW=0, DF=1) ---");
+            $display("--- SSW: data write BERR (FC=101, RW=0, DF=1) ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0194;
             p4_eu_wdata = 32'hDEAD_BEEF;
@@ -2606,14 +2593,14 @@ module biu_tb;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P12-2: eu_berr",        saw_berr12b);
-            check16("P12-2: SSW=0xA800",   exc_ssw, 16'hA800);
+            check("eu_berr",        saw_berr12b);
+            check16("SSW=0xA800",   exc_ssw, 16'hA800);
         end
 
-        // --- P12-3: Program fetch BERR → SSW FC=110, RW=1, DF=0 → 0xD000 ---
+        // --- Program fetch BERR → SSW FC=110, RW=1, DF=0 → 0xD000 ---
         begin
             int t; logic saw_berr12c;
-            $display("--- P12-3: SSW for fetch BERR (FC=110, RW=1, DF=0) ---");
+            $display("--- SSW: instruction fetch BERR (FC=110, RW=1, DF=0) ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0198;
             p4_eu_fc    = 3'b110;    // supervisor program (fetch)
@@ -2634,16 +2621,16 @@ module biu_tb;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P12-3: eu_berr",        saw_berr12c);
-            check16("P12-3: SSW=0xD000",   exc_ssw, 16'hD000);
+            check("eu_berr",        saw_berr12c);
+            check16("SSW=0xD000",   exc_ssw, 16'hD000);
         end
 
-        // --- P12-4: Double-fault via retry → SSW RC=1 → 0xB808 ---
+        // --- Double-fault via retry → SSW RC=1 → 0xB808 ---
         // First BERR+HALT on read → retry stored (in_retry_r sets at IDLE).
         // Retry cycle: BERR only (no HALT), in_retry_r=1 → fault_retry_r=1 → RC=1.
         begin
             int t; logic saw_berr12d;
-            $display("--- P12-4: SSW for retry fault (RC=1) ---");
+            $display("--- SSW: retry fault (RC=1) ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0050;
             p4_eu_fc    = 3'b101;    // supervisor data
@@ -2675,16 +2662,16 @@ module biu_tb;
             p4_direct = 0;
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
-            check("P12-4: eu_berr",        saw_berr12d);
-            check("P12-4: SSW RC=1",       exc_ssw[3]);
-            check16("P12-4: SSW=0xB808",   exc_ssw, 16'hB808);
+            check("eu_berr",        saw_berr12d);
+            check("SSW RC=1",       exc_ssw[3]);
+            check16("SSW=0xB808",   exc_ssw, 16'hB808);
         end
 
         // ===================================================================
-        // Phase 14 — ECS# and OCS# pin timing
+        // ECS# and OCS# pin timing
         // ===================================================================
         begin
-            $display("=== Phase 14: ECS# / OCS# Pin Timing ===");
+            $display("=== BIU: ECS# / OCS# pin timing ===");
 
             // Issue a plain EU read; peek at ECS#/OCS# during S0, S1, and S2.
             // State numbers: ST_READ_S0=18, ST_READ_S1=19, ST_READ_S2=20.
@@ -2696,36 +2683,36 @@ module biu_tb;
             eu_is_op_tb = 1'b1;    // operand cycle → OCS# should assert
             eu_req_tb   = 1'b1;
 
-            // --- P14-1: ECS# is a half-CLK pulse in the 2nd half of S1 ---
-            $display("--- P14-1: ECS# half-CLK pulse in S1 phases 2-3 ---");
+            // --- ECS# is a half-CLK pulse in the 2nd half of S1 ---
+            $display("--- ECS# half-CLK pulse in S1 (clk-phases 2-3) ---");
 
             // S0: ECS# must be deasserted (high)
             wait_for_state(7'd18, 20);   // ST_READ_S0, phase 0
-            check("P14-1a: ECS_n high S0-ph0", ext_ecs_n === 1'b1);
+            check("ECS_n high S0-ph0", ext_ecs_n === 1'b1);
             @(posedge clk_4x);  // phase 1
-            check("P14-1b: ECS_n high S0-ph1", ext_ecs_n === 1'b1);
+            check("ECS_n high S0-ph1", ext_ecs_n === 1'b1);
             @(posedge clk_4x);  // phase 2
-            check("P14-1c: ECS_n high S0-ph2", ext_ecs_n === 1'b1);
+            check("ECS_n high S0-ph2", ext_ecs_n === 1'b1);
             @(posedge clk_4x);  // phase 3
-            check("P14-1d: ECS_n high S0-ph3", ext_ecs_n === 1'b1);
+            check("ECS_n high S0-ph3", ext_ecs_n === 1'b1);
 
             // S1 phases 0-1: still deasserted; phases 2-3: asserted
             @(posedge clk_4x);  // S1 phase 0
-            check("P14-1e: ECS_n high S1-ph0", ext_ecs_n === 1'b1);
+            check("ECS_n high S1-ph0", ext_ecs_n === 1'b1);
             @(posedge clk_4x);  // S1 phase 1
-            check("P14-1f: ECS_n high S1-ph1", ext_ecs_n === 1'b1);
+            check("ECS_n high S1-ph1", ext_ecs_n === 1'b1);
             @(posedge clk_4x);  // S1 phase 2 — ECS# asserts here
-            check("P14-1g: ECS_n low  S1-ph2", ext_ecs_n === 1'b0);
+            check("ECS_n low  S1-ph2", ext_ecs_n === 1'b0);
             @(posedge clk_4x);  // S1 phase 3
-            check("P14-1h: ECS_n low  S1-ph3", ext_ecs_n === 1'b0);
+            check("ECS_n low  S1-ph3", ext_ecs_n === 1'b0);
 
             // S2: ECS# deasserts; AS# asserts
             @(posedge clk_4x);  // S2 phase 0
-            check("P14-1i: ECS_n high at S2",  ext_ecs_n === 1'b1);
-            check("P14-1j: AS_n  low  at S2",  ext_as_n  === 1'b0);
+            check("ECS_n high at S2",  ext_ecs_n === 1'b1);
+            check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 
             // --- P14-2: OCS# asserts coincident with AS# at S2, not at S1 ---
-            $display("--- P14-2: OCS# asserts coincident with AS# at S2 ---");
+            $display("--- OCS# asserts coincident with AS# at S2 ---");
 
             // Restart a fresh read for clean S1 check
             // (current cycle is already at S2; let it finish then issue a new one)
@@ -2739,23 +2726,23 @@ module biu_tb;
             eu_req_tb   = 1'b1;
 
             wait_for_state(7'd19, 20);   // ST_READ_S1, phase 0
-            check("P14-2a: OCS_n high at S1",  ext_ocs_n === 1'b1);
+            check("OCS_n high at S1",  ext_ocs_n === 1'b1);
 
             wait_for_state(7'd20, 20);   // ST_READ_S2, phase 0
-            check("P14-2b: OCS_n low  at S2",  ext_ocs_n === 1'b0);
-            check("P14-2c: AS_n  low  at S2",  ext_as_n  === 1'b0);
+            check("OCS_n low  at S2",  ext_ocs_n === 1'b0);
+            check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 
             eu_req_tb = 1'b0;
             wait_bus_idle;
         end
 
-        // Phase 20 — Standalone HALT# bus suspension
+        // HALT# bus suspension
         // ===================================================================
         begin
-            $display("=== Phase 20: HALT# Bus Suspension ===");
+            $display("=== BIU: HALT# bus suspension ===");
 
             // P20-1: HALT# asserted before request — no cycle starts
-            $display("--- P20-1: HALT# blocks new bus cycle ---");
+            $display("--- HALT# blocks new bus cycle ---");
             begin
                 int t; logic saw_as, saw_halted;
                 wait_bus_idle;
@@ -2774,8 +2761,8 @@ module biu_tb;
                     if (!ext_as_n) saw_as = 1;
                     if (bus_halted) saw_halted = 1;
                 end
-                check("P20-1a: bus_halted asserts",         saw_halted);
-                check("P20-1b: AS# never asserted",          !saw_as);
+                check("bus_halted asserts",         saw_halted);
+                check("AS# never asserted",          !saw_as);
                 // Deassert HALT# — cycle should now complete
                 halt_tb = 1'b1;
                 begin
@@ -2788,13 +2775,13 @@ module biu_tb;
                     p4_eu_req = 0;
                     p4_direct = 0;
                     while (!bus_idle) @(posedge clk_4x);
-                    check("P20-1c: eu_ack fires after HALT# deasserts", got_ack);
+                    check("eu_ack fires after HALT# deasserts", got_ack);
                 end
             end
             repeat(8) @(posedge clk_4x);
 
             // P20-2: In-progress cycle completes, THEN HALT# holds IDLE
-            $display("--- P20-2: In-progress cycle completes; HALT# holds IDLE ---");
+            $display("--- In-progress cycle completes; HALT# holds bus idle ---");
             begin
                 int t; logic got_first_ack, stayed_idle, got_second_ack;
                 p4_direct   = 1;
@@ -2813,7 +2800,7 @@ module biu_tb;
                     if (cg_eu_ack_direct) begin got_first_ack = 1; break; end
                 end
                 // First cycle should complete despite HALT#
-                check("P20-2a: first cycle completes",   got_first_ack);
+                check("first cycle completes",   got_first_ack);
                 // State is still ST_READ_S7 when ack fires; wait for IDLE, then
                 // verify the bus stays there (HALT# prevents the second cycle).
                 while (!bus_idle) @(posedge clk_4x);
@@ -2822,8 +2809,8 @@ module biu_tb;
                     @(posedge clk_4x);
                     if (!bus_idle) stayed_idle = 0;
                 end
-                check("P20-2b: bus stays IDLE while HALT# held", stayed_idle);
-                check("P20-2c: bus_halted asserts",               bus_halted);
+                check("bus stays IDLE while HALT# held", stayed_idle);
+                check("bus_halted asserts",               bus_halted);
                 // Deassert HALT# — second cycle should run
                 halt_tb = 1'b1;
                 got_second_ack = 0;
@@ -2834,18 +2821,18 @@ module biu_tb;
                 p4_eu_req = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P20-2d: second cycle completes after HALT# release", got_second_ack);
+                check("second cycle completes after HALT# release", got_second_ack);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 19 — Address error detection
+        // Address error detection
         // ===================================================================
         begin
-            $display("=== Phase 19: Address Error Detection ===");
+            $display("=== BIU: Address error detection ===");
 
             // P19-1: EU word read to odd address — eu_addr_err fires, no bus cycle
-            $display("--- P19-1: EU word read to odd address ---");
+            $display("--- EU word read to odd address ---");
             begin
                 int t; logic saw_ae, saw_as;
                 p4_direct   = 1;
@@ -2865,14 +2852,14 @@ module biu_tb;
                 p4_eu_req = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P19-1a: eu_addr_err fires",        saw_ae);
-                check("P19-1b: AS# never asserted",       !saw_as);
-                check("P19-1c: bus returned to idle",      bus_idle);
+                check("eu_addr_err fires",        saw_ae);
+                check("AS# never asserted",       !saw_as);
+                check("bus returned to idle",      bus_idle);
             end
             repeat(8) @(posedge clk_4x);
 
             // P19-2: EU byte read to odd address — no error (byte is always legal)
-            $display("--- P19-2: EU byte read to odd address (no error) ---");
+            $display("--- EU byte read to odd address (no error) ---");
             begin
                 int t; logic saw_ae, got_ack;
                 p4_direct   = 1;
@@ -2892,13 +2879,13 @@ module biu_tb;
                 p4_eu_req = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P19-2a: eu_addr_err NOT fired",  !saw_ae);
-                check("P19-2b: eu_ack fires normally",   got_ack);
+                check("eu_addr_err NOT fired",  !saw_ae);
+                check("eu_ack fires normally",   got_ack);
             end
             repeat(8) @(posedge clk_4x);
 
             // P19-3: EU word write to odd address — eu_addr_err fires, no write
-            $display("--- P19-3: EU word write to odd address ---");
+            $display("--- EU word write to odd address ---");
             begin
                 int t; logic saw_ae, saw_as;
                 p4_direct   = 1;
@@ -2919,13 +2906,13 @@ module biu_tb;
                 p4_eu_req = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P19-3a: eu_addr_err fires for word write to odd",  saw_ae);
-                check("P19-3b: AS# never asserted (no write started)",    !saw_as);
+                check("eu_addr_err fires for word write to odd",  saw_ae);
+                check("AS# never asserted (no write started)",    !saw_as);
             end
             repeat(8) @(posedge clk_4x);
 
             // P19-4: IFU fetch to odd address — ifu_addr_err fires, no bus cycle
-            $display("--- P19-4: IFU fetch to odd address ---");
+            $display("--- IFU fetch to odd address ---");
             begin
                 int t; logic saw_ae, saw_as;
                 ifu_addr_tb = 32'h0000_0101;  // odd instruction address
@@ -2940,21 +2927,21 @@ module biu_tb;
                 ifu_req_tb  = 1'b0;
                 ifu_addr_tb = 32'h0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P19-4a: ifu_addr_err fires",       saw_ae);
-                check("P19-4b: AS# never asserted",        !saw_as);
+                check("ifu_addr_err fires",       saw_ae);
+                check("AS# never asserted",        !saw_as);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 18 — VPA / E-clock termination
+        // VPA / E-clock termination
         // ===================================================================
         begin
-            $display("=== Phase 18: VPA / E-clock Termination ===");
+            $display("=== BIU: VPA / E-clock termination ===");
 
             // P18-1: VPA read — cycle must loop in S4/S5 until eclk_cnt==9
             // (the E-clock falling edge), then complete.  Data is captured at
             // that same edge.
-            $display("--- P18-1: VPA read — E-clock synchronized ---");
+            $display("--- VPA read: E-clock synchronized ---");
             begin
                 int t; logic saw_ack, saw_early_ack;
                 logic [3:0]  term_eclk;
@@ -2988,17 +2975,17 @@ module biu_tb;
                 test_mem_sel = MUX_FAST;
                 p4_direct    = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P18-1a: eu_ack fires",                   saw_ack);
+                check("eu_ack fires",                   saw_ack);
                 // eclk_cnt reads 0 at ack time: E fell on the previous phase_r==3
                 // tick (9→0 NBA), so the registered eclk_cnt at the ack tick is 0.
-                check("P18-1b: ack at eclk_cnt==0 (just after E falls)", term_eclk === 4'd0);
-                check32("P18-1c: rdata from VPA bus", got_rdata, vpa_test_data);
+                check("ack at eclk_cnt==0 (just after E falls)", term_eclk === 4'd0);
+                check32("rdata from VPA bus", got_rdata, vpa_test_data);
             end
             repeat(8) @(posedge clk_4x);
 
             // P18-2: VPA during IACK — autovector (same result as AVEC but
             // using E-clock synchronization rather than immediate termination).
-            $display("--- P18-2: VPA IACK — autovector via E-clock ---");
+            $display("--- VPA IACK: autovector via E-clock ---");
             begin
                 int t; logic saw_ack;
                 logic [7:0]  got_vec;
@@ -3023,21 +3010,21 @@ module biu_tb;
                 vpa_s_tb       = 1'b1;
                 test_mem_sel   = MUX_FAST;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P18-2a: iack_ack fires",              saw_ack);
-                check("P18-2b: avec flag set (autovector)",  got_avec);
-                check8("P18-2c: vector = 24+5 = 29",        got_vec, 8'd29);
+                check("iack_ack fires",              saw_ack);
+                check("avec flag set (autovector)",  got_avec);
+                check8("vector = 24+5 = 29",        got_vec, 8'd29);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 17 — CAS2 BERR abort, RESET_INST watchdog, frame_valid sticky
+        // CAS2 BERR abort, RESET watchdog guard, frame_valid persistence
         // ===================================================================
         begin
-            $display("=== Phase 17: Small Fixes ===");
+            $display("=== BIU: CAS2 BERR abort, watchdog guard, fault persistence ===");
 
             // P17-1: BERR during CAS2 R1 must abort the entire CAS2 and fire
             // eu_berr, NOT continue into W1/R2/W2 and fire eu_cas2_ack.
-            $display("--- P17-1: CAS2 BERR abort at R1 fires eu_berr, not ack ---");
+            $display("--- CAS2 BERR abort at R1 fires eu_berr ---");
             begin
                 int t; logic saw_berr, saw_ack;
                 // Initialise mem so mem_model responds with DSACK (not timeout)
@@ -3066,11 +3053,11 @@ module biu_tb;
                 berr_tb        = 0;
                 eu_cas2_req_tb = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P17-1a: eu_berr fires on CAS2 R1 BERR", saw_berr);
-                check("P17-1b: eu_cas2_ack does NOT fire",      !saw_ack);
+                check("eu_berr fires on CAS2 R1 BERR", saw_berr);
+                check("eu_cas2_ack does NOT fire",      !saw_ack);
                 // Memory must not have been written (CAS2 aborted before writes)
-                check32("P17-1c: mem[80] untouched", u_mem.mem[80], 32'hAAAA_BBBB);
-                check32("P17-1d: mem[81] untouched", u_mem.mem[81], 32'hCCCC_DDDD);
+                check32("mem[80] untouched", u_mem.mem[80], 32'hAAAA_BBBB);
+                check32("mem[81] untouched", u_mem.mem[81], 32'hCCCC_DDDD);
             end
             repeat(8) @(posedge clk_4x);
 
@@ -3078,7 +3065,7 @@ module biu_tb;
             // With TIMEOUT_CLKS=80 and RSTOUT_CLKS=124 (496 ticks), the watchdog
             // used to fire multiple times during RESET_INST.  The bus_reset_inst
             // fix suppresses the counter during that window.
-            $display("--- P17-2: RESET_INST does not fire watchdog timeout ---");
+            $display("--- RESET instruction does not trigger watchdog ---");
             begin
                 int t; logic saw_timeout;
                 wait_bus_idle;
@@ -3092,13 +3079,13 @@ module biu_tb;
                     if (bus_idle) break;
                 end
                 eu_rst_req_tb = 0;
-                check("P17-2: no watchdog timeout during RESET_INST", !saw_timeout);
+                check("no watchdog timeout during RESET_INST", !saw_timeout);
             end
             repeat(8) @(posedge clk_4x);
 
             // P17-3: frame_valid must remain set after a fault even when a
             // subsequent normal cycle completes successfully.
-            $display("--- P17-3: frame_valid sticky after fault ---");
+            $display("--- frame_valid stays set after fault ---");
             begin
                 int t; logic got_fault_valid, stayed_valid;
                 // Issue a BERR to set frame_valid via biu_exc_capture
@@ -3138,20 +3125,20 @@ module biu_tb;
                 while (!bus_idle) @(posedge clk_4x);
                 // frame_valid must still be 1 (sticky)
                 stayed_valid = exc_frame_valid;
-                check("P17-3a: frame_valid set after BERR",           got_fault_valid);
-                check("P17-3b: frame_valid sticky after normal cycle", stayed_valid);
+                check("frame_valid set after BERR",           got_fault_valid);
+                check("frame_valid sticky after normal cycle", stayed_valid);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 16 — Arbiter hardening: BG# glitch + AS# check on bus reclaim
+        // Arbiter edge cases: BG# glitch + AS# check on bus reclaim
         // ===================================================================
         begin
-            $display("=== Phase 16: Arbiter Hardening ===");
+            $display("=== BIU: Bus arbiter edge cases ===");
 
             // P16-1: BG# must deassert if BR# withdraws before BGACK is received.
             // Without the fix, bg_r stays 0 while internal grants resume.
-            $display("--- P16-1: BG# deasserts if BR# withdraws before BGACK ---");
+            $display("--- BG# deasserts if BR# withdraws before BGACK ---");
             begin
                 int t; logic saw_bg_assert, saw_bg_deassert;
                 wait_bus_idle;
@@ -3165,7 +3152,7 @@ module biu_tb;
                     @(posedge clk_4x);
                     if (!ext_bg_n_arb) begin saw_bg_assert = 1; break; end
                 end
-                check("P16-1a: BG# asserts after BR#", saw_bg_assert);
+                check("BG# asserts after BR#", saw_bg_assert);
 
                 // Withdraw BR# without sending BGACK
                 br_arb_tb = 1'b1;
@@ -3175,14 +3162,14 @@ module biu_tb;
                     @(posedge clk_4x);
                     if (ext_bg_n_arb) begin saw_bg_deassert = 1; break; end
                 end
-                check("P16-1b: BG# deasserts after BR# withdrawal", saw_bg_deassert);
-                check("P16-1c: dma_active stayed 0 (no BGACK)", !dma_active);
+                check("BG# deasserts after BR# withdrawal", saw_bg_deassert);
+                check("dma_active stayed 0 (no BGACK)", !dma_active);
             end
             repeat(8) @(posedge clk_4x);
 
             // P16-2: After BGACK deasserts, arbiter must wait for AS# to deassert
             // before releasing dma_active (MC68030 UM bus reclaim protocol).
-            $display("--- P16-2: Bus reclaim waits for AS# deassert ---");
+            $display("--- Bus reclaim waits for AS# deassert ---");
             begin
                 int t; logic saw_dma;
                 wait_bus_idle;
@@ -3201,8 +3188,8 @@ module biu_tb;
                     @(posedge clk_4x);
                     if (dma_active) begin saw_dma = 1; break; end
                 end
-                check("P16-2a: dma_active set after BGACK", dma_active);
-                check("P16-2b: BG# deasserted after BGACK", ext_bg_n_arb === 1'b1);
+                check("dma_active set after BGACK", dma_active);
+                check("BG# deasserted after BGACK", ext_bg_n_arb === 1'b1);
 
                 // DMA device asserts AS# (holds bus)
                 as_n_fb_arb = 1'b0;
@@ -3212,25 +3199,25 @@ module biu_tb;
                 bgack_arb_tb = 1'b1;
                 repeat(4) @(posedge clk_4x);
                 // Arbiter must NOT release yet — AS# still asserted
-                check("P16-2c: dma_active held while AS# low", dma_active === 1'b1);
+                check("dma_active held while AS# low", dma_active === 1'b1);
 
                 // DMA device releases AS# — now arbiter may resume
                 as_n_fb_arb = 1'b1;
                 repeat(4) @(posedge clk_4x);
-                check("P16-2d: dma_active cleared after AS# deassert", dma_active === 1'b0);
+                check("dma_active cleared after AS# deassert", dma_active === 1'b0);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 15 — RMW AS# continuity + BERR window extension through S6
+        // RMW AS# continuity + BERR window extension through S6
         // ===================================================================
         begin
-            $display("=== Phase 15: RMW AS# Continuity + BERR at S6 ===");
+            $display("=== BIU: RMW AS# continuity + BERR at S6 ===");
 
             // P15-1: AS# must stay asserted without glitch from RMW read S6
             //        through write S1.  The rmw_as_hold override covers those
             //        four states (READ_S6/S7 and WRITE_S0/S1).
-            $display("--- P15-1: RMW byte - AS# asserted through read→write gap ---");
+            $display("--- RMW byte: AS# held through read→write gap ---");
             begin
                 int t; logic saw_as_gap, got_rd_ack, got_wr_ack;
                 u_mem.mem[64] = 32'hAB000000;  // addr=$100
@@ -3273,15 +3260,15 @@ module biu_tb;
                 eu_rmw_tb = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P15-1: AS# no glitch through RMW gap", !saw_as_gap);
-                check("P15-1: RMW read ack received",  got_rd_ack);
-                check("P15-1: RMW write ack received", got_wr_ack);
+                check("AS# no glitch through RMW gap", !saw_as_gap);
+                check("RMW read ack received",  got_rd_ack);
+                check("RMW write ack received", got_wr_ack);
             end
             repeat(8) @(posedge clk_4x);
 
             // P15-2: BERR asserted at S6 (after DSACK window) must still fire eu_berr.
             //        This verifies the is_S6 extension to the BERR detection condition.
-            $display("--- P15-2: BERR at S6 fires eu_berr ---");
+            $display("--- BERR at S6 fires eu_berr ---");
             begin
                 int t; logic saw_berr;
                 p4_direct   = 1;
@@ -3305,19 +3292,19 @@ module biu_tb;
                 p4_eu_req = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("P15-2: eu_berr fired on S6 BERR", saw_berr);
+                check("eu_berr fired on S6 BERR", saw_berr);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 21 — MOVE16 burst write via STERM (no DSACK)
+        // MOVE16 burst write via STERM (no DSACK)
         // ===================================================================
         begin
-            $display("=== Phase 21: MOVE16 Burst Write via STERM ===");
+            $display("=== BIU: MOVE16 burst write via STERM ===");
 
             // P21-1: 4-beat MOVE16 burst write; STERM asserted, no DSACK.
             // Each beat must advance S4→S6 via sterm_active (not dsack_wait).
-            $display("--- P21-1: MOVE16 STERM burst write, 4 beats ---");
+            $display("--- MOVE16 STERM burst write, 4 beats ---");
             begin
                 logic got_ack, got_berr;
                 test_mem_sel   = MUX_NOSACK;   // suppress DSACK
@@ -3339,29 +3326,29 @@ module biu_tb;
                 test_mem_sel  = MUX_FAST;
                 while (!bus_idle) @(posedge clk_4x);
 
-                check("P21-1a: eu_m16_ack fires (no timeout)", got_ack);
-                check("P21-1b: no BERR on STERM burst write",  !got_berr);
-                check32("P21-1c: mem[0x300] beat-0",  u_mem.mem[192], 32'hC001_0001);
-                check32("P21-1d: mem[0x304] beat-1",  u_mem.mem[193], 32'hC001_0002);
-                check32("P21-1e: mem[0x308] beat-2",  u_mem.mem[194], 32'hC001_0003);
-                check32("P21-1f: mem[0x30C] beat-3",  u_mem.mem[195], 32'hC001_0004);
+                check("eu_m16_ack fires (no timeout)", got_ack);
+                check("no BERR on STERM burst write",  !got_berr);
+                check32("mem[0x300] beat-0",  u_mem.mem[192], 32'hC001_0001);
+                check32("mem[0x304] beat-1",  u_mem.mem[193], 32'hC001_0002);
+                check32("mem[0x308] beat-2",  u_mem.mem[194], 32'hC001_0003);
+                check32("mem[0x30C] beat-3",  u_mem.mem[195], 32'hC001_0004);
             end
             repeat(8) @(posedge clk_4x);
         end
 
-        // Phase 51 — biu_config power-on RSTO counter + biu_pin_driver OE
+        // biu_config power-on RSTO counter + biu_pin_driver OE
         // ===================================================================
         begin
-            $display("=== Phase 51: Power-on RSTO counter + OE verification ===");
+            $display("=== BIU: Power-on RSTO counter + data OE verification ===");
 
             // --- P51-1: Power-on RSTO counter (u_cfg51, POWERON_RSTO_CLKS=40) ---
             // cfg51_rst_n starts 0; verify RSTO asserted during reset.
             begin
-                $display("--- P51-1: Power-on RSTO counter ---");
+                $display("--- Power-on RSTO counter ---");
 
                 // Confirm: during reset (cfg51_rst_n=0), poweron_rstout_n must be 0.
                 @(posedge clk_4x); #1;
-                check("P51-1a: rstout_n low during reset", cfg51_poweron_rstout_n === 1'b0);
+                check("rstout_n low during reset", cfg51_poweron_rstout_n === 1'b0);
 
                 // Release reset. Count 4× cycles until rstout_n goes high (or timeout).
                 // Counter starts at POWERON_RSTO_CLKS=40 and counts on each posedge,
@@ -3374,19 +3361,19 @@ module biu_tb;
                         @(posedge clk_4x); #1;
                         cnt++;
                     end
-                    check("P51-1b: rstout_n low while counter running",  cnt > 1);
-                    check("P51-1c: rstout_n deasserts after 40 cycles",
+                    check("rstout_n low while counter running",  cnt > 1);
+                    check("rstout_n deasserts after 40 cycles",
                           cfg51_poweron_rstout_n === 1'b1 && cnt === 40);
                 end
 
                 // Verify counter saturates at 0 — rstout_n stays high.
                 repeat(8) @(posedge clk_4x); #1;
-                check("P51-1d: rstout_n stays high after expiry", cfg51_poweron_rstout_n === 1'b1);
+                check("rstout_n stays high after expiry", cfg51_poweron_rstout_n === 1'b1);
 
                 // Re-assert reset — counter reloads, RSTOUT re-asserts.
                 cfg51_rst_n = 1'b0;
                 @(posedge clk_4x); #1;
-                check("P51-1e: rstout_n re-asserts on re-reset", cfg51_poweron_rstout_n === 1'b0);
+                check("rstout_n re-asserts on re-reset", cfg51_poweron_rstout_n === 1'b0);
                 cfg51_rst_n = 1'b1;
             end
 
@@ -3395,7 +3382,7 @@ module biu_tb;
             // Verify ext_d_oe (from cycle_gen) is 0 before and after the cycle,
             // and goes high during S3–S5 (write data phase) only.
             begin
-                $display("--- P51-2: ext_d_oe asserts only during write data phase ---");
+                $display("--- ext_d_oe asserts only during write data phase ---");
                 wait_bus_idle;
 
                 // Capture ext_d_oe transitions around a write cycle.
@@ -3406,7 +3393,7 @@ module biu_tb;
 
                     // Verify OE starts low (no cycle active).
                     @(posedge clk_4x); #1;
-                    check("P51-2a: ext_d_oe idle before write", ext_d_oe === 1'b0);
+                    check("ext_d_oe idle before write", ext_d_oe === 1'b0);
 
                     // Issue a write: eu_addr=0x400, wdata=0xDEAD_1234, fc=101 (supervisor data)
                     sf_in_addr  = 32'h0000_0400;
@@ -3429,17 +3416,17 @@ module biu_tb;
                     sf_in_req = 1'b0;
                     wait_bus_idle;
 
-                    check("P51-2b: ext_d_oe asserted during write (S3-S5)", saw_oe_high);
-                    check("P51-2c: ext_d_oe deasserted at S6",              saw_oe_low_end);
+                    check("ext_d_oe asserted during write (S3-S5)", saw_oe_high);
+                    check("ext_d_oe deasserted at S6",              saw_oe_low_end);
                     // Final: OE back to 0 after cycle.
                     @(posedge clk_4x); #1;
-                    check("P51-2d: ext_d_oe idle after write", ext_d_oe === 1'b0);
+                    check("ext_d_oe idle after write", ext_d_oe === 1'b0);
                 end
             end
 
             // --- P51-3: ext_d_oe stays 0 on a read cycle ---
             begin
-                $display("--- P51-3: ext_d_oe not asserted during read cycle ---");
+                $display("--- ext_d_oe not asserted during read cycle ---");
                 wait_bus_idle;
                 begin
                     logic saw_oe_during_read;
@@ -3458,7 +3445,7 @@ module biu_tb;
                     sf_in_req = 1'b0;
                     wait_bus_idle;
 
-                    check("P51-3: ext_d_oe=0 throughout read cycle", !saw_oe_during_read);
+                    check("ext_d_oe=0 throughout read cycle", !saw_oe_during_read);
                 end
             end
 

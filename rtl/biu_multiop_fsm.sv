@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Multi-Operation FSM (Phase 5)
+// MC68030 BIU — Multi-Operation FSM (MOVEM/MOVEP sequencer)
 //
 // Sits between the EU and biu_sizing_fsm.  Issues N sequential single-operand
 // bus cycles to the sizing_fsm for MOVEM and MOVEP instructions.

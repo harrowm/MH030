@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 30: m68030_ifu prefetch queue test.
+// m68030_ifu prefetch queue test.
 //
 // BIU stub responds after BIU_LAT cycles.  Cancels in-flight requests when
 // ifu_req goes low (e.g. after pc_wr_en flush) so stale acks never corrupt
@@ -212,7 +212,7 @@ module ifu_tb;
     // Stimulus
     // -----------------------------------------------------------------------
     initial begin
-        $display("=== Phase 30: m68030_ifu ===");
+        $display("=== m68030_ifu unit tests ===");
 
         @(posedge clk_4x); #1;
         rst_n = 1'b1;

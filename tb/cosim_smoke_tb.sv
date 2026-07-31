@@ -11,9 +11,10 @@
 //   0x000E: 0x4E72 (STOP opcode)   stop_seen fires on second fetch (rd_word=0xD0804E72)
 //   0x0010: 0x2700 (STOP immediate)
 //
-// P73-01: STOP opcode fetched within 3000 cycles (toolchain produced valid code).
-// P73-02: D0 = 84 after NOP+MOVEQ+ADD.L sequence executes correctly.
-// P73-03: No address errors.
+// Checks:
+//   - STOP opcode fetched within 3000 cycles (validates toolchain output)
+//   - D0 = 84 after NOP+MOVEQ+ADD.L sequence executes correctly
+//   - No address errors generated
 
 module cosim_smoke_tb;
 
@@ -201,12 +202,12 @@ module cosim_smoke_tb;
             end
         join
 
-        check("P73-01 STOP opcode fetched",        stop_seen);
-        check("P73-02 D0 = 84 after NOP+MOVEQ+ADD",  u_top.u_eu.u_rf.d_reg[0] == 32'd84);
-        check("P73-03 No address errors",           ~any_addr_err);
+        check("STOP opcode fetched",           stop_seen);
+        check("D0 = 84 after NOP+MOVEQ+ADD",   u_top.u_eu.u_rf.d_reg[0] == 32'd84);
+        check("No address errors",             ~any_addr_err);
 
-        if (fail_count == 0) $display("PASS  cosim73");
-        else                 $display("FAIL  cosim73 (%0d)", fail_count);
+        if (fail_count == 0) $display("PASS  cosim_smoke");
+        else                 $display("FAIL  cosim_smoke (%0d)", fail_count);
         $finish;
     end
 

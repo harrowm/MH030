@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Byte Lane Controller (Phase 8)
+// MC68030 BIU — Byte Lane Controller
 //
 // The 68030 uses a single /DS pin (not /UDS+/LDS like the 68000).
 // Byte-lane selection is conveyed to peripherals via SIZ[1:0] + A[1:0].

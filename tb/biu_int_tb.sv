@@ -7,19 +7,10 @@
 // All async inputs (DSACK#, BERR# etc.) are raw active-low signals
 // that pass through biu_config's 2-stage synchroniser internally.
 //
-// P13-1: Power-on init completes (init_done) and SSP/PC values are captured
-// P13-2: EU longword read (cacr=0 → D-cache disabled → cache miss → bus cycle)
-// P13-3: EU longword write then read-back verifies data persistence
-// P13-4: m68030_top elaborates cleanly (compile-only; no run needed)
-//
-// Build:
-//   iverilog -g2012 -o phase13.vvp \
-//       tb/m68030_biu_tb.sv rtl/m68030_biu.sv rtl/m68030_top.sv \
-//       rtl/biu_eclk_gen.sv rtl/biu_cycle_gen.sv rtl/biu_arbiter.sv \
-//       rtl/biu_sizing_fsm.sv rtl/biu_multiop_fsm.sv rtl/biu_cache_if.sv \
-//       rtl/biu_mmu_if.sv rtl/biu_exc_capture.sv rtl/biu_byte_lane_ctrl.sv \
-//       rtl/biu_config.sv rtl/biu_pin_driver.sv rtl/biu_error_handler.sv \
-//       tb/mem_model.sv && vvp phase13.vvp
+// Tests:
+//   - Power-on init: init_done fires; SSP/PC fetched from reset vectors
+//   - EU longword read: cache disabled → bus cycle issued; data returned
+//   - EU longword write + read-back: data persists in memory model
 
 module biu_int_tb;
 
@@ -332,25 +323,24 @@ module biu_int_tb;
         rst_n = 1;
 
         // ===================================================================
-        // P13-1: Power-on init — wait for init_done (SSP + PC fetches)
+        // Power-on init: BIU fetches SSP and PC from reset vectors
         // ===================================================================
-        $display("--- P13-1: Power-on init (init_done) ---");
+        $display("--- Power-on init (init_done) ---");
         begin
             logic ok;
             ok = 1'b0;
             for (int t = 0; t < 400 && !init_done; t++) @(posedge clk_4x);
             ok = init_done;
-            check("P13-1a: init_done",    ok);
-            check32("P13-1b: SSP=0x2000", init_ssp, 32'h0000_2000);
-            check32("P13-1c: PC=0x0100",  init_pc,  32'h0000_0100);
+            check("init_done fires",    ok);
+            check32("SSP=0x2000", init_ssp, 32'h0000_2000);
+            check32("PC=0x0100",  init_pc,  32'h0000_0100);
         end
         repeat(4) @(posedge clk_4x);
 
         // ===================================================================
-        // P13-2: EU longword read at 0x10 (cache disabled → bus cycle issued)
-        // Expected data: mem[4] = 0xCAFE_BABE
+        // EU longword read — cache disabled → BIU issues external bus cycle
         // ===================================================================
-        $display("--- P13-2: EU longword read 0x10 ---");
+        $display("--- EU longword read 0x10 ---");
         begin
             logic got_ack;
             logic [31:0] rdata_snap;
@@ -363,15 +353,14 @@ module biu_int_tb;
             rdata_snap = eu_rdata;
             eu_req  = 1'b0;
             repeat(4) @(posedge clk_4x);
-            check("P13-2a: eu_ack",           got_ack);
-            check32("P13-2b: rdata=CAFE_BABE", rdata_snap, 32'hCAFE_BABE);
+            check("eu_ack fires",           got_ack);
+            check32("rdata=CAFE_BABE", rdata_snap, 32'hCAFE_BABE);
         end
 
         // ===================================================================
-        // P13-3: EU write then read-back
-        // Write 0xDEAD_BEEF to 0x20, then read it back.
+        // EU write then read-back — data persists in memory model
         // ===================================================================
-        $display("--- P13-3: EU write + read-back ---");
+        $display("--- EU write + read-back ---");
         begin
             logic got_ack;
             logic [31:0] rdata_snap;
@@ -386,7 +375,7 @@ module biu_int_tb;
             wait_eu_done(300, got_ack);
             eu_req = 1'b0;
             repeat(4) @(posedge clk_4x);
-            check("P13-3a: write eu_ack", got_ack);
+            check("write eu_ack fires", got_ack);
 
             // Read-back
             eu_rw  = 1'b1;
@@ -395,8 +384,8 @@ module biu_int_tb;
             rdata_snap = eu_rdata;
             eu_req = 1'b0;
             repeat(4) @(posedge clk_4x);
-            check("P13-3b: read  eu_ack",          got_ack);
-            check32("P13-3c: rdata=DEAD_BEEF",      rdata_snap, 32'hDEAD_BEEF);
+            check("read eu_ack fires",          got_ack);
+            check32("rdata=DEAD_BEEF",      rdata_snap, 32'hDEAD_BEEF);
         end
 
         $display("=== %0d failure(s) ===", fail_count);

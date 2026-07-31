@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — MMU Interface (Phase 6)
+// MC68030 BIU — MMU Interface
 // Implements:
 //   - TT0/TT1 transparent translation (address bypass, no ATC)
 //   - 22-entry fully-associative ATC (Address Translation Cache)
@@ -412,7 +412,7 @@ module biu_mmu_if (
     assign walk_done = walk_done_r;
     assign fault     = fault_r;
     assign pflush_ack = pflush_ack_r;
-    assign mmusr     = 16'h0;  // Phase 6: basic placeholder
+    assign mmusr     = 16'h0;  // placeholder: PTEST result not yet implemented
 
     // mmu_req: assert while issuing walk read cycles
     assign mmu_req      = (ms_state == MS_WALK_A) ||

@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// MC68030 BIU — Bus Error Timeout Watchdog (Phase 11)
+// MC68030 BIU — Bus Error Timeout Watchdog 
 //
 // Asserts berr_timeout when a bus cycle has been active for TIMEOUT_CLKS
 // 4x-clock ticks without any of: DSACK0, DSACK1, STERM, external BERR,

@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 25: eu_shifter testbench
+// eu_shifter testbench
 // Tests: LSL/LSR, ASL/ASR, ROL/ROR, ROXL/ROXR, byte/word/long, edge cases
 
 module eu_shifter_tb;
@@ -58,7 +58,7 @@ module eu_shifter_tb;
     endtask
 
     initial begin
-        $display("=== Phase 25: eu_shifter ===");
+        $display("=== eu_shifter unit tests ===");
 
         // ================================================================
         // A: LSL — logical shift left

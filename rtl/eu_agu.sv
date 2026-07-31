@@ -5,7 +5,7 @@
 //
 // Computes the effective address (EA) for all 68030 addressing modes except
 // memory indirect (full extension word I/IS != 000), which requires a BIU
-// memory read and is deferred to Phase 30 integration.
+// memory read and is dispatched through eu_seq.
 //
 // Extension word format reference:
 //   Brief (ext0[8]=0):  [15]=D/A [14:12]=Reg [11]=W/L [10:9]=Scale [8]=0 [7:0]=d8
@@ -232,7 +232,7 @@ module eu_agu (
 
     // Memory-indirect detection (caller reads ea_out as intermediate address then re-calls)
     // full_iis output lets caller know a BIU read is required before the final EA is known.
-    // (Unused in Phase 29; wired in eu_seq Phase 30+ integration.)
+    // (Wired through eu_seq for EA computation.)
 
 endmodule
 

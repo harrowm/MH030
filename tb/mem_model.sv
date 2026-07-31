@@ -8,8 +8,8 @@
 //
 // Response modes (set by PORT_WIDTH parameter):
 //   32  → DSACK1=0, DSACK0=0 (32-bit port, cycle complete)
-//   16  → DSACK1=0, DSACK0=1 (16-bit port — triggers sizing FSM in Phase 3)
-//    8  → DSACK1=1, DSACK0=0 ( 8-bit port — triggers sizing FSM in Phase 3)
+//   16  → DSACK1=0, DSACK0=1 (16-bit port — triggers dynamic bus sizing FSM)
+//    8  → DSACK1=1, DSACK0=0 ( 8-bit port — triggers dynamic bus sizing FSM)
 //
 // WAIT_STATES controls how many extra bus clocks the model holds DSACK=11
 // before asserting the real response (simulates slow memory).
@@ -18,7 +18,7 @@
 // For writes, the model stores data to the internal memory array.
 // The model assumes a 32-bit bus; for sub-longword transfers, the caller
 // is responsible for presenting the correct lanes (SIZ/A tracking is
-// future work in Phase 3).
+// future work to support non-32-bit ports).
 
 module mem_model #(
     parameter int DEPTH      = 256,   // words (32-bit longwords)
@@ -221,7 +221,7 @@ module mem_model #(
     end
 
     // -----------------------------------------------------------------------
-    // Write capture (for Phase 3+ write testing)
+    // Write capture (for write testing)
     // -----------------------------------------------------------------------
     // The write data from the BIU is on a separate port (ext_d_out / ext_d_oe
     // in m68030_biu). For the testbench, the tb wires ext_d_out directly to

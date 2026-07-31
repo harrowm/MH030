@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 77: .dat-replay testbench
+// .dat-replay testbench (Toni Wilen WinUAE-format register-state vectors)
 //
 // Usage: vvp sim/cosim_dat +hexfile=tests/vec_0000.hex [+cycles=5000]
 //

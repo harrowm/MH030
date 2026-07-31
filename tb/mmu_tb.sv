@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 35: m68030_mmu testbench
+// m68030_mmu testbench
 //
 // Instantiates m68030_mmu + biu_mmu_if (the ATC/walker) and connects them.
 // A simple walk-memory stub responds to biu_mmu_if's mmu_req port.
@@ -306,7 +306,7 @@ module mmu_tb;
     // Main test sequence
     // -----------------------------------------------------------------------
     initial begin
-        $display("=== Phase 35: m68030_mmu ===");
+        $display("=== m68030_mmu unit tests ===");
         repeat(10) @(posedge clk_4x);
         rst_n = 1'b1;
         repeat(4) @(posedge clk_4x);

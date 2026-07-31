@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 76: Generic group test testbench
+// Generic opcode-group cosimulation testbench
 //
 // Usage: vvp sim/cosim_grp +hexfile=tests/grpN.hex [+expected_d0=HEX]
 //

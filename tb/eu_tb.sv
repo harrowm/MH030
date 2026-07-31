@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 28: m68030_eu integration smoke test.
+// m68030_eu integration smoke test.
 // Verifies wiring of eu_seq + eu_regfile + eu_alu + eu_shifter + eu_mul_div.
 //
 // Tests:
@@ -143,7 +143,7 @@ module eu_tb;
     // Stimulus
     // -----------------------------------------------------------------------
     initial begin
-        $display("=== Phase 28: m68030_eu ===");
+        $display("=== m68030_eu integration tests ===");
 
         // Release reset
         @(posedge clk_4x); #1;

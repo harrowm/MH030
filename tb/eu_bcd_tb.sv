@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ns/1ps
 
-// eu_bcd standalone testbench — Phase 27
+// eu_bcd (BCD arithmetic unit) testbench
 // Verifies ABCD, SBCD, NBCD corner cases.
 // Run: iverilog -g2012 -o /tmp/phase27b.vvp -I rtl rtl/eu_bcd.sv tb/eu_bcd_tb.sv
 //      vvp /tmp/phase27b.vvp

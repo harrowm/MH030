@@ -8,7 +8,7 @@
 // pipeline stages, RAW-hazard stalling, and dispatches to ALU/shifter/mul-div.
 // This wrapper exposes the clean external interface to IFU and exception ctrl.
 //
-// Memory-access (effective address) ports are reserved for eu_agu (Phase 30).
+// Memory-access (effective address) ports are wired through eu_agu.
 // For now the EU operates only on register-direct EA modes.
 
 module m68030_eu (
@@ -40,7 +40,7 @@ module m68030_eu (
     output logic [31:0] msp_out,
     output logic [31:0] isp_out,
 
-    // ── Control register outputs (Phase 46: CACR/CAAR to BIU) ────────────
+    // ── Control register outputs (CACR/CAAR to BIU) ────────────
     output logic [31:0] cacr_out,
     output logic [31:0] caar_out,
 
@@ -67,7 +67,7 @@ module m68030_eu (
     input  logic        mem_berr,
     output logic        mem_rmw,      // 1=hold bus for RMW (TAS)
 
-    // ── Phase 52: FPU coprocessor interface (FC=111 CPU Space) ───────────
+    // ── FPU coprocessor interface (FC=111 CPU Space) ───────────
     output logic        eu_coproc_req,
     output logic        eu_coproc_rw,
     output logic [1:0]  eu_coproc_siz,
@@ -78,7 +78,7 @@ module m68030_eu (
     input  logic        eu_coproc_ack,
     input  logic        eu_coproc_berr,
 
-    // ── Phase 54: MMU instruction interface ──────────────────────────────
+    // ── MMU instruction interface ──────────────────────────────
     output logic        eu_pflush_req,
     output logic        eu_pflush_all,
     output logic [2:0]  eu_pflush_fc,
@@ -92,8 +92,8 @@ module m68030_eu (
     output logic [31:0] tc_out,
     output logic [31:0] tt0_out,
     output logic [31:0] tt1_out,
-    output logic [63:0] crp_out,         // Phase 64: CRP register → MMU
-    output logic [63:0] srp_out,         // Phase 64: SRP register → MMU
+    output logic [63:0] crp_out,         // CRP register → MMU
+    output logic [63:0] srp_out,         // SRP register → MMU
 
     // ── Address register update port ──────────────────────────────────────
     output logic        an_wr_en,
@@ -103,14 +103,14 @@ module m68030_eu (
     // ── Exception signals ─────────────────────────────────────────────────
     output logic        div_trap,     // divide-by-zero (m68030_exc handles)
     output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
-    // Phase 56: OS exception/control instructions
+    // OS exception/control instructions
     output logic        eu_trap_req,
     output logic [3:0]  eu_trap_num,
     output logic        eu_trapv_req,
     output logic        eu_illegal_req,
     output logic        eu_stop,
     output logic        eu_reset_req,    // RESET instruction — pulse RSTOUT low
-    // Phase 70: new exception outputs
+    // new exception outputs
     output logic        eu_priv_req,    // privilege violation → vector 8
     output logic        eu_trace_req,   // trace exception → vector 9
     output logic        eu_linea_req,   // Line-A opcode → vector 10
@@ -139,7 +139,7 @@ module m68030_eu (
     logic        sr_wr_en;
     logic [15:0] sr_wr_data;
     logic        sr_ccr_only;
-    // Phase 46: control register read/write wires (eu_seq ↔ eu_regfile)
+    // control register read/write wires (eu_seq ↔ eu_regfile)
     logic [2:0]  seq_sfc_out, seq_dfc_out;
     logic [31:0] seq_cacr_out, seq_caar_out;
     logic        seq_vbr_wr_en;
@@ -158,7 +158,7 @@ module m68030_eu (
     logic [31:0] seq_isp_wr_data;
     logic        seq_msp_wr_en;
     logic [31:0] seq_msp_wr_data;
-    // Phase 58: second Dn write port for 64-bit mul/div high result
+    // second Dn write port for 64-bit mul/div high result
     logic        wr2_en;
     logic [2:0]  wr2_sel;
     logic [31:0] wr2_data;
@@ -293,7 +293,7 @@ module m68030_eu (
         .mem_ack      (mem_ack),
         .mem_berr     (mem_berr),
         .mem_rmw      (mem_rmw),
-        // Phase 52: FPU coprocessor
+        // FPU coprocessor
         .eu_coproc_req   (eu_coproc_req),
         .eu_coproc_rw    (eu_coproc_rw),
         .eu_coproc_siz   (eu_coproc_siz),
@@ -303,7 +303,7 @@ module m68030_eu (
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
-        // Phase 54: MMU instruction interface
+        // MMU instruction interface
         .eu_pflush_req   (eu_pflush_req),
         .eu_pflush_all   (eu_pflush_all),
         .eu_pflush_fc    (eu_pflush_fc),
@@ -322,7 +322,7 @@ module m68030_eu (
         .an_wr_en     (an_wr_en),
         .an_wr_sel    (an_wr_sel),
         .an_wr_data   (an_wr_data),
-        // Phase 46: control register reads (from eu_regfile)
+        // control register reads (from eu_regfile)
         .sfc_in       (seq_sfc_out),
         .dfc_in       (seq_dfc_out),
         .vbr_in       (vbr_out),
@@ -331,7 +331,7 @@ module m68030_eu (
         .msp_in       (msp_out),
         .cacr_in      (seq_cacr_out),
         .caar_in      (seq_caar_out),
-        // Phase 46: control register writes (to eu_regfile)
+        // control register writes (to eu_regfile)
         .vbr_wr_en    (seq_vbr_wr_en),
         .vbr_wr_data  (seq_vbr_wr_data),
         .sfc_wr_en    (seq_sfc_wr_en),
@@ -348,21 +348,21 @@ module m68030_eu (
         .isp_wr_data  (seq_isp_wr_data),
         .msp_wr_en    (seq_msp_wr_en),
         .msp_wr_data  (seq_msp_wr_data),
-        // Phase 56: OS exception/control
+        // OS exception/control
         .eu_trap_req    (eu_trap_req),
         .eu_trap_num    (eu_trap_num),
         .eu_trapv_req   (eu_trapv_req),
         .eu_illegal_req (eu_illegal_req),
         .eu_stop        (eu_stop),
         .eu_reset_req   (eu_reset_req),
-        // Phase 70: new exception outputs
+        // new exception outputs
         .eu_priv_req    (eu_priv_req),
         .eu_trace_req   (eu_trace_req),
         .eu_linea_req   (eu_linea_req),
         .eu_linef_req   (eu_linef_req),
         .eu_fmt_err_req (eu_fmt_err_req),
         .exc_sr_wr_en   (exc_sr_wr_en),
-        // Phase 58: second Dn write port
+        // second Dn write port
         .wr2_en         (wr2_en),
         .wr2_sel        (wr2_sel),
         .wr2_data       (wr2_data)
@@ -432,11 +432,11 @@ module m68030_eu (
         .an_wr_en     (an_wr_en),
         .an_wr_sel    (an_wr_sel),
         .an_wr_data   (an_wr_data),
-        // Phase 58: second Dn write port
+        // second Dn write port
         .wr2_en       (wr2_en),
         .wr2_sel      (wr2_sel),
         .wr2_data     (wr2_data),
-        // Phase 46: SFC/DFC/CACR/CAAR
+        // SFC/DFC/CACR/CAAR
         .sfc_wr_en    (seq_sfc_wr_en),
         .sfc_wr_data  (seq_sfc_wr_data),
         .sfc_out      (seq_sfc_out),
@@ -449,7 +449,7 @@ module m68030_eu (
         .caar_wr_en   (seq_caar_wr_en),
         .caar_wr_data (seq_caar_wr_data),
         .caar_out     (seq_caar_out),
-        // Phase 46: explicit USP/ISP/MSP writes
+        // explicit USP/ISP/MSP writes
         .usp_wr_en    (seq_usp_wr_en),
         .usp_wr_data  (seq_usp_wr_data),
         .isp_wr_en    (seq_isp_wr_en),

@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 24: eu_alu unit testbench
+// eu_alu unit testbench
 // Tests: ADD/ADDX, SUB/SUBX, NEG/NEGX, CMP, AND/OR/EOR/NOT, TST/CLR,
 //        all three sizes (byte/word/long), carry/borrow, overflow, Z-preserve.
 
@@ -82,7 +82,7 @@ module eu_alu_tb;
     // Tests
     // -----------------------------------------------------------------------
     initial begin
-        $display("=== Phase 24: eu_alu ===");
+        $display("=== eu_alu unit tests ===");
 
         // ================================================================
         // A: ADD / ADDX  (byte unless noted)

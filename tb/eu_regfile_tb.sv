@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 23: eu_regfile unit testbench
+// eu_regfile unit testbench
 // Tests: RF-1 (D-reg), RF-2 (A-reg), RF-3 (SR/A7 routing),
 //        RF-4 (PC/VBR), RF-5 (dual-port), RF-6 (CCR-only/outputs), RF-7 (generate loops)
 
@@ -136,7 +136,7 @@ module eu_regfile_tb;
     // Main test sequence
     // -----------------------------------------------------------------------
     initial begin
-        $display("=== Phase 23: eu_regfile ===");
+        $display("=== eu_regfile unit tests ===");
 
         repeat(4) @(posedge clk_4x);
         rst_n = 1'b1;

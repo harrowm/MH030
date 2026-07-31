@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 27: eu_seq testbench
+// eu_seq (micro-sequencer) testbench
 // Instantiates eu_seq + eu_regfile + eu_alu + eu_shifter + eu_mul_div
 // Uses hierarchical references (u_rf.d_reg[], u_rf.sr_r) to check results.
 //
@@ -346,7 +346,7 @@ module eu_seq_tb;
     // Main test
     // -----------------------------------------------------------------------
     initial begin
-        $display("=== Phase 27: eu_seq ===");
+        $display("=== eu_seq unit tests ===");
 
         // Reset for 2 cycles
         rst_n = 0;

@@ -3,7 +3,7 @@
 
 // eu_bitfield — combinational bit-field unit.
 //
-// Phase 62 restriction: bf_offset + actual_width ≤ 32 (field fits in one 32-bit value).
+// Restriction: bf_offset + actual_width ≤ 32 (field fits in one 32-bit value).
 // Bit ordering: bit 0 of the field is bf_data[31-bf_offset] (MSB side), per 68030 convention.
 //
 // bf_op encoding (= {f_dn[1:0], f_dir} from opcode):

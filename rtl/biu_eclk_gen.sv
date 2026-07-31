@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// E-clock generator — MC68030 BIU, Phase 1
+// E-clock generator — MC68030 BIU
 //
 // Generates the E output at CLK/10 with a 60/40 duty cycle:
 //   6 external clock cycles low, then 4 external clock cycles high.

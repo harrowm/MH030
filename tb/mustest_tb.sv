@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ps/1ps
 
-// Phase 78: Musashi instruction test suite DUT testbench (Verilator-compatible)
+// Musashi instruction test suite DUT testbench (Verilator-compatible)
 //
 // clk_4x and rst_n are driven from C++ main (no --timing; no always #5).
 // Memory is loaded by C++ directly writing mustest_tb.main_mem[] after

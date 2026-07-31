@@ -8,8 +8,8 @@
 // ROM loaded from tests/boot.hex via $readmemh at elaboration time.
 // Every completed bus cycle is logged: BUS R|W addr data fc=FCfcfc siz=SZsz
 //
-// P72-01: STOP opcode (0x4E72) fetched on a program-space read within 3000 cycles.
-// P72-02: No eu_addr_err / ifu_addr_err asserted during execution.
+// Checks: STOP opcode (0x4E72) fetched on a program-space read within 3000 cycles.
+//   No eu_addr_err / ifu_addr_err asserted during execution.
 
 module cosim_boot_tb;
 
@@ -202,8 +202,8 @@ module cosim_boot_tb;
             end
         join
 
-        check("P72-01 STOP opcode fetched", stop_seen);
-        check("P72-02 No address errors",   ~any_addr_err);
+        check("STOP opcode fetched", stop_seen);
+        check("No address errors",   ~any_addr_err);
 
         if (fail_count == 0) $display("PASS  cosim72");
         else                 $display("FAIL  cosim72 (%0d)", fail_count);
