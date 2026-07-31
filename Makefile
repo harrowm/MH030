@@ -96,16 +96,13 @@ $(SIM)/system:    $(EU_SRCS)                         tb/system_tb.sv    | $(SIM)
 $(SIM)/exception: $(EU_SRCS)                         tb/exception_tb.sv | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/seq47:      $(EU_SRCS)                         tb/seq47_tb.sv      | $(SIM)
+$(SIM)/atomic:    $(EU_SRCS)                         tb/atomic_tb.sv    | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/seq52:      $(EU_SRCS)                         tb/seq52_tb.sv      | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/seq54:      $(EU_SRCS)                         tb/seq54_tb.sv      | $(SIM)
-	$(IVCOMP)
-
-$(SIM)/seq68:      $(EU_SRCS)                         tb/seq68_tb.sv      | $(SIM)
 	$(IVCOMP)
 
 $(SIM)/seq69:      $(EU_SRCS)                         tb/seq69_tb.sv      | $(SIM)
@@ -189,8 +186,8 @@ ALL_TESTS := \
     $(SIM)/eu_regfile $(SIM)/eu_alu $(SIM)/eu_shifter $(SIM)/eu_mul_div \
     $(SIM)/eu_bcd $(SIM)/eu_bitops $(SIM)/agu \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
-    $(SIM)/ctrl_flow $(SIM)/ea_modes $(SIM)/data_move $(SIM)/alu_reg $(SIM)/alu_mem $(SIM)/bitfield $(SIM)/bcd_pack $(SIM)/system $(SIM)/exception \
-    $(SIM)/seq47 $(SIM)/seq52 $(SIM)/seq54 $(SIM)/seq68 $(SIM)/seq69 \
+    $(SIM)/ctrl_flow $(SIM)/ea_modes $(SIM)/data_move $(SIM)/alu_reg $(SIM)/alu_mem $(SIM)/bitfield $(SIM)/bcd_pack $(SIM)/system $(SIM)/exception $(SIM)/atomic \
+    $(SIM)/seq52 $(SIM)/seq54 $(SIM)/seq69 \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke
