@@ -105,7 +105,10 @@ $(SIM)/seq52:      $(EU_SRCS)                         tb/seq52_tb.sv      | $(SI
 $(SIM)/seq54:      $(EU_SRCS)                         tb/seq54_tb.sv      | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/seq69:      $(EU_SRCS)                         tb/seq69_tb.sv      | $(SIM)
+$(SIM)/special_instr: $(EU_SRCS)                      tb/special_instr_tb.sv | $(SIM)
+	$(IVCOMP)
+
+$(SIM)/ea_extended: $(EU_SRCS)                        tb/ea_extended_tb.sv | $(SIM)
 	$(IVCOMP)
 
 # ── Standalone modules ─────────────────────────────────────────────────────
@@ -187,7 +190,7 @@ ALL_TESTS := \
     $(SIM)/eu_bcd $(SIM)/eu_bitops $(SIM)/agu \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/ctrl_flow $(SIM)/ea_modes $(SIM)/data_move $(SIM)/alu_reg $(SIM)/alu_mem $(SIM)/bitfield $(SIM)/bcd_pack $(SIM)/system $(SIM)/exception $(SIM)/atomic \
-    $(SIM)/seq52 $(SIM)/seq54 $(SIM)/seq69 \
+    $(SIM)/special_instr $(SIM)/ea_extended \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke
