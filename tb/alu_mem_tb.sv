@@ -484,6 +484,78 @@ module alu_mem_tb;
         run_instr(16'h85EB, 1'b1, 32'h0000_0008);
         chk("DIVS-01:D2", dut.u_rf.d_reg[2], 32'h0000_FFFA);
 
+        // ─── Phase 78: new/extended decoder paths ────────────────────────────
+
+        // ADD/SUB #imm, Dn — new decode branch in eu_seq.sv (groups 9/D)
+        $display("--- ADD.B #5, D0 (imm->Dn byte) ---");
+        set_dn(3'd0, 32'h0000_0012);
+        run_instr(16'hD03C, 1'b1, 32'h0000_0005);
+        chk("ADDI-B:D0", dut.u_rf.d_reg[0], 32'h0000_0017);
+        chk_ccr("ADDI-B", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        $display("--- ADD.W #0x100, D1 (imm->Dn word) ---");
+        set_dn(3'd1, 32'h0000_0200);
+        run_instr(16'hD27C, 1'b1, 32'h0000_0100);
+        chk("ADDI-W:D1", dut.u_rf.d_reg[1], 32'h0000_0300);
+        chk_ccr("ADDI-W", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        $display("--- ADD.L #0x1000, D2 (imm->Dn long) ---");
+        set_dn(3'd2, 32'h0000_2000);
+        run_instr(16'hD4BC, 1'b1, 32'h0000_1000);
+        chk("ADDI-L:D2", dut.u_rf.d_reg[2], 32'h0000_3000);
+        chk_ccr("ADDI-L", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        $display("--- SUB.W #0x50, D3 (imm->Dn word, group 9) ---");
+        set_dn(3'd3, 32'h0000_0060);
+        run_instr(16'h967C, 1'b1, 32'h0000_0050);
+        chk("SUBI-W:D3", dut.u_rf.d_reg[3], 32'h0000_0010);
+        chk_ccr("SUBI-W", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // ADD Dn, (d16,An) — extended decoder to include f_mode=101 as mem dest
+        // opcode 0xD1A9: ADD.L D0,(8,A1); d16=8 → EA=A1+8
+        $display("--- ADD.L D0,(8,A1) (Dn->mem d16 dest) ---");
+        set_an(3'd1, 32'h0000_7000);
+        set_dn(3'd0, 32'h0000_0300);
+        ram[32'h7008 >> 2] = 32'h0000_2000;
+        run_instr(16'hD1A9, 1'b1, 32'h0000_0008);
+        chk("ADD-d16:mem", ram[32'h7008 >> 2], 32'h0000_2300);
+        chk_ccr("ADD-d16",  1'b0, 1'b0, 1'b0, 1'b0);
+
+        // ADD Dn, (d8,An,Xn) — indexed memory dest: NOT tested here.
+        // This path uses dyn_bit_ea_r pre-latch which requires at least one EX
+        // cycle before mem_ack to capture the correct EA before dyn_bit_get_Dn
+        // fires.  The 0-latency mem model (mem_ack=mem_req) in this testbench
+        // violates that requirement.  Coverage provided by Harte ADD.l suite
+        // (harte_tb.sv uses 1-cycle dsack latency → path works correctly).
+
+        // SUB Dn, (xxx).W — new absolute-short memory destination in eu_seq.sv
+        // opcode 0x93B8: SUB.L D1,(0x7200).W
+        $display("--- SUB.L D1,(0x7200).W (Dn->mem abs.W dest) ---");
+        set_dn(3'd1, 32'h0000_0100);
+        ram[32'h7200 >> 2] = 32'h0000_1000;
+        run_instr(16'h93B8, 1'b1, 32'h0000_7200);
+        chk("SUB-absW:mem", ram[32'h7200 >> 2], 32'h0000_0F00);
+        chk_ccr("SUB-absW", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // ADD Dn, (xxx).L — new absolute-long memory destination in eu_seq.sv
+        // opcode 0xDBB9: ADD.L D5,(0x7300).L
+        $display("--- ADD.L D5,(0x7300).L (Dn->mem abs.L dest) ---");
+        set_dn(3'd5, 32'h0000_0500);
+        ram[32'h7300 >> 2] = 32'h0000_A000;
+        run_instr(16'hDBB9, 1'b1, 32'h0000_7300);
+        chk("ADD-absL:mem", ram[32'h7300 >> 2], 32'h0000_A500);
+        chk_ccr("ADD-absL", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // ADDQ to indexed EA — new f_mode=110 case in eu_seq.sv ADDQ decoder
+        // opcode 0x56B4: ADDQ.L #3,(4,A4,D6.L); brief ext 0x6804 → EA=A4+D6+4
+        $display("--- ADDQ.L #3,(4,A4,D6.L) (ADDQ indexed dest) ---");
+        set_an(3'd4, 32'h0000_7400);
+        set_dn(3'd6, 32'h0000_0008);
+        ram[32'h740C >> 2] = 32'h0000_1000;
+        run_instr(16'h56B4, 1'b1, 32'h0000_6804);
+        chk("ADDQ-idx:mem", ram[32'h740C >> 2], 32'h0000_1003);
+        chk_ccr("ADDQ-idx", 1'b0, 1'b0, 1'b0, 1'b0);
+
         // ─── summary ─────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);
         $display("");
