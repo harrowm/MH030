@@ -205,6 +205,102 @@ def get_scale_remap(test):
     return {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
 
 
+def get_operand_ea(test):
+    """
+    Compute the 68030 effective address for the memory operand of the instruction.
+    Returns (ea_byte_addr: int, siz_bytes: int) or None if no memory access or
+    the mode is too complex to evaluate statically.
+
+    Reads instruction bytes directly from ini['ram'] at ini['pc']-4 so that
+    group-0 immediate ops (where extension words are offset past the immediate)
+    are handled correctly without depending on prefetch[] content.
+    """
+    ini       = test['initial']
+    instr_src = ini['pc'] - 4
+    rm        = {a: v for a, v in ini['ram']}
+
+    def rw(off):    # read one big-endian instruction word from RAM
+        return (rm.get(instr_src + off, 0) << 8) | rm.get(instr_src + off + 1, 0)
+
+    opcode  = rw(0)
+    f_group = (opcode >> 12) & 0xF
+    f_dn    = (opcode >>  9) & 0x7
+    f_dir   = (opcode >>  8) & 0x1
+    f_ss    = (opcode >>  6) & 0x3
+    ea_mode = (opcode >>  3) & 0x7
+    ea_reg  =  opcode        & 0x7
+
+    # No memory operand for register-direct or immediate EA
+    if ea_mode in (0, 1):
+        return None
+    if ea_mode == 7 and ea_reg in (2, 3, 4):   # PC-relative or #imm
+        return None
+
+    # Transfer size in bytes.
+    # f_ss=3 signals ADDA: word (f_dir=0) or long (f_dir=1).
+    if f_ss == 3:
+        siz_bytes = 4 if f_dir else 2
+    else:
+        siz_bytes = {0: 1, 1: 2, 2: 4}[f_ss]
+
+    # Byte offset within the instruction to the first EA extension word.
+    # Group-0 immediate ops (ADDI/SUBI/ORI/ANDI/EORI) have an immediate word
+    # (byte/word size) or longword (long size) before the EA extension words.
+    if f_group == 0 and f_dn not in (4, 7) and f_ss != 3:
+        ea_off = 2 + (4 if f_ss == 2 else 2)
+    elif f_group == 0 and f_dn in (4, 7):
+        return None     # bit-ops / MOVES: non-trivial layout, skip
+    else:
+        ea_off = 2      # EA exts follow the opcode word directly
+
+    def get_an(reg):
+        if reg == 7:
+            return (ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']) & 0xFFFFFFFF
+        return ini[f'a{reg}'] & 0xFFFFFFFF
+
+    an = get_an(ea_reg)
+
+    if ea_mode == 2:        # (An)
+        ea = an
+    elif ea_mode == 3:      # (An)+
+        ea = an
+    elif ea_mode == 4:      # -(An)  — A7 byte uses step=2 to stay word-aligned
+        step = 2 if (ea_reg == 7 and f_ss == 0) else siz_bytes
+        ea   = (an - step) & 0xFFFFFFFF
+    elif ea_mode == 5:      # (d16,An)
+        d16 = rw(ea_off)
+        if d16 >= 0x8000: d16 -= 0x10000
+        ea = (an + d16) & 0xFFFFFFFF
+    elif ea_mode == 6:      # (d8,An,Xn) — use get_scale_remap for scale≠0
+        remap = get_scale_remap(test)
+        if remap:
+            ea = remap['ea_68030']
+        else:
+            brief  = rw(ea_off)
+            xn_da  = (brief >> 15) & 1
+            xn_reg = (brief >> 12) & 7
+            xn_wl  = (brief >> 11) & 1
+            d8     =  brief & 0xFF
+            if d8 >= 0x80: d8 -= 0x100
+            xn_sel = get_an(xn_reg) if xn_da else ini[f'd{xn_reg}'] & 0xFFFFFFFF
+            if not xn_wl:
+                xn_sel &= 0xFFFF
+                if xn_sel >= 0x8000: xn_sel -= 0x10000
+            ea = (an + xn_sel + d8) & 0xFFFFFFFF
+    elif ea_mode == 7:
+        if ea_reg == 0:     # (xxx).W
+            w  = rw(ea_off)
+            ea = ((w - 0x10000) if w >= 0x8000 else w) & 0xFFFFFFFF
+        elif ea_reg == 1:   # (xxx).L
+            ea = (rw(ea_off) << 16) | rw(ea_off + 2)
+        else:
+            return None
+    else:
+        return None
+
+    return ea & 0xFFFFFF, siz_bytes
+
+
 def patches_to_hex(patches):
     """
     Convert a {byte_addr: byte_val} dict to $readmemh format.
@@ -250,13 +346,14 @@ def can_run(test):
     final = test['final']
     opcode = ini['prefetch'][0]
 
-    # Sanity-check instruction length (final.pc - ini.pc).  68k instructions
-    # are at most 22 bytes (opcode + 5 extension words × 2 + 2 imm words × 2).
-    # A wild final.pc (e.g. exception handler PC from the 68000 sim) would make
-    # build_patches() try to allocate a billion-byte bytearray and hang.
-    instr_len = final['pc'] - ini['pc']
-    if instr_len <= 0 or instr_len > 24:
-        return False, f'bad instruction length {instr_len} (final.pc={final["pc"]:#010x})'
+    # Misaligned EA: word or longword access to an odd address causes a 68000/68030
+    # address error.  The reference sim then runs the exception handler, landing
+    # final.pc at a random location — the test cannot be replayed in our harness.
+    ea_info = get_operand_ea(test)
+    if ea_info is not None:
+        ea, ea_siz = ea_info
+        if ea_siz >= 2 and (ea & 1):
+            return False, 'misaligned EA'
 
     # PC-relative source EA (mode=111, reg=2 or reg=3): address depends on
     # original PC; instruction remapping to 0x0080 breaks the offset.
@@ -282,6 +379,13 @@ def can_run(test):
     # Instruction at original address would land in our init region
     instr_src = ini['pc'] - 4
     instr_len = final['pc'] - ini['pc']
+
+    # Backstop for complex EA modes that get_operand_ea() returns None for:
+    # if instr_len is still wild, the reference took an exception (almost certainly
+    # a misaligned EA that we couldn't compute statically).
+    if not (1 <= instr_len <= 24):
+        return False, 'misaligned EA'
+
     if instr_src < 0x000090:
         return False, f'instruction at {instr_src:#x} overlaps init region'
 
