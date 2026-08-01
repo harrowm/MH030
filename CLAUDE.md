@@ -132,19 +132,24 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 56–71. RTE/STOP/TRAP/TRAPV, ADDA/SUBA/CMPA/ORI-ANDI-EORI-to-SR, MULS.L/MULU.L/DIVS.L/DIVU.L, PEA/EXG/RTD/CMPM, memory-dest ALU, ADDX/SUBX, bit-field ops, PACK/UNPK/LINK.L/RESET, MOVES/PMOVE 64-bit, ALU mem→reg, extended EA sweep, trace/priv/Line-A/Line-F, CAS2/Format-Error
 72–76. cosim72_tb (full-chip testbench), smoke.s bare-metal test, Musashi reference generator, buscmp.py diff tool, 8 opcode group tests (`tests/grp0.s`–`grp7.s`, `tb/cosim_grp_tb.sv`)
 77. Toni Wilen `.dat` replay harness: `tb/cosim_dat_tb.sv` (runtime hex load, eu_stop detection), `scripts/gen_init_hex.py` (reg-state init scaffold with NOP bubble after MOVE.W #,SR), `scripts/parse_dat.py` (.dat binary parser, --probe mode), `scripts/run_cosim.py` (50-vector synthetic suite, 50/50 PASS). RTL fixes: eu_stop exposed as top-level port; ext_count=1 for MOVE.W #,SR/CCR by direct opcode match (was broken f_ss field condition).
+78. Tom Harte SingleStepTests harness (`scripts/parse_harte.py`, `scripts/gen_harte_hex.py`, `scripts/run_harte.py`, `tb/harte_tb.sv`, `tests/harte/`). RTL fixes: ADD/SUB #imm,Dn handler in eu_seq.sv (groups 9/D); `is_alu_imm_dn` + `is_addq_subq_ext` f_mode=110 fix in m68030_seq.sv. Harness fixes: bad-instr-len guard; indexed EA scale from RAM for group-0; init-region data conflict filter; misaligned longword testbench read/write. Results: ADD.b 2122/2122, ADD.w 1396/1396, ADD.l 1406/1406 (100%).
 
-**Current state**: 51/51 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`).
+**Current state**: 31/31 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`). ADD.b/w/l Harte suites 100%.
 
-**Next phase**: Phase 78 — real Toni Wilen `.dat` file testing with WinUAE-generated vectors.
+**Next phase**: Phase 79 — extend Harte testing to SUB, AND, OR, EOR, CMP, MOVE instruction families.
 
 ## Verification Commands
 
 ```bash
-make test          # 51/51 unit + integration regression
+make test          # 31/31 unit + integration regression
 make buscmp        # smoke.s DUT vs Musashi bus log
 make cosim_grp     # all 8 opcode group bus comparisons (grp0–grp7)
 make buscmp-grp0   # single group (replace 0 with 1–7)
 make dat-synth     # 50-vector synthetic register-state cosim (DUT vs Musashi)
+# Tom Harte SingleStepTests (68000 one-instruction vectors):
+python3 -u scripts/run_harte.py tests/harte/ADD.b.json.bin   # 2122/2122
+python3 -u scripts/run_harte.py tests/harte/ADD.w.json.bin   # 1396/1396
+python3 -u scripts/run_harte.py tests/harte/ADD.l.json.bin   # 1406/1406
 ```
 
 Bus log format: `BUS R|W %08x %08x fc=%b siz=%b` (siz: 00=longword, 01=byte, 10=word, 11=line)
