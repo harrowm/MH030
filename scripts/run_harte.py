@@ -29,7 +29,7 @@ SIM_BIN  = REPO / 'sim' / 'harte_dat'
 
 sys.path.insert(0, str(Path(__file__).parent))
 from parse_harte  import decode_file
-from gen_harte_hex import gen_hex, can_run
+from gen_harte_hex import gen_hex, can_run, get_scale_remap
 
 
 # ── Output parsing ────────────────────────────────────────────────────────────
@@ -120,6 +120,24 @@ def compare(test, regs, writes, verbose):
     # Memory writes: check bytes that CHANGED between initial.ram and final.ram
     ini_map   = {a: v for a, v in ini['ram']}
     final_map = {a: v for a, v in final['ram']}
+
+    # Scale remap: when indexed EA has non-zero scale the DUT writes to EA_68030
+    # rather than the 68000 reference EA.  Redirect expected writes (and the
+    # corresponding initial values) so the address comparison is correct.
+    remap = get_scale_remap(test)
+    if remap:
+        ea0, ea1, nb = remap['ea_68000'], remap['ea_68030'], remap['siz_bytes']
+        def _remap(m):
+            out = {}
+            for a, v in m.items():
+                if ea0 <= a < ea0 + nb:
+                    out[ea1 + (a - ea0)] = v
+                else:
+                    out[a] = v
+            return out
+        ini_map   = _remap(ini_map)
+        final_map = _remap(final_map)
+
     for addr, exp_byte in final_map.items():
         if ini_map.get(addr) == exp_byte:
             continue   # unchanged — don't require a MEMWRITE for it

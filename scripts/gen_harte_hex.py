@@ -128,7 +128,81 @@ def build_patches(test):
             continue   # instruction bytes already placed at INSTR_ADDR
         patches[addr24] = val
 
+    # ── Scale remap: copy bytes EA_68000 → EA_68030 for non-zero scale ────────
+    # When scale≠0, the 68030 computes a different indexed EA than the 68000.
+    # Pre-place the same source bytes at EA_68030 so the DUT reads correct data.
+    remap = get_scale_remap(test)
+    if remap:
+        ini_ram_map = {(a & 0xFFFFFF): v for a, v in ini['ram']}
+        ea0, ea1, nb = remap['ea_68000'], remap['ea_68030'], remap['siz_bytes']
+        for i in range(nb):
+            patches[(ea1 + i) & 0xFFFFFF] = ini_ram_map.get((ea0 + i) & 0xFFFFFF, 0)
+
     return patches, instr_len
+
+
+def get_scale_remap(test):
+    """
+    If the opcode has an indexed EA (mode=6) with non-zero scale, return a dict:
+      {'ea_68000': int, 'ea_68030': int, 'siz_bytes': int}
+    The 68000 ignores scale bits (always ×1); the 68030 applies ×1/×2/×4/×8.
+    build_patches() uses this to copy source bytes from EA_68000 to EA_68030 so
+    the DUT reads the expected data; compare() uses it to redirect expected memory
+    writes from EA_68000 to EA_68030 (for RMW-destination instructions).
+    Returns None when scale=0 or the opcode is not an indexed EA.
+    """
+    ini    = test['initial']
+    opcode = ini['prefetch'][0]
+
+    if (opcode >> 3) & 7 != 6:
+        return None
+
+    f_group = (opcode >> 12) & 0xF
+    f_ss    = (opcode >>  6) & 0x3
+    f_dn    = (opcode >>  9) & 0x7
+    f_reg   =  opcode        & 0x7
+
+    # Locate brief extension word (same logic as can_run() scale check)
+    if f_group == 0 and (f_dn not in (4, 7)) and f_ss != 3:
+        instr_src = ini['pc'] - 4
+        off       = 6 if f_ss == 2 else 4
+        rm        = {a: v for a, v in ini['ram']}
+        brief_ext = (rm.get(instr_src + off, 0) << 8) | rm.get(instr_src + off + 1, 0)
+    elif len(ini['prefetch']) > 1:
+        brief_ext = ini['prefetch'][1]
+    else:
+        return None
+
+    scale = (brief_ext >> 9) & 3
+    if scale == 0:
+        return None
+
+    xn_da  = (brief_ext >> 15) & 1
+    xn_reg = (brief_ext >> 12) & 7
+    xn_wl  = (brief_ext >> 11) & 1
+    d8     = brief_ext & 0xFF
+    if d8 >= 0x80:
+        d8 -= 0x100
+
+    def _get_an(reg):
+        if reg == 7:
+            return (ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']) & 0xFFFFFFFF
+        return ini[f'a{reg}'] & 0xFFFFFFFF
+
+    an_val  = _get_an(f_reg)
+    xn_val  = _get_an(xn_reg) if xn_da else ini[f'd{xn_reg}'] & 0xFFFFFFFF
+    if not xn_wl:                       # word Xn: sign-extend 16→32
+        xn_val &= 0xFFFF
+        if xn_val >= 0x8000:
+            xn_val -= 0x10000
+    # longword Xn stays as-is; Python arithmetic + 24-bit mask handles overflow
+
+    ea_68000 = (an_val + xn_val            + d8) & 0xFFFFFF
+    ea_68030 = (an_val + xn_val * (1 << scale) + d8) & 0xFFFFFF
+
+    siz_bytes = {0: 1, 1: 2, 2: 4}.get(f_ss, 1)
+
+    return {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
 
 
 def patches_to_hex(patches):
@@ -191,36 +265,19 @@ def can_run(test):
     if ea_mode == 7 and ea_reg in (2, 3):
         return False, 'PC-relative source EA'
 
-    # Indexed EA (mode=6): the 68030 reads bits[10:9] as scale (×1/×2/×4/×8).
-    # The 68000 ignores those bits (always ×1).  Any test with scale≠0 would
-    # compute a different EA on the 68030 DUT vs the 68000 reference — skip it.
-    #
-    # For most instructions the brief extension is at prefetch[1] (directly
-    # after the opcode word).  For group-0 immediate instructions (ADDI/SUBI/
-    # ORI/ANDI/EORI to indexed EA), an immediate word precedes the brief
-    # extension, so prefetch[1] is the immediate and the brief extension lives
-    # in the RAM at instr_src+4 (byte/word imm) or instr_src+6 (long imm).
+    # Indexed EA (mode=6) with non-zero scale: the 68030 computes a different EA
+    # than the 68000 reference.  get_scale_remap() handles the remapping so these
+    # tests can run — skip only when EA_68030 is problematic.
     if ea_mode == 6:
-        f_group = (opcode >> 12) & 0xF
-        f_ss    = (opcode >>  6) & 0x3
-        f_dn    = (opcode >>  9) & 0x7
-        if f_group == 0 and (f_dn not in (4, 7)) and f_ss != 3:
-            # ADDI/SUBI/ORI/ANDI/EORI to indexed EA: get brief ext from RAM
-            instr_src_for_scale = ini['pc'] - 4
-            brief_offset = 6 if f_ss == 2 else 4   # long imm = 2 words, else 1
-            ram_map_scale = {a: v for a, v in ini['ram']}
-            bhi = ram_map_scale.get(instr_src_for_scale + brief_offset,     0)
-            blo = ram_map_scale.get(instr_src_for_scale + brief_offset + 1, 0)
-            brief_ext = (bhi << 8) | blo
-            scale = (brief_ext >> 9) & 0x3
-            if scale != 0:
-                return False, f'indexed EA with non-zero scale={scale} (68000/68030 mismatch)'
-        elif len(ini['prefetch']) > 1:
-            # Brief extension is the second prefetch word (immediately after opcode)
-            ext_word = ini['prefetch'][1]
-            scale = (ext_word >> 9) & 0x3
-            if scale != 0:
-                return False, f'indexed EA with non-zero scale={scale} (68000/68030 mismatch)'
+        remap = get_scale_remap(test)
+        if remap:
+            ea1, nb = remap['ea_68030'], remap['siz_bytes']
+            # Odd-address word/longword → 68030 address error; skip.
+            if nb >= 2 and (ea1 & 1):
+                return False, f'EA_68030 {ea1:#08x} misaligned (would be addr error)'
+            # EA_68030 in our init code region → data conflict.
+            if any((ea1 + i) & 0xFFFFFF in range(0x000000, 0x000090) for i in range(nb)):
+                return False, f'EA_68030 {ea1:#08x} in init region (scale remap)'
 
     # Instruction at original address would land in our init region
     instr_src = ini['pc'] - 4
