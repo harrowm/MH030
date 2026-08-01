@@ -3143,7 +3143,7 @@ module eu_seq (
                         end
                     // ── ADDQ/SUBQ to memory ea ─────────────────────
                     end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
-                                 f_mode == 3'b101 ||
+                                 f_mode == 3'b101 || f_mode == 3'b110 ||
                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001))) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
@@ -3172,6 +3172,15 @@ module eu_seq (
                             3'b101: begin
                                 dec_needs_ext  = 1'b1;
                                 dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
+                            end
+                            3'b110: begin
+                                dec_needs_ext  = 1'b1;
+                                dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst  = 1'b1;
+                                dec_is_idx     = 1'b1;
+                                dec_xn_wl      = ext_data[11];
+                                dec_xn_scale   = ext_data[10:9];
+                                dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
                             end
                             3'b111: begin
                                 dec_needs_ext  = 1'b1;
@@ -3508,9 +3517,10 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         dec_dest_reg    = {1'b0, f_dn};
-                    // ── SUB Dn, (An)/(An)+/-(An) ──────────────────────
+                    // ── SUB Dn, (An)/(An)+/-(An)/(d16,An) ─────────────
                     end else if (f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101)) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
                         dec_alu_op      = grp_aop(f_group);
@@ -3521,7 +3531,48 @@ module eu_seq (
                         dec_dst_reg     = {1'b0, f_dn};
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
-                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        if (f_mode == 3'b101) begin
+                            dec_needs_ext  = 1'b1;
+                            dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else begin
+                            setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        end
+                    // ── SUB Dn, (d8,An,Xn) — indexed memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = grp_aop(f_group);
+                        dec_siz            = f_siz;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_is_mem_rmw     = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                    // ── SUB Dn, (xxx).W/(xxx).L — absolute memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)) begin
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = grp_aop(f_group);
+                        dec_siz        = f_siz;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_is_mem_rmw = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_dst_reg    = {1'b0, f_dn};
+                        dec_reads_dst  = 1'b1;
+                        dec_abs_ea_en  = 1'b1;
+                        if (f_reg == 3'b000)
+                            dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                        else
+                            dec_abs_ea_val = ext_data;
                     // ── SUB (An)/(An)+/-(An), Dn — memory source → register dest ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -3539,6 +3590,28 @@ module eu_seq (
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
                         setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                    // ── SUB (d8,An,Xn),Dn — indexed memory source ──────
+                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_is_mem_src     = 1'b1;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = grp_aop(f_group);
+                        dec_siz            = f_siz;
+                        dec_writes_reg     = 1'b1;
+                        dec_updates_ccr    = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_dest_reg       = {1'b0, f_dn};
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
                     // ── SUB (ea),Dn — memory source → register dest ────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
@@ -3571,6 +3644,19 @@ module eu_seq (
                                 default: ;
                             endcase
                         end
+                    // ── ADD/SUB #imm, Dn — immediate source, register destination ──
+                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b111 && f_reg == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = grp_aop(f_group);
+                        dec_siz         = f_siz;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_dst   = 1'b1;
+                        dec_dest_reg    = {1'b0, f_dn};
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
                     end else if (f_ss == 2'b11) begin
                         // SUBA/ADDA .W (f_dir=0) / .L (f_dir=1): An ← An ± src; CCR unchanged
                         dec_valid      = 1'b1;

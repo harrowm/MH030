@@ -156,6 +156,9 @@ $(SIM)/cosim_grp:  $(TOP_SRCS) tb/cosim_grp_tb.sv | $(SIM)
 $(SIM)/cosim_dat:  $(TOP_SRCS) tb/cosim_dat_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/harte_dat:  $(TOP_SRCS) tb/harte_tb.sv | $(SIM)
+	$(IVCOMP)
+
 $(SIM)/mustest: $(TOP_SRCS) tb/mustest_tb.sv | $(SIM)
 	$(IVCOMP)
 
@@ -219,7 +222,32 @@ winuae/tests:
 .PHONY: m68ksim ref-log buscmp cosim_grp \
         buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
         buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7 \
-        dat-replay dat-synth mustest mustest40 vmustest
+        dat-replay dat-synth mustest mustest40 vmustest \
+        harte-add harte-add-b harte-add-w harte-add-l
+
+# Tom Harte SingleStepTests: run ADD.b/w/l against DUT
+# Usage: make harte-add [LIMIT=N] [VERBOSE=-v]
+HARTE_LIMIT ?=
+HARTE_VERBOSE ?=
+harte-add: $(SIM)/harte_dat
+	python3 scripts/run_harte.py \
+	    tests/harte/ADD.b.json.bin \
+	    tests/harte/ADD.w.json.bin \
+	    tests/harte/ADD.l.json.bin \
+	    $(if $(HARTE_LIMIT),--limit $(HARTE_LIMIT)) \
+	    $(if $(HARTE_VERBOSE),--verbose)
+
+harte-add-b: $(SIM)/harte_dat
+	python3 scripts/run_harte.py tests/harte/ADD.b.json.bin \
+	    $(if $(HARTE_LIMIT),--limit $(HARTE_LIMIT)) $(if $(HARTE_VERBOSE),--verbose)
+
+harte-add-w: $(SIM)/harte_dat
+	python3 scripts/run_harte.py tests/harte/ADD.w.json.bin \
+	    $(if $(HARTE_LIMIT),--limit $(HARTE_LIMIT)) $(if $(HARTE_VERBOSE),--verbose)
+
+harte-add-l: $(SIM)/harte_dat
+	python3 scripts/run_harte.py tests/harte/ADD.l.json.bin \
+	    $(if $(HARTE_LIMIT),--limit $(HARTE_LIMIT)) $(if $(HARTE_VERBOSE),--verbose)
 m68ksim: tools/m68ksim
 ref-log: winuae/tests/smoke_ref.log
 

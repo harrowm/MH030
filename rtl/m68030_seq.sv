@@ -250,15 +250,23 @@ module m68030_seq (
     assign is_alu_mem_src =
         (f_group == 4'h8 || f_group == 4'h9 || f_group == 4'hb ||
          f_group == 4'hc || f_group == 4'hd) &&
-        (f_mode == 3'b101 ||
+        (f_mode == 3'b101 || f_mode == 3'b110 ||
          (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 || f_reg == 3'b010)));
     logic is_alu_mem_src_long;
     assign is_alu_mem_src_long = is_alu_mem_src && (f_mode == 3'b111) && (f_reg == 3'b001);
 
+    // ADD/SUB #imm, Dn (groups 9/D) and CMP #imm, Dn (group B, !f_dir) — immediate to register
+    // byte/word: 1 ext word; long: 2 ext words
+    logic is_alu_imm_dn;
+    assign is_alu_imm_dn =
+        (f_group == 4'h9 || f_group == 4'hd) &&
+        !f_dir && (f_ss != 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b100);
+
     // ADDQ/SUBQ #n, (d16,An) / (xxx).W / (xxx).L — 1 or 2 ext words
     logic is_addq_subq_ext;
     assign is_addq_subq_ext = (f_group == 4'h5) && (f_ss != 2'b11) &&
-        (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)));
+        (f_mode == 3'b101 || f_mode == 3'b110 ||
+         (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)));
     logic is_addq_subq_ext_long;
     assign is_addq_subq_ext_long = is_addq_subq_ext && (f_mode == 3'b111) && (f_reg == 3'b001);
 
@@ -406,7 +414,7 @@ module m68030_seq (
             ext_count = 3'd3;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long ||
-                 is_movem_2ext)
+                 is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10))
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
@@ -415,6 +423,7 @@ module m68030_seq (
                  is_rtd || is_stop_opcode || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||
                  (is_addq_subq_ext && !is_addq_subq_ext_long) ||
+                 (is_alu_imm_dn && f_ss != 2'b10) ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
