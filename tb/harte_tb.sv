@@ -44,11 +44,10 @@ module harte_tb;
     logic        cback_n = 1'b0;
 
     // ── Memory model ──────────────────────────────────────────────────────────
-    // 64K × 32-bit words (256 KB).  Addressed via ext_a[17:2] — 16-bit word
-    // index.  The upper bits of the 68030 address are ignored (folded mod 64K).
-    // The hex generator places all test data within a sparse 24-bit space;
-    // aliasing within 64K is extremely unlikely for 5-10 test entries.
-    localparam int MEM_WORDS = 1 << 16;   // 65 536 words = 256 KB
+    // 4M × 32-bit words (16 MB) — full 24-bit address space, no folding.
+    // ext_a[23:2] gives a unique 22-bit word index for every aligned 32-bit
+    // word in the 68000/030 24-bit address space, eliminating all aliasing.
+    localparam int MEM_WORDS = 1 << 22;   // 4M words = 16 MB
     logic [31:0] mem [0:MEM_WORDS-1];
 
     string hexfile;
@@ -58,7 +57,7 @@ module harte_tb;
         $readmemh(hexfile, mem);
     end
 
-    wire [15:0] mem_idx = ext_a[17:2];   // 64K word index
+    wire [21:0] mem_idx = ext_a[23:2];   // 22-bit word index, full 24-bit space
 
     // Register the read one cycle after DS+AS assert, avoiding a continuous
     // assignment that Icarus re-evaluates on every write to the array.
@@ -208,6 +207,7 @@ module harte_tb;
         fork
             begin : blk_timeout
                 repeat(cycles) @(posedge clk_4x);
+                disable blk_stop;
             end
             begin : blk_stop
                 wait(stop_seen == 1'b1);

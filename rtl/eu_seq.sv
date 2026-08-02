@@ -3617,7 +3617,8 @@ module eu_seq (
                                  (f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
                                                         f_reg == 3'b001 ||
-                                                        f_reg == 3'b010)))) begin
+                                                        f_reg == 3'b010 ||
+                                                        f_reg == 3'b011)))) begin
                         dec_valid       = 1'b1;
                         dec_is_mem_src  = 1'b1;
                         dec_is_mem_rd   = 1'b1;
@@ -3641,6 +3642,16 @@ module eu_seq (
                                 3'b001: dec_abs_ea_val = ext_data;
                                 3'b010: dec_abs_ea_val = decode_pc + 32'd2
                                                        + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b011: begin  // (d8,PC,Xn): EA = PC+2+d8 + scaled(Xn)
+                                    dec_abs_ea_val    = decode_pc + 32'd2
+                                                      + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg       = {ext_data[15], ext_data[14:12]};
+                                    dec_is_idx        = 1'b1;
+                                    dec_xn_wl         = ext_data[11];
+                                    dec_xn_scale      = ext_data[10:9];
+                                    dec_is_dyn_bit_idx = 1'b1;
+                                    dec_dyn_bit_reg   = f_dn;
+                                end
                                 default: ;
                             endcase
                         end

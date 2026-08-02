@@ -251,7 +251,8 @@ module m68030_seq (
         (f_group == 4'h8 || f_group == 4'h9 || f_group == 4'hb ||
          f_group == 4'hc || f_group == 4'hd) &&
         (f_mode == 3'b101 || f_mode == 3'b110 ||
-         (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 || f_reg == 3'b010)));
+         (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
+                               f_reg == 3'b010 || f_reg == 3'b011)));
     logic is_alu_mem_src_long;
     assign is_alu_mem_src_long = is_alu_mem_src && (f_mode == 3'b111) && (f_reg == 3'b001);
 

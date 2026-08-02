@@ -5,15 +5,16 @@ gen_harte_hex.py — generate a sparse $readmemh hex file from a Tom Harte test 
 Memory layout (all byte addresses, indexed as 32-bit words via addr[23:2]):
   0x000000  reset SSP (= test.initial.ssp or .usp)
   0x000004  reset PC  = RESET_PC (0x000008)
-  0x000008  init code: MOVE.L #Dn x8, MOVEA.L #An x7, MOVEA.L #A7, MOVE.W #SR
-  0x000066  instruction under test  (remapped from initial.pc-4)
-  0x000066+N  STOP #$2700  (N = final.pc - initial.pc = instruction byte length)
-  0x000076+  NOP padding (IFU prefetch runway)
+  0x000008  init code: MOVE.L #Dn x8, MOVEA.L #An x7, MOVEA.L #A7, MOVE.W #SR,
+                       NOP (SR pipeline guard), JMP.L #instr_src
+  instr_src  instruction under test at its original address (initial.pc - 4)
+  instr_src+N  STOP #$2700  (N = final.pc - initial.pc = instruction byte length)
+  instr_src+N+4+  NOP padding (IFU prefetch runway)
   <data addrs>  initial.ram entries at their natural 24-bit addresses
 
-Limitations:
-  - Instruction is always placed at 0x000066 regardless of original PC.
-    PC-relative EA (mode 7, reg 2/3) will be wrong — filter those tests out.
+The instruction runs at its original PC so PC-relative EAs (mode 7, reg 2/3)
+compute correctly without any displacement adjustment.
+
   - Always runs in supervisor mode (SR forced | 0x2000) so STOP can execute.
   - Only the 24-bit portion of addresses is used (ext_a[23:2] in the testbench).
 """
@@ -22,8 +23,8 @@ import struct
 import sys
 from pathlib import Path
 
-RESET_PC   = 0x000008   # init code start byte address
-INSTR_ADDR = 0x000080   # instruction under test byte address (init code = 100 bytes → ends at 0x6C)
+RESET_PC      = 0x000008   # init code start byte address
+INIT_CODE_END = 0x000080   # conservative upper bound on init code + JMP.L (~0x0074 actual)
 
 
 def _word(v):  return struct.pack('>H', v & 0xFFFF)
@@ -55,6 +56,11 @@ def _stop_2700():
 
 def _nop():
     return _word(0x4E71)
+
+
+def _jmp_l(addr):
+    """JMP (xxx).L — opcode 0x4EF9 + 32-bit absolute address"""
+    return _word(0x4EF9) + _long(addr)
 
 
 def build_patches(test):
@@ -92,45 +98,25 @@ def build_patches(test):
     # XNZVC and interrupt mask are kept from the test's initial SR.
     sr = (ini['sr'] | 0x2000) & ~0xC000
     code += _move_w_imm_sr(sr)
+    code += _nop()              # pipeline guard: no SR-forwarding after MOVE.W #SR
+    code += _jmp_l(instr_src)  # jump to instruction at its original address
 
-    init_end = RESET_PC + len(code)
-    assert init_end <= INSTR_ADDR, (
-        f"init code overflows: ends at {init_end:#x}, instr at {INSTR_ADDR:#x}")
+    assert RESET_PC + len(code) <= INIT_CODE_END, (
+        f"init code overflows: ends at {RESET_PC + len(code):#x}")
 
     patch(RESET_PC, bytes(code))
 
-    # Fill gap between init code and instruction with NOPs so IFU prefetch
-    # doesn't encounter uninitialized (X) memory.
-    for addr in range(init_end, INSTR_ADDR, 2):
-        patch(addr, _nop())
-
-    # ── Instruction bytes at INSTR_ADDR ──────────────────────────────────────
-    ram_map = {addr: val for addr, val in ini['ram']}
-    instr_bytes = bytearray(
-        ram_map.get(instr_src + i, 0x4E) for i in range(instr_len)
-    )
-    patch(INSTR_ADDR, bytes(instr_bytes))
-
-    # STOP after the instruction; NOP runway for IFU prefetch
-    stop_addr = INSTR_ADDR + instr_len
-    patch(stop_addr, _stop_2700())
-    nop_start = stop_addr + 4
-    for i in range(8):
-        patch(nop_start + i * 2, _nop())
-
     # ── Test data from initial.ram ────────────────────────────────────────────
-    our_code_range = range(0x000000, 0x000070)
+    # Instruction bytes live at their natural address (instr_src) — no copy needed.
+    # Place ini['ram'] first so the STOP/NOP runway below wins any overlap.
+    our_code_range = range(0x000000, INIT_CODE_END)
     for addr, val in ini['ram']:
         addr24 = addr & 0xFFFFFF
         if addr24 in our_code_range:
             continue   # our init code wins; don't let test data clobber it
-        if instr_src <= addr < instr_src + instr_len:
-            continue   # instruction bytes already placed at INSTR_ADDR
         patches[addr24] = val
 
     # ── Scale remap: copy bytes EA_68000 → EA_68030 for non-zero scale ────────
-    # When scale≠0, the 68030 computes a different indexed EA than the 68000.
-    # Pre-place the same source bytes at EA_68030 so the DUT reads correct data.
     remap = get_scale_remap(test)
     if remap:
         ini_ram_map = {(a & 0xFFFFFF): v for a, v in ini['ram']}
@@ -138,23 +124,54 @@ def build_patches(test):
         for i in range(nb):
             patches[(ea1 + i) & 0xFFFFFF] = ini_ram_map.get((ea0 + i) & 0xFFFFFF, 0)
 
+    # ── Full extension word masking: bit8=1 → force to brief (68000 behaviour) ─
+    # The 68000 ignores bit 8 and scale (bits 10:9); the 68030 interprets bit8=1
+    # as a full extension word with a completely different EA formula.  Patch the
+    # instruction bytes in memory so the DUT sees bits[10:8]=0 (a brief extension
+    # with scale=0), which produces exactly the same EA as the 68000 reference.
+    # The test data is already at the 68000 EA in ini['ram'], so no remap needed.
+    opcode_w = ini['prefetch'][0]
+    ea_mode_w = (opcode_w >> 3) & 7
+    ea_reg_w  =  opcode_w        & 7
+    if ea_mode_w == 6 or (ea_mode_w == 7 and ea_reg_w == 3):
+        f_group_w = (opcode_w >> 12) & 0xF
+        f_ss_w    = (opcode_w >>  6) & 0x3
+        f_dn_w    = (opcode_w >>  9) & 0x7
+        ea_off_w  = (6 if f_ss_w == 2 else 4) if (f_group_w == 0 and
+                     f_dn_w not in (4, 7) and f_ss_w != 3) else 2
+        ext_hi_addr = (instr_src + ea_off_w) & 0xFFFFFF
+        ext_hi = patches.get(ext_hi_addr, 0)
+        if ext_hi & 0x01:           # bit 8 of the 16-bit extension word is set
+            patches[ext_hi_addr] = ext_hi & 0xF8   # clear bit8 + scale[1:0]
+
+    # ── STOP + NOP runway (placed last so they always win over ini['ram'] data) ─
+    stop_addr = instr_src + instr_len
+    patch(stop_addr, _stop_2700())
+    for i in range(8):
+        patch(stop_addr + 4 + i * 2, _nop())
+
     return patches, instr_len
 
 
 def get_scale_remap(test):
     """
-    If the opcode has an indexed EA (mode=6) with non-zero scale, return a dict:
-      {'ea_68000': int, 'ea_68030': int, 'siz_bytes': int}
+    If the opcode has an indexed EA (mode=6 or mode=7 reg=3) with non-zero scale,
+    return a dict: {'ea_68000': int, 'ea_68030': int, 'siz_bytes': int}
     The 68000 ignores scale bits (always ×1); the 68030 applies ×1/×2/×4/×8.
     build_patches() uses this to copy source bytes from EA_68000 to EA_68030 so
     the DUT reads the expected data; compare() uses it to redirect expected memory
     writes from EA_68000 to EA_68030 (for RMW-destination instructions).
-    Returns None when scale=0 or the opcode is not an indexed EA.
+    Returns None when scale=0, bit8=1 (full extension word), or not an indexed EA.
     """
     ini    = test['initial']
     opcode = ini['prefetch'][0]
 
-    if (opcode >> 3) & 7 != 6:
+    ea_mode_r  = (opcode >> 3) & 7
+    ea_reg_r   =  opcode        & 7
+    is_mode6   = ea_mode_r == 6
+    is_pc_idx  = ea_mode_r == 7 and ea_reg_r == 3
+
+    if not (is_mode6 or is_pc_idx):
         return None
 
     f_group = (opcode >> 12) & 0xF
@@ -162,15 +179,20 @@ def get_scale_remap(test):
     f_dn    = (opcode >>  9) & 0x7
     f_reg   =  opcode        & 0x7
 
-    # Locate brief extension word (same logic as can_run() scale check)
+    # Locate brief extension word
+    instr_src = ini['pc'] - 4
+    rm        = {a: v for a, v in ini['ram']}
     if f_group == 0 and (f_dn not in (4, 7)) and f_ss != 3:
-        instr_src = ini['pc'] - 4
-        off       = 6 if f_ss == 2 else 4
-        rm        = {a: v for a, v in ini['ram']}
-        brief_ext = (rm.get(instr_src + off, 0) << 8) | rm.get(instr_src + off + 1, 0)
+        ea_off    = 6 if f_ss == 2 else 4
+        brief_ext = (rm.get(instr_src + ea_off, 0) << 8) | rm.get(instr_src + ea_off + 1, 0)
     elif len(ini['prefetch']) > 1:
+        ea_off    = 2
         brief_ext = ini['prefetch'][1]
     else:
+        return None
+
+    # Full extension word (bit 8 = 1): 68030 computes different EA; can't remap
+    if (brief_ext >> 8) & 1:
         return None
 
     scale = (brief_ext >> 9) & 3
@@ -189,18 +211,21 @@ def get_scale_remap(test):
             return (ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']) & 0xFFFFFFFF
         return ini[f'a{reg}'] & 0xFFFFFFFF
 
-    an_val  = _get_an(f_reg)
     xn_val  = _get_an(xn_reg) if xn_da else ini[f'd{xn_reg}'] & 0xFFFFFFFF
-    if not xn_wl:                       # word Xn: sign-extend 16→32
+    if not xn_wl:
         xn_val &= 0xFFFF
         if xn_val >= 0x8000:
             xn_val -= 0x10000
-    # longword Xn stays as-is; Python arithmetic + 24-bit mask handles overflow
+
+    siz_bytes = {0: 1, 1: 2, 2: 4}.get(f_ss, 1)
+
+    if is_mode6:
+        an_val = _get_an(f_reg)
+    else:  # (d8,PC,Xn): base is PC at the extension word
+        an_val = (instr_src + ea_off) & 0xFFFFFFFF
 
     ea_68000 = (an_val + xn_val            + d8) & 0xFFFFFF
     ea_68030 = (an_val + xn_val * (1 << scale) + d8) & 0xFFFFFF
-
-    siz_bytes = {0: 1, 1: 2, 2: 4}.get(f_ss, 1)
 
     return {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
 
@@ -233,7 +258,7 @@ def get_operand_ea(test):
     # No memory operand for register-direct or immediate EA
     if ea_mode in (0, 1):
         return None
-    if ea_mode == 7 and ea_reg in (2, 3, 4):   # PC-relative or #imm
+    if ea_mode == 7 and ea_reg == 4:   # #imm — no memory access
         return None
 
     # Transfer size in bytes.
@@ -280,19 +305,45 @@ def get_operand_ea(test):
             xn_da  = (brief >> 15) & 1
             xn_reg = (brief >> 12) & 7
             xn_wl  = (brief >> 11) & 1
+            scale  = 0 if (brief >> 8) & 1 else (brief >> 9) & 3
             d8     =  brief & 0xFF
             if d8 >= 0x80: d8 -= 0x100
             xn_sel = get_an(xn_reg) if xn_da else ini[f'd{xn_reg}'] & 0xFFFFFFFF
             if not xn_wl:
                 xn_sel &= 0xFFFF
                 if xn_sel >= 0x8000: xn_sel -= 0x10000
-            ea = (an + xn_sel + d8) & 0xFFFFFFFF
+            ea = (an + xn_sel * (1 << scale) + d8) & 0xFFFFFFFF
     elif ea_mode == 7:
+        # PC value used for EA computation = address of the extension word
+        pc_for_ea = instr_src + ea_off
         if ea_reg == 0:     # (xxx).W
             w  = rw(ea_off)
             ea = ((w - 0x10000) if w >= 0x8000 else w) & 0xFFFFFFFF
         elif ea_reg == 1:   # (xxx).L
             ea = (rw(ea_off) << 16) | rw(ea_off + 2)
+        elif ea_reg == 2:   # (d16,PC)
+            d16 = rw(ea_off)
+            if d16 >= 0x8000: d16 -= 0x10000
+            ea = (pc_for_ea + d16) & 0xFFFFFFFF
+        elif ea_reg == 3:   # (d8,PC,Xn) brief extension
+            remap = get_scale_remap(test)
+            if remap:
+                ea = remap['ea_68030']
+            else:
+                brief  = rw(ea_off)
+                xn_da  = (brief >> 15) & 1
+                xn_reg = (brief >> 12) & 7
+                xn_wl  = (brief >> 11) & 1
+                # If bit8=1 (full extension word), we patch scale to 0 in the
+                # instruction bytes so the DUT matches the 68000 reference.
+                scale  = 0 if (brief >> 8) & 1 else (brief >> 9) & 3
+                d8     =  brief & 0xFF
+                if d8 >= 0x80: d8 -= 0x100
+                xn_sel = get_an(xn_reg) if xn_da else ini[f'd{xn_reg}'] & 0xFFFFFFFF
+                if not xn_wl:
+                    xn_sel &= 0xFFFF
+                    if xn_sel >= 0x8000: xn_sel -= 0x10000
+                ea = (pc_for_ea + xn_sel * (1 << scale) + d8) & 0xFFFFFFFF
         else:
             return None
     else:
@@ -305,16 +356,16 @@ def patches_to_hex(patches):
     """
     Convert a {byte_addr: byte_val} dict to $readmemh format.
     Groups consecutive bytes into 32-bit words and emits @word_addr entries.
-    Addresses are folded to 16-bit word index (matching testbench mem_idx = ext_a[17:2])
-    so all entries fit in the 64K-word memory model.
+    Addresses use the full 22-bit word index (matching testbench mem_idx = ext_a[23:2])
+    so all entries map correctly in the 4M-word / 16 MB memory model.
     """
     if not patches:
         return ''
 
-    # Group bytes into 32-bit words: word_addr = (byte_addr >> 2) & 0xFFFF
+    # Group bytes into 32-bit words: word_addr = (byte_addr >> 2) & 0x3FFFFF
     words = {}
     for baddr, bval in patches.items():
-        waddr = (baddr >> 2) & 0xFFFF     # fold to 16-bit word index
+        waddr = (baddr >> 2) & 0x3FFFFF   # 22-bit word index for 24-bit space
         shift = (3 - (baddr & 3)) * 8    # big-endian: byte 0 → bits 31:24
         words.setdefault(waddr, [0, 0])   # [value, byte_mask]
         words[waddr][0] |= (bval & 0xFF) << shift
@@ -355,26 +406,18 @@ def can_run(test):
         if ea_siz >= 2 and (ea & 1):
             return False, 'misaligned EA'
 
-    # PC-relative source EA (mode=111, reg=2 or reg=3): address depends on
-    # original PC; instruction remapping to 0x0080 breaks the offset.
-    ea_mode = (opcode >> 3) & 0x7
-    ea_reg  = opcode & 0x7
-    if ea_mode == 7 and ea_reg in (2, 3):
-        return False, 'PC-relative source EA'
-
     # Indexed EA (mode=6) with non-zero scale: the 68030 computes a different EA
     # than the 68000 reference.  get_scale_remap() handles the remapping so these
     # tests can run — skip only when EA_68030 is problematic.
-    if ea_mode == 6:
-        remap = get_scale_remap(test)
-        if remap:
-            ea1, nb = remap['ea_68030'], remap['siz_bytes']
-            # Odd-address word/longword → 68030 address error; skip.
-            if nb >= 2 and (ea1 & 1):
-                return False, f'EA_68030 {ea1:#08x} misaligned (would be addr error)'
-            # EA_68030 in our init code region → data conflict.
-            if any((ea1 + i) & 0xFFFFFF in range(0x000000, 0x000090) for i in range(nb)):
-                return False, f'EA_68030 {ea1:#08x} in init region (scale remap)'
+    remap = get_scale_remap(test)
+    if remap:
+        ea1, nb = remap['ea_68030'], remap['siz_bytes']
+        # Odd-address word/longword → 68030 address error; skip.
+        if nb >= 2 and (ea1 & 1):
+            return False, f'EA_68030 {ea1:#08x} misaligned (would be addr error)'
+        # EA_68030 in our init code region → data conflict.
+        if any((ea1 + i) & 0xFFFFFF in range(0x000000, INIT_CODE_END) for i in range(nb)):
+            return False, f'EA_68030 {ea1:#08x} in init region (scale remap)'
 
     # Instruction at original address would land in our init region
     instr_src = ini['pc'] - 4
@@ -386,28 +429,29 @@ def can_run(test):
     if not (1 <= instr_len <= 24):
         return False, 'misaligned EA'
 
-    if instr_src < 0x000090:
+    if instr_src < INIT_CODE_END:
         return False, f'instruction at {instr_src:#x} overlaps init region'
 
-    # Skip tests where the instruction reads or writes into our init code region
-    # (0x000000-0x00008F).  We place init code there, not test data, so any
-    # data access to that range produces wrong values and can't be compared.
+    # Skip tests where the instruction writes into our init code region.
     ini_map24  = {a & 0xFFFFFF: v for a, v in ini['ram']}
     fin_map24  = {a & 0xFFFFFF: v for a, v in final['ram']}
-    init_range = range(0x000000, 0x000090)
+    init_range = range(0x000000, INIT_CODE_END)
     for a24, fin_v in fin_map24.items():
         if a24 in init_range and ini_map24.get(a24) != fin_v:
             return False, f'instruction writes to init region {a24:#06x}'
 
-    # Check for aliasing: two different byte addresses collide when folded
-    # to 16-bit word index ((byte_addr >> 2) & 0xFFFF).
+    # Check for aliasing: two byte addresses from different 32-bit aligned words
+    # must not share the same 22-bit word index (testbench uses ext_a[23:2]).
+    # All patch addresses are already in 24-bit space so genuine conflicts are
+    # extremely rare; this catches the edge case where init code and test data
+    # share bits [23:2] — i.e. fall within the same 4-byte aligned word.
     try:
         patches, _ = build_patches(test)
     except Exception:
         return True, 'ok'   # let it try and fail at run time
     word_owners = {}
     for baddr in patches:
-        waddr = (baddr >> 2) & 0xFFFF
+        waddr = (baddr >> 2) & 0x3FFFFF   # 22-bit word index for 24-bit space
         if waddr in word_owners and (baddr >> 2) != (word_owners[waddr] >> 2):
             return False, (f'address alias: {baddr:#x} and '
                            f'{word_owners[waddr]:#x} fold to same word {waddr:#06x}')
