@@ -256,11 +256,12 @@ module m68030_seq (
     logic is_alu_mem_src_long;
     assign is_alu_mem_src_long = is_alu_mem_src && (f_mode == 3'b111) && (f_reg == 3'b001);
 
-    // ADD/SUB #imm, Dn (groups 9/D) and CMP #imm, Dn (group B, !f_dir) — immediate to register
+    // OR/AND/CMP/ADD/SUB #imm, Dn (groups 8/9/B/C/D, !f_dir) — immediate to register
     // byte/word: 1 ext word; long: 2 ext words
     logic is_alu_imm_dn;
     assign is_alu_imm_dn =
-        (f_group == 4'h9 || f_group == 4'hd) &&
+        (f_group == 4'h8 || f_group == 4'h9 ||
+         f_group == 4'hb || f_group == 4'hc || f_group == 4'hd) &&
         !f_dir && (f_ss != 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b100);
 
     // ADDQ/SUBQ #n, (d16,An) / (xxx).W / (xxx).L — 1 or 2 ext words

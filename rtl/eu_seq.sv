@@ -3358,9 +3358,10 @@ module eu_seq (
                                 dec_dest_reg = {1'b0, f_reg};
                             end
                         end
-                    // ── OR Dn, (An)/(An)+/-(An) ───────────────────────
+                    // ── OR Dn, (An)/(An)+/-(An)/(d16,An) ─────────────
                     end else if (f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101)) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
                         dec_alu_op      = ALU_OR;
@@ -3371,7 +3372,12 @@ module eu_seq (
                         dec_dst_reg     = {1'b0, f_dn};   // Dn → rd_b (ALU src via redirect)
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
-                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        if (f_mode == 3'b101) begin
+                            dec_needs_ext = 1'b1;
+                            dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else begin
+                            setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        end
                     // ── SBCD -(Ay),-(Ax): 1000 Ax 1 00 001 Ay
                     end else if (f_dir && f_ss == 2'b00 && f_mode == 3'b001) begin
                         dec_valid            = 1'b1;
@@ -3398,6 +3404,42 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         dec_needs_ext   = 1'b1;           // adj16 in extension word
+                    // ── OR Dn, (d8,An,Xn) — indexed memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = ALU_OR;
+                        dec_siz            = f_siz;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_is_mem_rmw     = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                    // ── OR Dn, (xxx).W/(xxx).L — absolute memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)) begin
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = ALU_OR;
+                        dec_siz        = f_siz;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_is_mem_rmw = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_dst_reg    = {1'b0, f_dn};
+                        dec_reads_dst  = 1'b1;
+                        dec_abs_ea_en  = 1'b1;
+                        if (f_reg == 3'b000)
+                            dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                        else
+                            dec_abs_ea_val = ext_data;
                     // ── OR (An)/(An)+/-(An), Dn — memory source → register dest ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -3415,11 +3457,48 @@ module eu_seq (
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
                         setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                    // ── OR (d8,An,Xn), Dn — indexed memory source ──────
+                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_is_mem_src     = 1'b1;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = ALU_OR;
+                        dec_siz            = f_siz;
+                        dec_writes_reg     = 1'b1;
+                        dec_updates_ccr    = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_dest_reg       = {1'b0, f_dn};
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                    // ── OR #imm, Dn — immediate source (group 8 encoding) ──
+                    end else if (!f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && f_reg == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_OR;
+                        dec_siz         = f_siz;
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_dest_reg    = {1'b0, f_dn};
                     // ── OR/DIVU/DIVS (ea),Dn — memory source ────────────
                     end else if ((f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
                                                         f_reg == 3'b001 ||
-                                                        f_reg == 3'b010)))) begin
+                                                        f_reg == 3'b010 ||
+                                                        f_reg == 3'b011)))) begin
                         if (f_ss == 2'b11) begin
                             // DIVU.W (f_dir=0) or DIVS.W (f_dir=1) from memory EA
                             dec_valid       = 1'b1;
@@ -3460,6 +3539,16 @@ module eu_seq (
                                     3'b001: dec_abs_ea_val = ext_data;
                                     3'b010: dec_abs_ea_val = decode_pc + 32'd2
                                                            + {{16{ext_data[15]}}, ext_data[15:0]};
+                                    3'b011: begin  // (d8,PC,Xn)
+                                        dec_abs_ea_val    = decode_pc + 32'd2
+                                                          + {{24{ext_data[7]}}, ext_data[7:0]};
+                                        dec_dst_reg       = {ext_data[15], ext_data[14:12]};
+                                        dec_is_idx        = 1'b1;
+                                        dec_xn_wl         = ext_data[11];
+                                        dec_xn_scale      = ext_data[10:9];
+                                        dec_is_dyn_bit_idx = 1'b1;
+                                        dec_dyn_bit_reg   = f_dn;
+                                    end
                                     default: ;
                                 endcase
                             end
@@ -3793,9 +3882,10 @@ module eu_seq (
                         dec_reads_dst   = 1'b1;
                         dec_dest_reg    = {1'b0, f_dn};
 
-                    // ── EOR Dn, (An)/(An)+/-(An) ──────────────────────
+                    // ── EOR Dn, (An)/(An)+/-(An)/(d16,An) ────────────
                     end else if (f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101)) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
                         dec_alu_op      = ALU_EOR;
@@ -3807,7 +3897,48 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
-                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        if (f_mode == 3'b101) begin
+                            dec_needs_ext = 1'b1;
+                            dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else begin
+                            setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        end
+                    // ── EOR Dn, (d8,An,Xn) — indexed memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = ALU_EOR;
+                        dec_siz            = f_siz;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_is_mem_rmw     = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                    // ── EOR Dn, (xxx).W/(xxx).L — absolute memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)) begin
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = ALU_EOR;
+                        dec_siz        = f_siz;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_is_mem_rmw = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_dst_reg    = {1'b0, f_dn};
+                        dec_reads_dst  = 1'b1;
+                        dec_abs_ea_en  = 1'b1;
+                        if (f_reg == 3'b000)
+                            dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                        else
+                            dec_abs_ea_val = ext_data;
                     // ── CMP (An)/(An)+/-(An), Dn — memory source, flags only ───────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -3824,6 +3955,28 @@ module eu_seq (
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
                         setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                    // ── CMP (d8,An,Xn), Dn — indexed memory source, flags only ──
+                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_is_mem_src     = 1'b1;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = ALU_CMP;
+                        dec_siz            = f_siz;
+                        dec_updates_ccr    = 1'b1;
+                        dec_x_unchanged    = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_dest_reg       = {1'b0, f_dn};
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
                     // ── CMP (ea),Dn — memory source, flags only ──────────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
@@ -4002,9 +4155,10 @@ module eu_seq (
                         dec_dst_reg          = {1'b1, f_dn};
                         dec_reads_src        = 1'b1;
                         dec_reads_dst        = 1'b1;
-                    // ── AND Dn, (An)/(An)+/-(An) ──────────────────────
+                    // ── AND Dn, (An)/(An)+/-(An)/(d16,An) ────────────
                     end else if (f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101)) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_ALU;
                         dec_alu_op      = ALU_AND;
@@ -4016,7 +4170,12 @@ module eu_seq (
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         // CCR fires via mem_rmw_sr_wr_en, not WB (dec_updates_ccr stays 0)
-                        setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        if (f_mode == 3'b101) begin
+                            dec_needs_ext = 1'b1;
+                            dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else begin
+                            setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        end
                     end else if (f_dir &&
                                  ((f_ss == 2'b01 && f_mode == 3'b000) ||   // EXG Dx,Dy (handled above)
                                   (f_ss == 2'b01 && f_mode == 3'b001) ||   // EXG Ax,Ay
@@ -4052,6 +4211,42 @@ module eu_seq (
                             dec_an_upd_reg = f_reg;          // Ay receives Dx via an_wr (delta=0)
                             dec_an_delta   = 32'h0;
                         end
+                    // ── AND Dn, (d8,An,Xn) — indexed memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = ALU_AND;
+                        dec_siz            = f_siz;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_is_mem_rmw     = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                    // ── AND Dn, (xxx).W/(xxx).L — absolute memory destination ──
+                    end else if (f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)) begin
+                        dec_valid      = 1'b1;
+                        dec_unit       = UNIT_ALU;
+                        dec_alu_op     = ALU_AND;
+                        dec_siz        = f_siz;
+                        dec_is_mem_rd  = 1'b1;
+                        dec_is_mem_rmw = 1'b1;
+                        dec_needs_ext  = 1'b1;
+                        dec_dst_reg    = {1'b0, f_dn};
+                        dec_reads_dst  = 1'b1;
+                        dec_abs_ea_en  = 1'b1;
+                        if (f_reg == 3'b000)
+                            dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                        else
+                            dec_abs_ea_val = ext_data;
                     // ── AND (An)/(An)+/-(An), Dn — memory source → register dest ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
@@ -4069,11 +4264,48 @@ module eu_seq (
                         dec_src_reg     = {1'b1, f_reg};
                         dec_reads_src   = 1'b1;
                         setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                    // ── AND (d8,An,Xn), Dn — indexed memory source ──────
+                    end else if (!f_dir && f_ss != 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_is_mem_src     = 1'b1;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_unit           = UNIT_ALU;
+                        dec_alu_op         = ALU_AND;
+                        dec_siz            = f_siz;
+                        dec_writes_reg     = 1'b1;
+                        dec_updates_ccr    = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_dest_reg       = {1'b0, f_dn};
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                    // ── AND #imm, Dn — immediate source (group C encoding) ──
+                    end else if (!f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && f_reg == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_AND;
+                        dec_siz         = f_siz;
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_dest_reg    = {1'b0, f_dn};
                     // ── AND/MULU/MULS (ea),Dn — memory source ───────────
                     end else if ((f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
                                                         f_reg == 3'b001 ||
-                                                        f_reg == 3'b010)))) begin
+                                                        f_reg == 3'b010 ||
+                                                        f_reg == 3'b011)))) begin
                         if (f_ss == 2'b11) begin
                             // MULU.W (f_dir=0) or MULS.W (f_dir=1) from memory EA
                             dec_valid       = 1'b1;
@@ -4114,6 +4346,16 @@ module eu_seq (
                                     3'b001: dec_abs_ea_val = ext_data;
                                     3'b010: dec_abs_ea_val = decode_pc + 32'd2
                                                            + {{16{ext_data[15]}}, ext_data[15:0]};
+                                    3'b011: begin  // (d8,PC,Xn)
+                                        dec_abs_ea_val    = decode_pc + 32'd2
+                                                          + {{24{ext_data[7]}}, ext_data[7:0]};
+                                        dec_dst_reg       = {ext_data[15], ext_data[14:12]};
+                                        dec_is_idx        = 1'b1;
+                                        dec_xn_wl         = ext_data[11];
+                                        dec_xn_scale      = ext_data[10:9];
+                                        dec_is_dyn_bit_idx = 1'b1;
+                                        dec_dyn_bit_reg   = f_dn;
+                                    end
                                     default: ;
                                 endcase
                             end
