@@ -3977,12 +3977,27 @@ module eu_seq (
                         dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
+                    // ── CMP #imm, Dn — immediate source (group B encoding) ──
+                    end else if (!f_dir && f_ss != 2'b11 &&
+                                 f_mode == 3'b111 && f_reg == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_ALU;
+                        dec_alu_op      = ALU_CMP;
+                        dec_siz         = f_siz;
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_x_unchanged = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_dest_reg    = {1'b0, f_dn};
                     // ── CMP (ea),Dn — memory source, flags only ──────────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
                                                         f_reg == 3'b001 ||
-                                                        f_reg == 3'b010)))) begin
+                                                        f_reg == 3'b010 ||
+                                                        f_reg == 3'b011)))) begin
                         dec_valid       = 1'b1;
                         dec_is_mem_src  = 1'b1;
                         dec_is_mem_rd   = 1'b1;
@@ -4005,6 +4020,16 @@ module eu_seq (
                                 3'b001: dec_abs_ea_val = ext_data;
                                 3'b010: dec_abs_ea_val = decode_pc + 32'd2
                                                        + {{16{ext_data[15]}}, ext_data[15:0]};
+                                3'b011: begin  // (d8,PC,Xn)
+                                    dec_abs_ea_val    = decode_pc + 32'd2
+                                                      + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg       = {ext_data[15], ext_data[14:12]};
+                                    dec_is_idx        = 1'b1;
+                                    dec_xn_wl         = ext_data[11];
+                                    dec_xn_scale      = ext_data[10:9];
+                                    dec_is_dyn_bit_idx = 1'b1;
+                                    dec_dyn_bit_reg   = f_dn;
+                                end
                                 default: ;
                             endcase
                         end
@@ -4823,9 +4848,11 @@ module eu_seq (
     logic        cmpm_phase_r;    // 1=in phase 2 (reading Ax)
     logic [31:0] cmpm_src_r;      // Ay_val from phase 1 read
     logic [31:0] cmpm_ax_addr_r;  // Ax address for phase 2 read
-    logic [31:0] cmpm_step_r;     // postincrement step (same for both An, same instruction size)
+    logic [31:0] cmpm_step_r;     // Ax postincrement step
     logic [2:0]  cmpm_ax_reg_r;   // Ax register number latched for an_wr
     logic        cmpm_stall;
+    // Ay step: uses Ay register (ex_src_reg) for A7 special case; Ax uses ex_an_delta.
+    logic [31:0] cmpm_ay_step;
     assign cmpm_stall = ex_valid && ex_is_cmpm && !(cmpm_phase_r && mem_ack);
 
     // ADDX/SUBX -(Ay),-(Ax) 3-phase predecrement FSM (declared early for ex_mem_stall)
@@ -5299,7 +5326,15 @@ module eu_seq (
     logic [31:0] ex_decode_pc;
     // Memory-access EX signals
     logic [31:0] ex_ea_offset;   // displacement for EA (0 or d16 or -step)
-    logic [31:0] ex_an_delta;    // An update amount
+    logic [31:0] ex_an_delta;    // An update amount (Ax step for CMPM; Ay step computed separately)
+    // CMPM Ay postincrement step — uses Ay register (ex_src_reg) for A7 special case.
+    always_comb begin
+        case (ex_siz)
+            2'b00:   cmpm_ay_step = 32'd4;
+            2'b10:   cmpm_ay_step = 32'd2;
+            default: cmpm_ay_step = (ex_src_reg[2:0] == 3'b111) ? 32'd2 : 32'd1;
+        endcase
+    end
     // subroutine / jump EX signals
     logic [31:0] ex_return_pc;   // return address for JSR/BSR push
     logic [31:0] ex_bsr_target;  // pre-computed BSR branch target
@@ -5780,7 +5815,8 @@ module eu_seq (
         end else if (ex_valid && ex_is_cmpm && !cmpm_phase_r && mem_ack) begin
             cmpm_phase_r   <= 1'b1;
             cmpm_src_r     <= mem_rdata;          // Ay_val from phase 1
-            cmpm_ax_addr_r <= rd_b_data;          // Ax address (rd_b = Ax)
+            // When Ax==Ay, capture post-increment address (Ay step, not Ax step).
+            cmpm_ax_addr_r <= (ex_src_reg == ex_dst_reg) ? rd_b_data + cmpm_ay_step : rd_b_data;
             cmpm_step_r    <= ex_an_delta;         // postincrement step
             cmpm_ax_reg_r  <= ex_dst_reg[2:0];    // Ax register number
         end else if (ex_valid && ex_is_cmpm && cmpm_phase_r && mem_ack) begin
@@ -7192,7 +7228,7 @@ module eu_seq (
         else if (addx_ax_wr_en)        begin an_wr_sel = addx_ax_reg_r;        an_wr_data = addx_ax_addr_r;                              end
         else if (pack_ay_wr_en)        begin an_wr_sel = pack_mem_ay_reg_r;    an_wr_data = pack_mem_ay_addr_r;                          end
         else if (pack_ax_wr_en)        begin an_wr_sel = pack_mem_ax_reg_r;    an_wr_data = pack_mem_ax_addr_r;                          end
-        else if (cmpm_ay_wr_en)        begin an_wr_sel = ex_src_reg[2:0];      an_wr_data = rd_a_data + ex_an_delta;                     end
+        else if (cmpm_ay_wr_en)        begin an_wr_sel = ex_src_reg[2:0];      an_wr_data = rd_a_data + cmpm_ay_step;                    end
         else if (cmpm_ax_wr_en)        begin an_wr_sel = cmpm_ax_reg_r;        an_wr_data = cmpm_ax_addr_r + cmpm_step_r;                end
         else if (bcds_ay_wr_en)        begin an_wr_sel = bcds_ay_reg_r;        an_wr_data = bcds_ay_addr_r;                              end
         else if (bcds_ax_wr_en)        begin an_wr_sel = bcds_ax_reg_r;        an_wr_data = bcds_ax_addr_r;                              end
