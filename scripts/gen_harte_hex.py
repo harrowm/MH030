@@ -106,10 +106,24 @@ def build_patches(test):
 
     patch(RESET_PC, bytes(code))
 
-    # ── Test data from initial.ram ────────────────────────────────────────────
-    # Instruction bytes live at their natural address (instr_src) — no copy needed.
-    # Place ini['ram'] first so the STOP/NOP runway below wins any overlap.
+    # ── Prefetch words → memory ───────────────────────────────────────────────
+    # The Harte format stores ini['prefetch'] = words already in the IFU queue.
+    # When the instruction word is only in the prefetch queue (not in ini['ram'],
+    # e.g. pure-register SUBQ.b #2,D3) we still need to write those bytes to
+    # memory so the DUT's IFU can fetch them from the hex file.  Write both
+    # prefetch words at their natural addresses before ini['ram'] and STOP; the
+    # STOP runway placed last will overwrite any overlap.
     our_code_range = range(0x000000, INIT_CODE_END)
+    for pf_idx, pf_word in enumerate(ini['prefetch'][:2]):
+        pf_addr = (instr_src + pf_idx * 2) & 0xFFFFFF
+        for byte_off, byte_val in enumerate([(pf_word >> 8) & 0xFF, pf_word & 0xFF]):
+            ba = (pf_addr + byte_off) & 0xFFFFFF
+            if ba not in our_code_range:
+                patches[ba] = byte_val
+
+    # ── Test data from initial.ram ────────────────────────────────────────────
+    # Place ini['ram'] after prefetch so it wins over prefetch for overlapping
+    # addresses; STOP runway below wins over both.
     for addr, val in ini['ram']:
         addr24 = addr & 0xFFFFFF
         if addr24 in our_code_range:
@@ -244,8 +258,19 @@ def get_operand_ea(test):
     instr_src = ini['pc'] - 4
     rm        = {a: v for a, v in ini['ram']}
 
-    def rw(off):    # read one big-endian instruction word from RAM
-        return (rm.get(instr_src + off, 0) << 8) | rm.get(instr_src + off + 1, 0)
+    pf = ini.get('prefetch', [])
+
+    def rw(off):
+        # Read one big-endian instruction word from RAM.  Fall back to ini['prefetch']
+        # for offsets 0 and 2 (first two words) when they are absent from ini['ram'],
+        # which is normal for json.gz tests where those words were in the CPU pipeline.
+        hi = rm.get(instr_src + off, None)
+        lo = rm.get(instr_src + off + 1, None)
+        if hi is not None and lo is not None:
+            return (hi << 8) | lo
+        if off == 0 and pf:         return pf[0]
+        if off == 2 and len(pf) > 1: return pf[1]
+        return 0
 
     opcode  = rw(0)
     f_group = (opcode >> 12) & 0xF
@@ -405,6 +430,8 @@ def can_run(test):
         ea, ea_siz = ea_info
         if ea_siz >= 2 and (ea & 1):
             return False, 'misaligned EA'
+        if (ea & 0xFFFFFF) < INIT_CODE_END:
+            return False, f'EA {ea:#08x} in init region'
 
     # Indexed EA (mode=6) with non-zero scale: the 68030 computes a different EA
     # than the 68000 reference.  get_scale_remap() handles the remapping so these

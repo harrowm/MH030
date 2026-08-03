@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-parse_harte.py — decode Tom Harte / SingleStepTests m68000 .json.bin files.
+parse_harte.py — decode Tom Harte / SingleStepTests m68000 test files.
 
-Binary format documented by the repo's decode.py:
+Supports two formats:
+  .json.bin  Custom binary format (2500-test subsets used in Phase 78)
+  .json.gz   Original gzipped JSON from TomHarte/ProcessorTests repo (8065 tests each)
+
+Binary format:
   File header: magic=0x1A3F5D71, num_tests (both u32 LE)
   Per test:    magic=0xABC12367, size; name block; initial state; final state; transactions
 
@@ -13,8 +17,10 @@ Transaction fields: [kind, cycles, fc, addr, width, data, uds, lds]
 
 Usage:
   python3 scripts/parse_harte.py tests/harte/ADD.b.json.bin [--limit N] [--probe IDX]
+  python3 scripts/parse_harte.py tests/harte/SUB.b.json.gz  [--limit N] [--probe IDX]
 """
 
+import gzip
 import sys
 import json
 import struct
@@ -97,9 +103,60 @@ def _read_test(content, ptr):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def _decode_json_gz(path):
+    """Decode a .json.gz file from TomHarte/ProcessorTests and return list of test dicts."""
+    with gzip.open(path) as f:
+        raw = json.loads(f.read())
+    # JSON ram entries are already [[addr, byte_val], ...] — same structure as binary.
+    # Transactions: convert from JSON field names to the dict structure _read_transactions produces.
+    result = []
+    for t in raw:
+        txns = []
+        for tx in t.get('transactions', []):
+            # JSON transactions are arrays: [kind, cycles, fc, addr, width, data, (uds, lds)?]
+            if len(tx) < 2:
+                txns.append({'kind': 'n', 'cycles': tx[1] if len(tx) > 1 else 0})
+                continue
+            kind, cycles = tx[0], tx[1]
+            if kind == 'n' or len(tx) < 5:
+                txns.append({'kind': 'n', 'cycles': cycles})
+                continue
+            fc, addr, width, data = tx[2], tx[3], tx[4], tx[5] if len(tx) > 5 else 0
+            uds = tx[6] if len(tx) > 6 else 1
+            lds = tx[7] if len(tx) > 7 else 1
+            txns.append({'kind': kind, 'cycles': cycles, 'fc': fc, 'addr': addr,
+                         'data': data, 'width': width, 'uds': uds, 'lds': lds})
+
+        # Normalise PC convention: json.gz stores ini['pc'] = instruction_address
+        # (the actual 68000 program counter, pointing at the instruction opcode).
+        # json.bin and all downstream code (gen_harte_hex.py) use ini['pc'] =
+        # instruction_address + 4, reflecting the 68000 pipeline having already
+        # fetched 2 words (prefetch[0] and prefetch[1]) ahead of the current
+        # instruction.  Shift both PCs forward by 4 to match the json.bin convention
+        # so instr_src = ini['pc'] - 4 gives the correct instruction address.
+        ini_raw = t['initial']
+        fin_raw = t['final']
+        ini_norm = dict(ini_raw)
+        fin_norm = dict(fin_raw)
+        ini_norm['pc'] = (ini_raw['pc'] + 4) & 0xFFFFFF
+        fin_norm['pc'] = (fin_raw['pc'] + 4) & 0xFFFFFF
+
+        result.append({
+            'name':         t['name'],
+            'initial':      ini_norm,
+            'final':        fin_norm,
+            'transactions': txns,
+            'length':       t.get('length', 0),
+        })
+    return result
+
+
 def decode_file(path):
-    """Decode a .json.bin file and return list of test dicts."""
-    content = Path(path).read_bytes()
+    """Decode a .json.bin or .json.gz file and return list of test dicts."""
+    path = Path(path)
+    if path.suffix == '.gz':
+        return _decode_json_gz(path)
+    content = path.read_bytes()
     magic, num_tests = unpack_from('<II', content, 0)
     assert magic == MAGIC_FILE, f"bad file magic {magic:#010x}"
     ptr = 8
