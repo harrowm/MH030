@@ -132,24 +132,29 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 56–71. RTE/STOP/TRAP/TRAPV, ADDA/SUBA/CMPA/ORI-ANDI-EORI-to-SR, MULS.L/MULU.L/DIVS.L/DIVU.L, PEA/EXG/RTD/CMPM, memory-dest ALU, ADDX/SUBX, bit-field ops, PACK/UNPK/LINK.L/RESET, MOVES/PMOVE 64-bit, ALU mem→reg, extended EA sweep, trace/priv/Line-A/Line-F, CAS2/Format-Error
 72–76. cosim72_tb (full-chip testbench), smoke.s bare-metal test, Musashi reference generator, buscmp.py diff tool, 8 opcode group tests (`tests/grp0.s`–`grp7.s`, `tb/cosim_grp_tb.sv`)
 77. Toni Wilen `.dat` replay harness: `tb/cosim_dat_tb.sv` (runtime hex load, eu_stop detection), `scripts/gen_init_hex.py` (reg-state init scaffold with NOP bubble after MOVE.W #,SR), `scripts/parse_dat.py` (.dat binary parser, --probe mode), `scripts/run_cosim.py` (50-vector synthetic suite, 50/50 PASS). RTL fixes: eu_stop exposed as top-level port; ext_count=1 for MOVE.W #,SR/CCR by direct opcode match (was broken f_ss field condition).
-78. Tom Harte SingleStepTests harness (`scripts/parse_harte.py`, `scripts/gen_harte_hex.py`, `scripts/run_harte.py`, `tb/harte_tb.sv`, `tests/harte/`). RTL fixes: ADD/SUB #imm,Dn handler in eu_seq.sv (groups 9/D); `is_alu_imm_dn` + `is_addq_subq_ext` f_mode=110 fix in m68030_seq.sv. Harness fixes: bad-instr-len guard; indexed EA scale from RAM for group-0; init-region data conflict filter; misaligned longword testbench read/write. Results: ADD.b 2122/2122, ADD.w 1396/1396, ADD.l 1406/1406 (100%).
+78. Tom Harte SingleStepTests harness (`scripts/parse_harte.py`, `scripts/gen_harte_hex.py`, `scripts/run_harte.py`, `tb/harte_tb.sv`, `tests/harte/`). RTL fixes: ADD/SUB #imm,Dn handler in eu_seq.sv (groups 9/D); `is_alu_imm_dn` + `is_addq_subq_ext` f_mode=110 fix in m68030_seq.sv. Harness fixes: bad-instr-len guard; indexed EA scale from RAM for group-0; init-region data conflict filter; misaligned longword testbench read/write. Scale-remap: tests with non-zero scale run via `get_scale_remap()`. Results: ADD.b/w/l 100%.
+79. Harte sweep — SUB/AND/OR/EOR/CMP/MOVE + bit-ops + shifts + misc. RTL fixes: (a) MOVE An,(dst) CCR bug: `dec_updates_ccr=(f_mode==3'b000)` suppressed Z/N/V/C update for An-source MOVE to memory; changed to `1'b1` in both indirect-dst and abs-dst blocks → MOVE.w/l 82.3%→94%/93.6%; (b) BCHG/BCLR/BSET CCR Z-flag bug: explicit `dec_updates_ccr=1'b0` overrode block-level `1'b1` for memory RMW bit-ops, and #imm forms lacked it entirely; fixed both locations. See `plan.md` for full Harte results table.
 
-**Current state**: 31/31 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`). ADD.b/w/l Harte suites 100%.
+**Current state**: 32/32 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`). Phase 79 Harte results: ADD/SUB/AND/OR/EOR/CMP b/w/l all 100%; MOVE.b/w/l 91–94% (all remaining fails = indexed-dst arch gap TIMEOUTs); BCHG/BCLR/BSET fix applied (retest pending at restart); see `plan.md §Phase 79` for full table.
 
-**Next phase**: Phase 79 — extend Harte testing to SUB, AND, OR, EOR, CMP, MOVE instruction families.
+**Architectural gap (known, deferred)**: Instructions with indexed destination `(d8,An,Xn)` TIMEOUT because the EU register file has only 2 read ports — simultaneous read of `dst_An` + `dst_Xn` + any src register exceeds port count. Affects: MOVE.b/w/l →indexed dst (~9%), CLR/NEG/NOT/TST/NEGX →indexed dst, shift memory-word forms, TAS, and others. Requires a 3-read-port register file to fix cleanly.
+
+**Next phase**: Phase 80 — continue Harte sweep: investigate and fix CLR/NEG/NOT/TST/NEGX memory-form TIMEOUTs (if not arch gap), TAS TIMEOUTs, CHK failures, shift memory-word forms, MOVEQ 4 TIMEOUTs, and ADDA/SUBA/CMPA/Scc/MOVEM/MOVEP/MOVEA/LEA/PEA once sweep completes.
 
 ## Verification Commands
 
 ```bash
-make test          # 31/31 unit + integration regression
+make test          # 32/32 unit + integration regression
 make buscmp        # smoke.s DUT vs Musashi bus log
 make cosim_grp     # all 8 opcode group bus comparisons (grp0–grp7)
 make buscmp-grp0   # single group (replace 0 with 1–7)
 make dat-synth     # 50-vector synthetic register-state cosim (DUT vs Musashi)
+make sim/harte_dat # (re)compile Harte testbench binary after RTL changes
 # Tom Harte SingleStepTests (68000 one-instruction vectors):
-python3 -u scripts/run_harte.py tests/harte/ADD.b.json.bin   # 2122/2122
-python3 -u scripts/run_harte.py tests/harte/ADD.w.json.bin   # 1396/1396
-python3 -u scripts/run_harte.py tests/harte/ADD.l.json.bin   # 1406/1406
+python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # 100%
+python3 -u scripts/run_harte.py tests/harte/SUB.b.json.gz    # 100%
+python3 -u scripts/run_harte.py tests/harte/MOVE.b.json.gz   # 90.8% (arch gap)
+# Run all: for f in tests/harte/*.json.gz; do python3 -u scripts/run_harte.py "$f"; done
 ```
 
 Bus log format: `BUS R|W %08x %08x fc=%b siz=%b` (siz: 00=longword, 01=byte, 10=word, 11=line)

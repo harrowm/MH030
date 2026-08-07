@@ -183,18 +183,47 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 ## Simulation and Verification
 
-**Tools**: Icarus Verilog (simulation), GTKWave (waveform debug).
+**Tools**: Icarus Verilog (simulation), GTKWave (waveform debug), Python 3 (test harnesses).
 
-**Test strategy**: trace-driven co-simulation against WinUAE / Musashi. A reference run logs every bus transaction; the Verilog simulation runs the same binary and the bus logs are diffed cycle-by-cycle. Any divergence is a failure.
+**Test strategy**: Three independent verification layers:
 
+1. **Unit + integration regression** (`make test`) — 32 testbenches covering BIU S-state timing, EU instruction decode, exception frames, MMU, cache, and full-chip co-simulation. 32/32 pass.
+
+2. **Bus co-simulation** (`make cosim_grp`) — run 8 opcode-group assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle. All 8 groups pass.
+
+3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 79` for full results table.
+
+```bash
+make test                  # 32/32 regression suite
+make cosim_grp             # 8 opcode group bus comparisons (DUT vs Musashi)
+make dat-synth             # 50-vector synthetic dat-replay cosim; 50/50 pass
+make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
+python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
-make test          # compile and run all tests
-make run TEST=seq59  # compile and run one test
-make compile       # compile all without running
-make clean
-```
 
-Each `seq<N>_tb.sv` testbench corresponds to a phase of the implementation. Tests use a word-addressed 32-bit RAM model and the `run_instr()` pattern: feed an opcode sequence, wait for `instr_ack`, then drain the pipeline and check register and memory state.
+### Harte Pass Rates (Phase 79 summary)
+
+| Family | Sizes | Pass rate | Notes |
+|--------|-------|-----------|-------|
+| ADD | b/w/l | 100% | |
+| SUB | b/w/l | 100% | |
+| AND | b/w/l | 100% | |
+| OR | b/w/l | 100% | |
+| EOR | b/w/l | 100% | |
+| CMP | b/w/l | 100% | |
+| MOVE | b | 90.8% | Remaining = indexed-dst TIMEOUTs (arch gap) |
+| MOVE | w/l | 94% / 93.6% | Same arch gap |
+| BCHG/BCLR/BSET | — | ~100% | CCR fix applied Phase 79 |
+| TRAPV | — | 100% | |
+| MOVEfromUSP/toUSP | — | 100% | |
+| CLR | b | 64% | TIMEOUTs (arch gap or path issue; under investigation) |
+| TAS | — | 69% | TIMEOUTs |
+| CHK | — | 18% | Mixed real failures + TIMEOUTs; needs investigation |
+| TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
+
+### Known Architectural Gap — Indexed Destination
+
+Instructions with a `(d8,An,Xn)` destination TIMEOUT because the EU register file has only 2 read ports — reading src_data + dst_An + dst_Xn simultaneously exceeds port count. Fix requires a 3-port register file; deferred. Affected: MOVE.b/w/l, CLR/NEG/NOT/TST/NEGX, memory-word shifts, TAS, BCHG/BCLR/BSET Dn,mem.
 
 ---
 

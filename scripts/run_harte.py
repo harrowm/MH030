@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO     = Path(__file__).parent.parent
@@ -202,11 +203,13 @@ def run_test(test, cycles, verbose):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('files', nargs='+', help='.json.bin test files')
+    ap.add_argument('files', nargs='+', help='.json.bin/.json.gz test files')
     ap.add_argument('--limit',          type=int, default=None)
     ap.add_argument('--verbose',        action='store_true')
     ap.add_argument('--timeout-cycles', type=int, default=8000)
     ap.add_argument('--stop-on-fail',   type=int, default=None)
+    ap.add_argument('--jobs', '-j',     type=int, default=6,
+                    help='parallel vvp workers (default 6)')
     args = ap.parse_args()
 
     if not SIM_BIN.exists():
@@ -222,11 +225,23 @@ def main():
             tests = tests[:args.limit]
 
         fname = Path(path).name
-        print(f"\n=== {fname} ({len(tests)} tests) ===")
+        print(f"\n=== {fname} ({len(tests)} tests) ===", flush=True)
 
-        for i, test in enumerate(tests):
-            result, fails = run_test(test, args.timeout_cycles, args.verbose)
+        indexed = list(enumerate(tests))
 
+        def _run(item):
+            i, test = item
+            return i, test, *run_test(test, args.timeout_cycles, args.verbose)
+
+        results_by_idx = {}
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(_run, item): item for item in indexed}
+            for fut in as_completed(futures):
+                i, test, result, fails = fut.result()
+                results_by_idx[i] = (test, result, fails)
+
+        for i in range(len(indexed)):
+            test, result, fails = results_by_idx[i]
             if result == 'PASS':
                 total_pass += 1
                 if args.verbose:

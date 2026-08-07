@@ -54,6 +54,10 @@ module eu_shifter (
     assign eff_rot   = count & (size_bits - 6'd1);
     assign eff_rox   = count % (size_bits + 6'd1);
 
+    // When count > size_bits: C and X must be cleared (last bit is 0 — all real bits gone)
+    logic over_shift;
+    assign over_shift = (count > size_bits);
+
     // -----------------------------------------------------------------------
     // Shift results
     // -----------------------------------------------------------------------
@@ -82,15 +86,19 @@ module eu_shifter (
     assign lsr_c_bit = (lsr_c_raw & 32'h1) != 32'h0;
 
     // -----------------------------------------------------------------------
-    // ASL overflow: V=1 if any of the top (eff_shift+1) bits of op_m differ.
-    // Mask covers bits [size_bits-1 : size_bits-1-eff_shift], i.e., eff_shift+1 bits.
+    // ASL overflow: V=1 if MSB changes at any point during the shift.
+    // For count < size_bits: check whether top (eff_shift+1) bits are non-uniform.
+    // For count >= size_bits: result is 0 — V=1 iff op_m != 0 (any bit causes MSB change).
     // -----------------------------------------------------------------------
     logic [31:0] asl_v_mask, asl_v_window;
     logic        asl_v;
+    logic        shift_full;      // count >= size_bits (result forced to 0)
 
+    assign shift_full    = (count >= size_bits);
     assign asl_v_mask   = result_mask & ~(result_mask >> (eff_shift + 6'd1));
     assign asl_v_window = op_m & asl_v_mask;
-    assign asl_v        = (asl_v_window != 32'h0) && (asl_v_window != asl_v_mask);
+    assign asl_v        = shift_full ? (op_m != 32'h0)
+                                     : (asl_v_window != 32'h0) && (asl_v_window != asl_v_mask);
 
     // -----------------------------------------------------------------------
     // Rotate results (ROL/ROR)
@@ -146,30 +154,30 @@ module eu_shifter (
                     result = lsl_res;
                     n_out  = (lsl_res & msb_mask) != 32'h0;
                     z_out  = (lsl_res == 32'h0);
-                    c_out  = lsl_c_bit;
-                    x_out  = lsl_c_bit;
+                    c_out  = over_shift ? 1'b0 : lsl_c_bit;
+                    x_out  = over_shift ? 1'b0 : lsl_c_bit;
                 end
                 SHF_ASL: begin
                     result = lsl_res;
                     n_out  = (lsl_res & msb_mask) != 32'h0;
                     z_out  = (lsl_res == 32'h0);
                     v_out  = asl_v;
-                    c_out  = lsl_c_bit;
-                    x_out  = lsl_c_bit;
+                    c_out  = over_shift ? 1'b0 : lsl_c_bit;
+                    x_out  = over_shift ? 1'b0 : lsl_c_bit;
                 end
                 SHF_LSR: begin
                     result = lsr_res;
                     n_out  = (lsr_res & msb_mask) != 32'h0;
                     z_out  = (lsr_res == 32'h0);
-                    c_out  = lsr_c_bit;
-                    x_out  = lsr_c_bit;
+                    c_out  = over_shift ? 1'b0 : lsr_c_bit;
+                    x_out  = over_shift ? 1'b0 : lsr_c_bit;
                 end
                 SHF_ASR: begin
                     result = asr_res;
                     n_out  = (asr_res & msb_mask) != 32'h0;
                     z_out  = (asr_res == 32'h0);
-                    c_out  = lsr_c_bit;   // same last-bit-shifted-out as LSR
-                    x_out  = lsr_c_bit;
+                    c_out  = over_shift ? 1'b0 : lsr_c_bit;
+                    x_out  = over_shift ? 1'b0 : lsr_c_bit;
                 end
                 SHF_ROL: begin
                     result = rol_res;

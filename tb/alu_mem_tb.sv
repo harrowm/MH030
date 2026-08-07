@@ -556,6 +556,109 @@ module alu_mem_tb;
         chk("ADDQ-idx:mem", ram[32'h740C >> 2], 32'h0000_1003);
         chk_ccr("ADDQ-idx", 1'b0, 1'b0, 1'b0, 1'b0);
 
+        // ─── Phase 79: OR/AND/EOR extended mem-dest; OR/AND/CMP #imm,Dn ─────
+        // OR.L D0,(d16,A1) — new mode 101 mem-dest added to group 8 decoder
+        $display("--- OR.L D0,(8,A1) (Phase79: OR mode101 dest) ---");
+        set_an(3'd1, 32'h0000_7500);
+        set_dn(3'd0, 32'h0000_F0F0);
+        ram[32'h7508 >> 2] = 32'h0000_0F0F;
+        run_instr(16'h81A9, 1'b1, 32'h0000_0008);
+        chk("OR-d16:mem",  ram[32'h7508 >> 2], 32'h0000_FFFF);
+        chk_ccr("OR-d16",  1'b0, 1'b0, 1'b0, 1'b0);
+
+        // OR.L D0,(0x7510).W — new abs.W mem-dest for group 8
+        $display("--- OR.L D0,(0x7510).W (Phase79: OR abs.W dest) ---");
+        set_dn(3'd0, 32'h0000_5678);
+        ram[32'h7510 >> 2] = 32'h0000_1234;
+        run_instr(16'h81B8, 1'b1, 32'h0000_7510);
+        chk("OR-absW:mem", ram[32'h7510 >> 2], 32'h0000_567c);  // 0x5678|0x1234=0x567c
+        chk_ccr("OR-absW", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // OR.L D0,(0x7520).L — new abs.L mem-dest for group 8
+        $display("--- OR.L D0,(0x7520).L (Phase79: OR abs.L dest) ---");
+        set_dn(3'd0, 32'h0FFF_FFFF);
+        ram[32'h7520 >> 2] = 32'hF000_0000;
+        run_instr(16'h81B9, 1'b1, 32'h0000_7520);
+        chk("OR-absL:mem", ram[32'h7520 >> 2], 32'hFFFF_FFFF);
+        chk_ccr("OR-absL", 1'b1, 1'b0, 1'b0, 1'b0);  // N=1: 0xFFFF_FFFF has bit31 set
+
+        // OR.b #0x42, D1 — new #imm,Dn handler for group 8 + is_alu_imm_dn fix
+        $display("--- OR.b #0x42, D1 (Phase79: OR imm->Dn) ---");
+        set_dn(3'd1, 32'h1122_3300);
+        run_instr(16'h823C, 1'b1, 32'h0000_0042);
+        chk("OR-imm-b:D1", dut.u_rf.d_reg[1], 32'h1122_3342);
+        chk_ccr("OR-imm-b", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // OR.l #0x1234_5678, D2 — long immediate to register (opcode 0x84BC)
+        $display("--- OR.l #0x12345678, D2 (Phase79: OR long imm->Dn) ---");
+        set_dn(3'd2, 32'h0000_0000);
+        run_instr(16'h84BC, 1'b1, 32'h1234_5678);
+        chk("OR-imm-l:D2", dut.u_rf.d_reg[2], 32'h1234_5678);
+        chk_ccr("OR-imm-l", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // AND.L D1,(8,A2) — new mode 101 mem-dest added to group C decoder
+        $display("--- AND.L D1,(8,A2) (Phase79: AND mode101 dest) ---");
+        set_an(3'd2, 32'h0000_7530);
+        set_dn(3'd1, 32'h0F0F_0F0F);
+        ram[32'h7538 >> 2] = 32'hFFFF_FFFF;
+        run_instr(16'hC3AA, 1'b1, 32'h0000_0008);
+        chk("AND-d16:mem",  ram[32'h7538 >> 2], 32'h0F0F_0F0F);
+        chk_ccr("AND-d16",  1'b0, 1'b0, 1'b0, 1'b0);
+
+        // AND.L D1,(0x7540).W — new abs.W mem-dest for group C
+        $display("--- AND.L D1,(0x7540).W (Phase79: AND abs.W dest) ---");
+        set_dn(3'd1, 32'hA5A5_A5A5);
+        ram[32'h7540 >> 2] = 32'hFFFF_FFFF;
+        run_instr(16'hC3B8, 1'b1, 32'h0000_7540);
+        chk("AND-absW:mem", ram[32'h7540 >> 2], 32'hA5A5_A5A5);
+        chk_ccr("AND-absW", 1'b1, 1'b0, 1'b0, 1'b0);  // N=1: 0xA5A5_A5A5 has bit31 set
+
+        // AND.b #0x0F, D3 — new #imm,Dn handler for group C + is_alu_imm_dn fix
+        $display("--- AND.b #0x0F, D3 (Phase79: AND imm->Dn) ---");
+        set_dn(3'd3, 32'h1234_5678);
+        run_instr(16'hC63C, 1'b1, 32'h0000_000F);
+        chk("AND-imm-b:D3", dut.u_rf.d_reg[3], 32'h1234_5608);
+        chk_ccr("AND-imm-b", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // EOR.L D2,(8,A3) — new mode 101 mem-dest added to group B EOR decoder
+        $display("--- EOR.L D2,(8,A3) (Phase79: EOR mode101 dest) ---");
+        set_an(3'd3, 32'h0000_7550);
+        set_dn(3'd2, 32'h5555_5555);
+        ram[32'h7558 >> 2] = 32'hAAAA_AAAA;
+        run_instr(16'hB5AB, 1'b1, 32'h0000_0008);
+        chk("EOR-d16:mem",  ram[32'h7558 >> 2], 32'hFFFF_FFFF);
+        chk_ccr("EOR-d16",  1'b1, 1'b0, 1'b0, 1'b0);  // N=1: 0xFFFF_FFFF has bit31 set
+
+        // EOR.L D2,(0x7560).W — new abs.W mem-dest for group B EOR
+        $display("--- EOR.L D2,(0x7560).W (Phase79: EOR abs.W dest) ---");
+        set_dn(3'd2, 32'h0F0F_0F0F);
+        ram[32'h7560 >> 2] = 32'hF0F0_F0F0;
+        run_instr(16'hB5B8, 1'b1, 32'h0000_7560);
+        chk("EOR-absW:mem", ram[32'h7560 >> 2], 32'hFFFF_FFFF);
+        chk_ccr("EOR-absW", 1'b1, 1'b0, 1'b0, 1'b0);  // N=1: 0xFFFF_FFFF has bit31 set
+
+        // CMP.b #0x20, D0 — new #imm,Dn handler for group B + is_alu_imm_dn fix
+        // 0x30 - 0x20 = 0x10: positive, no carry/overflow
+        $display("--- CMP.b #0x20, D0 (Phase79: CMP imm->Dn) ---");
+        set_dn(3'd0, 32'h0000_0030);
+        run_instr(16'hB03C, 1'b1, 32'h0000_0020);
+        chk("CMP-imm-b:D0-unchanged", dut.u_rf.d_reg[0], 32'h0000_0030);
+        chk_ccr("CMP-imm-b", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // CMP.l #0x00000001, D1 — long immediate CMP; 5-1=4 positive
+        $display("--- CMP.l #1, D1 (Phase79: CMP long imm->Dn) ---");
+        set_dn(3'd1, 32'h0000_0005);
+        run_instr(16'hB2BC, 1'b1, 32'h0000_0001);
+        chk("CMP-imm-l:D1-unchanged", dut.u_rf.d_reg[1], 32'h0000_0005);
+        chk_ccr("CMP-imm-l", 1'b0, 1'b0, 1'b0, 1'b0);
+
+        // CMP.w #0x1234, D2 — equal: Z=1
+        $display("--- CMP.w #0x1234, D2 equal (Phase79: CMP imm Z-flag) ---");
+        set_dn(3'd2, 32'h0000_1234);
+        run_instr(16'hB47C, 1'b1, 32'h0000_1234);
+        chk("CMP-imm-w:D2-unchanged", dut.u_rf.d_reg[2], 32'h0000_1234);
+        chk_ccr("CMP-imm-w-eq", 1'b0, 1'b1, 1'b0, 1'b0);
+
         // ─── summary ─────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);
         $display("");
