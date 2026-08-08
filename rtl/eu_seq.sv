@@ -479,6 +479,19 @@ module eu_seq (
                                       // (MOVE mem-src,(d8,An_dst,Xn): rd_a=src_An during
                                       // the read, swaps to dst_An at read_ack; rd_b stays
                                       // fixed = dst_Xn throughout, no swap needed there)
+    // second dyn_bit swap target — for MOVE (d8,An_src,Xn),(d8,An_dst,Xn): both sides
+    // indexed, so rd_a AND rd_b both need to swap at read_ack (rd_a: src_An->dst_An
+    // via dyn_bit_reg/is_an as usual; rd_b: src_Xn->dst_Xn via this second target).
+    logic        dec_dyn_bit_swap_both; // 1: swap BOTH rd_a and rd_b at read_ack
+    logic [2:0]  dec_dyn_bit_reg2;      // dst_Xn register selector (2nd swap target)
+    logic        dec_dyn_bit_is_an2;    // 1 when dyn_bit_reg2 selects an address register
+    // destination's own indexed-EA scale/wl, separate from dec_xn_wl/dec_xn_scale
+    // (which the source uses for its own indexed EA when both sides are indexed —
+    // e.g. MOVE (d8,An_src,Xn),(d8,An_dst,Xn) — the move_mm_dst_addr_r capture
+    // formula picks dst_xn_wl/dst_xn_scale over the shared fields when this is set).
+    logic        dec_dst_is_idx;
+    logic        dec_dst_xn_wl;
+    logic [1:0]  dec_dst_xn_scale;
     logic        dec_is_bit_imm;    // 1 when BTST Dn,#imm — immediate byte as bit_dst
     // MOVEM register save/restore
     logic        dec_is_movem;      // MOVEM instruction
@@ -672,6 +685,12 @@ module eu_seq (
         dec_dyn_bit_reg  = 3'b0;
         dec_dyn_bit_is_an = 1'b0;
         dec_dyn_bit_swap_a = 1'b0;
+        dec_dyn_bit_swap_both = 1'b0;
+        dec_dyn_bit_reg2   = 3'b0;
+        dec_dyn_bit_is_an2 = 1'b0;
+        dec_dst_is_idx     = 1'b0;
+        dec_dst_xn_wl      = 1'b0;
+        dec_dst_xn_scale   = 2'b00;
 
         // ── Memory access ──────────────────────────────────────────────────────
         dec_is_mem_rd    = 1'b0;
@@ -2144,6 +2163,83 @@ module eu_seq (
                                 dec_dst_ea_offset = dec_dst_ea_offset
                                                   + (dec_an_delta << ext_data[10:9]);
                             end
+                        end else if (f_mode == 3'b110) begin
+                            // MOVE (d8,An_src,Xn_src),(d8,An_dst,Xn_dst): BOTH sides
+                            // indexed. ext_count=2 (generic is_move_mm classifier in
+                            // m68030_seq.sv already handles this — src_ext_w=1 for
+                            // f_mode=110, dst_ext_w=1 for dst_mode_s=110, no separate
+                            // entry needed): src brief ext word first (high half,
+                            // source evaluated before dest), dst brief ext word
+                            // second (low half).
+                            // rd_a=src_An, rd_b=src_Xn during the read (source's own
+                            // indexed EA via the generic ex_ea path). At read_ack,
+                            // BOTH swap (dyn_bit_swap_both): rd_a->dst_An (reg/is_an),
+                            // rd_b->dst_Xn (reg2/is_an2). The capture formula uses the
+                            // separate ex_dst_xn_wl/ex_dst_xn_scale (dec_dst_is_idx=1)
+                            // for the destination, since the shared xn fields are
+                            // taken by the source here.
+                            dec_valid              = 1'b1;
+                            dec_is_move_mm         = 1'b1;
+                            dec_is_move_mm_idx_dst = 1'b1;
+                            dec_is_mem_rd          = 1'b1;
+                            dec_unit               = UNIT_MOVE;
+                            dec_writes_reg         = 1'b0;
+                            dec_x_unchanged        = 1'b1;
+                            dec_siz                = f_move_sz;
+                            dec_needs_ext          = 1'b1;
+                            dec_src_reg            = {1'b1, f_reg};  // src_An → rd_a
+                            dec_reads_src          = 1'b1;
+                            dec_dst_reg            = {ext_data[31], ext_data[30:28]};  // src_Xn → rd_b
+                            dec_reads_dst          = 1'b1;
+                            dec_is_idx             = 1'b1;
+                            dec_xn_wl              = ext_data[27];
+                            dec_xn_scale           = ext_data[26:25];
+                            dec_ea_offset          = {{24{ext_data[23]}}, ext_data[23:16]};  // d8_src
+                            dec_is_dyn_bit_idx     = 1'b1;
+                            dec_dyn_bit_swap_both  = 1'b1;
+                            dec_dyn_bit_reg        = f_dn;               // dst_An → rd_a after swap
+                            dec_dyn_bit_is_an      = 1'b1;
+                            dec_dyn_bit_reg2       = ext_data[14:12];    // dst_Xn → rd_b after swap
+                            dec_dyn_bit_is_an2     = ext_data[15];
+                            dec_dst_is_idx         = 1'b1;
+                            dec_dst_xn_wl          = ext_data[11];
+                            dec_dst_xn_scale       = ext_data[10:9];
+                            dec_dst_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};  // d8_dst
+                        end else if (f_mode == 3'b111 && f_reg == 3'b011) begin
+                            // MOVE (d8,PC,Xn_src),(d8,An_dst,Xn_dst): PC-relative
+                            // indexed src, indexed dst. Source needs no An (PC-
+                            // relative) — rd_a can be dst_An from the start (no swap
+                            // needed, same as the abs.W/(d16,PC) src cases above);
+                            // only rd_b (src_Xn -> dst_Xn) swaps at read_ack, via the
+                            // plain single-target dyn_bit_get_Dn mechanism (swap_a/
+                            // swap_both both stay 0 — this is a normal rd_b-only swap
+                            // like Bucket B/BCHG, not the swap_both case above).
+                            dec_valid              = 1'b1;
+                            dec_is_move_mm         = 1'b1;
+                            dec_is_move_mm_idx_dst = 1'b1;
+                            dec_is_mem_rd          = 1'b1;
+                            dec_unit               = UNIT_MOVE;
+                            dec_writes_reg         = 1'b0;
+                            dec_x_unchanged        = 1'b1;
+                            dec_siz                = f_move_sz;
+                            dec_needs_ext          = 1'b1;
+                            dec_abs_ea_en          = 1'b1;
+                            dec_abs_ea_val         = decode_pc + 32'd2
+                                                    + {{24{ext_data[23]}}, ext_data[23:16]}; // PC+2+d8_src
+                            dec_dst_reg            = {ext_data[31], ext_data[30:28]};  // src_Xn → rd_b
+                            dec_reads_dst          = 1'b1;
+                            dec_is_idx             = 1'b1;
+                            dec_xn_wl              = ext_data[27];
+                            dec_xn_scale           = ext_data[26:25];
+                            dec_src_reg            = {1'b1, f_dn};   // dst_An_base → rd_a (fixed)
+                            dec_reads_src          = 1'b1;
+                            dec_is_dyn_bit_idx     = 1'b1;
+                            dec_dyn_bit_reg        = ext_data[14:12]; // dst_Xn → rd_b after swap
+                            dec_dyn_bit_is_an      = ext_data[15];
+                            dec_dst_is_idx         = 1'b1;
+                            dec_dst_xn_wl          = ext_data[11];
+                            dec_dst_xn_scale       = ext_data[10:9];
+                            dec_dst_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};  // d8_dst
                         end
                         // Other src modes (indirect with pre/post) not yet decoded
                     end else if (f_move_dst_mode == 3'b111) begin
@@ -5193,6 +5289,12 @@ module eu_seq (
     logic [2:0]  ex_dyn_bit_reg;    // Dn register for bit count
     logic        ex_dyn_bit_is_an;  // 1 when dyn_bit_reg selects address register
     logic        ex_dyn_bit_swap_a; // 1: dyn_bit swap targets rd_a instead of rd_b
+    logic        ex_dyn_bit_swap_both; // 1: swap BOTH rd_a and rd_b at read_ack
+    logic [2:0]  ex_dyn_bit_reg2;      // dst_Xn register selector (2nd swap target)
+    logic        ex_dyn_bit_is_an2;    // 1 when dyn_bit_reg2 selects an address register
+    logic        ex_dst_is_idx;
+    logic        ex_dst_xn_wl;
+    logic [1:0]  ex_dst_xn_scale;
     logic [31:0] dyn_bit_ea_r;      // latched EA for RMW write-back addr fix
     // MOVEM
     logic        ex_is_movem;
@@ -5851,6 +5953,12 @@ module eu_seq (
             ex_dyn_bit_reg        <= 3'b0;
             ex_dyn_bit_is_an      <= 1'b0;
             ex_dyn_bit_swap_a     <= 1'b0;
+            ex_dyn_bit_swap_both  <= 1'b0;
+            ex_dyn_bit_reg2       <= 3'b0;
+            ex_dyn_bit_is_an2     <= 1'b0;
+            ex_dst_is_idx         <= 1'b0;
+            ex_dst_xn_wl          <= 1'b0;
+            ex_dst_xn_scale       <= 2'b00;
             ex_is_bit_imm         <= 1'b0;
             ex_return_pc          <= 32'h0;
             ex_bsr_target         <= 32'h0;
@@ -5966,6 +6074,12 @@ module eu_seq (
             ex_dyn_bit_reg        <= 3'b0;
             ex_dyn_bit_is_an      <= 1'b0;
             ex_dyn_bit_swap_a     <= 1'b0;
+            ex_dyn_bit_swap_both  <= 1'b0;
+            ex_dyn_bit_reg2       <= 3'b0;
+            ex_dyn_bit_is_an2     <= 1'b0;
+            ex_dst_is_idx         <= 1'b0;
+            ex_dst_xn_wl          <= 1'b0;
+            ex_dst_xn_scale       <= 2'b00;
             ex_is_bit_imm         <= 1'b0;
             ex_is_movem           <= 1'b0;
             ex_movem_load     <= 1'b0;
@@ -6102,6 +6216,12 @@ module eu_seq (
             ex_dyn_bit_reg    <= dec_dyn_bit_reg;
             ex_dyn_bit_is_an  <= dec_dyn_bit_is_an;
             ex_dyn_bit_swap_a <= dec_dyn_bit_swap_a;
+            ex_dyn_bit_swap_both <= dec_dyn_bit_swap_both;
+            ex_dyn_bit_reg2       <= dec_dyn_bit_reg2;
+            ex_dyn_bit_is_an2     <= dec_dyn_bit_is_an2;
+            ex_dst_is_idx         <= dec_dst_is_idx;
+            ex_dst_xn_wl          <= dec_dst_xn_wl;
+            ex_dst_xn_scale       <= dec_dst_xn_scale;
             ex_is_bit_imm     <= dec_is_bit_imm;
             ex_return_pc      <= dec_return_pc;
             ex_bsr_target     <= dec_bsr_target;
@@ -6215,6 +6335,9 @@ module eu_seq (
     // at read_ack for the move_mm_dst_addr_r indexed-dst capture; rd_b stays fixed
     // = dst_Xn the whole time (untouched by this override) since it was never needed
     // for the source (dec_is_idx is not set for these source EA modes).
+    // MOVE (d8,An_src,Xn),(d8,An_dst,Xn) (dec_dyn_bit_swap_both=1): both sides are
+    // indexed, so rd_a AND rd_b both swap at read_ack — rd_a: src_An->dst_An (reg/
+    // is_an, same as swap_a), rd_b: src_Xn->dst_Xn (reg2/is_an2, the 2nd target).
     logic dyn_bit_get_Dn;
     assign dyn_bit_get_Dn = ex_is_dyn_bit_idx && ex_is_mem_rd &&
                             (ex_is_mem_rmw ? mem_rmw_read_ack
@@ -6222,7 +6345,7 @@ module eu_seq (
                                               && !move_mm_run_r && !move_mm_after_r));
     assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel :
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
-                      (dyn_bit_get_Dn && ex_dyn_bit_swap_a) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
+                      (dyn_bit_get_Dn && (ex_dyn_bit_swap_a || ex_dyn_bit_swap_both)) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
                                                         ex_src_reg;
     assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea || ex_is_abcd_sbcd_mem || ex_is_addx_mem) ? 2'b00 : ex_siz;
     assign rd_b_sel = cas_get_du_r     ? {1'b0, ex_cas_du_reg}  :
@@ -6230,6 +6353,7 @@ module eu_seq (
                       cas2_get_du1_r   ? {1'b0, ex_cas2_du1_reg} :
                       cas2_get_du2_r   ? {1'b0, ex_cas2_du2_reg} :
                       // Use explicit flag: An for ADDA/SUBA/CMPA indexed, Dn for bit ops
+                      (dyn_bit_get_Dn && ex_dyn_bit_swap_both) ? {ex_dyn_bit_is_an2, ex_dyn_bit_reg2} :
                       (dyn_bit_get_Dn && !ex_dyn_bit_swap_a) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
                                          ex_dst_reg;
     // for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
@@ -7323,12 +7447,18 @@ module eu_seq (
             if (move_mm_read_ack) begin
                 move_mm_run_r        <= 1'b1;
                 move_mm_data_r       <= mem_rdata;
+                // dst's own xn_wl/xn_scale (ex_dst_*) apply when the SOURCE is also
+                // indexed (both sides indexed — the shared ex_xn_wl/ex_xn_scale are
+                // taken by the source's own EA in that case); otherwise (src is
+                // abs/PC-relative/imm, not indexed) dst uses the shared fields as
+                // before, unchanged from the original single-indexed-side behavior.
                 move_mm_dst_addr_r   <= ex_abs_dst_ea_en ? ex_abs_dst_ea_val
                                      : ex_is_move_mm_idx_dst
                                        ? (rd_a_data +
-                                          ((ex_xn_wl ? rd_b_data
-                                                     : {{16{rd_b_data[15]}}, rd_b_data[15:0]})
-                                           << ex_xn_scale) + ex_dst_ea_offset)
+                                          ((ex_dst_is_idx
+                                             ? (ex_dst_xn_wl ? rd_b_data : {{16{rd_b_data[15]}}, rd_b_data[15:0]})
+                                             : (ex_xn_wl     ? rd_b_data : {{16{rd_b_data[15]}}, rd_b_data[15:0]}))
+                                           << (ex_dst_is_idx ? ex_dst_xn_scale : ex_xn_scale)) + ex_dst_ea_offset)
                                        : (rd_b_data + ex_dst_ea_offset);
                 move_mm_siz_r        <= ex_siz;
                 // CCR: {X unchanged, N, Z, 0, 0}; N/Z from sized read data

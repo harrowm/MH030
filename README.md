@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 84 summary)
+### Harte Pass Rates (Phase 85 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -211,8 +211,7 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | OR | b/w/l | 100% | |
 | EOR | b/w/l | 100% | |
 | CMP | b/w/l | 100% | |
-| MOVE | b | 97.9% | Phase 82: fixed indexed-dst src EA + a same-register-conflict bug; remaining = deferred indexed-src (needs new src/dst Xn field infra) |
-| MOVE | w/l | 98.7% / 99.0% | Same |
+| MOVE | b/w/l | **100%** / **100%** / **100%** | Phase 85: indexed-src added (dual swap-both register-file ports) + fixed a `get_scale_remap()` single-side-only harness bug |
 | BCHG/BCLR/BSET | — | **100%** / **100%** / **100%** | Phase 83: root cause was a test-harness bug, not RTL — zero RTL changes |
 | TRAPV | — | 100% | |
 | MOVEfromUSP/toUSP | — | 100% | |

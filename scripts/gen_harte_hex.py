@@ -137,8 +137,7 @@ def build_patches(test):
         patches[addr24] = val
 
     # ── Scale remap: copy bytes EA_68000 → EA_68030 for non-zero scale ────────
-    remap = get_scale_remap(test)
-    if remap:
+    for remap in get_scale_remap(test):
         ini_ram_map = {(a & 0xFFFFFF): v for a, v in ini['ram']}
         ea0, ea1, nb = remap['ea_68000'], remap['ea_68030'], remap['siz_bytes']
         for i in range(nb):
@@ -218,15 +217,117 @@ def build_patches(test):
     return patches, instr_len
 
 
+def _dst_indexed_remap(test):
+    """
+    MOVE groups (1,2,3) encode the destination mode in bits[8:6]. When the
+    destination is mode-6 (indexed) with non-zero scale, compute its own
+    ea_68000/ea_68030 remap — independent of whether the SOURCE is also
+    indexed. Returns None if the destination isn't indexed, has scale=0, or
+    has bit8=1 (full extension word).
+    """
+    ini    = test['initial']
+    opcode = ini['prefetch'][0]
+    instr_src = ini['pc'] - 4
+    rm        = {a: v for a, v in ini['ram']}
+
+    ea_mode_r = (opcode >> 3) & 7
+    ea_reg_r  =  opcode        & 7
+
+    f_group_d = (opcode >> 12) & 0xF
+    dst_mode  = (opcode >>  6) & 0x7
+    if not (f_group_d in (1, 2, 3) and dst_mode == 6):
+        return None
+
+    # Source extension-word count by mode (determines where the destination's
+    # own extension word starts):
+    #   0–4 (register/register-indirect simple): 0 ext words
+    #   5   (d16,An):                            1 ext word
+    #   6   (d8,An,Xn):                          1 ext word (source itself indexed)
+    #   7,0 (abs.w):                             1 ext word
+    #   7,1 (abs.l):                             2 ext words
+    #   7,2 (d16,PC):                            1 ext word
+    #   7,3 (d8,PC,Xn):                          1 ext word
+    #   7,4 (#imm): 1 word for byte/word, 2 words for longword (group 2)
+    if ea_mode_r == 5:
+        src_ext = 1
+    elif ea_mode_r == 6:
+        src_ext = 1
+    elif ea_mode_r == 7:
+        if ea_reg_r == 1:
+            src_ext = 2
+        elif ea_reg_r == 4:
+            src_ext = 2 if f_group_d == 2 else 1  # .l imm = 2 words
+        else:
+            src_ext = 1
+    else:
+        src_ext = 0   # modes 0–4
+
+    dst_ext_off = 2 + src_ext * 2   # byte offset from instr_src
+    dst_ext_idx = 1 + src_ext       # index in ini['prefetch']
+    if len(ini['prefetch']) > dst_ext_idx:
+        dst_brief = ini['prefetch'][dst_ext_idx]
+    else:
+        dst_brief = (rm.get(instr_src + dst_ext_off, 0) << 8) | \
+                     rm.get(instr_src + dst_ext_off + 1, 0)
+
+    if (dst_brief >> 8) & 1:
+        return None   # full extension word
+
+    dst_scale = (dst_brief >> 9) & 3
+    if dst_scale == 0:
+        return None   # no scale difference
+
+    def _get_an_d(reg):
+        if reg == 7:
+            return (ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']) & 0xFFFFFFFF
+        return ini[f'a{reg}'] & 0xFFFFFFFF
+
+    dst_xn_da  = (dst_brief >> 15) & 1
+    dst_xn_reg = (dst_brief >> 12) & 7
+    dst_xn_wl  = (dst_brief >> 11) & 1
+    dst_d8     = dst_brief & 0xFF
+    if dst_d8 >= 0x80: dst_d8 -= 0x100
+
+    dst_xn_val = _get_an_d(dst_xn_reg) if dst_xn_da else ini[f'd{dst_xn_reg}'] & 0xFFFFFFFF
+
+    dst_reg    = (opcode >> 9) & 7
+    dst_an_val = _get_an_d(dst_reg)
+    siz_bytes  = {1: 1, 2: 4, 3: 2}[f_group_d]
+
+    # Same-register An conflict: src (An)+/-(An) on the same An as dst_An
+    # and/or dst_Xn. The source auto-increment/decrement is applied — as
+    # part of evaluating the source operand — before the destination EA is
+    # computed, so the indexed-dst EA must use the *updated* An, not the
+    # initial value, wherever that An also appears as dst_An or dst_Xn.
+    if ea_mode_r in (3, 4):
+        step = 2 if (siz_bytes == 1 and ea_reg_r == 7) else siz_bytes
+        delta = step if ea_mode_r == 3 else -step
+        if ea_reg_r == dst_reg:
+            dst_an_val = (dst_an_val + delta) & 0xFFFFFFFF
+        if dst_xn_da and ea_reg_r == dst_xn_reg:
+            dst_xn_val = (dst_xn_val + delta) & 0xFFFFFFFF
+
+    if not dst_xn_wl:
+        dst_xn_val &= 0xFFFF
+        if dst_xn_val >= 0x8000: dst_xn_val -= 0x10000
+
+    ea_68000 = (dst_an_val + dst_xn_val                       + dst_d8) & 0xFFFFFF
+    ea_68030 = (dst_an_val + dst_xn_val * (1 << dst_scale)    + dst_d8) & 0xFFFFFF
+    return {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
+
+
 def get_scale_remap(test):
     """
-    If the opcode has an indexed EA (mode=6 or mode=7 reg=3) with non-zero scale,
-    return a dict: {'ea_68000': int, 'ea_68030': int, 'siz_bytes': int}
+    Return a list of 0-2 remap dicts: {'ea_68000': int, 'ea_68030': int, 'siz_bytes': int}
     The 68000 ignores scale bits (always ×1); the 68030 applies ×1/×2/×4/×8.
     build_patches() uses this to copy source bytes from EA_68000 to EA_68030 so
     the DUT reads the expected data; compare() uses it to redirect expected memory
     writes from EA_68000 to EA_68030 (for RMW-destination instructions).
-    Returns None when scale=0, bit8=1 (full extension word), or not an indexed EA.
+
+    Source (opcode's own mode=6/mode=7,reg=3 EA field) and, for MOVE groups,
+    destination (bits[8:6]==6) are independently indexed EAs — either, both, or
+    neither may need a remap (non-zero scale, brief extension word). Both are
+    checked and any that apply are returned together.
     """
     ini    = test['initial']
     opcode = ini['prefetch'][0]
@@ -239,89 +340,10 @@ def get_scale_remap(test):
     instr_src = ini['pc'] - 4
     rm        = {a: v for a, v in ini['ram']}
 
+    dst_remap = _dst_indexed_remap(test)
+
     if not (is_mode6 or is_pc_idx):
-        # Source not indexed.  For MOVE groups (1,2,3) the destination may still be
-        # indexed (bits[8:6]==6), requiring a separate scale remap for writes.
-        f_group_d = (opcode >> 12) & 0xF
-        dst_mode  = (opcode >>  6) & 0x7
-        if f_group_d in (1, 2, 3) and dst_mode == 6:
-            # Destination is indexed.  Locate the destination extension word.
-            # Source extension-word count by mode:
-            #   0–4 (register/register-indirect simple): 0 ext words
-            #   5   (d16,An):                           1 ext word
-            #   6   (d8,An,Xn) — handled by SOURCE path when source is indexed,
-            #                     so we won't reach here in that case:  0 ext seen here
-            #   7,0 (abs.w):                            1 ext word
-            #   7,1 (abs.l):                            2 ext words
-            #   7,2 (d16,PC):                           1 ext word
-            #   7,3 (PC indexed): already caught by is_pc_idx above — won't reach here
-            #   7,4 (#imm): 1 word for byte/word, 2 words for longword (group 2)
-            if ea_mode_r == 5:
-                src_ext = 1
-            elif ea_mode_r == 7:
-                if ea_reg_r == 1:
-                    src_ext = 2
-                elif ea_reg_r == 4:
-                    src_ext = 2 if f_group_d == 2 else 1  # .l imm = 2 words
-                else:
-                    src_ext = 1
-            else:
-                src_ext = 0   # modes 0–4
-
-            dst_ext_off = 2 + src_ext * 2   # byte offset from instr_src
-            dst_ext_idx = 1 + src_ext       # index in ini['prefetch']
-            if len(ini['prefetch']) > dst_ext_idx:
-                dst_brief = ini['prefetch'][dst_ext_idx]
-            else:
-                dst_brief = (rm.get(instr_src + dst_ext_off, 0) << 8) | \
-                             rm.get(instr_src + dst_ext_off + 1, 0)
-
-            if (dst_brief >> 8) & 1:
-                return None   # full extension word
-
-            dst_scale = (dst_brief >> 9) & 3
-            if dst_scale == 0:
-                return None   # no scale difference
-
-            def _get_an_d(reg):
-                if reg == 7:
-                    return (ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']) & 0xFFFFFFFF
-                return ini[f'a{reg}'] & 0xFFFFFFFF
-
-            dst_xn_da  = (dst_brief >> 15) & 1
-            dst_xn_reg = (dst_brief >> 12) & 7
-            dst_xn_wl  = (dst_brief >> 11) & 1
-            dst_d8     = dst_brief & 0xFF
-            if dst_d8 >= 0x80: dst_d8 -= 0x100
-
-            dst_xn_val = _get_an_d(dst_xn_reg) if dst_xn_da else ini[f'd{dst_xn_reg}'] & 0xFFFFFFFF
-
-            dst_reg    = (opcode >> 9) & 7
-            dst_an_val = _get_an_d(dst_reg)
-            siz_bytes  = {1: 1, 2: 4, 3: 2}[f_group_d]
-
-            # Same-register An conflict: src (An)+/-(An) on the same An as dst_An
-            # and/or dst_Xn. The source auto-increment/decrement is applied — as
-            # part of evaluating the source operand — before the destination EA is
-            # computed, so the indexed-dst EA must use the *updated* An, not the
-            # initial value, wherever that An also appears as dst_An or dst_Xn.
-            if ea_mode_r in (3, 4):
-                step = 2 if (siz_bytes == 1 and ea_reg_r == 7) else siz_bytes
-                delta = step if ea_mode_r == 3 else -step
-                if ea_reg_r == dst_reg:
-                    dst_an_val = (dst_an_val + delta) & 0xFFFFFFFF
-                if dst_xn_da and ea_reg_r == dst_xn_reg:
-                    dst_xn_val = (dst_xn_val + delta) & 0xFFFFFFFF
-
-            if not dst_xn_wl:
-                dst_xn_val &= 0xFFFF
-                if dst_xn_val >= 0x8000: dst_xn_val -= 0x10000
-
-            ea_68000 = (dst_an_val + dst_xn_val                       + dst_d8) & 0xFFFFFF
-            ea_68030 = (dst_an_val + dst_xn_val * (1 << dst_scale)    + dst_d8) & 0xFFFFFF
-            return {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
-
-        return None
+        return [dst_remap] if dst_remap else []
 
     f_group = (opcode >> 12) & 0xF
     f_dir   = (opcode >>  8) & 0x1
@@ -365,15 +387,15 @@ def get_scale_remap(test):
         ea_off    = 2
         brief_ext = ini['prefetch'][1]
     else:
-        return None
+        return [dst_remap] if dst_remap else []
 
     # Full extension word (bit 8 = 1): 68030 computes different EA; can't remap
     if (brief_ext >> 8) & 1:
-        return None
+        return [dst_remap] if dst_remap else []
 
     scale = (brief_ext >> 9) & 3
     if scale == 0:
-        return None
+        return [dst_remap] if dst_remap else []
 
     xn_da  = (brief_ext >> 15) & 1
     xn_reg = (brief_ext >> 12) & 7
@@ -422,7 +444,8 @@ def get_scale_remap(test):
     ea_68000 = (an_val + xn_val            + d8) & 0xFFFFFF
     ea_68030 = (an_val + xn_val * (1 << scale) + d8) & 0xFFFFFF
 
-    return {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
+    src_remap = {'ea_68000': ea_68000, 'ea_68030': ea_68030, 'siz_bytes': siz_bytes}
+    return [src_remap, dst_remap] if dst_remap else [src_remap]
 
 
 def get_operand_ea(test):
@@ -515,9 +538,9 @@ def get_operand_ea(test):
         if d16 >= 0x8000: d16 -= 0x10000
         ea = (an + d16) & 0xFFFFFFFF
     elif ea_mode == 6:      # (d8,An,Xn) — use get_scale_remap for scale≠0
-        remap = get_scale_remap(test)
-        if remap:
-            ea = remap['ea_68030']
+        remap_list = get_scale_remap(test)
+        if remap_list:
+            ea = remap_list[0]['ea_68030']
         else:
             brief  = rw(ea_off)
             xn_da  = (brief >> 15) & 1
@@ -544,9 +567,9 @@ def get_operand_ea(test):
             if d16 >= 0x8000: d16 -= 0x10000
             ea = (pc_for_ea + d16) & 0xFFFFFFFF
         elif ea_reg == 3:   # (d8,PC,Xn) brief extension
-            remap = get_scale_remap(test)
-            if remap:
-                ea = remap['ea_68030']
+            remap_list = get_scale_remap(test)
+            if remap_list:
+                ea = remap_list[0]['ea_68030']
             else:
                 brief  = rw(ea_off)
                 xn_da  = (brief >> 15) & 1
@@ -659,8 +682,7 @@ def can_run(test):
     # Indexed EA (mode=6) with non-zero scale: the 68030 computes a different EA
     # than the 68000 reference.  get_scale_remap() handles the remapping so these
     # tests can run — skip only when EA_68030 is problematic.
-    remap = get_scale_remap(test)
-    if remap:
+    for remap in get_scale_remap(test):
         ea1, nb = remap['ea_68030'], remap['siz_bytes']
         # Odd-address word/longword → 68030 address error; skip.
         if nb >= 2 and (ea1 & 1):

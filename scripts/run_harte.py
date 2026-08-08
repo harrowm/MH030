@@ -125,10 +125,9 @@ def compare(test, regs, writes, verbose):
     # Scale remap: when indexed EA has non-zero scale the DUT writes to EA_68030
     # rather than the 68000 reference EA.  Redirect expected writes (and the
     # corresponding initial values) so the address comparison is correct.
-    remap = get_scale_remap(test)
-    if remap:
+    for remap in get_scale_remap(test):
         ea0, ea1, nb = remap['ea_68000'], remap['ea_68030'], remap['siz_bytes']
-        def _remap(m):
+        def _remap(m, ea0=ea0, ea1=ea1, nb=nb):
             out = {}
             for a, v in m.items():
                 if ea0 <= a < ea0 + nb:

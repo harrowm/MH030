@@ -471,6 +471,74 @@ there is currently no known case that requires it.
 
 ---
 
+## Phase 85 — MOVE indexed-source `(d8,An,Xn)`/`(d8,PC,Xn)`: MOVE.b/w/l → 100%
+
+**Goal**: close the last deferred MOVE gap from Phase 82 — indexed-source forms
+(`MOVE (d8,An,Xn),dst` and `MOVE (d8,PC,Xn),dst`) combined with an indexed
+destination, which needs independent src/dst `Xn`/scale fields since both sides
+can now be simultaneously indexed.
+
+### RTL (`eu_seq.sv`)
+
+Extended the existing `dyn_bit_get_Dn` deferred-register-swap mechanism to swap
+**both** register-file read ports at once (`dec_dyn_bit_swap_both`), since
+indexed-src+indexed-dst MOVE needs `src_An`+`src_Xn` during the read phase and
+`dst_An`+`dst_Xn` for the write phase — 4 logical operands through 2 physical
+ports, resolved by deferring the write-phase pair until after the read ack
+(same shape as every other case in this investigation). Added
+`dec_dyn_bit_reg2`/`dec_dyn_bit_is_an2` (second swap target),
+`dec_dst_is_idx`/`dec_dst_xn_wl`/`dec_dst_xn_scale` (destination's own indexed
+fields, independent of the source's), and updated `rd_a_sel`/`rd_b_sel` muxes
+and the `move_mm_dst_addr_r` capture formula accordingly. Two new decode blocks:
+`f_mode==3'b110` (indexed src, any dst) and `f_mode==3'b111,f_reg==3'b011`
+((d8,PC,Xn) src — dst_An is fixed, no swap needed since PC-relative source
+never conflicts with a register operand). No `m68030_seq.sv` change needed —
+the existing generic `is_move_mm` ext_count classifier already handled both
+new cases.
+
+### Harness bug found (same recurring class, new shape)
+
+Initial retest: MOVE.b 97.9% → 99.2%, but 47 new "no write seen" failures, all
+indexed-src + indexed-dst combinations. Hand-verified test index 6527
+(`MOVE.b (d8,A1,Xn),(d8,A1,Xn)`, opcode 0x13b1): DUT's write address was
+correct (`0xb2f580`, matching an unscaled/scale-×1 destination calculation),
+but the test's own expected-write bookkeeping never saw it, because
+`get_scale_remap()` in `gen_harte_hex.py` can only ever compute a remap for
+**one side** of an instruction — it derives "the" indexed EA from the opcode's
+own low-6-bit field (always the *source* for MOVE), so whenever the source is
+*also* mode-6, its "destination is indexed" branch (gated by
+`not (is_mode6 or is_pc_idx)`) is structurally unreachable. Two independently
+scaled sides — a case that never came up until indexed-source MOVE existed.
+
+**Fix**: extracted the destination-remap computation into its own
+`_dst_indexed_remap()` helper and call it unconditionally (whenever
+`f_group in (1,2,3) and dst_mode==6`), independent of whether the source is
+also indexed — added the missing `ea_mode_r==6 → src_ext=1` case to its
+extension-word-offset table (source consumes 1 ext word when it's ALSO
+indexed, which the original table never needed to express). `get_scale_remap()`
+now returns a **list** of 0-2 remaps (source-side, destination-side, both, or
+neither) instead of a single dict/`None`. Updated all 4 call sites
+(`build_patches()`, `get_operand_ea()` ×2, `can_run()` in `gen_harte_hex.py`;
+`compare()` in `run_harte.py`) to iterate the list.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| MOVE.b | 99.2% (5873/5920) | **100%** (5922/5922) |
+| MOVE.w | (not yet retested post-82) | **100%** (3235/3235) |
+| MOVE.l | (not yet retested post-82) | **100%** (3148/3148) |
+
+Zero remaining failures of any kind. **Verification**: `make test` (32/32),
+`make cosim_grp` (8/8 vs Musashi).
+
+This is the fourth harness bug found by this investigation, but the first that
+wasn't the `f_dir`-disambiguation pattern — it's a genuinely new structural gap
+(single-remap assumption) that only surfaced once an instruction with two
+independently-indexable operands existed to test it.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
