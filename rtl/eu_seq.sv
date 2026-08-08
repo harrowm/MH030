@@ -2398,13 +2398,15 @@ module eu_seq (
                             end
                         end
                     // ── NEGX/CLR/NEG/NOT/TST to memory ea ─────────────
-                    // (d8,An,Xn) indexed dst is not supported — same 3-read-port
-                    // register-file gap as other indexed-dst RMW ops (see CLAUDE.md).
+                    // (d8,An,Xn) indexed dst only needs An(rd_a)+Xn(rd_b) — these are
+                    // unary memory ops with no separate data-register operand, so the
+                    // 2-port regfile is sufficient (same pattern as LEA/PEA indexed;
+                    // see port3.md §1 Bucket A — this is not the 3-read-port gap).
                     // (d16,PC) is only reachable for TST (f_dn=101) — not alterable,
                     // so illegal as a NEGX/CLR/NEG/NOT destination.
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
-                                  f_mode == 3'b101 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
                                                         (f_dn == 3'b101 && f_reg == 3'b010)))) &&
                                  (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
@@ -2420,6 +2422,15 @@ module eu_seq (
                         case (f_mode)
                             3'b101: begin  // (d16,An)
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext = 1'b1;
+                            end
+                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                                dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst = 1'b1;
+                                dec_is_idx    = 1'b1;
+                                dec_xn_wl     = ext_data[11];
+                                dec_xn_scale  = ext_data[10:9];
+                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext = 1'b1;
                             end
                             3'b111: begin
@@ -3120,18 +3131,19 @@ module eu_seq (
                         end
 
                     // ----------------------------------------------------------------
-                    // TAS.B (An)/(An)+/-(An)/(d16,An)/(xxx).W/(xxx).L — memory indirect RMW
-                    // f_dn=101, f_dir=0, f_ss=11, f_mode=010/011/100/101/111(000,001).
-                    // (d8,An,Xn) is not supported — same 3-read-port register-file gap
-                    // that blocks all indexed-dst RMW ops (see CLAUDE.md arch gap note).
+                    // TAS.B (An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/(xxx).W/(xxx).L — memory indirect RMW
+                    // f_dn=101, f_dir=0, f_ss=11, f_mode=010/011/100/101/110/111(000,001).
+                    // (d8,An,Xn) only needs An(rd_a)+Xn(rd_b) — TAS is a unary memory op
+                    // (test-and-set the byte itself, no separate data-register operand),
+                    // so the 2-port regfile is sufficient (see port3.md §1 Bucket A).
                     // TAS.B Dn (f_mode=000) is decoded inside the f_mode==000/f_ss==11 block above.
                     // N=bit7(original), Z=(original_byte==0), V=0, C=0, X unchanged.
                     // ----------------------------------------------------------------
                     end else if (f_dn == 3'b101 && !f_dir && f_ss == 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
-                                  f_mode == 3'b101 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
-                        // TAS.B (An)/(An)+/-(An)/(d16,An)/(xxx).W/(xxx).L — memory indirect RMW
+                        // TAS.B (An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/(xxx).W/(xxx).L — memory indirect RMW
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_MOVE;
                         dec_siz         = 2'b01;    // byte
@@ -3146,6 +3158,15 @@ module eu_seq (
                         case (f_mode)
                             3'b101: begin  // (d16,An)
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext = 1'b1;
+                            end
+                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                                dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst = 1'b1;
+                                dec_is_idx    = 1'b1;
+                                dec_xn_wl     = ext_data[11];
+                                dec_xn_scale  = ext_data[10:9];
+                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext = 1'b1;
                             end
                             3'b111: begin  // (xxx).W / (xxx).L
@@ -4812,9 +4833,14 @@ module eu_seq (
                         end
                     // ── shift/rotate ea (f_ss=11, f_dn[2]=0, memory forms) ──
                     // Encoding: 1110 tt d 11 0ss mmm rrr  (f_dn={tt,0,ss?} — use f_shf_tt)
-                    // f_ss=11 + f_dn[2]=0: single-bit shift of (An)/(An)+/-(An)
+                    // f_ss=11 + f_dn[2]=0: single-bit shift of memory word.
+                    // (d8,An,Xn) only needs An(rd_a)+Xn(rd_b) — memory shifts are always
+                    // 1-bit, unary on the word itself, no data-register operand (see
+                    // port3.md §1 Bucket A — not the 3-read-port gap).
                     end else if (!f_dn[2] &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_SHF;
                         dec_siz         = 2'b10;   // word (memory shifts are always word)
@@ -4823,8 +4849,10 @@ module eu_seq (
                         // CCR fires via mem_rmw_sr_wr_en (not WB), to avoid stale mem_rdata
                         dec_updates_ccr = 1'b0;
                         dec_shf_imm_cnt = 6'd1;    // always 1-bit memory shift
-                        dec_src_reg     = {1'b1, f_reg};
-                        dec_reads_src   = 1'b1;
+                        if (f_mode != 3'b111) begin
+                            dec_src_reg   = {1'b1, f_reg};
+                            dec_reads_src = 1'b1;
+                        end
                         // shf_op: {0, f_dn[1], f_dn[0]^f_dn[1], ~f_dir} — same as register form
                         dec_shf_op      = {1'b0, f_dn[1], f_dn[0]^f_dn[1], ~f_dir};
                         case (f_mode)
@@ -4838,6 +4866,25 @@ module eu_seq (
                                 dec_an_upd_reg = f_reg;
                                 dec_an_delta   = 32'hFFFFFFFE;  // -2
                                 dec_ea_offset  = 32'hFFFFFFFE;
+                            end
+                            3'b101: begin  // (d16,An)
+                                dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext = 1'b1;
+                            end
+                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                                dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst = 1'b1;
+                                dec_is_idx    = 1'b1;
+                                dec_xn_wl     = ext_data[11];
+                                dec_xn_scale  = ext_data[10:9];
+                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                                dec_needs_ext = 1'b1;
+                            end
+                            3'b111: begin  // (xxx).W / (xxx).L
+                                dec_abs_ea_en  = 1'b1;
+                                dec_needs_ext  = 1'b1;
+                                dec_abs_ea_val = (f_reg == 3'b001) ? ext_data
+                                                 : {{16{ext_data[15]}}, ext_data[15:0]};
                             end
                             default: ;
                         endcase

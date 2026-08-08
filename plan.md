@@ -402,6 +402,65 @@ group excluding FPU (Phase 52 stub only) and user/supervisor boundary edge cases
 
 ---
 
+## Phase 81 — "3rd port" investigation, Phase 0: indexed EA for unary memory ops (no port needed)
+
+**Context**: the user asked for a plan to add a 3rd register-file read port to close
+the `(d8,An,Xn)` indexed-dst "arch gap" documented since Phase 79. Before writing that
+plan (`port3.md`, kept at the repo root), a diagnostic re-run of `AND.b` — which uses
+the identical 2-port time-multiplexing trick (`dyn_bit_get_Dn`) that BCHG's broken
+indexed form uses — came back **100% pass, 0 fails**. That's strong evidence the
+2-port register file is not the real blocker for most of what's labeled "arch gap."
+
+`port3.md` breaks the gap into four buckets; this phase implements **Bucket A**: CLR /
+NEG / NOT / NEGX / TST / TAS / memory-word shift-rotate are all *unary* memory RMW ops
+— they only ever touch the memory operand itself, so `(d8,An,Xn)` only needs
+`An`(rd_a) + `Xn`(rd_b) for the EA, exactly like LEA/PEA indexed already do with 2
+ports. These were simply never decoded for indexed mode; nothing architectural was
+stopping them.
+
+### Implementation
+
+Same shape of change as the Phase 80 EA-mode extension — added `f_mode==3'b110`
+(`(d8,An,Xn)`) to each shared decode block in `rtl/eu_seq.sv`, setting
+`dec_dst_reg=Xn` (→rd_b), `dec_is_idx=1`, `dec_xn_wl`/`dec_xn_scale`/`dec_ea_offset`
+from the brief extension word — identical pattern to the existing
+`(d16,An)`/abs.W/abs.L cases added in Phase 80. Added a matching `ext_count=1` entry
+in `rtl/m68030_seq.sv` for each family so the IFU prefetch queue drains the right
+number of extension words. Three call sites touched:
+- NEGX/CLR/NEG/NOT/TST shared memory-EA block (`eu_seq.sv` ~2405)
+- TAS memory-indirect block (`eu_seq.sv` ~3141)
+- memory shift/rotate block (`eu_seq.sv` ~4834) — this one previously had *no*
+  `(d16,An)`/abs.W/abs.L support either (only `(An)/(An)+/-(An)`), so all of those
+  were added in the same pass as the indexed case.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| CLR.b | 83.8% (1306 fails) | **100%** (8062/8062) |
+| NEG.w | 89.3% (511 fails) | **100%** (4789/4789) |
+| NOT.b | (untested) | **100%** (8063/8063) |
+| TST.b | 83.6% (1324 fails) | **100%** (8064/8064) |
+| TAS | 87.2% (630 fails) | **100%** (4920/4920) |
+| ASL.w | 93.3% (388 fails) | **100%** (5799/5799) |
+
+Six suites spot-checked (one per shared decode block, plus NOT.b as a second data
+point for the NEGX/CLR/NEG/NOT/TST block), all hit 100% with zero remaining failures
+of any kind (no FAIL, no TIMEOUT). NEGX/NOT.w-l/CLR.w-l/NEG.b-l/TST.w-l/
+ASR-LSL-LSR-ROL-ROR-ROXL-ROXR share the identical decode blocks and should land at the
+same 100%, but weren't individually swept this phase.
+
+**Verification**: `make test` (32/32) and `make cosim_grp` (8/8 vs Musashi) both pass.
+
+**What's left of the "arch gap"**: per `port3.md`'s bucket breakdown, only CHK
+indexed (Bucket D — genuinely needs 3 simultaneous registers, no natural 2-phase
+sequencing available) and BCHG/BCLR/BSET/MOVE-reg-src indexed (Bucket C — confirmed
+broken, but likely an isolated bug given AND's identical mechanism works, not a true
+port-count problem) remain. See `port3.md` for the full analysis and open questions
+before deciding how to proceed on those.
+
+---
+
 ## Phase 80 — BCHG/BCLR/BSET regression fix, CHK CCR fix, TAS/CLR/NEG/NOT/NEGX/TST EA-mode extension
 
 **Goal**: Rebuild and retest the Phase 79 BCHG/BCLR/BSET fix, then investigate the
@@ -527,21 +586,22 @@ The Harte test vectors are 68000 one-instruction tests stored in `tests/harte/*.
 | BCLR | 5851 | 5467 | 384 | 0 | 93.4% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
 | BSET | 6019 | 5912 | 107 | 0 | 98.2% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
 | BTST | TBD | — | — | — | — | retest pending (not affected by Phase 80 fix) |
-| CLR.b | 8062 | 6756 | 1306 | 1306 | 83.8% | ✅ Phase 80 EA-mode fix; remaining = indexed-dst arch gap |
-| CLR.w | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
-| CLR.l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
-| NEG.b/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
-| NEG.w | 4789 | 4278 | 511 | 511 | 89.3% | ✅ Phase 80 EA-mode fix; remaining = indexed-dst arch gap |
-| NEGX.b/w/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
-| NOT.b/w/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
-| TST.b | 8064 | 6740 | 1324 | 1324 | 83.6% | ✅ Phase 80 EA-mode fix (+ (d16,PC)); remaining = indexed-dst arch gap |
-| TST.w/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
-| ASL.b | 8065 | 8063 | 2 | 0 | 100% | ✅ (~100%, 2 non-TIMEOUT fails TBD) |
-| ASL.w | 5799 | 5411 | 388 | 388 | 93.3% | ⚠ TIMEOUT=FAIL (shift-mem arch gap?) |
-| ASL.l/ASR/LSL/LSR | TBD | — | — | — | — | sweep pending |
+| CLR.b | 8062 | 8062 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
+| CLR.w | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
+| CLR.l | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
+| NEG.b/l | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
+| NEG.w | 4789 | 4789 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
+| NEGX.b/w/l | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
+| NOT.b | 8063 | 8063 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
+| NOT.w/l | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
+| TST.b | 8064 | 8064 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (+ (d16,PC), no port needed) |
+| TST.w/l | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
+| ASL.b | 8065 | 8063 | 2 | 0 | 100% | ✅ (~100%, 2 non-TIMEOUT fails TBD, unrelated to Phase 81) |
+| ASL.w | 5799 | 5799 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
+| ASL.l/ASR/LSL/LSR | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
 | ROL/ROR/ROXL/ROXR | TBD | — | — | — | — | sweep pending |
-| TAS | 4920 | 4290 | 630 | 630 | 87.2% | ✅ Phase 80 EA-mode fix; remaining = indexed-dst arch gap |
-| CHK | 652 | 419 | 233 | 233 | 64.3% | ✅ Phase 80 CCR fix; remaining = unimplemented EA modes (TIMEOUT only, no logic fails) |
+| TAS | 4920 | 4920 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
+| CHK | 652 | 419 | 233 | 233 | 64.3% | ✅ Phase 80 CCR fix; remaining = unimplemented EA modes incl. indexed (needs 3rd port — see port3.md Bucket D) |
 | Scc | TBD | — | — | — | — | sweep pending |
 | ADDA.w/l | TBD | — | — | — | — | sweep pending |
 | SUBA.w/l | TBD | — | — | — | — | sweep pending |

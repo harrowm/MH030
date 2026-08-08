@@ -191,7 +191,7 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 2. **Bus co-simulation** (`make cosim_grp`) — run 8 opcode-group assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle. All 8 groups pass.
 
-3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 80` for full results table.
+3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 81` for full results table.
 
 ```bash
 make test                  # 32/32 regression suite
@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 80 summary)
+### Harte Pass Rates (Phase 81 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -211,24 +211,35 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | OR | b/w/l | 100% | |
 | EOR | b/w/l | 100% | |
 | CMP | b/w/l | 100% | |
-| MOVE | b | 90.8% | Remaining = indexed-dst TIMEOUTs (arch gap) |
-| MOVE | w/l | 94% / 93.6% | Same arch gap |
-| BCHG/BCLR/BSET | — | 92.8% / 93.4% / 98.2% | Remaining = indexed-dst arch gap |
+| MOVE | b | 90.8% | Remaining = indexed-dst; likely a fixable bug, not a port gap (see `port3.md`) |
+| MOVE | w/l | 94% / 93.6% | Same |
+| BCHG/BCLR/BSET | — | 92.8% / 93.4% / 98.2% | Remaining = indexed-dst; likely a fixable bug, not a port gap (see `port3.md`) |
 | TRAPV | — | 100% | |
 | MOVEfromUSP/toUSP | — | 100% | |
-| CLR | b | 83.8% | Remaining = indexed-dst arch gap |
-| NEG | w | 89.3% | Remaining = indexed-dst arch gap |
-| TST | b | 83.6% | Remaining = indexed-dst arch gap |
-| TAS | — | 87.2% | Remaining = indexed-dst arch gap |
-| CHK | — | 64.3% | Zero logic mismatches; remaining = unimplemented EA modes (TIMEOUT) |
+| CLR | b | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
+| NEG | w | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
+| NOT | b | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
+| TST | b | **100%** | Phase 81: indexed EA added (+ (d16,PC)), no port needed |
+| TAS | — | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
+| ASL | w | **100%** | Phase 81: full EA sweep added (d16/abs/indexed), no port needed |
+| CHK | — | 64.3% | Zero logic mismatches; remaining = unimplemented EA modes, incl. indexed which does need the 3rd port (see `port3.md` Bucket D) |
 | TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
 
-NEGX/NOT/CLR.w-l/NEG.b-l/TST.w-l share the same decode block fixed in Phase 80 and
-should land at a similar pass rate, but weren't individually swept yet.
+NEGX/NOT.w-l/CLR.w-l/NEG.b-l/TST.w-l/other shift sizes share the decode blocks fixed
+in Phase 81 and should also land at 100%, but weren't individually swept yet.
 
-### Known Architectural Gap — Indexed Destination
+### Known Architectural Gap — narrower than previously documented
 
-Instructions with a `(d8,An,Xn)` destination TIMEOUT (or, for BCHG/BCLR/BSET, silently produce the wrong CCR/no write) because the EU register file has only 2 read ports — reading src_data + dst_An + dst_Xn simultaneously exceeds port count. Fix requires a 3-port register file; deferred. Affected: MOVE.b/w/l, CLR/NEG/NOT/TST/NEGX, memory-word shifts, TAS, BCHG/BCLR/BSET Dn,mem, CHK.
+A diagnostic in Phase 81 (`AND.b` retested at 100% using the same 2-port
+time-multiplexing trick BCHG's broken indexed form uses) showed the "2-port register
+file" explanation for `(d8,An,Xn)`-destination failures was overbroad. See `port3.md`
+for the full breakdown: most instructions either don't need a 3rd operand at all
+(unary memory ops — fixed in Phase 81, no port needed) or already work fine with the
+existing 2-port scheme (AND/OR/EOR/SUB/CMP/ADDA/SUBA/CMPA). Only **CHK**'s indexed
+form is confirmed to need a genuine 3rd simultaneous register read (tested value +
+EA base + EA index). BCHG/BCLR/BSET and MOVE `Dn/An→(d8,An,Xi)` are still broken but
+are suspected to be an isolated bug rather than a port-count limitation — pending
+root-cause investigation (`port3.md` Phase 0.75).
 
 ---
 
