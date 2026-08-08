@@ -396,6 +396,28 @@ module m68030_seq (
         else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b100) && (f_ss == 2'b00) &&
                  (f_mode == 3'b111 && f_reg == 3'b000))
             ext_count = 3'd1;
+        // TAS.B (d16,An)/(xxx).W — 1 ext word
+        else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b101) && (f_ss == 2'b11) &&
+                 (f_mode == 3'b101 || (f_mode == 3'b111 && f_reg == 3'b000)))
+            ext_count = 3'd1;
+        // TAS.B (xxx).L — 2 ext words
+        else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b101) && (f_ss == 2'b11) &&
+                 (f_mode == 3'b111 && f_reg == 3'b001))
+            ext_count = 3'd2;
+        // NEGX/CLR/NEG/NOT/TST to (d16,An)/(xxx).W/(d16,PC — TST only) — 1 ext word
+        else if ((f_group == 4'h4) && !f_dir && (f_ss != 2'b11) &&
+                 (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
+                  f_dn == 3'b011 || f_dn == 3'b101) &&
+                 (f_mode == 3'b101 ||
+                  (f_mode == 3'b111 && (f_reg == 3'b000 ||
+                                        (f_dn == 3'b101 && f_reg == 3'b010)))))
+            ext_count = 3'd1;
+        // NEGX/CLR/NEG/NOT/TST to (xxx).L — 2 ext words
+        else if ((f_group == 4'h4) && !f_dir && (f_ss != 2'b11) &&
+                 (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
+                  f_dn == 3'b011 || f_dn == 3'b101) &&
+                 (f_mode == 3'b111 && f_reg == 3'b001))
+            ext_count = 3'd2;
         // CMP2/CHK2 (d16,An)/(xxx).W/(d16,PC) — 2 ext words
         else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) && !f_dn[2] && (f_dn != 3'b011) &&
                  (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010))))

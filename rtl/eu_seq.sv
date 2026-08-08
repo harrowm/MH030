@@ -1089,9 +1089,12 @@ module eu_seq (
                         endcase
                         case (f_ss)
                             2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; end
-                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
+                            // CCR fires via mem_rmw_sr_wr_en (captured at read-ack), not WB —
+                            // dec_updates_ccr must stay 0 or WB re-fires one cycle later with
+                            // stale mem_rdata and clobbers the correct value (Z ends up wrong).
+                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
                         endcase
                     // ── BTST/BCHG/BCLR/BSET #n, memory EA ──────────────────
                     // f_dn=100 selects static (immediate) bit number from extension word.
@@ -1173,9 +1176,11 @@ module eu_seq (
                         endcase
                         case (f_ss)
                             2'b00: begin dec_bit_op=BIT_TST; dec_valid=1'b1; dec_updates_ccr=1'b1; end
-                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b1; end
-                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b1; end
-                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b1; end
+                            // CCR fires via mem_rmw_sr_wr_en (captured at read-ack), not WB —
+                            // see comment on the register-src block above.
+                            2'b01: begin dec_bit_op=BIT_CHG; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b10: begin dec_bit_op=BIT_CLR; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
+                            2'b11: begin dec_bit_op=BIT_SET; dec_valid=1'b1; dec_is_mem_rmw=1'b1; dec_updates_ccr=1'b0; end
                         endcase
                     // ── CAS2 Dc1:Dc2, Du1:Du2, (Rn1):(Rn2) ───────────────
                     // Opcode: 0x0CFC (.W) / 0x0EFC (.L)
@@ -2393,16 +2398,51 @@ module eu_seq (
                             end
                         end
                     // ── NEGX/CLR/NEG/NOT/TST to memory ea ─────────────
+                    // (d8,An,Xn) indexed dst is not supported — same 3-read-port
+                    // register-file gap as other indexed-dst RMW ops (see CLAUDE.md).
+                    // (d16,PC) is only reachable for TST (f_dn=101) — not alterable,
+                    // so illegal as a NEGX/CLR/NEG/NOT destination.
                     end else if (!f_dir && f_ss != 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
+                                                        (f_dn == 3'b101 && f_reg == 3'b010)))) &&
                                  (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
                                   f_dn == 3'b011 || f_dn == 3'b101)) begin
                         dec_siz         = f_siz;
                         dec_unit        = UNIT_ALU;
-                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a (EA base)
-                        dec_reads_src   = 1'b1;
                         dec_is_mem_rd   = 1'b1;
+                        if (f_mode != 3'b111) begin
+                            dec_src_reg   = {1'b1, f_reg};  // An → rd_a (EA base)
+                            dec_reads_src = 1'b1;
+                        end
                         setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        case (f_mode)
+                            3'b101: begin  // (d16,An)
+                                dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext = 1'b1;
+                            end
+                            3'b111: begin
+                                dec_needs_ext = 1'b1;
+                                case (f_reg)
+                                    3'b000: begin  // abs.W
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    3'b001: begin  // abs.L
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = ext_data;
+                                    end
+                                    3'b010: begin  // (d16,PC) — TST only
+                                        dec_abs_ea_en  = 1'b1;
+                                        dec_abs_ea_val = decode_pc + 32'd2
+                                                       + {{16{ext_data[15]}}, ext_data[15:0]};
+                                    end
+                                    default: ;
+                                endcase
+                            end
+                            default: ;
+                        endcase
                         case (f_dn)
                             3'b000: begin dec_alu_op=ALU_NEGX; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b001: begin dec_alu_op=ALU_CLR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
@@ -3080,23 +3120,42 @@ module eu_seq (
                         end
 
                     // ----------------------------------------------------------------
-                    // TAS.B (An)/(An)+/-(An) — memory indirect RMW
-                    // f_dn=101, f_dir=0, f_ss=11, f_mode=010/011/100.
+                    // TAS.B (An)/(An)+/-(An)/(d16,An)/(xxx).W/(xxx).L — memory indirect RMW
+                    // f_dn=101, f_dir=0, f_ss=11, f_mode=010/011/100/101/111(000,001).
+                    // (d8,An,Xn) is not supported — same 3-read-port register-file gap
+                    // that blocks all indexed-dst RMW ops (see CLAUDE.md arch gap note).
                     // TAS.B Dn (f_mode=000) is decoded inside the f_mode==000/f_ss==11 block above.
                     // N=bit7(original), Z=(original_byte==0), V=0, C=0, X unchanged.
                     // ----------------------------------------------------------------
                     end else if (f_dn == 3'b101 && !f_dir && f_ss == 2'b11 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
-                        // TAS.B (An)/(An)+/-(An) — memory indirect RMW
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
+                        // TAS.B (An)/(An)+/-(An)/(d16,An)/(xxx).W/(xxx).L — memory indirect RMW
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_MOVE;
                         dec_siz         = 2'b01;    // byte
-                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a
-                        dec_reads_src   = 1'b1;
                         dec_is_mem_rd   = 1'b1;
                         dec_updates_ccr = 1'b0;  // CCR fires via tas_sr_wr path
                         dec_x_unchanged = 1'b1;
                         dec_is_tas      = 1'b1;
+                        if (f_mode != 3'b111) begin
+                            dec_src_reg   = {1'b1, f_reg};  // An → rd_a
+                            dec_reads_src = 1'b1;
+                        end
+                        case (f_mode)
+                            3'b101: begin  // (d16,An)
+                                dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                dec_needs_ext = 1'b1;
+                            end
+                            3'b111: begin  // (xxx).W / (xxx).L
+                                dec_abs_ea_en  = 1'b1;
+                                dec_needs_ext  = 1'b1;
+                                dec_abs_ea_val = (f_reg == 3'b001) ? ext_data
+                                                 : {{16{ext_data[15]}}, ext_data[15:0]};
+                            end
+                            default: ;
+                        endcase
                         setup_mem_incdec(2'b01, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
 
                     // ----------------------------------------------------------------
@@ -6652,20 +6711,35 @@ module eu_seq (
         : (pack_mem_is_unpk_r ? 2'b01 : 2'b10);  // read: UNPK=byte, PACK=word
 
     // CHK comparison: rd_b = value checked (Dn); upper bound from register/imm or memory.
-    logic [31:0] chk_val_w, chk_ub_w;
+    // CHK.W only tests/compares the low 16 bits — both operands must be sign-extended
+    // to 32 bits before the signed compare, else garbage in Dn[31:16]/bound[31:16]
+    // corrupts the result (Musashi: sint src = MAKE_INT_16(DX)).
+    logic [31:0] chk_val_w, chk_ub_w, chk_val_ext_w, chk_ub_ext_w;
     logic        chk_below_w, chk_above_w;
-    assign chk_val_w   = rd_b_data;
-    assign chk_ub_w    = ex_use_imm ? ex_imm : rd_a_data;
-    assign chk_below_w = ex_chk_word ? chk_val_w[15] : chk_val_w[31];
-    assign chk_above_w = $signed(chk_val_w) > $signed(chk_ub_w);
+    assign chk_val_w     = rd_b_data;
+    assign chk_ub_w      = ex_use_imm ? ex_imm : rd_a_data;
+    assign chk_val_ext_w = ex_chk_word ? {{16{chk_val_w[15]}}, chk_val_w[15:0]} : chk_val_w;
+    assign chk_ub_ext_w  = ex_chk_word ? {{16{chk_ub_w[15]}},  chk_ub_w[15:0]}  : chk_ub_w;
+    assign chk_below_w   = ex_chk_word ? chk_val_w[15] : chk_val_w[31];
+    assign chk_above_w   = $signed(chk_val_ext_w) > $signed(chk_ub_ext_w);
 
     // CHK with memory-source upper bound — fires when read ack arrives.
     // rd_b_data = Dn (value to check); mem_rdata = upper bound from memory.
     logic [31:0] chk_mem_ub_w;
     logic        chk_mem_below_w, chk_mem_above_w;
-    assign chk_mem_ub_w    = ex_chk_word ? {16'h0, mem_rdata[15:0]} : mem_rdata;
+    assign chk_mem_ub_w    = ex_chk_word ? {{16{mem_rdata[15]}}, mem_rdata[15:0]} : mem_rdata;
     assign chk_mem_below_w = ex_chk_word ? rd_b_data[15] : rd_b_data[31];
-    assign chk_mem_above_w = $signed(rd_b_data) > $signed(chk_mem_ub_w);
+    assign chk_mem_above_w = $signed(chk_val_ext_w) > $signed(chk_mem_ub_w);
+
+    // Z reflects the tested value only (Musashi: FLAG_Z = ZFLAG_16(src), unconditional —
+    // set every CHK regardless of trap). N is set from the sign of the tested value only
+    // when CHK actually traps (below 0 or above bound); otherwise N is left unchanged
+    // ("undefined" on real silicon; Musashi's early-return path never touches FLAG_N).
+    logic       chk_z_w;
+    logic       chk_traps_w;
+    assign chk_z_w     = ex_chk_word ? (chk_val_w[15:0] == 16'h0) : (chk_val_w == 32'h0);
+    assign chk_traps_w = ex_is_mem_rd ? (chk_mem_below_w || chk_mem_above_w)
+                                       : (chk_below_w     || chk_above_w);
 
     logic [31:0] ex_src_operand;
     assign ex_src_operand = ex_use_imm ? ex_imm : rd_a_data;
@@ -6883,8 +6957,8 @@ module eu_seq (
             end
             default: begin
                 if (ex_is_chk) begin
-                    ex_n = chk_below_w;
-                    ex_z = flag_z;
+                    ex_n = chk_traps_w ? chk_below_w : flag_n;
+                    ex_z = chk_z_w;
                     ex_v = 1'b0;
                     ex_c = 1'b0;
                     ex_x = flag_x;

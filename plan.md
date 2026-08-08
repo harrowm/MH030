@@ -402,6 +402,84 @@ group excluding FPU (Phase 52 stub only) and user/supervisor boundary edge cases
 
 ---
 
+## Phase 80 — BCHG/BCLR/BSET regression fix, CHK CCR fix, TAS/CLR/NEG/NOT/NEGX/TST EA-mode extension
+
+**Goal**: Rebuild and retest the Phase 79 BCHG/BCLR/BSET fix, then investigate the
+CLR.b/TAS/CHK failures flagged "under investigation" at the end of Phase 79.
+
+### Bug 1 (regression) — Phase 79's BCHG/BCLR/BSET "fix" double-fired CCR
+
+Retesting the Phase 79 commit showed BCHG at only **58.1%** — worse than the ~92%
+baseline the fix was meant to improve. Root cause: memory-RMW BCHG/BCLR/BSET already
+update CCR correctly via the `mem_rmw_sr_wr_en` path — captured combinationally at
+`mem_rmw_read_ack` into `mem_rmw_ccr_r`, gated by `mem_rmw_ccr_en_r <= ex_mem_rmw_ccr`,
+which fires **unconditionally** for any non-UNIT_MOVE RMW op regardless of
+`dec_updates_ccr`. This is the documented convention (see the "CCR fires via
+mem_rmw_sr_wr_en, not WB" comments already present at several other RMW blocks in
+eu_seq.sv).
+
+Phase 79 set `dec_updates_ccr=1` for the BCHG/BCLR/BSET memory-RMW forms (both
+register-src and #imm-src blocks), which was redundant with the always-on mem_rmw
+path — and worse, actively wrong: `ex_mem_stall` deasserts for exactly one cycle
+during `mem_rmw_after_r` (the cycle after the write ack), and since the EX-stage
+pipeline register still holds the same BCHG instruction, `wb_updates_ccr` fires a
+**second**, later CCR write using `ex_z = bit_z` recomputed from `bit_dst = mem_rdata`
+— which by that cycle no longer holds the read-phase data. The first (correct) write
+from `mem_rmw_sr_wr_en` gets clobbered one cycle later by the second (stale) write from
+WB. The observed symptom matched exactly: Z was spuriously set to 1 across nearly all
+failing vectors.
+
+**Fix**: restore `dec_updates_ccr=1'b0` for the CHG/CLR/SET cases in both memory-RMW
+decode blocks (`rtl/eu_seq.sv`, register-src block ~line 1092 and #imm block ~line
+1179), leaving BTST (which is not RMW and has no mem_rmw path) at `dec_updates_ccr=1`.
+
+**Result**: BCHG 58.1%→92.8%, BCLR →93.4%, BSET →98.2%. All remaining failures are
+exclusively `(d8,An,Xn)` indexed-dst — the documented register-file arch gap.
+
+### Bug 2 — CHK Z/N flag semantics wrong (17.8%→64.3%, zero logic mismatches left)
+
+`rtl/eu_seq.sv`'s CHK CCR mux had it backwards from real hardware / Musashi
+(`tools/musashi/m68kops.c: m68k_op_chk_16_d` etc.):
+- **Z** must be `(tested_value == 0)`, computed **unconditionally** every CHK. The RTL
+  left `ex_z = flag_z` (i.e. never updated it — carried over whatever CCR Z already was).
+- **N** must be `(tested_value < 0)` **only when CHK actually traps** (value below zero
+  or above the upper bound); if the value is in range (no trap), N is **left unchanged**
+  (Musashi's early-return path never touches `FLAG_N`). The RTL set
+  `ex_n = chk_below_w` unconditionally, forcing N=0 on every non-trapping in-range CHK
+  even when the previous instruction had left N=1.
+- Also fixed: CHK.W compared the **full 32-bit** `rd_b_data`/bound against each other
+  without sign-extending from the low 16 bits first, so garbage in the upper 16 bits of
+  either operand corrupted the signed "above bound" comparison (Musashi:
+  `sint src = MAKE_INT_16(DX)`). Added `chk_val_ext_w`/`chk_ub_ext_w` sign-extension and
+  fixed `chk_mem_ub_w` to sign- rather than zero-extend the memory-sourced bound.
+
+**Result**: CHK 17.8%→64.3%. Every remaining failure is a TIMEOUT from an unimplemented
+EA mode (`(An)+`, `-(An)`, `(d8,An,Xn)`, abs.L, `(d16,PC)`) — zero CCR/logic mismatches
+on any mode that does decode.
+
+### Bug 3 (missing feature, not a logic bug) — TAS/CLR/NEG/NOT/NEGX/TST only supported 3 of 7 alterable EA modes
+
+TAS and the NEGX/CLR/NEG/NOT/TST shared memory-EA decode block in `eu_seq.sv` only
+recognized `(An)`/`(An)+`/`-(An)`. `(d16,An)`, `(xxx).W`, and `(xxx).L` don't need a 3rd
+register-file read port (unlike `(d8,An,Xn)`, which is the real arch gap) and were
+straightforward to add, following the same pattern already used by NBCD's abs.W/L
+support. TST additionally got `(d16,PC)` since it's read-only (not a valid destination
+for the RMW forms). Each addition required a matching `ext_count` entry in
+`m68030_seq.sv` (`rtl/m68030_seq.sv`'s per-instruction extension-word-count table) so
+the IFU prefetch queue drains the right number of extension words — the eu_seq.sv EA
+decode and the m68030_seq.sv ext_count table must agree or the pipeline desyncs.
+
+**Result**: TAS 69.4%→87.2%, CLR.b 64.1%→83.8%, NEG.w 89.3% (spot check), TST.b
+83.6% (spot check, `(d16,PC)` included). All remaining failures across all six
+instructions are exclusively `(d8,An,Xn)` — the same register-file arch gap. NEGX/NOT/
+CLR.w/l/NEG.b/l/TST.w/l share the identical decode block and should follow the same
+pattern but were not individually swept this phase (time-boxed).
+
+**Verification**: `make test` (32/32) and `make cosim_grp` (all 8 groups match Musashi
+bus traces) both still pass after all three fixes.
+
+---
+
 ## Phase 79 — Tom Harte SingleStepTests Full Sweep
 
 **Goal**: Run every available Harte instruction suite against the DUT, fix wrong-result failures, and document TIMEOUTs (which indicate either the architectural gap or an unhandled decode path).
@@ -445,23 +523,25 @@ The Harte test vectors are 68000 one-instruction tests stored in `tests/harte/*.
 | MOVEfromSR | TBD | — | — | — | — | sweep pending |
 | MOVEfromUSP | 4027 | 4027 | 0 | 0 | 100% | ✅ |
 | MOVEtoUSP | 4494 | 4494 | 0 | 0 | 100% | ✅ |
-| BCHG | 5867 | 5867 | 0 | 0 | ~100% | ✅ (fix applied; retest at restart) |
-| BCLR | 5851 | 5851 | 0 | 0 | ~100% | ✅ (fix applied; retest at restart) |
-| BSET | TBD | — | — | — | — | fix applied; retest pending |
-| BTST | TBD | — | — | — | — | retest pending |
-| CLR.b | 8062 | 5168 | 2894 | 2894 | 64.1% | ⚠ TIMEOUT=FAIL (arch gap or decode) |
-| CLR.w | TBD | — | — | — | — | sweep pending |
-| CLR.l | TBD | — | — | — | — | sweep pending |
-| NEG.b/w/l | TBD | — | — | — | — | sweep pending |
-| NEGX.b/w/l | TBD | — | — | — | — | sweep pending |
-| NOT.b/w/l | TBD | — | — | — | — | sweep pending |
-| TST.b/w/l | TBD | — | — | — | — | sweep pending |
+| BCHG | 5867 | 5446 | 421 | 0 | 92.8% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
+| BCLR | 5851 | 5467 | 384 | 0 | 93.4% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
+| BSET | 6019 | 5912 | 107 | 0 | 98.2% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
+| BTST | TBD | — | — | — | — | retest pending (not affected by Phase 80 fix) |
+| CLR.b | 8062 | 6756 | 1306 | 1306 | 83.8% | ✅ Phase 80 EA-mode fix; remaining = indexed-dst arch gap |
+| CLR.w | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
+| CLR.l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
+| NEG.b/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
+| NEG.w | 4789 | 4278 | 511 | 511 | 89.3% | ✅ Phase 80 EA-mode fix; remaining = indexed-dst arch gap |
+| NEGX.b/w/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
+| NOT.b/w/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
+| TST.b | 8064 | 6740 | 1324 | 1324 | 83.6% | ✅ Phase 80 EA-mode fix (+ (d16,PC)); remaining = indexed-dst arch gap |
+| TST.w/l | TBD | — | — | — | — | same fix applies (shared decode block); sweep pending |
 | ASL.b | 8065 | 8063 | 2 | 0 | 100% | ✅ (~100%, 2 non-TIMEOUT fails TBD) |
 | ASL.w | 5799 | 5411 | 388 | 388 | 93.3% | ⚠ TIMEOUT=FAIL (shift-mem arch gap?) |
 | ASL.l/ASR/LSL/LSR | TBD | — | — | — | — | sweep pending |
 | ROL/ROR/ROXL/ROXR | TBD | — | — | — | — | sweep pending |
-| TAS | 4920 | 3414 | 1506 | 1506 | 69.4% | ⚠ TIMEOUT=FAIL (arch gap or RMW) |
-| CHK | 652 | 116 | 536 | 233 | 17.8% | ❌ mix of real fails + TIMEOUTs |
+| TAS | 4920 | 4290 | 630 | 630 | 87.2% | ✅ Phase 80 EA-mode fix; remaining = indexed-dst arch gap |
+| CHK | 652 | 419 | 233 | 233 | 64.3% | ✅ Phase 80 CCR fix; remaining = unimplemented EA modes (TIMEOUT only, no logic fails) |
 | Scc | TBD | — | — | — | — | sweep pending |
 | ADDA.w/l | TBD | — | — | — | — | sweep pending |
 | SUBA.w/l | TBD | — | — | — | — | sweep pending |
