@@ -155,11 +155,23 @@ def build_patches(test):
     ea_reg_w  =  opcode_w        & 7
     if ea_mode_w == 6 or (ea_mode_w == 7 and ea_reg_w == 3):
         f_group_w = (opcode_w >> 12) & 0xF
+        f_dir_w   = (opcode_w >>  8) & 0x1
         f_ss_w    = (opcode_w >>  6) & 0x3
         f_dn_w    = (opcode_w >>  9) & 0x7
         is_movem_w = (f_group_w == 4 and f_dn_w in (4, 6) and f_ss_w >= 2)
-        if f_group_w == 0 and f_dn_w not in (4, 7) and f_ss_w != 3:
+        # Group-0 immediate ALU ops (ORI/ANDI/SUBI/ADDI/EORI/CMPI) always have
+        # f_dir=0 (bit8=0) — the immediate word precedes the EA extension word(s).
+        # Dynamic bit-ops (BTST/BCHG/BCLR/BSET Dn,ea) share the f_group==0 + mode-6
+        # encoding but have f_dir=1 (Dn is the bit-count register, no immediate
+        # word at all) — f_dn alone can't disambiguate since it's the bit-count
+        # register 0-7 for dynamic forms, not a fixed marker. Must check f_dir too.
+        if f_group_w == 0 and not f_dir_w and f_dn_w not in (4, 7) and f_ss_w != 3:
             ea_off_w = 6 if f_ss_w == 2 else 4
+        elif f_group_w == 0 and not f_dir_w and f_dn_w == 4:
+            # Static BTST/BCHG/BCLR/BSET #n,ea: bit-number word precedes the EA's
+            # own extension word (we're already known mode6/pc_idx here) — see
+            # matching comment in get_scale_remap().
+            ea_off_w = 4
         elif is_movem_w:
             ea_off_w = 4  # skip opcode + register-mask word
         else:
@@ -309,6 +321,7 @@ def get_scale_remap(test):
         return None
 
     f_group = (opcode >> 12) & 0xF
+    f_dir   = (opcode >>  8) & 0x1
     f_ss    = (opcode >>  6) & 0x3
     f_dn    = (opcode >>  9) & 0x7
     f_reg   =  opcode        & 0x7
@@ -319,8 +332,20 @@ def get_scale_remap(test):
 
     # Locate brief extension word
     # (instr_src and rm already computed above)
-    if f_group == 0 and (f_dn not in (4, 7)) and f_ss != 3:
+    # f_dir=0 required: dynamic bit-ops (BTST/BCHG/BCLR/BSET Dn,ea) share the
+    # f_group==0 + mode-6 encoding but have f_dir=1 and no immediate word — see
+    # the matching comment in build_patches() above.
+    if f_group == 0 and not f_dir and (f_dn not in (4, 7)) and f_ss != 3:
         ea_off    = 6 if f_ss == 2 else 4
+        brief_ext = (rm.get(instr_src + ea_off, 0) << 8) | rm.get(instr_src + ea_off + 1, 0)
+    elif f_group == 0 and not f_dir and f_dn == 4:
+        # Static BTST/BCHG/BCLR/BSET #n,ea (f_dn=4 is the "static" marker, not a
+        # bit-count register). A bit-number word precedes the EA's own extension
+        # word here (we already know we're mode6/pc_idx to have reached this
+        # function), so the brief ext is the *second* extension word, not the
+        # first — read it from RAM at +4, never from prefetch[1] (that's the
+        # bit-number word).
+        ea_off    = 4
         brief_ext = (rm.get(instr_src + ea_off, 0) << 8) | rm.get(instr_src + ea_off + 1, 0)
     elif is_movem:
         ea_off    = 4  # skip opcode + register-mask word
@@ -448,11 +473,13 @@ def get_operand_ea(test):
 
     # Byte offset within the instruction to the first EA extension word.
     # Group-0 immediate ops (ADDI/SUBI/ORI/ANDI/EORI) have an immediate word
-    # (byte/word size) or longword (long size) before the EA extension words.
-    if f_group == 0 and f_dn not in (4, 7) and f_ss != 3:
+    # (byte/word size) or longword (long size) before the EA extension words —
+    # but only when f_dir=0; dynamic bit-ops (BTST/BCHG/BCLR/BSET Dn,ea) share
+    # the f_group==0 encoding with f_dir=1 and have no immediate word at all.
+    if f_group == 0 and not f_dir and f_dn not in (4, 7) and f_ss != 3:
         ea_off = 2 + (4 if f_ss == 2 else 2)
-    elif f_group == 0 and f_dn in (4, 7):
-        return None     # bit-ops / MOVES: non-trivial layout, skip
+    elif f_group == 0 and not f_dir and f_dn in (4, 7):
+        return None     # static #n bit-ops / MOVES: non-trivial layout, skip
     elif f_group == 4 and f_dn in (4, 6) and f_ss >= 2:
         ea_off = 4      # MOVEM: opcode word + register-mask word before EA extension
     else:

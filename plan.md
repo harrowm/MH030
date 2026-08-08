@@ -402,6 +402,80 @@ group excluding FPU (Phase 52 stub only) and user/supervisor boundary edge cases
 
 ---
 
+## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
+
+**Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
+waveform-trace a failing vector against a working AND-indexed vector, to determine
+whether Bucket C needs the 3rd register-file port or is an isolated, cheaper bug.
+
+**Result: neither RTL fix nor port needed. The RTL was already correct.** The bug was
+in `scripts/gen_harte_hex.py`, the same class of bug as Phase 82's MOVE fix but in
+different functions.
+
+### Root cause
+
+Applying the same technique that cracked the MOVE bug — hand-computing the expected
+outcome from the raw Harte JSON's opcode/register data rather than trusting the test's
+own "expected" fields — a reproduction of `BCHG D2,(d8,A3,Xn)` showed the DUT writing
+`xx` (fully undefined data) to the wrong address. Tracing back: `get_scale_remap()`,
+`build_patches()`, and `get_operand_ea()` in `gen_harte_hex.py` all share a condition
+meant to detect "group-0 immediate ALU ops" (ORI/ANDI/SUBI/ADDI/EORI/CMPI, which have
+an immediate word before the EA extension word) using only `f_group==0 and f_dn not
+in (4,7)`. But **dynamic bit-ops** (`BTST/BCHG/BCLR/BSET Dn,ea`) share the exact same
+`f_group==0` + mode-6 encoding, with `f_dn` holding the bit-count register (any value
+0–7, not a fixed marker) — the condition can't tell them apart because it never checks
+`f_dir` (bit 8), which is 0 for the immediate-ALU family and 1 for dynamic bit-ops.
+
+Misclassified as an immediate-ALU op, the harness looked for the EA's brief extension
+word 2 bytes too far into the instruction stream. Two downstream consequences:
+- `build_patches()` failed to mask the *real* extension word's bit 8 (a "full
+  extension word" flag the harness deliberately neutralizes elsewhere, since neither
+  the harness nor likely the RTL was built/verified to handle full-extension-word
+  addressing) — so the DUT decoded a pattern it was never meant to see.
+- `get_scale_remap()` failed to detect the (very real) non-zero scale on this
+  instruction, so it never redirected the expected write to the correctly-scaled
+  68030 address, and never copied the source byte there for `build_patches()` to
+  place in DUT memory — hence the DUT reading `xx` (genuinely uninitialized memory
+  at the address it correctly, scaledly, computed).
+
+A second, related bug: the *static* `#n` form (`BCHG #n,(d8,An,Xn)`, `f_dn==4`) has a
+bit-number extension word *before* the EA's own extension word — none of the three
+functions accounted for that either, so they read `prefetch[1]` (the bit-number word)
+as if it were the brief EA extension.
+
+### Fix
+
+Added `f_dir==0` to the group-0-immediate-ALU-op condition in all three functions
+(`build_patches()`, `get_scale_remap()`, `get_operand_ea()`), and added a dedicated
+branch for the static `#n` form reading the *second* extension word (offset +4, not
++2) in `build_patches()` and `get_scale_remap()`. Pure test-harness fix — zero RTL
+changes.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| BCHG | 92.8% (5446/5867) | **100%** (5231/5231) |
+| BCLR | 93.4% (5467/5851) | **100%** (5203/5203) |
+| BSET | 98.2% (5912/6019) | **100%** (5337/5337) |
+
+Total test counts dropped (5867→5231 etc.) because tests that were previously
+misclassified and wrongly run through the DUT now correctly `SKIP` (address-error or
+init-region conflicts once the corrected, properly-scaled EA is computed) instead of
+producing a spurious failure. Every remaining executed test passes.
+
+**Verification**: `make test` (32/32) still passes (no RTL touched this phase).
+
+**Bottom line for the 3rd-port investigation**: Bucket C is now fully closed, alongside
+A and B. Of the original four buckets, only **Bucket D (CHK indexed)** remains as a
+case that plausibly needs the register-file port — and given how consistently every
+other "needs a port" diagnosis in this investigation turned out to be a test-harness
+or missing-decode bug instead, that's worth treating as a working hypothesis to verify
+by attempting the CHK indexed decode, not a settled conclusion. See `port3.md` for the
+updated bucket summary.
+
+---
+
 ## Phase 82 — MOVE indexed-dst source EA fix (no port needed)
 
 **Goal**: Phase 81/0.5 found MOVE's indexed-dst gap was missing decode for 6 source
@@ -698,9 +772,9 @@ The Harte test vectors are 68000 one-instruction tests stored in `tests/harte/*.
 | MOVEfromSR | TBD | — | — | — | — | sweep pending |
 | MOVEfromUSP | 4027 | 4027 | 0 | 0 | 100% | ✅ |
 | MOVEtoUSP | 4494 | 4494 | 0 | 0 | 100% | ✅ |
-| BCHG | 5867 | 5446 | 421 | 0 | 92.8% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
-| BCLR | 5851 | 5467 | 384 | 0 | 93.4% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
-| BSET | 6019 | 5912 | 107 | 0 | 98.2% | ✅ Phase 80 fix; remaining = indexed-dst arch gap |
+| BCHG | 5231 | 5231 | 0 | 0 | **100%** | ✅ Phase 83: root cause was a test-harness bug, not RTL — no port needed |
+| BCLR | 5203 | 5203 | 0 | 0 | **100%** | ✅ Phase 83: same harness bug fixed |
+| BSET | 5337 | 5337 | 0 | 0 | **100%** | ✅ Phase 83: same harness bug fixed |
 | BTST | TBD | — | — | — | — | retest pending (not affected by Phase 80 fix) |
 | CLR.b | 8062 | 8062 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
 | CLR.w | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |

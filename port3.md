@@ -1,9 +1,12 @@
 # Plan: Add a 3rd combinational read port to `eu_regfile`
 
-Status: **Phase 0 (Bucket A), Phase 0.5 (Bucket B confirmation), and the MOVE
-non-indexed-src fix (Phase X, partial) all done. Phase 0.75 (BCHG root-cause), the
-MOVE indexed-src remainder, and Phase 1+ (the port itself) not started — no
-register-file port added yet.**
+Status: **Phase 0 (Bucket A), Phase 0.5 (Bucket B), Phase X (MOVE non-indexed-src,
+partial), and Phase 0.75 (BCHG root-cause) all done. Buckets A, B, and C are now
+fully closed — zero RTL changes for any of them. The MOVE indexed-src remainder and
+Phase 1+ (the port itself) are the only things left, and Phase 1+ may not be needed
+at all: CHK indexed (Bucket D) is now the only case that's ever been *shown* to need
+it, and it's an untested hypothesis, not a verified conclusion (see the Phase 0.75
+update below for why that's worth taking seriously). No register-file port added.**
 
 **Update after Phase 0**: Bucket A is confirmed and closed. CLR.b/NEG.w/NOT.b/TST.b/
 TAS/ASL.w all went from their previous partial pass rates to **100%**, zero remaining
@@ -29,6 +32,37 @@ MOVE.w 94.0%→**98.7%**, MOVE.l 93.6%→**99.0%**; every remaining failure is T
 and matches the deferred indexed-src (`(d8,An,Xn)`/`(d8,PC,Xn)`) count exactly. See
 `plan.md §Phase 82` for the full writeup.
 
+**Update after Phase 0.75 (BCHG root-cause) — Bucket C fully closed, zero RTL
+changes.** Applying the same hand-verification technique that found the MOVE bug —
+compute the expected outcome directly from the raw Harte JSON's opcode/register data
+rather than trusting the test's own "expected" fields — showed the DUT was writing
+*undefined data* to an address that didn't match the test's raw "expected" field
+either. Tracing why led to a **third instance of the exact same class of bug** as
+Phase 82's MOVE fix, this time in `get_scale_remap()`, `build_patches()`, and
+`get_operand_ea()` together: all three misclassify dynamic bit-ops
+(`BTST/BCHG/BCLR/BSET Dn,ea`) as group-0 *immediate* ALU ops (`ADDI`/`ANDI`/etc.),
+because their shared classification condition never checks `f_dir` (0 for immediate
+ops, 1 for dynamic bit-ops) — only `f_dn`, which for dynamic bit-ops is the bit-count
+*register number* (0–7), not a fixed marker distinguishing it from the immediate-op
+family. Misclassified, the harness read the EA's extension word from the wrong byte
+offset, which cascaded into two independent failures: it never masked the *real*
+extension word's "full extension word" bit (a mode the harness deliberately avoids
+elsewhere since it isn't built/verified), and it never applied the scale-remap that
+would have redirected the expected write to the correctly-scaled 68030 address and
+pre-populated DUT memory there. **The RTL was correct the entire time.** Fixed the
+classification (added the missing `f_dir` check) in all three functions, plus a
+related bug for the static `#n` form (needs its own extension-word offset). Zero RTL
+changes. Results: BCHG 92.8%→**100%**, BCLR 93.4%→**100%**, BSET 98.2%→**100%**, all
+zero fails. See `plan.md §Phase 83` for the full writeup.
+
+This closes Bucket C entirely — it was never a port-count problem, just like Bucket A
+and B. **Three separate "arch gap" diagnoses in a row have turned out to be test
+infrastructure bugs, not RTL limitations.** That's a strong prior against Bucket D
+(CHK) also secretly needing the port rather than just missing (or buggy) decode —
+worth treating the "CHK genuinely needs 3 operands" analysis as a hypothesis to verify
+by attempting the indexed decode, not a settled conclusion, before committing to
+building the register-file port.
+
 ## Results so far (Phase 0 + 0.5)
 
 Every number below is a Harte SingleStepTests suite re-run this session on real RTL —
@@ -52,47 +86,55 @@ unchanged (diagnostic-only buckets).
 | ADDA.w | B | untested | **100%** (5320/5320) | diagnostic only — no fix needed |
 | SUBA.w | B | untested | **100%** (5279/5279) | diagnostic only — no fix needed |
 | CMPA.w | B | untested | **100%** (5244/5244) | diagnostic only — no fix needed |
-| MOVE.b | reclassified | 90.8% (5375/5920) | 90.8% (5375/5920) | unchanged — root cause found, fix not applied |
-| BCHG | C (unresolved) | 92.8% (5446/5867) | 92.8% (5446/5867) | unchanged — root cause not found |
-| BCLR | C (unresolved) | 93.4% (5467/5851) | 93.4% (5467/5851) | unchanged — root cause not found |
-| BSET | C (unresolved) | 98.2% (5912/6019) | 98.2% (5912/6019) | unchanged — root cause not found |
-| CHK | D | 64.3% (419/652) | 64.3% (419/652) | unchanged — this is the one case needing the port |
+| MOVE.b | reclassified | 90.8% (5375/5920) | **97.9%** (5797/5920) | RTL fix, non-indexed-src only (Phase 82) |
+| MOVE.w | reclassified | 94.0% (3044/3239) | **98.7%** (3196/3239) | RTL fix (Phase 82) |
+| MOVE.l | reclassified | 93.6% (2954/3157) | **99.0%** (3125/3157) | RTL fix (Phase 82) |
+| BCHG | C → closed | 92.8% (5446/5867) | **100%** (5231/5231) | test-harness fix, zero RTL (Phase 83) |
+| BCLR | C → closed | 93.4% (5467/5851) | **100%** (5203/5203) | test-harness fix, zero RTL (Phase 83) |
+| BSET | C → closed | 98.2% (5912/6019) | **100%** (5337/5337) | test-harness fix, zero RTL (Phase 83) |
+| CHK | D | 64.3% (419/652) | 64.3% (419/652) | unchanged — the last unverified "needs a port" hypothesis |
 
-Six suites (one per Bucket A decode block, plus a second data point for
+Six Bucket-A suites (one per decode block, plus a second data point for
 NEGX/CLR/NEG/NOT/TST) went to 100% with **zero remaining failures of any kind** — no
-FAIL, no TIMEOUT. `make test` (32/32) and `make cosim_grp` (8/8 vs Musashi) both pass
-after all Bucket A changes.
+FAIL, no TIMEOUT. All of Bucket B (7 suites) confirmed at 100% with no fix needed.
+BCHG/BCLR/BSET (Bucket C) went to 100% too, purely via a test-harness fix. `make test`
+(32/32) and `make cosim_grp` (8/8 vs Musashi) both pass throughout.
 
-**Bottom line**: two of the four original "arch gap" buckets are now fully closed
-(A and B), with zero register-file changes. MOVE's gap turned out to be a third,
-previously-unrecognized case — missing decode, not Bucket C, not proven to need the
-port. That leaves exactly one confirmed 3rd-port requirement (CHK, Bucket D) and one
-still-open mystery (BCHG/BCLR/BSET, Bucket C — Phase 0.75, not started).
+**Bottom line**: three of the four original "arch gap" buckets are now fully closed
+(A, B, and C), and **not one of them needed the register-file port** — A and the MOVE
+non-indexed-src gap were missing decode; B already worked; C was a test-harness bug
+that made correctly-computed RTL output look wrong. Given that track record, treat
+Bucket D (CHK) as a hypothesis to verify, not a settled conclusion — the honest
+current state is "no case has yet been *shown* to require the port," even though
+CHK's on-paper analysis (needing `An`+`Xn`+`Dn` all at once, no natural 2-phase
+deferral) is the most plausible candidate so far.
 
 ## TL;DR
 
 - Adding a 3rd read port is cheap here: `eu_regfile` is a small flip-flop array read
   through combinational muxes, not a true multi-port SRAM. A 3rd port is another mux,
   not a structural redesign. Low risk, low cost, mechanically simple.
-- **But before committing to it**: a diagnostic this session shows the "indexed-dst
-  arch gap" documented since Phase 79 is not one problem. I re-ran `AND.b` — which
-  uses the *exact same* 2-port time-multiplexing trick (`dyn_bit_get_Dn`) that
-  BCHG/BCLR/BSET use for their indexed-dst forms — and it's **100% pass, 0 fails**
-  (8064/8064). That means the existing 2-port scheme *does* work for at least one
-  instruction family that needs a genuine 3rd operand (Dn + An + Xn simultaneously in
-  spirit, even if fetched across two cycles). So BCHG/BCLR/BSET's failure is most
-  likely an isolated bug in their specific RMW path, not proof that 2 ports are
-  insufficient in general.
-- Separately, a large chunk of what's labeled "arch gap" in `CLAUDE.md`/`plan.md`
-  (CLR/NEG/NOT/NEGX/TST/TAS/shift-memory → indexed dst) is for **unary** memory ops
-  that only ever need `An` + `Xn` (2 ports) — they were just never decoded for
-  `(d8,An,Xn)` at all. That's a plain feature-gap fix, no port change needed.
-- **Recommendation**: do the cheap, low-risk fixes first (Phase 0 below) and use their
-  results to decide how much of the true 3rd-port work is still needed. This doc still
-  gives the full 3rd-port design (Phase 1+) since you asked for it and it's a
-  legitimate simplification regardless — it replaces a fragile multi-cycle register
-  swap with a clean single-cycle 3-operand read — but I'd size it down substantially
-  once Phase 0 lands.
+- **As it turned out, none of it was needed.** The "indexed-dst arch gap" documented
+  since Phase 79 was never one problem, and — after actually investigating each
+  piece — it was never a register-file port problem either. Bucket A (unary memory
+  ops: CLR/NEG/NOT/NEGX/TST/TAS/shifts) was missing EA decode. Bucket B
+  (AND/OR/EOR/SUB/CMP/ADDA/SUBA/CMPA) already worked with the existing 2-port
+  time-multiplex trick. MOVE's indexed-dst gap was also missing decode (mostly
+  fixed). And BCHG/BCLR/BSET (Bucket C) — the case that most looked like it needed a
+  port, since it silently produced wrong output instead of just timing out — turned
+  out to be a bug in the *test harness*, not the RTL: it misclassified dynamic
+  bit-ops as a different instruction family and read the extension word from the
+  wrong offset, so the DUT was decoding a bit pattern it was never meant to see. Once
+  fixed, BCHG/BCLR/BSET went to 100% with zero RTL changes.
+- Only **CHK indexed** (Bucket D) remains as a case that plausibly needs the port —
+  and given the track record above, that should be treated as a hypothesis to verify
+  by attempting the decode, not a conclusion to build a port around sight unseen.
+- This doc still gives the full 3rd-port design (§3-4) since it was asked for and
+  it's a legitimate simplification if CHK does turn out to need it — but the honest
+  recommendation now is: try CHK indexed with the *existing* 2-port scheme's
+  deferred-read pattern first (bound value doesn't need to be read simultaneously
+  with `An`+`Xn` if the memory read can supply it after the fact, the way Bucket B's
+  cases do), and only reach for the port if that genuinely doesn't work.
 
 ---
 
@@ -196,18 +238,34 @@ own `get_scale_remap()`, both fixed. **Still open**: `(d8,An,Xn)`/`(d8,PC,Xn)` s
 `xn_scale`/`xn_wl`/offset fields, since the existing struct has only one set, shared
 by whichever side is indexed. Not a port issue either, just more struct plumbing.
 
-### Bucket D — Never had decode, genuinely needs 3 operands, would benefit from the port
+### Bucket D — Never had decode; probably does NOT need the port either (revised)
 
 `CHK (d8,An,Xn),Dn` — CHK reads its upper bound from memory (`An`+`Xn` for indexed EA)
-*and* separately needs `Dn` (the tested value) for the comparison. Currently
-undecoded (Phase 80 explicitly skipped it, citing the arch gap). Unlike Bucket A, CHK
-does need a real 3rd register value, and unlike Bucket B/C, there's no natural
-"after the bus ack" sequencing available — CHK's non-indexed memory forms already use
-`rd_a=An` + `rd_b=Dn` simultaneously (see `eu_seq.sv` ~2540), so adding `Xn` for the
-indexed EA is the one case in this whole audit that unambiguously needs a 3rd port
-(or an equivalent 2-cycle register-fetch scheme copied from the dyn_bit trick, which
-would need its own new plumbing since CHK's existing memory-source path doesn't have
-one).
+and separately needs `Dn` (the tested value) for the comparison. Currently undecoded
+(Phase 80 explicitly skipped it, citing the arch gap).
+
+**Original draft reasoning (superseded)**: I originally wrote this off as needing a
+real 3rd port, on the grounds that CHK's existing non-indexed memory forms hold
+`rd_a=An` + `rd_b=Dn` simultaneously *from decode*, so adding `Xn` for the indexed EA
+looked like a genuine 3-way conflict with no "defer to after the bus ack" option like
+Bucket B has.
+
+**That reasoning doesn't actually hold up.** The comparison (`Dn` vs. the bound) only
+happens *after* the memory read completes and `mem_rdata` is available — `Dn` isn't
+needed at all during the read/EA phase. That's exactly Bucket B's shape: `rd_a=An`,
+`rd_b=Xn` during the read (2 ports, no conflict), then swap `rd_b` to `Dn` at the read
+ack for the comparison — the *existing* `dyn_bit_get_Dn` mechanism, unmodified,
+already proven at 100% for AND/OR/EOR/SUB/CMP. The non-indexed CHK forms hold `Dn` on
+`rd_b` from decode only because there's no `Xn` to conflict with there, not because
+`Dn` is structurally needed early.
+
+Given three other "needs a port" diagnoses this session turned out to be missing
+decode or test-harness bugs instead, this should be tried before building anything:
+add `f_mode==3'b110` to CHK's memory-source block (`eu_seq.sv` ~2531) using the same
+`dec_is_dyn_bit_idx`/`dec_dyn_bit_reg=f_dn`/`dec_dyn_bit_is_an=0` pattern as Bucket B,
+plus the matching `ext_count` entry. If this works (plausible, given the pattern's
+100% track record elsewhere), **Bucket D closes too and the port is never needed for
+anything found so far.**
 
 ---
 
@@ -223,28 +281,34 @@ one).
    failures: all 545 are TIMEOUT, zero involve the register-source form, all are
    missing decode for 6 source EA modes on `dec_is_move_mm_idx_dst`. This turned out
    not to be a Bucket C question at all — see the updated Bucket C section above.
-3. **Phase 0.75 (targeted debug, moderate) — next up**: root-cause BCHG/BCLR/BSET's
-   indexed-dst failure specifically — waveform one failing vector
-   (e.g. `0d71 BCHG D6,(d8,A1,Xn)`) through the RMW read-ack/write-phase and compare
-   against a working AND-indexed-dst vector to find the actual divergence. If this
-   turns out to be a small, isolated bug (most likely, per every piece of evidence so
-   far), fix it directly — no port needed for Bucket C after all.
+3. **Phase 0.75 — DONE (Phase 83, `plan.md`)**: root-caused BCHG/BCLR/BSET's
+   indexed-dst failure. Not a Bucket C RTL bug at all — a test-harness bug (dynamic
+   bit-ops misclassified as immediate-ALU ops in `gen_harte_hex.py`, reading the
+   extension word from the wrong offset). Zero RTL changes. BCHG/BCLR/BSET →
+   100%/100%/100%. Bucket C fully closed.
 4. **Phase X — mostly DONE (Phase 82, `plan.md`)**: added 4 of the 6 missing source
    EA modes to `eu_seq.sv`'s `f_move_dst_mode==3'b110` block for MOVE indexed-dst —
    `(An)/(An)+/-(An)/(d16,An)`, no port needed. MOVE.b/w/l → 97.9%/98.7%/99.0%.
    Remaining: `(d8,An,Xn)`/`(d8,PC,Xn)` src (both sides indexed) — needs separate
    src/dst `xn_scale`/`xn_wl`/offset struct fields, more plumbing but still no port.
-5. **Phase 1+ (the 3rd port itself)**: at this point, only clearly required for CHK
-   indexed (Bucket D). Worth it as a structural cleanup for Bucket C only if Phase
-   0.75 finds the existing multi-cycle scheme too fragile to trust going forward even
-   after the immediate bug is fixed — increasingly looking optional rather than
-   required, the more of this gap turns out to be ordinary missing-feature work.
-   Design below.
+5. **Bucket D attempt — next up, before touching the register file at all**: try
+   CHK indexed with the existing `dyn_bit_get_Dn` deferred-register pattern (§1
+   Bucket D, revised) — `Dn` is only needed after the memory read, same shape as
+   Bucket B, no port required if this works. Given the session's track record (A, B,
+   C, and most of MOVE all turned out not to need the port), this is the
+   highest-probability next step.
+6. **Phase 1+ (the 3rd port itself) — only if step 5 fails**: at this point nothing
+   has been *shown* to need it. Only reach for this if CHK indexed genuinely can't be
+   made to work with the deferred-register pattern (worth understanding *why* it
+   fails first — that failure mode itself would be useful evidence about what a real
+   3rd-operand conflict looks like, versus the false alarms found so far). Design
+   below, kept for reference either way — it's a legitimate structural cleanup if it
+   ever *is* warranted, not wasted regardless.
 
-If you'd rather skip straight to the port regardless of Phase 0's findings (e.g.
-because you want the cleaner single-cycle design on principle, not just to fix bugs),
-that's a reasonable call too — say so and I'll scope Phase 1 as the primary work item
-instead of the fallback.
+If you'd rather build the port anyway regardless of whether anything currently needs
+it (e.g. because you want the cleaner single-cycle design on principle, replacing the
+fragile multi-cycle swap trick everywhere it's used), that's a reasonable call too —
+say so and I'll scope Phase 1 as the primary work item instead of the fallback.
 
 ---
 
@@ -406,16 +470,15 @@ Same pattern as Phase 80:
 
 ## Open questions for you
 
-1. ~~Do you want Phase 0 (quick unary-op EA-mode wins) done first, or go straight to
-   the 3rd port regardless of what Phase 0.75 finds?~~ Resolved — Phase 0 done, and
-   0.5 further shrank the case for the port (MOVE's gap looks like missing decode too,
-   not a port issue). Worth deciding now: still want Phase 0.75 (BCHG root-cause) and
-   the Phase X MOVE EA-mode work before touching the register file at all, or do you
-   want the port built regardless, now that CHK indexed is the only confirmed case for
-   it?
-2. For CHK indexed — fine to add `rd_c` as a CHK-only special case initially, or do
-   you want it designed from the start as the general mechanism BCHG/MOVE would also
-   migrate to (more upfront design, less rework later)?
+1. ~~Do you want Phase 0 done first, or go straight to the port?~~ Resolved — Phase 0,
+   0.5, and 0.75 are all done. A, B, and C are fully closed, all without touching the
+   register file. Current recommendation: try the CHK-indexed deferred-register
+   approach (§2 step 5) before building anything — say the word and I'll implement it.
+2. If the CHK attempt *does* work (closing Bucket D too): is there any remaining
+   appetite for building the 3rd port anyway, purely as a structural cleanup to
+   replace the multi-cycle swap trick everywhere it's used (BCHG/BCLR/BSET, MOVE
+   reg-idx-dst, CHK) with a single-cycle 3-operand read? Or shelve this doc once
+   nothing needs it?
 3. Any objection to potentially dropping the fake RMW read phase for MOVE
    `Dn/An→(d8,An,Xi)` if it turns out to be pure vestigial scaffolding for the register
    dance (per §4.3)? That would change bus cycle count/timing for that one
