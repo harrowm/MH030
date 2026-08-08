@@ -2742,10 +2742,12 @@ module eu_seq (
                         dec_needs_ext   = 1'b1;
                     // ── CHK memory-source upper bound ───────────────
                     end else if (f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
-                                 (f_mode == 3'b010 || f_mode == 3'b101 ||
-                                  f_mode == 3'b110 ||
-                                  (f_mode == 3'b111 && f_reg == 3'b000))) begin
-                        // CHK (An)/(d16,An)/(d8,An,Xn)/(xxx).W, Dn — read upper bound from memory
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
+                                                        f_reg == 3'b010 || f_reg == 3'b011)))) begin
+                        // CHK (An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/(xxx).W/(xxx).L/
+                        // (d16,PC)/(d8,PC,Xn), Dn — read upper bound from memory
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_NONE;
                         dec_is_chk      = 1'b1;
@@ -2756,10 +2758,12 @@ module eu_seq (
                         dec_dst_reg     = {1'b0, f_dn};    // Dn (value to check) → rd_b
                         dec_reads_dst   = 1'b1;
                         dec_is_mem_rd   = 1'b1;            // read upper bound from memory
-                        if (f_mode == 3'b010) begin
-                            // (An): EA = An
+                        if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) begin
+                            // (An)/(An)+/-(An): EA = An, auto-inc/dec by operand size
                             dec_src_reg   = {1'b1, f_reg};
                             dec_reads_src = 1'b1;
+                            setup_mem_incdec(dec_siz, dec_an_upd_en, dec_an_upd_reg,
+                                              dec_an_delta, dec_ea_offset);
                         end else if (f_mode == 3'b101) begin
                             // (d16,An): EA = An + d16
                             dec_src_reg   = {1'b1, f_reg};
@@ -2789,11 +2793,44 @@ module eu_seq (
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;   // Dn (tested value) → rd_b after swap
                             dec_dyn_bit_is_an  = 1'b0;
-                        end else begin
+                        end else if (f_reg == 3'b000) begin
                             // (xxx).W: EA = sign-extend(abs16)
                             dec_abs_ea_en  = 1'b1;
                             dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
                             dec_needs_ext  = 1'b1;
+                        end else if (f_reg == 3'b001) begin
+                            // (xxx).L: EA = abs32
+                            dec_abs_ea_en  = 1'b1;
+                            dec_abs_ea_val = ext_data;
+                            dec_needs_ext  = 1'b1;
+                        end else if (f_reg == 3'b010) begin
+                            // (d16,PC): EA = decode_pc+2 + d16 — no register operand for
+                            // the base, Dn stays fixed on rd_b, no swap needed.
+                            dec_abs_ea_en  = 1'b1;
+                            dec_abs_ea_val = decode_pc + 32'd2
+                                           + {{16{ext_data[15]}}, ext_data[15:0]};
+                            dec_needs_ext  = 1'b1;
+                        end else begin
+                            // (d8,PC,Xn): EA = decode_pc+2 + Xn*scale + d8. Xn is hardwired
+                            // to rd_b by the EX-stage EA datapath (ex_xn_scaled always reads
+                            // rd_b_data), which collides with Dn also needing rd_b for the
+                            // post-read comparison — same deferred-swap shape as the
+                            // (d8,An,Xn) case above, just with dec_abs_ea_en (PC-relative
+                            // base) instead of dec_src_reg (An base); dyn_bit_get_Dn doesn't
+                            // care which one supplies the base, only that ex_is_dyn_bit_idx
+                            // + ex_is_mem_rd are set, so the same swap-at-ack mechanism works
+                            // unmodified. rd_a is unused here (no An operand).
+                            dec_abs_ea_en      = 1'b1;
+                            dec_abs_ea_val     = decode_pc + 32'd2
+                                               + {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_dst_reg        = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            dec_is_idx         = 1'b1;
+                            dec_xn_wl          = ext_data[11];
+                            dec_xn_scale       = ext_data[10:9];
+                            dec_needs_ext      = 1'b1;
+                            dec_is_dyn_bit_idx = 1'b1;
+                            dec_dyn_bit_reg    = f_dn;   // Dn (tested value) → rd_b after swap
+                            dec_dyn_bit_is_an  = 1'b0;
                         end
                     end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b10) begin
                         // JSR ea: 0100 1110 10 mmm rrr — push PC to -(A7), jump to ea

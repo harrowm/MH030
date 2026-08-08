@@ -539,6 +539,55 @@ independently-indexable operands existed to test it.
 
 ---
 
+## Phase 86 — CHK remaining EA modes: `(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)` → 100%
+
+**Goal**: close CHK's remaining gap from Phase 84 — every memory-source EA mode
+except `(An)`/`(d16,An)`/`(d8,An,Xn)`/`(xxx).W` had never been attempted.
+
+### RTL (`eu_seq.sv`, `m68030_seq.sv`)
+
+Extended CHK's memory-source decode block (`eu_seq.sv` ~2744) to cover all
+remaining modes:
+- **`(An)+`/`-(An)`** (`f_mode==011/100`): straightforward — `An`→`rd_a`, reuse
+  the existing `setup_mem_incdec()` task (already used by the NEGX/CLR/NEG/NOT/
+  TST unary block) for the auto-increment/decrement, keyed on CHK's own operand
+  size (`dec_siz`, word or long) rather than `f_siz`.
+- **`(xxx).L`** (`f_mode==111,f_reg==001`): `dec_abs_ea_val = ext_data` (full
+  32-bit absolute), 2 extension words.
+- **`(d16,PC)`** (`f_reg==010`): `dec_abs_ea_val = decode_pc+2+sext(d16)` — no
+  register operand for the base at all, so `Dn` stays fixed on `rd_b` for the
+  whole cycle, no swap mechanism needed.
+- **`(d8,PC,Xn)`** (`f_reg==011`): the one non-obvious case. The EX-stage EA
+  datapath hardwires the scaled index register to `rd_b`
+  (`ex_xn_scaled = ... rd_b_data ...`, `eu_seq.sv` ~6371) regardless of whether
+  the base comes from a register or `dec_abs_ea_en`/PC — so `Xn` needs `rd_b`
+  during the read phase, colliding with `Dn` also wanting `rd_b` for the
+  post-read comparison. Confirmed `dyn_bit_get_Dn`'s swap-at-ack condition
+  (`eu_seq.sv` ~6342) depends only on `ex_is_dyn_bit_idx && ex_is_mem_rd` plus
+  the read-ack signal — nothing in it assumes a register-relative base — so the
+  existing `(d8,An,Xn)` mechanism (`dec_is_dyn_bit_idx`/`dec_dyn_bit_reg=f_dn`/
+  `dec_dyn_bit_is_an=0`) works unmodified with `dec_abs_ea_en`+PC-relative
+  `dec_abs_ea_val` substituted for `dec_src_reg`=An. `rd_a` is simply unused
+  (no An operand exists for this mode).
+
+`m68030_seq.sv`: added a new `ext_count=2` entry for `(xxx).L`, and added
+`f_reg==010`/`011` to the existing CHK `ext_count=1` entry. `(An)+`/`-(An)`
+need no entry — 0 extension words falls through to the classifier's default.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| CHK | 70.3% (468/666) | **100%** (666/666) |
+
+Zero remaining failures of any kind. **Verification**: `make test` (32/32),
+`make cosim_grp` (8/8 vs Musashi).
+
+No harness bugs found this phase — first-try correct once the register-port
+collision was reasoned through up front instead of discovered via failure.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

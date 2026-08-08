@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 85 summary)
+### Harte Pass Rates (Phase 86 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -221,7 +221,7 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | TST | b | **100%** | Phase 81: indexed EA added (+ (d16,PC)), no port needed |
 | TAS | — | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
 | ASL | w | **100%** | Phase 81: full EA sweep added (d16/abs/indexed), no port needed |
-| CHK | — | 70.3% | Phase 84: indexed EA added, no port needed; zero remaining fails on `(d8,An,Xn)`; rest = other unimplemented EA modes |
+| CHK | — | **100%** | Phase 84: `(d8,An,Xn)` indexed EA added, no port needed. Phase 86: remaining EA modes (`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)`) added — `(d8,PC,Xn)` needed the same swap trick, no port needed either |
 | TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
 
 NEGX/NOT.w-l/CLR.w-l/NEG.b-l/TST.w-l/other shift sizes share the decode blocks fixed
