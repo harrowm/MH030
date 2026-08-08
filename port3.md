@@ -1,15 +1,22 @@
 # Plan: Add a 3rd combinational read port to `eu_regfile`
 
-Status: **Phase 0 done (Bucket A, Phase 81 in `plan.md`). Phase 0.5/0.75/1+ not
-started — no register-file port added yet.**
+Status: **Phase 0 (Bucket A) and Phase 0.5 (Bucket B confirmation) done. Phase 0.75
+(BCHG root-cause) and Phase 1+ (the port itself) not started — no register-file port
+added yet.**
 
 **Update after Phase 0**: Bucket A is confirmed and closed. CLR.b/NEG.w/NOT.b/TST.b/
 TAS/ASL.w all went from their previous partial pass rates to **100%**, zero remaining
 fails of any kind, purely by adding `(d8,An,Xn)` decode using the existing 2-port
-`An`(rd_a)/`Xn`(rd_b) pattern — no port change. This empirically confirms the bucket
-breakdown below rather than just arguing it from code reading. See `plan.md §Phase 81`
-for the full results. Buckets B/C/D and the port design itself are unchanged from the
-original draft.
+`An`(rd_a)/`Xn`(rd_b) pattern — no port change. See `plan.md §Phase 81`.
+
+**Update after Phase 0.5**: Bucket B is fully confirmed — OR/EOR/SUB/CMP.b and
+ADDA/SUBA/CMPA.w all retested at 100%, matching AND.b. Also found something not
+anticipated in the original draft: **MOVE's indexed-dst failures have nothing to do
+with Bucket C at all.** All 545 MOVE.b failures are TIMEOUT, none involve the
+register-source form (the one that actually shares BCHG's mechanism) — it's purely
+missing decode coverage for 6 source addressing modes on `dec_is_move_mm_idx_dst`.
+See the updated Bucket C section below — this looks fixable the same way as Phase 81,
+no port needed, but wasn't implemented this session.
 
 ## TL;DR
 
@@ -76,9 +83,10 @@ fundamentally broken for this shape of instruction (source register value only
 needed *after* the EA/bus phase completes — never simultaneously with `Xn`, so the
 2-port swap is safe).
 
-**No port change required here either**, on current evidence. (OR/EOR/SUB/CMP weren't
-individually re-verified this session — recommend a quick sweep to confirm before
-assuming they're all fine, but I'd bet they are, same code shape as AND.)
+**No port change required here either.** **UPDATE (Phase 0.5, `plan.md`)**: confirmed —
+OR.b/EOR.b/SUB.b/CMP.b and ADDA.w/SUBA.w/CMPA.w all retested at **100%**. Bucket B is
+fully closed; the 2-port time-multiplex mechanism is solid for every instruction that
+uses it this way.
 
 ### Bucket C — Confirmed broken, mechanism unclear, needs investigation
 
@@ -98,17 +106,33 @@ roughly in order of likelihood:
   so it doesn't share the exact same FSM path as BCHG despite reusing
   `dyn_bit_get_Dn`).
 
-`MOVE Dn/An,(d8,An,Xi)` — Phase 79/80 docs list MOVE.b/w/l at 90.8%/94.0%/93.6%, with
-"indexed-dst arch gap" cited for all remaining fails, but this was never
-disambiguated between `dec_is_move_reg_idx_dst` (register source, uses
-`dyn_bit_get_Dn`, same family as BCHG) and `dec_is_move_mm_idx_dst` (memory/PC-relative
-source, no register-swap needed, should be unaffected). Needs the same targeted
-re-check as BCHG before concluding a port fixes it.
+**This is the bucket the 3rd port would definitively fix** if it's needed at all, and
+it's also the bucket worth a half-day of waveform debugging first, since if it's a
+small BCHG-specific bug (most likely, given AND works), fixing that bug directly is
+far cheaper than adding a register-file port and migrating N decode sites.
 
-**This is the bucket the 3rd port would definitively fix**, and it's also the bucket
-worth a half-day of waveform debugging first, since if it's a small BCHG-specific bug
-(most likely, given AND works), fixing that bug directly is far cheaper than adding a
-register-file port and migrating N decode sites.
+**UPDATE (Phase 0.5, `plan.md`)**: `MOVE Dn/An,(d8,An,Xi)` — the one MOVE sub-case that
+actually shares BCHG's `dyn_bit_get_Dn` mechanism — turns out to be a red herring for
+this bucket. Re-ran MOVE.b: 545 failures, **all TIMEOUT, zero involve a register
+source** (`grep`ing for `MOVE.b D0,`/`A0,`-style failures returns nothing). The
+register-swap form isn't broken — consistent with Bucket B, not Bucket C. Every single
+MOVE.b indexed-dst failure is `dec_is_move_mm_idx_dst` (memory-to-memory move) with a
+**source** addressing mode that was simply never decoded: `eu_seq.sv`'s
+`f_move_dst_mode==3'b110` block only covers src = Dn/An (register), abs.W, abs.L,
+`(d16,PC)`, and `#imm` — it's missing src = `(An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/
+(d8,PC,Xn)`, and the failure list matches that gap exactly, mode for mode.
+
+This is really a 5th bucket (or an extension of Bucket A): TIMEOUT-only, missing
+decode coverage, and *not proven to need a 3rd port* — `move_mm`'s existing FSM
+already does "read src (whatever addressing mode), then compute dst EA and write" as
+two naturally sequential phases elsewhere (that's how the abs.W/abs.L/(d16,PC) src
+cases already work with just 2 ports: `rd_a`=dst An, `rd_b`=dst Xn, with no register
+needed for the abs/PC-relative src read). Adding a register-based src address
+(`src_An`) is a 3rd register only if it's needed *simultaneously* with dst
+`An`+`Xn` — and it isn't, since the src read fully completes before the dst EA is
+ever computed. This looks like straightforward missing-decode work, same shape as
+Phase 81, not a Bucket C/D problem. Not implemented this session — flagged for
+whoever picks up the MOVE indexed-dst gap next.
 
 ### Bucket D — Never had decode, genuinely needs 3 operands, would benefit from the port
 
@@ -132,21 +156,26 @@ one).
    `Xn`(rd_b) pattern already proven by LEA/PEA. CLR.b/NEG.w/NOT.b/TST.b/TAS/ASL.w all
    confirmed at 100%, zero remaining fails. `make test` (32/32) and `make cosim_grp`
    (8/8) both still pass.
-2. **Phase 0.5 (diagnostic, cheap) — next up**: sweep OR.b/EOR.b/SUB.b/CMP.b and
-   ADDA.w/SUBA.w/CMPA.w indexed forms to confirm Bucket B's "already works" hypothesis
-   holds beyond AND. Also split MOVE.b's indexed-dst failures by
-   `dec_is_move_reg_idx_dst` vs `dec_is_move_mm_idx_dst` to see which sub-case is
-   actually failing.
-3. **Phase 0.75 (targeted debug, moderate)**: root-cause BCHG/BCLR/BSET's indexed-dst
-   failure specifically — waveform one failing vector
+2. **Phase 0.5 — DONE**: swept OR.b/EOR.b/SUB.b/CMP.b and ADDA.w/SUBA.w/CMPA.w indexed
+   forms — all 100%, Bucket B fully confirmed. Also split MOVE.b's indexed-dst
+   failures: all 545 are TIMEOUT, zero involve the register-source form, all are
+   missing decode for 6 source EA modes on `dec_is_move_mm_idx_dst`. This turned out
+   not to be a Bucket C question at all — see the updated Bucket C section above.
+3. **Phase 0.75 (targeted debug, moderate) — next up**: root-cause BCHG/BCLR/BSET's
+   indexed-dst failure specifically — waveform one failing vector
    (e.g. `0d71 BCHG D6,(d8,A1,Xn)`) through the RMW read-ack/write-phase and compare
    against a working AND-indexed-dst vector to find the actual divergence. If this
-   turns out to be a small, isolated bug (most likely), fix it directly — no port
-   needed for Bucket C after all.
-4. **Phase 1+ (the 3rd port itself)**: only clearly required for CHK indexed (Bucket
-   D), and as a structural cleanup for Bucket C if Phase 0.75 finds the existing
-   multi-cycle scheme too fragile to trust going forward even after the immediate bug
-   is fixed. Design below.
+   turns out to be a small, isolated bug (most likely, per every piece of evidence so
+   far), fix it directly — no port needed for Bucket C after all.
+4. **Phase X (not port-related, but worth doing)**: add the 6 missing source EA modes
+   to `eu_seq.sv`'s `f_move_dst_mode==3'b110` block for MOVE indexed-dst — same shape
+   of change as Phase 81, likely closes most of MOVE's remaining ~9% gap with no port.
+5. **Phase 1+ (the 3rd port itself)**: at this point, only clearly required for CHK
+   indexed (Bucket D). Worth it as a structural cleanup for Bucket C only if Phase
+   0.75 finds the existing multi-cycle scheme too fragile to trust going forward even
+   after the immediate bug is fixed — increasingly looking optional rather than
+   required, the more of this gap turns out to be ordinary missing-feature work.
+   Design below.
 
 If you'd rather skip straight to the port regardless of Phase 0's findings (e.g.
 because you want the cleaner single-cycle design on principle, not just to fix bugs),
@@ -313,8 +342,13 @@ Same pattern as Phase 80:
 
 ## Open questions for you
 
-1. Do you want Phase 0 (quick unary-op EA-mode wins) done first, or go straight to
-   the 3rd port regardless of what Phase 0.75 finds?
+1. ~~Do you want Phase 0 (quick unary-op EA-mode wins) done first, or go straight to
+   the 3rd port regardless of what Phase 0.75 finds?~~ Resolved — Phase 0 done, and
+   0.5 further shrank the case for the port (MOVE's gap looks like missing decode too,
+   not a port issue). Worth deciding now: still want Phase 0.75 (BCHG root-cause) and
+   the Phase X MOVE EA-mode work before touching the register file at all, or do you
+   want the port built regardless, now that CHK indexed is the only confirmed case for
+   it?
 2. For CHK indexed — fine to add `rd_c` as a CHK-only special case initially, or do
    you want it designed from the start as the general mechanism BCHG/MOVE would also
    migrate to (more upfront design, less rework later)?

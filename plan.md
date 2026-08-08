@@ -402,7 +402,7 @@ group excluding FPU (Phase 52 stub only) and user/supervisor boundary edge cases
 
 ---
 
-## Phase 81 — "3rd port" investigation, Phase 0: indexed EA for unary memory ops (no port needed)
+## Phase 81 — "3rd port" investigation, Phase 0 + 0.5: indexed EA for unary memory ops, Bucket B confirmed, MOVE reclassified (no port needed for any of it)
 
 **Context**: the user asked for a plan to add a 3rd register-file read port to close
 the `(d8,An,Xn)` indexed-dst "arch gap" documented since Phase 79. Before writing that
@@ -458,6 +458,49 @@ sequencing available) and BCHG/BCLR/BSET/MOVE-reg-src indexed (Bucket C — conf
 broken, but likely an isolated bug given AND's identical mechanism works, not a true
 port-count problem) remain. See `port3.md` for the full analysis and open questions
 before deciding how to proceed on those.
+
+### Phase 0.5 — Bucket B confirmation + MOVE indexed-dst reclassified (diagnostic only, no RTL)
+
+Swept the rest of Bucket B (instructions using the same `dyn_bit_get_Dn` 2-port
+time-multiplex mechanism as AND, which was the only one verified when Bucket B was
+first written up):
+
+| Suite | Result |
+|-------|--------|
+| OR.b | 8064/8064 (100%) |
+| EOR.b | 8065/8065 (100%) |
+| SUB.b | 8064/8064 (100%) |
+| CMP.b | 8064/8064 (100%) |
+| ADDA.w | 5320/5320 (100%) |
+| SUBA.w | 5279/5279 (100%) |
+| CMPA.w | 5244/5244 (100%) |
+
+All 100%. Bucket B is fully closed — the 2-port scheme is solid for every instruction
+family that uses it this way.
+
+Also re-ran MOVE.b (545 failures, previously attributed to "indexed-dst arch gap"
+without disambiguation) and classified the failures:
+- **All 545 are TIMEOUT** — none are logic/CCR mismatches.
+- **Zero involve a register source** (`grep`ing failures for `MOVE.b D0,`/`A0,`-style
+  entries returns nothing) — meaning `dec_is_move_reg_idx_dst`, the one MOVE sub-case
+  that actually shares BCHG's `dyn_bit_get_Dn` mechanism, isn't broken at all.
+- Every failure is `dec_is_move_mm_idx_dst` (memory-to-memory move) with a **source**
+  addressing mode that `eu_seq.sv`'s `f_move_dst_mode==3'b110` decode block never
+  covered: `(An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/(d8,PC,Xn)`. Only Dn/An (register),
+  abs.W, abs.L, `(d16,PC)`, and `#imm` sources are decoded for an indexed destination.
+  The failure list matches this gap mode-for-mode, exactly.
+
+MOVE's ~9% "arch gap" turns out to be unrelated to Bucket C/the register-swap
+mechanism entirely — it's missing decode coverage, same shape as Phase 81's fix, and
+not proven to need a 3rd port (the existing `move_mm` FSM already reads an arbitrary
+source EA in one phase and writes an arbitrary destination EA in a later phase
+elsewhere — that's exactly how the abs.W/abs.L/(d16,PC) source cases already work with
+2 ports). Not implemented this session; see `port3.md` for the writeup.
+
+**Net effect on the port-3 case**: after Phase 0 + 0.5, the *only* confirmed
+requirement for a 3rd register-file read port is CHK's indexed form (Bucket D). BCHG/
+BCLR/BSET remain broken and unexplained (Bucket C, Phase 0.75 not yet done); MOVE's
+gap looks like ordinary missing-feature work, not a port issue.
 
 ---
 
