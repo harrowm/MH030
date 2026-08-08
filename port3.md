@@ -18,6 +18,46 @@ missing decode coverage for 6 source addressing modes on `dec_is_move_mm_idx_dst
 See the updated Bucket C section below — this looks fixable the same way as Phase 81,
 no port needed, but wasn't implemented this session.
 
+## Results so far (Phase 0 + 0.5)
+
+Every number below is a Harte SingleStepTests suite re-run this session on real RTL —
+not a projection. "Before" is the pass rate at the start of this investigation
+(Phase 80 baseline); "After" reflects the Phase 81/0.5 changes (Bucket A) or is
+unchanged (diagnostic-only buckets).
+
+| Suite | Bucket | Before | After | Change |
+|-------|--------|--------|-------|--------|
+| CLR.b | A | 83.8% (6756/8062) | **100%** (8062/8062) | RTL fix (Phase 81) |
+| NEG.w | A | 89.3% (4278/4789) | **100%** (4789/4789) | RTL fix (Phase 81) |
+| NOT.b | A | untested | **100%** (8063/8063) | RTL fix (Phase 81) |
+| TST.b | A | 83.6% (6740/8064) | **100%** (8064/8064) | RTL fix (Phase 81) |
+| TAS | A | 87.2% (4290/4920) | **100%** (4920/4920) | RTL fix (Phase 81) |
+| ASL.w | A | 93.3% (5411/5799) | **100%** (5799/5799) | RTL fix (Phase 81) |
+| AND.b | B | 100% (8064/8064) | 100% (8064/8064) | diagnostic only — no fix needed |
+| OR.b | B | untested | **100%** (8064/8064) | diagnostic only — no fix needed |
+| EOR.b | B | untested | **100%** (8065/8065) | diagnostic only — no fix needed |
+| SUB.b | B | untested | **100%** (8064/8064) | diagnostic only — no fix needed |
+| CMP.b | B | untested | **100%** (8064/8064) | diagnostic only — no fix needed |
+| ADDA.w | B | untested | **100%** (5320/5320) | diagnostic only — no fix needed |
+| SUBA.w | B | untested | **100%** (5279/5279) | diagnostic only — no fix needed |
+| CMPA.w | B | untested | **100%** (5244/5244) | diagnostic only — no fix needed |
+| MOVE.b | reclassified | 90.8% (5375/5920) | 90.8% (5375/5920) | unchanged — root cause found, fix not applied |
+| BCHG | C (unresolved) | 92.8% (5446/5867) | 92.8% (5446/5867) | unchanged — root cause not found |
+| BCLR | C (unresolved) | 93.4% (5467/5851) | 93.4% (5467/5851) | unchanged — root cause not found |
+| BSET | C (unresolved) | 98.2% (5912/6019) | 98.2% (5912/6019) | unchanged — root cause not found |
+| CHK | D | 64.3% (419/652) | 64.3% (419/652) | unchanged — this is the one case needing the port |
+
+Six suites (one per Bucket A decode block, plus a second data point for
+NEGX/CLR/NEG/NOT/TST) went to 100% with **zero remaining failures of any kind** — no
+FAIL, no TIMEOUT. `make test` (32/32) and `make cosim_grp` (8/8 vs Musashi) both pass
+after all Bucket A changes.
+
+**Bottom line**: two of the four original "arch gap" buckets are now fully closed
+(A and B), with zero register-file changes. MOVE's gap turned out to be a third,
+previously-unrecognized case — missing decode, not Bucket C, not proven to need the
+port. That leaves exactly one confirmed 3rd-port requirement (CHK, Bucket D) and one
+still-open mystery (BCHG/BCLR/BSET, Bucket C — Phase 0.75, not started).
+
 ## TL;DR
 
 - Adding a 3rd read port is cheap here: `eu_regfile` is a small flip-flop array read
