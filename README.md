@@ -191,7 +191,7 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 2. **Bus co-simulation** (`make cosim_grp`) — run 8 opcode-group assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle. All 8 groups pass.
 
-3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 81` for full results table.
+3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 82` for full results table.
 
 ```bash
 make test                  # 32/32 regression suite
@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 81 summary)
+### Harte Pass Rates (Phase 82 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -211,8 +211,8 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | OR | b/w/l | 100% | |
 | EOR | b/w/l | 100% | |
 | CMP | b/w/l | 100% | |
-| MOVE | b | 90.8% | Remaining = indexed-dst; likely a fixable bug, not a port gap (see `port3.md`) |
-| MOVE | w/l | 94% / 93.6% | Same |
+| MOVE | b | 97.9% | Phase 82: fixed indexed-dst src EA + a same-register-conflict bug; remaining = deferred indexed-src (needs new src/dst Xn field infra) |
+| MOVE | w/l | 98.7% / 99.0% | Same |
 | BCHG/BCLR/BSET | — | 92.8% / 93.4% / 98.2% | Remaining = indexed-dst; likely a fixable bug, not a port gap (see `port3.md`) |
 | TRAPV | — | 100% | |
 | MOVEfromUSP/toUSP | — | 100% | |

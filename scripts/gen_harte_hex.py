@@ -280,12 +280,27 @@ def get_scale_remap(test):
             if dst_d8 >= 0x80: dst_d8 -= 0x100
 
             dst_xn_val = _get_an_d(dst_xn_reg) if dst_xn_da else ini[f'd{dst_xn_reg}'] & 0xFFFFFFFF
+
+            dst_reg    = (opcode >> 9) & 7
+            dst_an_val = _get_an_d(dst_reg)
+            siz_bytes  = {1: 1, 2: 4, 3: 2}[f_group_d]
+
+            # Same-register An conflict: src (An)+/-(An) on the same An as dst_An
+            # and/or dst_Xn. The source auto-increment/decrement is applied — as
+            # part of evaluating the source operand — before the destination EA is
+            # computed, so the indexed-dst EA must use the *updated* An, not the
+            # initial value, wherever that An also appears as dst_An or dst_Xn.
+            if ea_mode_r in (3, 4):
+                step = 2 if (siz_bytes == 1 and ea_reg_r == 7) else siz_bytes
+                delta = step if ea_mode_r == 3 else -step
+                if ea_reg_r == dst_reg:
+                    dst_an_val = (dst_an_val + delta) & 0xFFFFFFFF
+                if dst_xn_da and ea_reg_r == dst_xn_reg:
+                    dst_xn_val = (dst_xn_val + delta) & 0xFFFFFFFF
+
             if not dst_xn_wl:
                 dst_xn_val &= 0xFFFF
                 if dst_xn_val >= 0x8000: dst_xn_val -= 0x10000
-
-            dst_an_val = _get_an_d((opcode >> 9) & 7)
-            siz_bytes  = {1: 1, 2: 4, 3: 2}[f_group_d]
 
             ea_68000 = (dst_an_val + dst_xn_val                       + dst_d8) & 0xFFFFFF
             ea_68030 = (dst_an_val + dst_xn_val * (1 << dst_scale)    + dst_d8) & 0xFFFFFF

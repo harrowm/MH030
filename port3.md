@@ -1,8 +1,9 @@
 # Plan: Add a 3rd combinational read port to `eu_regfile`
 
-Status: **Phase 0 (Bucket A) and Phase 0.5 (Bucket B confirmation) done. Phase 0.75
-(BCHG root-cause) and Phase 1+ (the port itself) not started — no register-file port
-added yet.**
+Status: **Phase 0 (Bucket A), Phase 0.5 (Bucket B confirmation), and the MOVE
+non-indexed-src fix (Phase X, partial) all done. Phase 0.75 (BCHG root-cause), the
+MOVE indexed-src remainder, and Phase 1+ (the port itself) not started — no
+register-file port added yet.**
 
 **Update after Phase 0**: Bucket A is confirmed and closed. CLR.b/NEG.w/NOT.b/TST.b/
 TAS/ASL.w all went from their previous partial pass rates to **100%**, zero remaining
@@ -15,8 +16,18 @@ anticipated in the original draft: **MOVE's indexed-dst failures have nothing to
 with Bucket C at all.** All 545 MOVE.b failures are TIMEOUT, none involve the
 register-source form (the one that actually shares BCHG's mechanism) — it's purely
 missing decode coverage for 6 source addressing modes on `dec_is_move_mm_idx_dst`.
-See the updated Bucket C section below — this looks fixable the same way as Phase 81,
-no port needed, but wasn't implemented this session.
+See the updated Bucket C section below.
+
+**Update after Phase X (partial — non-indexed-src modes)**: implemented the 4 easy
+source EA modes (`(An)/(An)+/-(An)/(d16,An)`), no port needed, using a new
+`rd_a`-targeted variant of the existing `dyn_bit_get_Dn` swap (`dyn_bit_swap_a`).
+Found and fixed a real 68k-semantics bug along the way — same-register src
+auto-increment/decrement must apply before the destination EA is evaluated when that
+register is also the destination's base or index — present in both the RTL and the
+Python test harness's own reference calculation. Results: MOVE.b 90.8%→**97.9%**,
+MOVE.w 94.0%→**98.7%**, MOVE.l 93.6%→**99.0%**; every remaining failure is TIMEOUT
+and matches the deferred indexed-src (`(d8,An,Xn)`/`(d8,PC,Xn)`) count exactly. See
+`plan.md §Phase 82` for the full writeup.
 
 ## Results so far (Phase 0 + 0.5)
 
@@ -171,8 +182,19 @@ needed for the abs/PC-relative src read). Adding a register-based src address
 (`src_An`) is a 3rd register only if it's needed *simultaneously* with dst
 `An`+`Xn` — and it isn't, since the src read fully completes before the dst EA is
 ever computed. This looks like straightforward missing-decode work, same shape as
-Phase 81, not a Bucket C/D problem. Not implemented this session — flagged for
-whoever picks up the MOVE indexed-dst gap next.
+Phase 81, not a Bucket C/D problem.
+
+**DONE for the non-indexed-src modes (Phase 82, `plan.md`).** Confirmed: no port
+needed, fixed via a new `rd_a`-targeted swap (`dyn_bit_swap_a`, mirrors the existing
+`dyn_bit_get_Dn` but for `rd_a` instead of `rd_b`). `(An)/(An)+/-(An)/(d16,An)` src
+now all work. MOVE.b/w/l went to 97.9%/98.7%/99.0%. Along the way, found the real bug
+was a missing 68k same-register-conflict rule (source's own auto-increment/decrement
+must apply before the destination EA is evaluated when that register is also the
+destination's base or index) — present in both the RTL and the Python Harte harness's
+own `get_scale_remap()`, both fixed. **Still open**: `(d8,An,Xn)`/`(d8,PC,Xn)` src
+(both sides indexed at once) — genuinely needs separate src-side and dst-side
+`xn_scale`/`xn_wl`/offset fields, since the existing struct has only one set, shared
+by whichever side is indexed. Not a port issue either, just more struct plumbing.
 
 ### Bucket D — Never had decode, genuinely needs 3 operands, would benefit from the port
 
@@ -207,9 +229,11 @@ one).
    against a working AND-indexed-dst vector to find the actual divergence. If this
    turns out to be a small, isolated bug (most likely, per every piece of evidence so
    far), fix it directly — no port needed for Bucket C after all.
-4. **Phase X (not port-related, but worth doing)**: add the 6 missing source EA modes
-   to `eu_seq.sv`'s `f_move_dst_mode==3'b110` block for MOVE indexed-dst — same shape
-   of change as Phase 81, likely closes most of MOVE's remaining ~9% gap with no port.
+4. **Phase X — mostly DONE (Phase 82, `plan.md`)**: added 4 of the 6 missing source
+   EA modes to `eu_seq.sv`'s `f_move_dst_mode==3'b110` block for MOVE indexed-dst —
+   `(An)/(An)+/-(An)/(d16,An)`, no port needed. MOVE.b/w/l → 97.9%/98.7%/99.0%.
+   Remaining: `(d8,An,Xn)`/`(d8,PC,Xn)` src (both sides indexed) — needs separate
+   src/dst `xn_scale`/`xn_wl`/offset struct fields, more plumbing but still no port.
 5. **Phase 1+ (the 3rd port itself)**: at this point, only clearly required for CHK
    indexed (Bucket D). Worth it as a structural cleanup for Bucket C only if Phase
    0.75 finds the existing multi-cycle scheme too fragile to trust going forward even

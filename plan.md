@@ -402,6 +402,79 @@ group excluding FPU (Phase 52 stub only) and user/supervisor boundary edge cases
 
 ---
 
+## Phase 82 — MOVE indexed-dst source EA fix (no port needed)
+
+**Goal**: Phase 81/0.5 found MOVE's indexed-dst gap was missing decode for 6 source
+addressing modes (`(An)/(An)+/-(An)/(d16,An)/(d8,An,Xn)/(d8,PC,Xn)`), not a Bucket C/
+port issue. This phase adds the 4 easy ones (non-indexed src): `(An)/(An)+/-(An)/
+(d16,An)`. `(d8,An,Xn)` and `(d8,PC,Xn)` src remain deferred — both need genuinely
+separate src-side and dst-side Xn/scale/offset fields (the existing struct only has
+one set, shared by whichever side is indexed; both sides being indexed at once needs
+new fields, out of scope this phase).
+
+### New mechanism: `dyn_bit_swap_a`
+
+The existing `dyn_bit_get_Dn` swap only ever retargeted `rd_b`. For src=(An)-family
+with an indexed destination, the conflict is on `rd_a` instead: `rd_a` must hold
+`src_An` throughout the read phase (to form the correct source address via the
+generic `ex_ea` path), then switch to `dst_An` exactly at the read-ack cycle (for the
+`move_mm_dst_addr_r` indexed-dst capture, which reads `rd_a_data` as the destination
+base). Added a new 1-bit `dec_dyn_bit_swap_a`/`ex_dyn_bit_swap_a` field, defaulting to
+0 (preserves every existing `dyn_bit_get_Dn` use exactly as before) — when set, the
+swap retargets `rd_a` instead of `rd_b`. `rd_b` stays fixed = `dst_Xn` throughout for
+this instruction shape (never needed for the source, since these source modes aren't
+indexed), so no `rd_b` swap is needed at all.
+
+Also renamed the existing abs.W/(d16,PC)/abs.L indexed-dst blocks' `dec_ea_offset`
+(destination d8) to `dec_dst_ea_offset`, and updated the `move_mm_dst_addr_r` capture
+formula to match — freeing `dec_ea_offset` for the new blocks' own source-offset use
+(0, or the source's d16). This was a pure rename for the 3 existing blocks (source
+never used `dec_ea_offset` in any of them — verified before renaming), so it carries
+zero behavior change for cases already at 100%.
+
+### Two real bugs found and fixed along the way
+
+**Bug 1 — `dyn_bit_get_Dn`'s move_mm branch missing an `after_r` guard.** The RMW
+branch already excludes `mem_rmw_after_r` (`mem_rmw_read_ack` checks it); the move_mm
+branch didn't have the equivalent `!move_mm_after_r`. Added it defensively — turned
+out not to be the actual cause of the observed failures (see Bug 2), but it's a real
+latent gap in the same family as the RMW guard and worth keeping.
+
+**Bug 2 (the actual cause) — missing 68k same-register-conflict handling for the new
+indexed-dst forms.** When `src=(An)+/-(An)` and the source register is *also*
+referenced by the destination — either as `dst_An` (the base) or as `dst_Xn` (the
+index) — 68k applies the source's auto-increment/decrement *before* evaluating the
+destination EA. Neither the RTL nor (surprisingly) the Python Harte-generation
+harness's `get_scale_remap()` accounted for this. Root-caused by hand-computing the
+expected EA from the Harte JSON's raw register/opcode data and comparing against the
+DUT's actual (correct!) write address — the DUT was computing the right *scaled*
+68030 address the whole time; the "expected" address the test harness compared
+against was wrong because `get_scale_remap()` used the pre-update register value.
+Fixed in both places:
+- `rtl/eu_seq.sv`: add the source's `dec_an_delta` to `dec_dst_ea_offset` when
+  `f_reg == f_dn` (base-register conflict); add `dec_an_delta << scale` when
+  `f_reg` matches the destination's index register instead (index-register conflict
+  — the capture formula multiplies Xn by the scale, so the compensating delta must
+  be scaled too).
+- `scripts/gen_harte_hex.py`'s `get_scale_remap()`: apply the identical adjustment to
+  `dst_an_val`/`dst_xn_val` before computing `ea_68000`/`ea_68030`.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| MOVE.b | 90.8% (5375/5920) | **97.9%** (5797/5920) |
+| MOVE.w | 94.0% (3044/3239) | **98.7%** (3196/3239) |
+| MOVE.l | 93.6% (2954/3157) | **99.0%** (3125/3157) |
+
+Every remaining failure across all three sizes is TIMEOUT, and the count matches
+exactly the deliberately-deferred indexed-source cases (123/43/32) — zero unexpected
+failures, zero logic mismatches.
+
+**Verification**: `make test` (32/32) and `make cosim_grp` (8/8 vs Musashi) both pass.
+
+---
+
 ## Phase 81 — "3rd port" investigation, Phase 0 + 0.5: indexed EA for unary memory ops, Bucket B confirmed, MOVE reclassified (no port needed for any of it)
 
 **Context**: the user asked for a plan to add a 3rd register-file read port to close
@@ -612,9 +685,9 @@ The Harte test vectors are 68000 one-instruction tests stored in `tests/harte/*.
 | CMP.b | 8064 | 8064 | 0 | 0 | 100% | ✅ |
 | CMP.w | 4921 | 4921 | 0 | 0 | 100% | ✅ |
 | CMP.l | 4944 | 4944 | 0 | 0 | 100% | ✅ |
-| MOVE.b | 5920 | 5375 | 545 | 545 | 90.8% | ⚠ TIMEOUT=FAIL (arch gap) |
-| MOVE.w | 3239 | 3044 | 195 | 195 | 94.0% | ⚠ TIMEOUT=FAIL (arch gap) |
-| MOVE.l | 3156 | 2954 | 202 | 202 | 93.6% | ⚠ TIMEOUT=FAIL (arch gap) |
+| MOVE.b | 5920 | 5797 | 123 | 123 | 97.9% | ✅ Phase 82 fix; remaining = indexed-src (needs separate src/dst Xn scale fields) |
+| MOVE.w | 3239 | 3196 | 43 | 43 | 98.7% | ✅ Phase 82 fix; remaining = indexed-src |
+| MOVE.l | 3157 | 3125 | 32 | 32 | 99.0% | ✅ Phase 82 fix; remaining = indexed-src |
 | MOVEQ | 6089 | 6085 | 4 | 4 | 99.9% | ⚠ 4 TIMEOUTs (investigate) |
 | MOVEA.w | TBD | — | — | — | — | sweep pending |
 | MOVEA.l | TBD | — | — | — | — | sweep pending |
