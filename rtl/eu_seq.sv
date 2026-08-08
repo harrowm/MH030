@@ -2647,8 +2647,9 @@ module eu_seq (
                     // ── CHK memory-source upper bound ───────────────
                     end else if (f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
                                  (f_mode == 3'b010 || f_mode == 3'b101 ||
+                                  f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && f_reg == 3'b000))) begin
-                        // CHK (An)/(d16,An)/(xxx).W, Dn — read upper bound from memory
+                        // CHK (An)/(d16,An)/(d8,An,Xn)/(xxx).W, Dn — read upper bound from memory
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_NONE;
                         dec_is_chk      = 1'b1;
@@ -2669,6 +2670,29 @@ module eu_seq (
                             dec_reads_src = 1'b1;
                             dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                             dec_needs_ext = 1'b1;
+                        end else if (f_mode == 3'b110) begin
+                            // (d8,An,Xn): EA = An + Xn*scale + d8. Dn (tested value) is
+                            // only needed for the comparison AFTER the memory read
+                            // completes — same deferred-register pattern already proven
+                            // for AND/OR/EOR/SUB/CMP Dn,(d8,An,Xn) (dyn_bit_get_Dn), not
+                            // a true 3-simultaneous-operand case. rd_a=An, rd_b=Xn during
+                            // the read; rd_b swaps to Dn exactly at the read-ack cycle,
+                            // which is also the cycle CHK's own WB capture fires (no
+                            // RMW/move_mm write phase to desync from — see port3.md
+                            // Bucket D), so no extra capture register is needed. This
+                            // override replaces the dec_dst_reg=Dn set above with Xn for
+                            // the read phase; dyn_bit swaps it back to Dn at the ack.
+                            dec_src_reg        = {1'b1, f_reg};  // An → rd_a
+                            dec_reads_src      = 1'b1;
+                            dec_dst_reg        = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                            dec_is_idx         = 1'b1;
+                            dec_xn_wl          = ext_data[11];
+                            dec_xn_scale       = ext_data[10:9];
+                            dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext      = 1'b1;
+                            dec_is_dyn_bit_idx = 1'b1;
+                            dec_dyn_bit_reg    = f_dn;   // Dn (tested value) → rd_b after swap
+                            dec_dyn_bit_is_an  = 1'b0;
                         end else begin
                             // (xxx).W: EA = sign-extend(abs16)
                             dec_abs_ea_en  = 1'b1;

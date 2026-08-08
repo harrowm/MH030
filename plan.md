@@ -402,6 +402,75 @@ group excluding FPU (Phase 52 stub only) and user/supervisor boundary edge cases
 
 ---
 
+## Phase 84 — Bucket D closed: CHK indexed EA, no port needed
+
+**Goal**: per `port3.md`'s revised Bucket D analysis, try CHK's indexed form
+(`CHK (d8,An,Xn),Dn`) using the existing `dyn_bit_get_Dn` deferred-register pattern
+before concluding it needs the 3rd register-file port.
+
+**Result: it works. No port needed. This closes the last of the four original
+"arch gap" buckets — none of them ever required the register-file port.**
+
+### Implementation
+
+Added `f_mode==3'b110` to CHK's memory-source decode block (`eu_seq.sv` ~2648):
+`rd_a=An`, `rd_b=Xn` during the read (via `dec_is_idx`/`dec_xn_wl`/`dec_xn_scale`/
+`dec_ea_offset` from the brief extension word), then `dec_is_dyn_bit_idx=1`/
+`dec_dyn_bit_reg=f_dn`/`dec_dyn_bit_is_an=0` to swap `rd_b` to `Dn` (the tested
+value) at the read-ack cycle — identical mechanism to Bucket B's
+AND/OR/EOR/SUB/CMP `Dn,(d8,An,Xn)`. Matching `ext_count=1` entry added to
+`m68030_seq.sv`. CHK needed no additional capture-register plumbing (unlike
+BCHG/MOVE) because its own WB write-back fires on the exact same cycle as the
+read ack — there's no separate write phase to desync from.
+
+### Two bugs found and fixed along the way (both test-harness, zero RTL after the initial decode addition)
+
+Retested immediately after the RTL addition and hit two failures with a "CCR only
+wrong, everything else correct" signature — used the same hand-verification
+technique as Phases 82/83 (added temporary `$display` tracing to the WB-capture
+point) to find:
+
+1. **`chk_traps_w`/`ex_n` computed as `x` (undefined)** — traced to `mem_rdata`
+   itself showing `0000xxxx` at the WB-capture cycle. Root cause: `get_scale_remap()`
+   in `scripts/gen_harte_hex.py` was misclassifying this CHK instruction as MOVEM.
+   `is_movem`'s heuristic (`f_group==4 and f_dn in (4,6) and f_ss>=2`) collides with
+   CHK whenever the *tested register* happens to be D4 or D6 at word size — MOVEM's
+   `f_dn∈{4,6}` is a fixed direction marker (bits `1,d,0`), but CHK's `f_dn` is the
+   tested-register selector (any value 0-7), and the two encodings are
+   indistinguishable without checking `f_dir` (0 for MOVEM always, 1 for CHK always).
+   Misclassified as MOVEM, the harness computed a garbage `siz_bytes` (18, from a
+   bit-count-of-register-mask formula that doesn't apply to CHK) and a wrong bound
+   address, so the DUT's *correctly*-computed indexed read address pointed at memory
+   the harness never populated — hence the undefined read data. Added `not f_dir` to
+   all three occurrences of this condition (`build_patches()`, `get_scale_remap()`,
+   `get_operand_ea()`).
+2. Verified the fix didn't just move the corruption elsewhere by cross-checking a
+   *passing* BCHG indexed vector with the same tracing — confirmed BCHG's `mem_rdata`
+   was clean throughout, ruling out a live signal-glitch theory and pointing
+   correctly at the test-data-population bug above.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| CHK | 64.3% (419/652) | **70.3%** (468/666) |
+
+Zero remaining failures involve `(d8,An,Xn)` (the indexed form this phase targeted)
+— every remaining `TIMEOUT` is one of the *other*, still-unimplemented EA modes
+(`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)` — a separate, pre-existing gap,
+unrelated to the port question, not attempted this phase).
+
+**Verification**: `make test` (32/32) and `make cosim_grp` (8/8 vs Musashi) both pass.
+
+**This is the conclusion of the `port3.md` investigation.** All four original
+"arch gap" buckets (A, B, C, D) are now closed. Not one of them needed the
+register-file port — Bucket A and most of MOVE were missing decode; Bucket B already
+worked; Buckets C and CHK's portion of "D" were test-harness bugs. See `port3.md` for
+the final summary; the 3rd-port design is kept in that document for reference but
+there is currently no known case that requires it.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
@@ -791,7 +860,7 @@ The Harte test vectors are 68000 one-instruction tests stored in `tests/harte/*.
 | ASL.l/ASR/LSL/LSR | TBD | — | — | — | — | same fix applies (shared decode block); expect 100% |
 | ROL/ROR/ROXL/ROXR | TBD | — | — | — | — | sweep pending |
 | TAS | 4920 | 4920 | 0 | 0 | 100% | ✅ Phase 81 indexed-EA fix (no port needed — Bucket A) |
-| CHK | 652 | 419 | 233 | 233 | 64.3% | ✅ Phase 80 CCR fix; remaining = unimplemented EA modes incl. indexed (needs 3rd port — see port3.md Bucket D) |
+| CHK | 666 | 468 | 198 | 198 | 70.3% | ✅ Phase 84: indexed EA added, no port needed; remaining = other unimplemented EA modes ((An)+/-(An)/(xxx).L/(d16,PC)/(d8,PC,Xn)) |
 | Scc | TBD | — | — | — | — | sweep pending |
 | ADDA.w/l | TBD | — | — | — | — | sweep pending |
 | SUBA.w/l | TBD | — | — | — | — | sweep pending |

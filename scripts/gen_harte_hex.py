@@ -158,7 +158,10 @@ def build_patches(test):
         f_dir_w   = (opcode_w >>  8) & 0x1
         f_ss_w    = (opcode_w >>  6) & 0x3
         f_dn_w    = (opcode_w >>  9) & 0x7
-        is_movem_w = (f_group_w == 4 and f_dn_w in (4, 6) and f_ss_w >= 2)
+        # f_dir=0 required: CHK ea,Dn (f_dir=1 always) uses f_dn as the tested
+        # register (any value 0-7) and collides with MOVEM's f_dn∈{4,6} marker
+        # when testing D4/D6 at word size — see get_operand_ea()'s comment.
+        is_movem_w = (f_group_w == 4 and not f_dir_w and f_dn_w in (4, 6) and f_ss_w >= 2)
         # Group-0 immediate ALU ops (ORI/ANDI/SUBI/ADDI/EORI/CMPI) always have
         # f_dir=0 (bit8=0) — the immediate word precedes the EA extension word(s).
         # Dynamic bit-ops (BTST/BCHG/BCLR/BSET Dn,ea) share the f_group==0 + mode-6
@@ -328,7 +331,11 @@ def get_scale_remap(test):
 
     # MOVEM (group 4, f_dn=4 store/6 load, f_ss>=2): the register-mask word precedes
     # the brief extension word, so the brief is at opcode+4, not opcode+2.
-    is_movem = (f_group == 4 and f_dn in (4, 6) and f_ss >= 2)
+    # f_dir=0 required: CHK ea,Dn (f_group==4, f_dir=1 always) uses f_dn as the
+    # *tested register* (any value 0-7) — CHK D4/D6 with word size collides with
+    # MOVEM's f_dn∈{4,6} marker unless f_dir disambiguates them (MOVEM: f_dir=0
+    # always; see the matching comment in get_operand_ea()).
+    is_movem = (f_group == 4 and not f_dir and f_dn in (4, 6) and f_ss >= 2)
 
     # Locate brief extension word
     # (instr_src and rm already computed above)
@@ -463,7 +470,11 @@ def get_operand_ea(test):
     # Transfer size in bytes.
     # MOVEM: f_ss encodes per-register size (2=word, 3=long); total = size × num_regs.
     # ADDA/SUBA/CMPA (f_ss==3): bit 8 (f_dir) selects word vs long.
-    if f_group == 4 and f_dn in (4, 6) and f_ss >= 2:
+    # f_dir=0 required: MOVEM's f_dn∈{4,6} marker is bits[11:9]="1,d,0"/"1,d,1" with
+    # bit8(f_dir) always 0 — but CHK ea,Dn (f_group==4, f_dir=1 always) uses f_dn as
+    # the *tested register* (any value 0-7), so CHK D4/D6 with word size collides
+    # with this pattern unless f_dir disambiguates them.
+    if f_group == 4 and not f_dir and f_dn in (4, 6) and f_ss >= 2:
         mask = pf[1] if len(pf) > 1 else rw(2)
         siz_bytes = (4 if f_ss == 3 else 2) * bin(mask).count('1')
     elif f_ss == 3:
@@ -480,7 +491,7 @@ def get_operand_ea(test):
         ea_off = 2 + (4 if f_ss == 2 else 2)
     elif f_group == 0 and not f_dir and f_dn in (4, 7):
         return None     # static #n bit-ops / MOVES: non-trivial layout, skip
-    elif f_group == 4 and f_dn in (4, 6) and f_ss >= 2:
+    elif f_group == 4 and not f_dir and f_dn in (4, 6) and f_ss >= 2:
         ea_off = 4      # MOVEM: opcode word + register-mask word before EA extension
     else:
         ea_off = 2      # EA exts follow the opcode word directly

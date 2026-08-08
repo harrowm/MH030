@@ -191,7 +191,7 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 2. **Bus co-simulation** (`make cosim_grp`) — run 8 opcode-group assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle. All 8 groups pass.
 
-3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 83` for full results table.
+3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 84` for full results table.
 
 ```bash
 make test                  # 32/32 regression suite
@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 83 summary)
+### Harte Pass Rates (Phase 84 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -222,29 +222,29 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | TST | b | **100%** | Phase 81: indexed EA added (+ (d16,PC)), no port needed |
 | TAS | — | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
 | ASL | w | **100%** | Phase 81: full EA sweep added (d16/abs/indexed), no port needed |
-| CHK | — | 64.3% | Zero logic mismatches; remaining = unimplemented EA modes, incl. indexed (last unverified "needs a port" hypothesis — see `port3.md` Bucket D) |
+| CHK | — | 70.3% | Phase 84: indexed EA added, no port needed; zero remaining fails on `(d8,An,Xn)`; rest = other unimplemented EA modes |
 | TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
 
 NEGX/NOT.w-l/CLR.w-l/NEG.b-l/TST.w-l/other shift sizes share the decode blocks fixed
 in Phase 81 and should also land at 100%, but weren't individually swept yet.
 
-### Known Architectural Gap — turned out not to exist (so far)
+### Known Architectural Gap — did not exist
 
 A diagnostic in Phase 81 (`AND.b` retested at 100% using the same 2-port
 time-multiplexing trick BCHG's broken indexed form uses) showed the "2-port register
 file" explanation for `(d8,An,Xn)`-destination failures was overbroad. Following that
-thread through Phases 81–83: unary memory ops just needed EA decode (Bucket A, fixed);
-AND/OR/EOR/SUB/CMP/ADDA/SUBA/CMPA already worked with the existing 2-port scheme
-(Bucket B, no fix needed); and BCHG/BCLR/BSET — the case that looked most like a real
-RTL limitation, since it silently produced wrong output rather than just timing out —
-turned out to be a **test-harness bug** (Bucket C, Phase 83): the harness
-misclassified dynamic bit-ops and read the extension word from the wrong offset,
-so the DUT was never actually exercised with valid input. Zero RTL changes needed.
-Only **CHK**'s indexed form (Bucket D) remains a candidate for genuinely needing a
-3rd simultaneous register read (tested value + EA base + EA index) — but even that
-has a plausible path to closing without a port, since the tested value isn't needed
-until after the memory read completes, the same shape Bucket B already handles. See
-`port3.md` for the full analysis; nothing has yet been *shown* to require the
+thread through Phases 81–84, all four original buckets closed without ever touching
+the register file: unary memory ops just needed EA decode (Bucket A); AND/OR/EOR/SUB/
+CMP/ADDA/SUBA/CMPA already worked with the existing 2-port scheme (Bucket B);
+BCHG/BCLR/BSET — the case that looked most like a real RTL limitation, since it
+silently produced wrong output rather than just timing out — turned out to be a
+**test-harness bug** (Bucket C, Phase 83): the harness misclassified dynamic bit-ops
+and read the extension word from the wrong offset. And **CHK's indexed form**
+(Bucket D, Phase 84) — the one case with a plausible on-paper argument for a genuine
+3rd simultaneous register read — closed the same way as Bucket B once actually
+attempted: the tested value isn't needed until after the memory read completes, so it
+defers to the existing swap mechanism instead. See `port3.md` for the full analysis —
+the investigation is concluded, and nothing in the codebase requires the
 register-file port.
 
 ---
