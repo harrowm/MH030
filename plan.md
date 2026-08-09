@@ -679,6 +679,22 @@ regression specific to the read-only bit-test form.
 
 ---
 
+## Phase 89 — MOVEQ 4-TIMEOUT investigation: already resolved, 100%
+
+**Goal**: track down the 4 TIMEOUTs noted against MOVEQ (`MOVE.q.json.gz`) in
+earlier status logs.
+
+**Result**: `MOVE.q.json.gz` **100%** (6089/6089), 0 TIMEOUT, 0 FAIL. Whatever
+caused the 4 TIMEOUTs was resolved as a side effect of an earlier phase's IFU/
+`ext_count` fix (most likely the Phase 78/79 `m68030_seq.sv` classification
+fixes, which touched the same extension-word-count machinery TIMEOUTs
+typically trace back to — an IFU prefetch-queue desync from a wrong
+`ext_count`). No RTL or harness changes needed this phase.
+
+**Verification**: Harte suite only — no RTL changed.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

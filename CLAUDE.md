@@ -154,11 +154,13 @@ The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline s
 
 88. BTST retest — re-verified `BTST.json.gz` after Phases 79-83's fixes to the shared dynamic-bit-op decode path (BCHG/BCLR/BSET). Already **100%** (8064/8064), zero failures, no RTL or harness changes needed. See `plan.md §Phase 88`.
 
-**Current state**: 32/32 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`). Harte results: ADD/SUB/AND/OR/EOR/CMP b/w/l all 100%; MOVE.b/w/l all **100%** (Phase 85); BCHG/BCLR/BSET/BTST all **100%** (Phase 83/88); **CHK all 100%** (Phase 86); CLR/NEG/NOT/NEGX/TST all sizes **100%** (Phase 81/87); **ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR all sizes 100%** except ASL.b's 2 confirmed corpus anomalies (Phase 87). **The 3rd-register-file-port investigation (`port3.md`) is concluded — nothing in the codebase requires it.**
+89. MOVEQ 4-TIMEOUT investigation — re-verified `MOVE.q.json.gz`. Already **100%** (6089/6089), 0 TIMEOUT, 0 FAIL. Whatever caused the previously-noted 4 TIMEOUTs was resolved as a side effect of an earlier `ext_count`/IFU-desync fix; no RTL or harness changes needed this phase. See `plan.md §Phase 89`.
+
+**Current state**: 32/32 regression tests pass (`make test`). All 8 opcode groups pass vs Musashi (`make cosim_grp`). 50/50 synthetic dat-replay vectors pass (`make dat-synth`). Harte results: ADD/SUB/AND/OR/EOR/CMP b/w/l all 100%; MOVE.b/w/l/q all **100%** (Phase 85/89); BCHG/BCLR/BSET/BTST all **100%** (Phase 83/88); **CHK all 100%** (Phase 86); CLR/NEG/NOT/NEGX/TST all sizes **100%** (Phase 81/87); **ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR all sizes 100%** except ASL.b's 2 confirmed corpus anomalies (Phase 87). **The 3rd-register-file-port investigation (`port3.md`) is concluded — nothing in the codebase requires it.**
 
 **Architectural gap — did not exist.** Every "needs a 3rd port" diagnosis investigated across Phases 81-84 (Bucket A, most of MOVE, Bucket C, Bucket D/CHK) turned out to be missing decode or a test-harness bug, not an RTL port-count limitation — Bucket B (AND/OR/EOR/SUB/CMP/ADDA/SUBA/CMPA) already worked with the existing 2-port time-multiplex trick, and even CHK's indexed form (the one case that looked architecturally justified on paper) closed the same way once actually tried. See `port3.md` for the full analysis, kept as a reference design in case a genuine 3-simultaneous-operand case ever turns up.
 
-**Next phase**: Phase 89 — MOVEQ 4 TIMEOUTs; Scc/MOVEM/MOVEP/MOVEA/LEA/PEA/ADDX/SUBX/ABCD/SBCD/NBCD/register shifts/ANDI-ORI-EORI-to-CCR-SR/MOVE-to-CCR-SR/MULS/MULU/DIVS/DIVU/LINK/UNLINK/JSR/JMP/RTS/BSR/Bcc/DBcc/EXG/SWAP/EXT/NOP.
+**Next phase**: Phase 90 — sweep never-tested instruction families: Scc/MOVEM/MOVEP/MOVEA/LEA/PEA/ADDX/SUBX/ABCD/SBCD/NBCD/register shifts/ANDI-ORI-EORI-to-CCR-SR/MOVE-to-CCR-SR/MULS/MULU/DIVS/DIVU/LINK/UNLINK/JSR/JMP/RTS/BSR/Bcc/DBcc/EXG/SWAP/EXT/NOP.
 
 ## Verification Commands
 
