@@ -264,6 +264,14 @@ module m68030_seq (
          f_group == 4'hb || f_group == 4'hc || f_group == 4'hd) &&
         !f_dir && (f_ss != 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b100);
 
+    // MULU/MULS/DIVU/DIVS #imm, Dn (groups 8/C, f_ss==11 is their own
+    // size-independent signature) — always exactly 1 ext word (16-bit
+    // immediate); is_alu_imm_dn above explicitly excludes f_ss==11.
+    logic is_muldiv_imm;
+    assign is_muldiv_imm =
+        (f_group == 4'h8 || f_group == 4'hc) &&
+        (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b100);
+
     // ADDQ/SUBQ #n, (d16,An) / (xxx).W / (xxx).L — 1 or 2 ext words
     logic is_addq_subq_ext;
     assign is_addq_subq_ext = (f_group == 4'h5) && (f_ss != 2'b11) &&
@@ -466,7 +474,7 @@ module m68030_seq (
                  is_rtd || is_stop_opcode || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||
                  (is_addq_subq_ext && !is_addq_subq_ext_long) ||
-                 (is_alu_imm_dn && f_ss != 2'b10) ||
+                 (is_alu_imm_dn && f_ss != 2'b10) || is_muldiv_imm ||
                  (is_pea && (f_mode == 3'b101)) ||   // (d16,An)
                  (is_pea && (f_mode == 3'b110)) ||   // (d8,An,Xn) indexed
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W

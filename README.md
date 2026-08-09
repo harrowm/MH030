@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 91 summary)
+### Harte Pass Rates (Phase 92 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -229,8 +229,8 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | **JMP/JSR** | — | **88.6% / 89.1%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual failures are all TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets, root cause not yet found |
 | **ABCD / NBCD** | — | **100% / 100%** | Phase 91: N/V are "undefined" per the PRM but real hardware is deterministic — reverse-engineered the actual formulas from raw Harte JSON (Musashi's own reference doesn't match real hardware either); fixed 2 real RTL bugs (Verilog sign-extension gotcha, a 9-bit field overflow) plus a pre-existing `-(An)` A7-step-size bug |
 | **SBCD** | — | **99.7%** | Phase 91: same fixes as ABCD/NBCD; 28/8065 residual is a genuine algorithmic subtlety (C flag and result-correction are decoupled in real hardware in a way not yet captured) — documented, not guessed at |
-| **MULS / MULU** | — | **24.5% / 25.1%** | Phase 90: found, not yet root-caused |
-| **DIVS / DIVU** | — | **15.7% / 18.2%** | Phase 90: found, not yet root-caused |
+| **MULS / MULU** | — | **97.4% / 97.3%** | Phase 92: memory-EA decode was entirely missing (same `f_ss==11` exclusion gap as MULS's sibling AND/OR), plus a missing bus-read-size override that hung every memory-source multiply, plus a 4th instance of the recurring harness `f_ss`/`f_dir` misclassification bug. Residual = indexed-EA TIMEOUT, same shape as JMP/JSR's open issue |
+| **DIVS / DIVU** | — | **17.2% / 19.8%** | Phase 92: barely moved by the MULS/MULU fixes — even register-direct divides fail, pointing to a deep, separate `eu_mul_div.sv` divide-FSM problem (thousands of TIMEOUTs). Needs its own from-scratch investigation |
 | **Scc** | — | **72.7%** | Phase 90: found, not yet root-caused |
 | **PEA / LEA** | — | **86.0% / 89.0%** | Phase 90: found, not yet root-caused |
 | **MOVEM.l** | — | **95.0%** | Phase 90: found, not yet root-caused |

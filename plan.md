@@ -938,6 +938,97 @@ Musashi).
 
 ---
 
+## Phase 92 — MULS/MULU root-caused: memory-EA decode was entirely missing → 24.5%/25.1% → 97.4%/97.3%
+
+**Goal**: root-cause the Phase 90 MULS (24.5%)/MULU (25.1%) cluster.
+DIVS/DIVU turned out to need a much deeper, separate investigation — see below.
+
+### Finding 1: `(An)/(An)+/-(An)/(d8,An,Xn)`/immediate forms were never decoded at all
+
+Exactly the same shape as MULS/MULU's sibling AND/OR: the shared
+AND-memory-source and OR-memory-source decode blocks in `eu_seq.sv`
+explicitly gate on `f_ss != 2'b11`, since MUL/DIV repurpose those two size
+bits as their own opcode signature (the operand is always a fixed 16-bit
+word, never byte/word/long-selectable) rather than a size field. That
+exclusion meant MULS/MULU's `(An)/(An)+/-(An)`, `(d8,An,Xn)`, and `#imm`
+forms were **never decoded at all** — only the pre-existing block covering
+`(d16,An)`/`(xxx).W`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)` worked. Added four new
+decode blocks mirroring the AND/OR blocks' EA-computation exactly, with
+`dec_unit=UNIT_MUL`/`dec_md_op` substituted for the ALU op. Also added the
+missing `is_muldiv_imm` `ext_count` classifier entry in `m68030_seq.sv` (the
+existing `is_alu_imm_dn` explicitly excludes `f_ss==11` for the same reason).
+
+### Finding 2: the bus read size was never overridden from the 32-bit result size
+
+Even the pre-existing memory-source block set `dec_siz=2'b00` (correct for
+the 32-bit result write to Dn) but never told the bus layer that the READ
+itself must stay word-sized — there's a dedicated `dec_mem_rd_siz` override
+signal (sentinel `00` = "no override, use `dec_siz`") that other dual-size
+instructions (visible at several existing call sites) already use for
+exactly this situation, but MUL's block never set it. Result: every
+memory-source MUL requested a **longword** bus read for what should be a
+16-bit word, which — depending on the specific address — either silently
+hung waiting for an ack the bus never gave for that access pattern, or
+returned data that the multiply then read from the wrong byte lanes.
+Confirmed via `$display` tracing (`ex_mem_stall`/`mem_ack` stayed asserted
+forever, zero bus activity) then found the fix by grep-ing for other
+`dec_mem_rd_siz` users. This single fix (plus Finding 1) took MULS/MULU from
+24.5%/25.1% to 94.7%/94.8%, eliminating nearly all TIMEOUTs.
+
+### Finding 3: a fourth instance of the `get_scale_remap()`/`get_operand_ea()` size-classification bug
+
+The remaining ~5% (all `(d8,An,Xn)`/`(d8,PC,Xn)` indexed forms, showing wrong
+results with a suspiciously structured error — e.g. `0xfa2df100` vs expected
+`0xfa33a735`, low byte always `00`) traced to `gen_harte_hex.py`'s
+`get_scale_remap()`: its `siz_bytes` determination has a generic
+`{0:1,1:2,2:4}.get(f_ss, 1)` fallback that silently defaults to **1 byte**
+for MUL/DIV's `f_ss==3` signature (not in the dict), so the scale-remap only
+copied half the test data to the scaled address, leaving the other byte
+stale/zero — the DUT's *correctly* 68030-scaled address computation was
+right, the harness's own data placement wasn't. `get_operand_ea()` had a
+related but different bug in the same spot: its `elif f_ss==3` branch
+assumes ADDA/SUBA/CMPA-style semantics (`f_dir` selects word vs long), but
+for MUL/DIV `f_dir` selects signed vs unsigned, unrelated to size — so MULS
+(f_dir=1) got `siz_bytes=4` instead of 2 (MULU got the right answer by
+coincidence, since f_dir=0 there too). Fixed both with an explicit
+`f_group in (0x8, 0xC) and f_ss==3 → siz_bytes=2` branch ahead of the
+generic fallback in each function — this is the same recurring
+"f_ss/f_dir field means something different for this instruction family"
+harness-bug shape found repeatedly across this whole Harte investigation,
+just newly triggered because MUL/DIV's indexed-source form had never existed
+in the RTL before this phase to exercise it.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| MULS | 24.5% (1178/4816) | **97.4%** (4816/4943) |
+| MULU | 25.1% (1221/4858) | **97.3%** (4858/4991) |
+
+**Residual (both suites, ~2.6%): TIMEOUT, 100% on `(d8,An,Xn)`/`(d8,PC,Xn)`
+indexed forms specifically** — the same symptom shape as Phase 90's
+still-unsolved JMP/JSR indexed-EA IFU-redirect stall (though MUL's indexed
+block additionally uses the `dyn_bit_get_Dn` deferred-register-swap
+mechanism, which JMP/JSR's doesn't, so these may or may not share a root
+cause — not yet determined). Not investigated further this phase given the
+time already spent; tracked as a follow-up alongside JMP/JSR's.
+
+**DIVS/DIVU are a separate, much deeper problem, NOT resolved by any of the
+above.** Even pure **register-direct** divides (`DIVS D4,D5`, `DIVU D3,D7`)
+fail with CCR mismatches, and both suites show **thousands** of TIMEOUTs
+(DIVS: 3603/4975, DIVU: 3631/4931) — a scale and a symptom (register-direct
+failures) that the memory-EA/bus-size fixes above cannot explain, since
+those forms never touch the memory-EA decode path at all. This points to a
+fundamental problem in the divide FSM itself (`eu_mul_div.sv`), most likely
+around overflow-trap or divide-by-zero handling given the sheer TIMEOUT
+volume. Barely moved by this phase's fixes (DIVS 15.7%→17.2%, DIVU
+18.2%→19.8%) — needs its own dedicated investigation from scratch, not a
+continuation of the MULS/MULU work. Tracked separately.
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

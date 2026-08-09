@@ -420,6 +420,8 @@ def get_scale_remap(test):
     #   MOVEM (group 4):               f_ss==2 → word, f_ss==3 → long.
     #   MOVE (groups 1,2,3):           group encodes size (1=byte, 2=long, 3=word).
     #   Memory-mode shifts (group E):  always word (bit 8 is direction, not size).
+    #   MULU/MULS/DIVU/DIVS (groups 8,C): f_ss==3 is their own signature bit
+    #     pattern (not a size field) — operand is always a 16-bit word.
     #   All others:                    f_ss=0→byte, 1→word, 2→long.
     #   Group 4, f_ss==3: MOVE SR/CCR to/from memory — SR/CCR are always 16-bit.
     if f_group in (0x9, 0xD, 0xB) and f_ss == 3:
@@ -433,6 +435,8 @@ def get_scale_remap(test):
         siz_bytes = {1: 1, 2: 4, 3: 2}[f_group]
     elif f_group == 0xE:
         siz_bytes = 2  # memory-mode shifts always operate on word
+    elif f_group in (0x8, 0xC) and f_ss == 3:
+        siz_bytes = 2  # MULU/MULS/DIVU/DIVS: always word, f_ss==3 isn't a size field
     else:
         siz_bytes = {0: 1, 1: 2, 2: 4}.get(f_ss, 1)
 
@@ -500,6 +504,11 @@ def get_operand_ea(test):
     if f_group == 4 and not f_dir and f_dn in (4, 6) and f_ss >= 2:
         mask = pf[1] if len(pf) > 1 else rw(2)
         siz_bytes = (4 if f_ss == 3 else 2) * bin(mask).count('1')
+    elif f_group in (0x8, 0xC) and f_ss == 3:
+        # MULU/MULS/DIVU/DIVS: f_ss==3 is their own signature bit pattern,
+        # not a size field (f_dir here selects signed/unsigned, not word/long)
+        # — the memory operand is always a 16-bit word.
+        siz_bytes = 2
     elif f_ss == 3:
         siz_bytes = 4 if f_dir else 2
     else:

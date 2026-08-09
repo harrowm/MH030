@@ -4013,6 +4013,64 @@ module eu_seq (
                         dec_reads_dst   = 1'b1;
                         dec_dst_reg     = {1'b0, f_dn};
                         dec_dest_reg    = {1'b0, f_dn};
+                    // ── DIVU/DIVS (An)/(An)+/-(An), Dn — memory source ──
+                    // Same gap as MULS/MULU: the OR-memory-source blocks above
+                    // explicitly exclude f_ss==11 (DIV's own signature, since
+                    // DIV doesn't use f_ss for operand size — always 16-bit),
+                    // so these EA modes were never decoded for DIV at all.
+                    end else if (f_ss == 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_is_mem_src  = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_unit        = UNIT_DIV;
+                        dec_siz         = 2'b00;
+                        dec_mem_rd_siz  = 2'b10;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_dst   = 1'b1;
+                        dec_dest_reg    = {1'b0, f_dn};
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_reads_src   = 1'b1;
+                        dec_md_op       = f_dir ? DIV_SW : DIV_UW;
+                        setup_mem_incdec(2'b10, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                    // ── DIVU/DIVS (d8,An,Xn), Dn — indexed memory source ──
+                    end else if (f_ss == 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_is_mem_src     = 1'b1;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_unit           = UNIT_DIV;
+                        dec_siz            = 2'b00;
+                        dec_mem_rd_siz     = 2'b10;
+                        dec_writes_reg     = 1'b1;
+                        dec_updates_ccr    = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_dest_reg       = {1'b0, f_dn};
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                        dec_md_op          = f_dir ? DIV_SW : DIV_UW;
+                    // ── DIVU/DIVS #imm, Dn — immediate source ───────────
+                    end else if (f_ss == 2'b11 && f_mode == 3'b111 && f_reg == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_DIV;
+                        dec_siz         = 2'b00;
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_dest_reg    = {1'b0, f_dn};
+                        dec_md_op       = f_dir ? DIV_SW : DIV_UW;
                     // ── OR/DIVU/DIVS (ea),Dn — memory source ────────────
                     end else if ((f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
@@ -4026,6 +4084,7 @@ module eu_seq (
                             dec_is_mem_rd   = 1'b1;
                             dec_unit        = UNIT_DIV;
                             dec_siz         = 2'b00;   // 32-bit result write; MUL/DIV uses src[15:0]
+                            dec_mem_rd_siz  = 2'b10;   // but the bus read itself must stay word-sized
                             dec_writes_reg  = 1'b1;
                             dec_updates_ccr = 1'b1;
                             dec_dst_reg     = {1'b0, f_dn};
@@ -4915,6 +4974,68 @@ module eu_seq (
                         dec_reads_dst   = 1'b1;
                         dec_dst_reg     = {1'b0, f_dn};
                         dec_dest_reg    = {1'b0, f_dn};
+                    // ── MULU/MULS (An)/(An)+/-(An), Dn — memory source ──
+                    // The AND-memory-source blocks above explicitly exclude
+                    // f_ss==11 (MUL's own signature bits, since MUL doesn't
+                    // use f_ss for operand size — the operand is always a
+                    // 16-bit word), so these three EA-mode groups were never
+                    // decoded for MUL at all before this block existed.
+                    end else if (f_ss == 2'b11 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
+                        dec_valid       = 1'b1;
+                        dec_is_mem_src  = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_unit        = UNIT_MUL;
+                        dec_siz         = 2'b00;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_reads_dst   = 1'b1;
+                        dec_dest_reg    = {1'b0, f_dn};
+                        dec_src_reg     = {1'b1, f_reg};
+                        dec_reads_src   = 1'b1;
+                        dec_md_op       = f_dir ? MUL_SW : MUL_UW;
+                        // dec_siz=00 (longword) is for the 32-bit result write; the
+                        // memory READ itself must stay word-sized regardless — override
+                        // via dec_mem_rd_siz (sentinel 00 = "no override, use dec_siz").
+                        dec_mem_rd_siz  = 2'b10;
+                        setup_mem_incdec(2'b10, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                    // ── MULU/MULS (d8,An,Xn), Dn — indexed memory source ──
+                    end else if (f_ss == 2'b11 && f_mode == 3'b110) begin
+                        dec_valid          = 1'b1;
+                        dec_is_mem_src     = 1'b1;
+                        dec_is_mem_rd      = 1'b1;
+                        dec_unit           = UNIT_MUL;
+                        dec_siz            = 2'b00;
+                        dec_writes_reg     = 1'b1;
+                        dec_updates_ccr    = 1'b1;
+                        dec_needs_ext      = 1'b1;
+                        dec_src_reg        = {1'b1, f_reg};
+                        dec_dst_reg        = {ext_data[15], ext_data[14:12]};
+                        dec_reads_src      = 1'b1;
+                        dec_reads_dst      = 1'b1;
+                        dec_dest_reg       = {1'b0, f_dn};
+                        dec_is_idx         = 1'b1;
+                        dec_xn_wl          = ext_data[11];
+                        dec_xn_scale       = ext_data[10:9];
+                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = f_dn;
+                        dec_md_op          = f_dir ? MUL_SW : MUL_UW;
+                        dec_mem_rd_siz     = 2'b10;  // word read despite longword result
+                    // ── MULU/MULS #imm, Dn — immediate source ───────────
+                    end else if (f_ss == 2'b11 && f_mode == 3'b111 && f_reg == 3'b100) begin
+                        dec_valid       = 1'b1;
+                        dec_unit        = UNIT_MUL;
+                        dec_siz         = 2'b00;
+                        dec_use_imm     = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_reads_dst   = 1'b1;
+                        dec_dst_reg     = {1'b0, f_dn};
+                        dec_dest_reg    = {1'b0, f_dn};
+                        dec_md_op       = f_dir ? MUL_SW : MUL_UW;
                     // ── AND/MULU/MULS (ea),Dn — memory source ───────────
                     end else if ((f_mode == 3'b101 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 ||
@@ -4928,6 +5049,7 @@ module eu_seq (
                             dec_is_mem_rd   = 1'b1;
                             dec_unit        = UNIT_MUL;
                             dec_siz         = 2'b00;   // 32-bit result write; MUL/DIV uses src[15:0]
+                            dec_mem_rd_siz  = 2'b10;   // but the bus read itself must stay word-sized
                             dec_writes_reg  = 1'b1;
                             dec_updates_ccr = 1'b1;
                             dec_dst_reg     = {1'b0, f_dn};
@@ -7153,7 +7275,7 @@ module eu_seq (
     assign shf_siz     = ex_siz;
     assign shf_x_in    = flag_x;
 
-    assign md_src = ex_is_mem_src ? mem_rdata : rd_a_data;  // mem provides multiplier/divisor
+    assign md_src = ex_is_mem_src ? mem_rdata : (ex_use_imm ? ex_imm : rd_a_data);  // mem/imm/reg provides multiplier/divisor
     assign md_dst = rd_b_data;
     assign md_op  = ex_md_op;
 
