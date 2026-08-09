@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 90 summary)
+### Harte Pass Rates (Phase 91 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -227,7 +227,8 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | EXG/EXT/LINK/UNLINK/SWAP/NOP/RESET | — | **100%** | Phase 90 sweep |
 | MOVEA/MOVEfromSR/MOVEtoCCR/MOVEM.w/MOVEP | — | ~100% | Phase 90 sweep; MOVEP.w/.l each have 1 unexamined fail |
 | **JMP/JSR** | — | **88.6% / 89.1%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual failures are all TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets, root cause not yet found |
-| **NBCD / SBCD / ABCD** | — | **6.9% / 33.1% / 51.0%** | Phase 90: found, not yet root-caused |
+| **ABCD / NBCD** | — | **100% / 100%** | Phase 91: N/V are "undefined" per the PRM but real hardware is deterministic — reverse-engineered the actual formulas from raw Harte JSON (Musashi's own reference doesn't match real hardware either); fixed 2 real RTL bugs (Verilog sign-extension gotcha, a 9-bit field overflow) plus a pre-existing `-(An)` A7-step-size bug |
+| **SBCD** | — | **99.7%** | Phase 91: same fixes as ABCD/NBCD; 28/8065 residual is a genuine algorithmic subtlety (C flag and result-correction are decoupled in real hardware in a way not yet captured) — documented, not guessed at |
 | **MULS / MULU** | — | **24.5% / 25.1%** | Phase 90: found, not yet root-caused |
 | **DIVS / DIVU** | — | **15.7% / 18.2%** | Phase 90: found, not yet root-caused |
 | **Scc** | — | **72.7%** | Phase 90: found, not yet root-caused |

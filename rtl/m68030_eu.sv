@@ -194,7 +194,7 @@ module m68030_eu (
     // -----------------------------------------------------------------------
     logic [7:0]  bcd_src, bcd_dst, bcd_result;
     logic [1:0]  bcd_op;
-    logic        bcd_x_in, bcd_z_in, bcd_c, bcd_z_flag;
+    logic        bcd_x_in, bcd_z_in, bcd_c, bcd_z_flag, bcd_v;
 
     // -----------------------------------------------------------------------
     // Internal wires: eu_seq ↔ eu_bitops
@@ -271,6 +271,7 @@ module m68030_eu (
         .bcd_result   (bcd_result),
         .bcd_c        (bcd_c),
         .bcd_z        (bcd_z_flag),
+        .bcd_v        (bcd_v),
         .bit_dst      (bit_dst),
         .bit_num      (bit_num),
         .bit_op       (bit_op),
@@ -525,7 +526,9 @@ module m68030_eu (
         .result (bcd_result),
         .c_out  (bcd_c),
         .x_out  (),           // not used separately (same as c_out)
-        .z_out  (bcd_z_flag)
+        .z_out  (bcd_z_flag),
+        .n_out  (),           // not used separately (bcd_result[7] already gives N)
+        .v_out  (bcd_v)
     );
 
     // -----------------------------------------------------------------------

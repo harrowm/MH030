@@ -392,9 +392,14 @@ module m68030_seq (
         // Scc abs.L — 2 ext words for 32-bit absolute address
         else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b001))
             ext_count = 3'd2;
-        // NBCD abs.W — 1 ext word for 16-bit absolute address
+        // NBCD abs.L — 2 ext words
         else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b100) && (f_ss == 2'b00) &&
-                 (f_mode == 3'b111 && f_reg == 3'b000))
+                 (f_mode == 3'b111 && f_reg == 3'b001))
+            ext_count = 3'd2;
+        // NBCD (d16,An)/(d8,An,Xn)/abs.W — 1 ext word
+        else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b100) && (f_ss == 2'b00) &&
+                 (f_mode == 3'b101 || f_mode == 3'b110 ||
+                  (f_mode == 3'b111 && f_reg == 3'b000)))
             ext_count = 3'd1;
         // TAS.B (d16,An)/(d8,An,Xn)/(xxx).W — 1 ext word
         else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b101) && (f_ss == 2'b11) &&

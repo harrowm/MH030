@@ -13,6 +13,7 @@ module eu_bcd_tb;
     logic       x_in, z_in;
     logic [7:0] result;
     logic       c_out, x_out, z_out;
+    logic       n_out, v_out;   // not checked by this testbench's existing cases
 
     eu_bcd dut (.*);
 

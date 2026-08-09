@@ -101,6 +101,7 @@ module eu_seq (
     input  logic [7:0]  bcd_result,
     input  logic        bcd_c,
     input  logic        bcd_z,
+    input  logic        bcd_v,
 
     // Bitops datapath
     output logic [31:0] bit_dst,
@@ -2637,6 +2638,7 @@ module eu_seq (
                     // ── NBCD memory EA ────────────────────────────────
                     end else if (!f_dir && f_ss == 2'b00 && f_dn == 3'b100 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_BCD;
@@ -2644,7 +2646,7 @@ module eu_seq (
                         dec_siz         = 2'b01;
                         dec_is_mem_rd   = 1'b1;
                         dec_is_mem_rmw  = 1'b1;
-                        dec_needs_ext   = (f_mode == 3'b111) ? 1'b1 : 1'b0;
+                        dec_needs_ext   = (f_mode == 3'b101 || f_mode == 3'b110 || f_mode == 3'b111) ? 1'b1 : 1'b0;
                         if (f_mode != 3'b111) begin
                             dec_src_reg   = {1'b1, f_reg};
                             dec_reads_src = 1'b1;
@@ -2660,6 +2662,17 @@ module eu_seq (
                                 dec_an_upd_reg = f_reg;
                                 dec_an_delta   = ~calc_step(2'b01, f_reg == 3'b111) + 32'h1;
                                 dec_ea_offset  = dec_an_delta;
+                            end
+                            3'b101: begin  // (d16,An)
+                                dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                            end
+                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                                dec_dst_reg   = {ext_data[15], ext_data[14:12]};
+                                dec_reads_dst = 1'b1;
+                                dec_is_idx    = 1'b1;
+                                dec_xn_wl     = ext_data[11];
+                                dec_xn_scale  = ext_data[10:9];
+                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
                             end
                             3'b111: begin  // abs.W or abs.L
                                 dec_abs_ea_en  = 1'b1;
@@ -5638,6 +5651,9 @@ module eu_seq (
     logic        bcds_stall;
     logic        bcds_sr_wr_en;
     logic        bcds_ay_wr_en, bcds_ax_wr_en;
+    // Byte-sized -(An) on A7 steps by 2, not 1, to stay word-aligned.
+    // (assigned further down, after ex_src_reg/ex_dst_reg are declared)
+    logic [31:0] bcds_ay_step, bcds_ax_step;
     assign bcds_stall   = ex_valid && ex_is_abcd_sbcd_mem &&
                           !(bcds_run_r && bcds_phase_r == 2'd2 && mem_ack);
     assign bcds_sr_wr_en = ex_valid && ex_is_abcd_sbcd_mem &&
@@ -5927,6 +5943,8 @@ module eu_seq (
     logic        ex_bit_from_reg;
     logic        ex_is_bit_imm;
     logic [3:0]  ex_src_reg, ex_dst_reg;
+    assign bcds_ay_step = (ex_src_reg[2:0] == 3'b111) ? 32'd2 : 32'd1;
+    assign bcds_ax_step = (ex_dst_reg[2:0] == 3'b111) ? 32'd2 : 32'd1;
     logic [1:0]  ex_siz;
     logic [31:0] ex_imm;
     logic        ex_use_imm, ex_use_reg_cnt;
@@ -7255,8 +7273,12 @@ module eu_seq (
             UNIT_BCD: begin
                 ex_result = {24'h0, bcd_result};  // byte result, zero-extended
                 ex_z      = bcd_z;   // already incorporates z_in & (result==0)
-                ex_n      = 1'b0;    // undefined — set to 0
-                ex_v      = 1'b0;    // undefined — set to 0
+                // N/V are "undefined" per the 68k PRM but real hardware
+                // produces specific values — see eu_bcd.sv header comment
+                // for the empirically-derived formulas (verified 100% match
+                // against Tom Harte's register-direct ABCD/SBCD/NBCD vectors).
+                ex_n      = bcd_result[7];
+                ex_v      = bcd_v;
                 ex_c      = bcd_c;
                 ex_x      = bcd_c;   // X = C for all BCD ops
             end
@@ -7708,8 +7730,19 @@ module eu_seq (
                 bcds_is_abcd_r <= ex_is_abcd_mem;
                 bcds_ay_reg_r  <= ex_src_reg[2:0];
                 bcds_ax_reg_r  <= ex_dst_reg[2:0];
-                bcds_ay_addr_r <= rd_a_data - 32'd1;
-                bcds_ax_addr_r <= rd_b_data - 32'd1;
+                // Byte-sized -(An) on A7 steps by 2, not 1, to keep the
+                // stack pointer word-aligned (same rule as every other
+                // byte-op -(A7) case in this codebase). When Ay and Ax are
+                // the SAME register (-(A1),-(A1)), Ay's predecrement is
+                // applied first as part of evaluating the source operand,
+                // so Ax's own predecrement must compound on top of that
+                // already-updated address, not the original register value
+                // (same "same-register conflict" rule fixed for MOVE in
+                // Phase 82).
+                bcds_ay_addr_r <= rd_a_data - bcds_ay_step;
+                bcds_ax_addr_r <= (ex_src_reg[2:0] == ex_dst_reg[2:0])
+                                 ? (rd_a_data - bcds_ay_step - bcds_ax_step)
+                                 : (rd_b_data - bcds_ax_step);
             end else if (bcds_run_r && mem_ack) begin
                 if (bcds_phase_r == 2'd2) begin
                     bcds_run_r <= 1'b0;
@@ -8003,7 +8036,7 @@ module eu_seq (
                       : bf_mem_sr_wr_en     ? {sr_live[15:8], 3'b000, flag_x, bf_n, bf_z, bf_v, bf_c}
                       : move_mm_sr_wr_en    ? {sr_live[15:8], 3'b000, move_mm_ccr_r}
                       : cas_sr_wr_en        ? {sr_live[15:8], 3'b000, cas_ccr_r}
-                      : bcds_sr_wr_en       ? {sr_live[15:8], 3'b000, bcd_c, bcd_result[7], bcd_z, 1'b0, bcd_c}
+                      : bcds_sr_wr_en       ? {sr_live[15:8], 3'b000, bcd_c, bcd_result[7], bcd_z, bcd_v, bcd_c}
                       : cas2_sr_wr_en       ? {sr_live[15:8], 3'b000, cas2_ccr_r}
                       : wb_is_move_sr_w     ? (wb_result[15:0] & 16'hF71F)
                       : wb_is_move_ccr_w    ? {sr_live[15:8], 3'b000, wb_result[4:0]}

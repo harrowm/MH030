@@ -816,6 +816,128 @@ index 22 (`JMP (d8,A4,Xn)`) via a small Python script calling
 
 ---
 
+## Phase 91 — ABCD/SBCD/NBCD root-caused: reverse-engineered real-hardware N/V flags, fixed genuine RTL bugs → 51%/33%/6.9% → 100%/99.7%/100%
+
+**Goal**: root-cause the Phase 90 BCD cluster (ABCD 51.0%, SBCD 33.1%, NBCD 6.9%).
+
+### The core problem: N and V are "undefined" per the 68k PRM, but real hardware isn't random
+
+ABCD/SBCD/NBCD's N and V flags are officially undefined, but real silicon
+produces specific, deterministic values (a side effect of the internal BCD
+adder), and Tom Harte's corpus — captured from real hardware — checks them.
+The existing `eu_bcd.sv` never computed N/V at all (`ex_n=1'b0`/`ex_v=1'b0`
+hardcoded at the register-direct WB path in `eu_seq.sv`; `1'b0` hardcoded at
+the memory-form CCR-write path too), so almost every non-trivial test failed
+on CCR alone even when the result byte was correct.
+
+**Musashi (`tools/musashi/m68kops.c`) does not match real hardware either**,
+for N/V *or* for the result byte in SBCD/NBCD's invalid-BCD-digit edge cases
+(operand nibbles 10-15, which Tom Harte deliberately exercises). Confirmed by
+hand-simulating Musashi's exact algorithm in Python against raw Harte JSON:
+for `ABCD D2,D4` (src=0x3d, dst=0x49, X=1), Musashi's formula predicts V=1;
+the actual hardware-captured expected CCR has V=0.
+
+### Reverse-engineering the real formulas
+
+Since neither the PRM nor Musashi gave a usable reference, the flags were
+derived empirically: gather (operand, expected-CCR) tuples straight from the
+raw Harte JSON for each op's register-direct form, hypothesize candidate bit
+formulas, and brute-force/exhaustively search 1-2-feature boolean combinations
+of intermediate signals until a 0-mismatch formula was found. Verified against
+every register-direct vector in each suite (4004 ABCD, 3948 SBCD, 1315 NBCD).
+
+Findings:
+- **N** = bit 7 of the final (BCD-corrected) result byte — this one was
+  already implicit and correct via `bcd_result[7]`, just never wired to `ex_n`.
+- **ABCD V** = `N & ~(bit7 of the UNCORRECTED binary sum dst+src+X)`. The
+  "uncorrected" sum is algebraically identical to `add_lo + HIGH(dst) +
+  HIGH(src)` (nibble decomposition is exact before any BCD correction), which
+  is exactly what the RTL already computed as `add_bin` — reused directly.
+- **SBCD/NBCD V** = `~N & (bit7 of the UNCORRECTED binary difference
+  dst-src-X)` — same shape, sign flipped, matching the subtraction case.
+- **ABCD carry (C/X)**: Musashi's `>0x99` threshold is wrong — the true
+  threshold is `>=0xA0`. The `0x9A-0x9F` band only arises from invalid BCD
+  digits surviving into the high-nibble stage; real hardware does not correct
+  for it. (Fixed 28/4004 C-flag mismatches.)
+- **SBCD/NBCD's low-nibble correction** must be gated by a true *signed
+  borrow* (`dst_lo - src_lo - X < 0`), not Musashi's `raw_digit > 9` — those
+  diverge whenever an operand nibble is invalid (>9), a whole class of cases
+  Musashi gets outright wrong even for the *result byte*, independent of flags.
+- **SBCD/NBCD's high-nibble borrow (C/X)**: a true *signed* check on the
+  nibble-combined intermediate (`s2 < 0`), not Musashi's byte-level
+  `dst < src+X` comparison or its `>0x99` magnitude check — both diverge from
+  real hardware on invalid-digit inputs.
+
+### Two real RTL implementation bugs found along the way
+
+1. **Verilog sign-extension bug** (own mistake while implementing the above):
+   `{4'b0, sbcd_loc}` is a *concatenation*, which does NOT sign-extend a
+   negative signed value — it just zero-pads, silently corrupting the result
+   whenever `sbcd_loc` was negative (the common case). Symptom: every BCD op
+   result off by exactly `0x40`. Fixed with explicit sign-bit replication
+   (`{{4{sbcd_loc[5]}}, sbcd_loc}`).
+2. **9-bit overflow in `add_adj1`** (pre-existing, unrelated to the flag work):
+   `add_bin` (max `0x1FF`) `+ 6` can reach `0x205`, which doesn't fit in the
+   9-bit field the RTL declared — it silently wrapped for invalid-BCD-digit
+   inputs near the top of `add_bin`'s range. Found via Harte test `cf00 [ABCD
+   D0,D7]` (D0=0xff, D7=0xfb): correct result 0x60, RTL produced 0x00 after
+   the 9→10-bit wrap. Widened `add_adj1`/`add_adj2` to 10 bits.
+
+### A genuine pre-existing memory-form addressing bug, unrelated to any of the above
+
+The `-(Ay),-(Ax)` memory-form ABCD/SBCD predecrement FSM (`bcds_ay_addr_r`/
+`bcds_ax_addr_r` in `eu_seq.sv`) always stepped by 1, missing the standard
+68k rule that a *byte*-sized `-(An)` on **A7** steps by 2 to keep the stack
+word-aligned (the same rule already correctly applied elsewhere in this
+codebase for other byte-op `-(A7)` cases). Symptom: `A7: got 0x7ff, exp
+0x7fe`. Fixed by computing per-register step sizes (`bcds_ay_step`/
+`bcds_ax_step`).
+
+A second, related bug: when Ay and Ax are the **same register**
+(`-(A1),-(A1)`), Ay's predecrement (applied while evaluating the source
+operand) must be visible to Ax's own predecrement — the RTL computed both
+from the original (pre-decrement) register value. Fixed by compounding Ax's
+address on top of Ay's already-decremented value when the registers match
+(same "same-register conflict" pattern fixed for MOVE in Phase 82).
+
+### NBCD's missing extended EA modes
+
+Separately from all of the above, NBCD's memory-EA decode only ever covered
+`(An)/(An)+/-(An)/(xxx).W`/(a pre-existing `(xxx).L` decode that turned out to
+be missing its `ext_count` classification). Added `(d16,An)`/`(d8,An,Xn)`
+decode (mirroring the same pattern used for TAS/CLR/NEG/NOT/NEGX/TST in
+Phases 80-81) plus the missing `ext_count=1`/`ext_count=2` classifier entries
+for `(d16,An)`/`(d8,An,Xn)`/`(xxx).L` in `m68030_seq.sv`.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| ABCD | 51.0% (4112/8065) | **100%** (8065/8065) |
+| SBCD | 33.1% (2672/8065) | **99.7%** (8037/8065) |
+| NBCD | 6.9% (555/8064) | **100%** (8064/8064) |
+
+**SBCD's residual 28/8065 (0.35%) is a genuine, not-yet-solved algorithmic
+subtlety**: hand-verified that the C flag and the result-byte correction are
+*decoupled* in real hardware in a way the current `s2 < 0` single-condition
+model doesn't capture — two operand pairs producing the identical
+nibble-combined intermediate (`s2 = -1`) need opposite treatment (one wants
+the `+0xA0` wraparound applied to the result, the other wants the plain
+two's-complement truncation), distinguished by *how* they arrived at that
+intermediate (whether the low-nibble correction fired), not by the
+intermediate's own value — the current formula loses that path information
+by combining everything into one number. A brute-force search over the
+available intermediate signals didn't find a clean replacement condition;
+whichever single condition was tried either matched the known-good 3939/3948
+cases or the residual 9, never both. Left as a known gap rather than
+introducing an untested guess.
+
+**Verification**: `make test` (32/32, after adding `n_out`/`v_out` wires to
+`eu_bcd_tb.sv`'s wildcard `.*` port connection), `make cosim_grp` (8/8 vs
+Musashi).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
