@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 87 summary)
+### Harte Pass Rates (Phase 88 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -212,7 +212,7 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | EOR | b/w/l | 100% | |
 | CMP | b/w/l | 100% | |
 | MOVE | b/w/l | **100%** / **100%** / **100%** | Phase 85: indexed-src added (dual swap-both register-file ports) + fixed a `get_scale_remap()` single-side-only harness bug |
-| BCHG/BCLR/BSET | — | **100%** / **100%** / **100%** | Phase 83: root cause was a test-harness bug, not RTL — zero RTL changes |
+| BCHG/BCLR/BSET/BTST | — | **100%** (all) | Phase 83: root cause was a test-harness bug, not RTL — zero RTL changes. Phase 88: BTST retested, already 100% |
 | TRAPV | — | 100% | |
 | MOVEfromUSP/toUSP | — | 100% | |
 | CLR/NEG/NOT/NEGX/TST | b/w/l | **100%** (all) | Phase 81 (b/w spot checks) + Phase 87 (full size sweep) |

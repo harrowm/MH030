@@ -661,6 +661,24 @@ form at scale.
 
 ---
 
+## Phase 88 — BTST retest: already 100%
+
+**Goal**: re-verify `BTST.json.gz` after all the intervening bit-op fixes
+(Phases 79-83 touched BCHG/BCLR/BSET's shared dynamic-bit-op decode paths,
+which BTST also runs through).
+
+**Result**: BTST.json.gz **100%** (8064/8064), zero failures. No RTL or
+harness changes needed — this suite was already passing; retested purely to
+close out the remaining-work list item and confirm none of the BCHG/BCLR/BSET
+fixes (particularly Phase 83's harness classification fix, which affects the
+same `f_group==0`+mode-6 dynamic-bit-op decode shared by BTST) introduced any
+regression specific to the read-only bit-test form.
+
+**Verification**: Harte suite only — no RTL changed, so `make test`/
+`make cosim_grp` were already covered by Phase 87's checkpoint.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
