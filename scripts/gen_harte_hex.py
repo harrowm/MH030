@@ -697,7 +697,22 @@ def can_run(test):
 
     # EA range must not overlap the STOP+NOP runway placed immediately after the instruction.
     # Applies to loads (e.g. MOVEM (d16,PC)) whose EA lands inside the runway.
-    if ea_info is not None:
+    #
+    # JMP/JSR are exempt: get_operand_ea() returns their *jump target* as "ea", and
+    # for those two instructions build_patches() deliberately places the STOP+NOP
+    # runway starting AT that target (instr_len = final_pc - ini_pc reduces to
+    # final_pc - 4 = the jump target for any control-transfer instruction, so
+    # stop_start always numerically equals ea here) — so execution halts the instant
+    # the jump lands. That's the intended design, not a data conflict: JMP/JSR never
+    # read or write memory at their EA, so there is no operand data to protect.
+    # Without this exemption every JMP/JSR test trivially "overlaps" itself and the
+    # suite skips 100% of the time.
+    f_dn_jj  = (opcode >> 9) & 7
+    f_dir_jj = (opcode >> 8) & 1
+    f_ss_jj  = (opcode >> 6) & 3
+    is_jmp_jsr = (not f_dir_jj) and f_dn_jj == 7 and f_ss_jj in (2, 3) and \
+                 ((opcode >> 12) & 0xF) == 4
+    if ea_info is not None and not is_jmp_jsr:
         ea, ea_siz = ea_info
         stop_start = (instr_src + instr_len) & 0xFFFFFF
         stop_end   = (stop_start + 4 + 8 * 2) & 0xFFFFFF  # STOP(4) + 8 NOPs(2 each)
@@ -707,8 +722,13 @@ def can_run(test):
 
     # Backstop for complex EA modes that get_operand_ea() returns None for:
     # if instr_len is still wild, the reference took an exception (almost certainly
-    # a misaligned EA that we couldn't compute statically).
-    if not (1 <= instr_len <= 24):
+    # a misaligned EA that we couldn't compute statically). Only applies when
+    # ea_info is None — when get_operand_ea() DID return a concrete EA (e.g. JMP/JSR,
+    # whose "ea" is the jump target), its own misalignment was already checked above,
+    # and instr_len = final_pc - ini_pc is *expected* to be "wild" for any
+    # control-transfer instruction (PC legitimately jumps elsewhere) — that's not a
+    # signal of an exception, so this backstop must not re-fire on it.
+    if ea_info is None and not (1 <= instr_len <= 24):
         return False, 'misaligned EA'
 
     if instr_src < INIT_CODE_END:

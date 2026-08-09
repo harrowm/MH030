@@ -695,6 +695,127 @@ typically trace back to — an IFU prefetch-queue desync from a wrong
 
 ---
 
+## Phase 90 — Sweep of never-tested instruction families: major findings
+
+**Goal**: run every remaining Harte suite that had never been exercised at
+scale (only covered by the 32-test regression + 8-group cosim, not the full
+8065-vector corpus): ABCD, ADDX, ANDItoCCR/SR, Bcc, BSR, DBcc, DIVS, DIVU,
+EORItoCCR/SR, EXG, EXT, JMP, JSR, LEA, LINK, MOVEA, MOVEfromSR, MOVEM, MOVEP,
+MOVEtoCCR/SR, MULS, MULU, NBCD, NOP, ORItoCCR/SR, PEA, RESET, SBCD, Scc, SUBX,
+SWAP, UNLINK (44 suites total; TRAP/RTE/RTR excluded, tracked separately as
+Phase 91).
+
+### Result: mostly clean, but this uncovered by far the largest cluster of
+### real gaps found in the entire Harte verification effort to date.
+
+**Clean (100%, or a single stray fail not yet investigated):** ADDX.b/l
+(ADDX.w has 1 fail), ANDItoCCR/SR, Bcc, BSR, DBcc, EORItoCCR/SR, EXG, EXT.w/l,
+LINK, MOVEA.w/l, MOVEfromSR, MOVEM.w, MOVEP.w/l (1 fail each), MOVEtoCCR, NOP,
+ORItoCCR/SR, RESET, SUBX.b/w/l, SWAP, UNLINK.
+
+**Substantially broken — real, unfixed RTL gaps found this phase:**
+
+| Suite | Pass rate | Fail | Timeout | Notes |
+|-------|-----------|------|---------|-------|
+| NBCD | 6.9% | 4811 | 2698 | worst of the three BCD ops |
+| SBCD | 33.1% | 5393 | 0 | |
+| ABCD | 51.0% | 3953 | 0 | |
+| DIVS | 15.7% | 458 | 3636 | |
+| DIVU | 18.2% | 271 | 3665 | |
+| MULS | 24.5% | 867 | 2771 | |
+| MULU | 25.1% | 951 | 2686 | |
+| Scc | 72.7% | 526 | 812 | |
+| PEA | 86.0% | 439 | 154 | |
+| LEA | 89.0% | 449 | 0 | |
+| MOVEM.l | 95.0% | 201 | 0 | |
+| MOVEtoSR | 96.3% | 89 | 0 | |
+
+None of these have been root-caused yet — this phase focused on the sweep
+itself plus the one deep-dive below (JMP/JSR). Given the scale of this list,
+each will need its own root-cause phase, likely following the same
+hand-verification technique that has worked throughout this investigation.
+
+### JMP/JSR: two-part harness bug found + fixed (0% → ~89%), one RTL gap identified but not yet fixed
+
+**Before this phase, JMP and JSR were 100% SKIP — 0 of 8065 tests in either
+suite ever ran.** Root cause: two compounding bugs in `gen_harte_hex.py`'s
+`can_run()`, both stemming from the same wrong assumption — that
+`instr_len = final['pc'] - ini['pc']` is always "the instruction's own byte
+length." That's true for straight-line instructions (PC advances
+sequentially) but **not** for JMP/JSR, where PC-after-execution is the *jump
+target*, unrelated to the instruction's encoded length.
+
+1. **"EA overlaps STOP runway" false positive.** For JMP/JSR,
+   `get_operand_ea()` returns the jump target as "ea" (not a data operand —
+   JMP/JSR never read/write memory there). `build_patches()` *intentionally*
+   places the STOP+NOP runway starting exactly at that target, using the same
+   `instr_len` identity (`stop_addr = instr_src + instr_len` reduces
+   algebraically to `final_pc - 4`, i.e. the jump target — by design, so
+   execution halts immediately after landing). But `can_run()`'s overlap
+   check had no exemption for this: it flagged every JMP/JSR test as
+   "conflicting" with a runway that was deliberately placed to coincide with
+   its own target. Fixed by adding an `is_jmp_jsr` opcode check (`f_group==4,
+   !f_dir, f_dn==7, f_ss∈{2,3}`) and skipping the overlap check for those two
+   instructions specifically, since there's no real data being protected.
+2. **"misaligned EA" backstop false positive.** A second, later check —
+   `if not (1 <= instr_len <= 24): return False, 'misaligned EA'` — exists to
+   catch instructions where `get_operand_ea()` returned `None` (EA too
+   complex to compute statically) and a wild PC delta implies the reference
+   took an address-error exception. But it ran unconditionally, so once fix
+   #1 let JMP/JSR tests reach this point, they hit it too: `instr_len` is
+   *always* "wild" for a jump (PC legitimately goes somewhere else), which
+   isn't a signal of an exception in this case, since `get_operand_ea()` DID
+   return a concrete EA and its misalignment was already checked earlier.
+   Fixed by gating the backstop on `ea_info is None`.
+
+**Results**: JMP 0% → **88.6%** (3758/4240 run), JSR 0% → **89.1%**
+(3738/4194 run). `make test` (32/32) and `make cosim_grp` (8/8) both pass —
+Python-only change, no RTL rebuild strictly required, but rebuilt anyway as
+part of the investigation below.
+
+**Residual RTL gap (not fixed, root cause narrowed but not found):** every
+remaining JMP/JSR failure is a TIMEOUT, and 100% of them are the
+`(d8,An,Xn)`/`(d8,PC,Xn)` indexed target forms (confirmed via
+`grep TIMEOUT | sort | uniq -c` — every An register and PC, all indexed,
+zero non-indexed failures). Added temporary `$display` tracing (`eu_seq.sv`,
+`ex_jmp_taken`) and confirmed the RTL computes the jump target **correctly**:
+`rd_a_data + ex_jump_offset + ex_xn_scaled` produces a 32-bit value whose low
+24 bits exactly match the test's expected target (verified against test index
+22, `JMP (d8,A4,Xn)`: computed `0x0bcbf118`, expected target `0xcbf118` —
+matches after masking). The memory model (`mem_idx = ext_a[23:2]`) already
+ignores address bits above 23, so bus-level access to the correct physical
+location should work regardless of the stray high byte. Yet **zero further
+bus activity of any kind occurs after the jump** — the simulation doesn't
+even attempt a subsequent fetch, even at 10x the normal cycle budget. This
+means the target-address computation is not the culprit; something in the
+IFU-redirect/pipeline-restart handshake (`pc_wr_en`/`fetch_pend_r`/
+`eu_instr_ack`/`drain`) fails to complete specifically when `ex_is_idx` is
+combined with a control-transfer instruction. Spent significant effort
+tracing `branch_target`, `pc_wr_en_common`, and the IFU's queue-flush logic in
+`m68030_ifu.sv` without finding the exact stall condition — deprioritized in
+favor of surfacing the full sweep's findings; needs a dedicated follow-up
+phase with more `$display` tracing on the IFU's `fetch_pend_r`/`ifu_req`/
+`ifu_ack` sequence in the cycles immediately following `pc_wr_en`.
+
+**Also note**: the computed 32-bit target legitimately differs from the
+68000 reference whenever `rd_a_data + ex_jump_offset + ex_xn_scaled` exceeds
+24 bits — real 68000 hardware only has 24 address pins and silently drops the
+upper byte, while the 68030 has genuine 32-bit addressing and does not. This
+is the same class of 68000-vs-68030 architectural difference the scale-remap
+and misalignment filters already account for elsewhere; some fraction of the
+"indexed timeout" cases may turn out to be more of this (unreplayable on our
+DUT, should SKIP) rather than a pure RTL bug — worth checking during the
+follow-up.
+
+**Debugging notes for next attempt**: temporary trace was added at
+`eu_seq.sv`'s `assign branch_taken = ...` block (an `always_ff` firing on
+`ex_jmp_taken`) and has been removed. Reproduction: `tests/harte/JMP.json.gz`
+index 22 (`JMP (d8,A4,Xn)`) via a small Python script calling
+`gen_harte_hex.gen_hex(test)` + `vvp sim/harte_dat +hexfile=... +cycles=20000`
+— same pattern used throughout this investigation.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

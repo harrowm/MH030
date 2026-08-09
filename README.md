@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 89 summary)
+### Harte Pass Rates (Phase 90 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -221,7 +221,29 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | ASR/LSL/LSR/ROL/ROR | b/w/l | **100%** (all) | Phase 87 full sweep |
 | ROXL/ROXR | b/w/l | **100%** (all) | Phase 87: found + fixed a real `eu_shifter.sv` bug — `count==0` register-count ROX must set `C=X` per 68k PRM, RTL cleared it to 0 like the other 6 shift/rotate types |
 | CHK | — | **100%** | Phase 84: `(d8,An,Xn)` indexed EA added, no port needed. Phase 86: remaining EA modes (`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)`) added — `(d8,PC,Xn)` needed the same swap trick, no port needed either |
+| ADDX/SUBX | b/w/l | ~100% | Phase 90 sweep; ADDX.w has 1 unexamined fail |
+| ANDI/EORI/ORI to CCR/SR | — | **100%** | Phase 90 sweep |
+| Bcc/BSR/DBcc | — | **100%** | Phase 90 sweep |
+| EXG/EXT/LINK/UNLINK/SWAP/NOP/RESET | — | **100%** | Phase 90 sweep |
+| MOVEA/MOVEfromSR/MOVEtoCCR/MOVEM.w/MOVEP | — | ~100% | Phase 90 sweep; MOVEP.w/.l each have 1 unexamined fail |
+| **JMP/JSR** | — | **88.6% / 89.1%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual failures are all TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets, root cause not yet found |
+| **NBCD / SBCD / ABCD** | — | **6.9% / 33.1% / 51.0%** | Phase 90: found, not yet root-caused |
+| **MULS / MULU** | — | **24.5% / 25.1%** | Phase 90: found, not yet root-caused |
+| **DIVS / DIVU** | — | **15.7% / 18.2%** | Phase 90: found, not yet root-caused |
+| **Scc** | — | **72.7%** | Phase 90: found, not yet root-caused |
+| **PEA / LEA** | — | **86.0% / 89.0%** | Phase 90: found, not yet root-caused |
+| **MOVEM.l** | — | **95.0%** | Phase 90: found, not yet root-caused |
+| **MOVEtoSR** | — | **96.3%** | Phase 90: found, not yet root-caused |
 | TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
+
+**JMP/JSR harness bug (Phase 90)**: both were 0% (100% SKIP, never ran at
+all) before this phase. `can_run()`'s "EA overlaps STOP runway" check treated
+the jump target — which `build_patches()` *deliberately* places the STOP
+opcode at — as a data-operand conflict; a second "misaligned EA" backstop
+then re-triggered on the same underlying issue (PC-after-jump isn't
+"instruction start + length", so the wild PC delta looked like an exception
+that never happened). Both fixed in `gen_harte_hex.py`. See `plan.md §Phase
+90` for the residual indexed-EA timeout that's still open.
 
 ### Known Architectural Gap — did not exist
 
