@@ -262,10 +262,17 @@ module eu_shifter_tb;
         check("F4a: C=0 (old LSB=0)", !c_out);
         check("F4a: N=1", n_out);
 
-        // F5: ROXL count=0 — X unchanged, C=0
+        // F5: ROXL count=0 — X unchanged, and per 68k PRM the ROX exception:
+        // "If the rotate count is zero, the C bit is set to the value of the
+        // extend bit" (unlike ASL/ASR/LSL/LSR/ROL/ROR, which clear C at count=0).
         apply(SHF_ROXL, 2'b01, 6'd0, 32'hAB, 1);
-        check("F5a: ROXL by 0, C=0",      !c_out);
+        check("F5a: ROXL by 0, C=x_in=1",  c_out);
         check("F5a: ROXL by 0, X=x_in=1", x_out == 1'b1);
+
+        // F5b: ROXR count=0 with x_in=0 — C must also follow X (not just default 0).
+        apply(SHF_ROXR, 2'b01, 6'd0, 32'hAB, 0);
+        check("F5b: ROXR by 0, C=x_in=0",  !c_out);
+        check("F5b: ROXR by 0, X=x_in=0", x_out == 1'b0);
 
         // ================================================================
         // G: Word and long size coverage

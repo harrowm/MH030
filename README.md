@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 86 summary)
+### Harte Pass Rates (Phase 87 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -215,17 +215,13 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | BCHG/BCLR/BSET | — | **100%** / **100%** / **100%** | Phase 83: root cause was a test-harness bug, not RTL — zero RTL changes |
 | TRAPV | — | 100% | |
 | MOVEfromUSP/toUSP | — | 100% | |
-| CLR | b | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
-| NEG | w | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
-| NOT | b | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
-| TST | b | **100%** | Phase 81: indexed EA added (+ (d16,PC)), no port needed |
+| CLR/NEG/NOT/NEGX/TST | b/w/l | **100%** (all) | Phase 81 (b/w spot checks) + Phase 87 (full size sweep) |
 | TAS | — | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
-| ASL | w | **100%** | Phase 81: full EA sweep added (d16/abs/indexed), no port needed |
+| ASL | b/w/l | 99.98%\* / **100%** / **100%** | \*ASL.b: 2/8065 confirmed Tom Harte corpus data anomalies (opcode `0xe502`, passes 41/43 other instances) — not a bug |
+| ASR/LSL/LSR/ROL/ROR | b/w/l | **100%** (all) | Phase 87 full sweep |
+| ROXL/ROXR | b/w/l | **100%** (all) | Phase 87: found + fixed a real `eu_shifter.sv` bug — `count==0` register-count ROX must set `C=X` per 68k PRM, RTL cleared it to 0 like the other 6 shift/rotate types |
 | CHK | — | **100%** | Phase 84: `(d8,An,Xn)` indexed EA added, no port needed. Phase 86: remaining EA modes (`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)`) added — `(d8,PC,Xn)` needed the same swap trick, no port needed either |
 | TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
-
-NEGX/NOT.w-l/CLR.w-l/NEG.b-l/TST.w-l/other shift sizes share the decode blocks fixed
-in Phase 81 and should also land at 100%, but weren't individually swept yet.
 
 ### Known Architectural Gap — did not exist
 

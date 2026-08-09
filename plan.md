@@ -588,6 +588,79 @@ collision was reasoned through up front instead of discovered via failure.
 
 ---
 
+## Phase 87 — Sweep NEGX/NOT/CLR/NEG/TST sizes + shift/rotate families; found + fixed a real ROXL/ROXR CCR bug
+
+**Goal**: confirm the Phase 81 unary-EA decode fix generalizes across the sizes
+that weren't individually swept (NEGX.b/w/l, NOT.w/l, CLR.w/l, NEG.b/l,
+TST.w/l), and run the full shift/rotate family (ASL/ASR/LSL/LSR/ROL/ROR/
+ROXL/ROXR × b/w/l = 24 suites) for the first time.
+
+### Results — first pass
+
+All of NEGX/NOT/CLR/NEG/TST (9 suites) and ASL/ASR/LSL/LSR/ROL/ROR (18 suites)
+came back **100%**, except:
+- **ASL.b**: 8063/8065 (2 FAIL) — investigated and confirmed to be a **Tom
+  Harte test-corpus data anomaly**, not an RTL or harness bug (see below).
+- **ROXL.b/w/l and ROXR.b/w/l** (6 suites): consistently ~99.6-99.7% (118
+  failures total) — a real, reproducible RTL bug (see below).
+
+### ASL.b: 2 corpus anomalies, not a bug
+
+Both failures are opcode `0xe502` (`ASL.b #2,D2`), which appears 43 times total
+in the suite — 41 pass, 2 fail. Hand-verified both failures: the claimed
+"expected" final D2 value doesn't match the initial value in its upper 24 bits
+at all (impossible for a byte-size op, which must leave them untouched), and no
+combination of size/count/direction/rotate-type reproduces the claimed result
+from the initial value. Since the *same opcode* with different operand data
+passes correctly 41/43 times, the DUT's decode is provably correct; these 2
+vectors are simply corrupted in the upstream Tom Harte corpus. Not fixable
+(nothing to fix) — documented as a known, harmless 2/8065 corpus artifact.
+
+### ROXL/ROXR: real RTL bug, fixed
+
+All 118 failures were CCR-only mismatches, always the C flag off by exactly
+one value, and — critically — every single failing vector used the
+**register-count form** (`ROXL Dx,Dy`) with the count register's value ≡ 0
+(mod 64). The 68k PRM has one documented exception to "count=0 → flags mostly
+unaffected": for ASL/ASR/LSL/LSR/ROL/ROR a zero count clears C, but for
+**ROXL/ROXR specifically, a zero count sets C to the current X flag** instead.
+
+Root cause in `eu_shifter.sv`: the `count==0` default block (before the
+`if (count != 0)` guard that gates the whole op-specific `case` statement)
+unconditionally set `c_out = 1'b0` — correct for the 6 non-ROX ops, but wrong
+for ROXL/ROXR, whose correct `c_out = roxl_c_bit`/`roxr_c_bit` (which itself
+naturally evaluates to `x_in` when count=0, verified by hand) never got a
+chance to run because the whole case statement is skipped. Fixed by making the
+default's `c_out` conditional: `(op == SHF_ROXL || op == SHF_ROXR) ? x_in : 1'b0`.
+
+Also fixed the existing `eu_shifter_tb.sv` unit test (`F5a`), which had encoded
+the *old, incorrect* behavior (`ROXL by 0, C=0`) as its expected value — updated
+to assert `C=x_in` per spec, and added a matching `F5b` case for ROXR with
+`x_in=0` to cover both flag polarities.
+
+### Results — after fix
+
+| Suite | Before | After |
+|-------|--------|-------|
+| ROXL.b | 99.6% (7274/7305) | **100%** (7305/7305) |
+| ROXL.w | 99.7% (4341/4353) | **100%** (4353/4353) |
+| ROXL.l | 99.7% (4270/4284) | **100%** (4284/4284) |
+| ROXR.b | 99.6% (7299/7330) | **100%** (7330/7330) |
+| ROXR.w | 99.6% (4320/4337) | **100%** (4337/4337) |
+| ROXR.l | 99.7% (4289/4302) | **100%** (4302/4302) |
+
+**Verification**: `make test` (32/32, after fixing `eu_shifter_tb.sv`'s stale
+expectation), `make cosim_grp` (8/8 vs Musashi).
+
+This is the first RTL bug found by the debug technique in this session that
+wasn't triggered by an indexed/register-port EA case — it's a plain CCR
+edge-case bug in the shifter's zero-count path, present since whenever
+register-count ROX was first implemented, simply never exercised by the
+regression suite or by any Harte suite until this sweep ran the register-count
+form at scale.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

@@ -140,12 +140,18 @@ module eu_shifter (
     // Output mux — no constant bit-selects inside always_comb
     // -----------------------------------------------------------------------
     always_comb begin
-        // count=0 defaults: N/Z from operand, C=0, V=0, X unchanged
+        // count=0 defaults: N/Z from operand, V=0, X unchanged.
+        // C=0 for ASL/ASR/LSL/LSR/ROL/ROR, but ROXL/ROXR are the spec's one
+        // exception: with a zero rotate count, C takes the *current* X value
+        // instead of clearing (68k PRM: "If the rotate count is zero, the C
+        // bit is set to the value of the extend bit"). The case statement
+        // below is skipped entirely when count==0, so that exception has to
+        // be captured here in the default.
         result = op_m;
         n_out  = (op_m & msb_mask) != 32'h0;
         z_out  = (op_m == 32'h0);
         v_out  = 1'b0;
-        c_out  = 1'b0;
+        c_out  = (op == SHF_ROXL || op == SHF_ROXR) ? x_in : 1'b0;
         x_out  = x_in;
 
         if (count != 0) begin
