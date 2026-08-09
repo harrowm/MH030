@@ -1029,6 +1029,80 @@ continuation of the MULS/MULU work. Tracked separately.
 
 ---
 
+## Phase 93 — DIVS/DIVU root-caused: two real bugs, unrelated to the MULS/MULU fixes → 17.2%/19.8% → 97.6%/97.6%
+
+**Goal**: root-cause the deep DIVS/DIVU problem left open by Phase 92 —
+register-direct divides failing and thousands of TIMEOUTs, a symptom shape
+the MULS/MULU memory-EA fixes couldn't explain.
+
+### Bug 1: DIVS/DIVU overflow always clears C — the RTL's own comment was wrong
+
+Hand-verified against 887 DIVS.json.gz and 536 DIVU.json.gz register-direct
+overflow vectors (cases where the result is unchanged, meaning the divide
+overflowed and aborted per spec): **C is 0 in 100% of these cases**,
+regardless of the incoming C value. The existing RTL's overflow branch —
+labeled `// N/Z/C unchanged (matches Musashi)` — set `ex_c = flag_c` (leave
+C as whatever it was before the divide). That comment was simply wrong: N/Z
+genuinely are unchanged (887/887 and 536/536 match), but C must always be
+cleared. This is the exact same shape of bug as Phase 91's BCD flags —
+Musashi's own reference doesn't match real hardware for this "what happens
+to unaffected flags on trap/abort" edge case either. One-line fix:
+`ex_c = 1'b0;` in the overflow branch.
+
+### Bug 2: `div_trap` evaluated `md_div_by_zero` before the memory read completed — the actual mass-TIMEOUT cause
+
+`$display` tracing on a failing memory-source `DIVS (A6),D4` test (Harte
+index 3 — nearly every *other* memory-source DIVS/DIVU test in the file was
+failing this way) showed: `mem_ack=0`, `mem_rdata=00000000`,
+`md_div_by_zero=1`, `ex_mem_stall=1` — **forever**, no further bus activity
+at all. `md_src = ex_is_mem_src ? mem_rdata : ...` reads `mem_rdata` live;
+before the bus read actually acks, that wire sits at its idle value of zero.
+`eu_mul_div`'s combinational `divs_zero = (src[15:0]==0)` correctly computes
+true for that *momentarily* all-zero operand — and `div_trap` was wired as a
+**pure combinational** `assign div_trap = ex_valid && (ex_unit==UNIT_DIV) &&
+md_div_by_zero`, with no gate on whether the memory-source operand had
+actually arrived yet. That fired a bogus divide-by-zero trap sequence *while
+the pipeline was still stalled waiting for the real memory read*, and the
+two mechanisms fighting over control locked the pipeline permanently.
+
+The fix already existed as a pattern one line below: `chk_trap` (CHK's own
+out-of-bounds trap, which has exactly the same "memory-source operand not
+ready yet" hazard) is correctly gated as `ex_is_mem_rd && mem_ack` for its
+memory-source case. Applied the identical structure to `div_trap`: trap
+combinationally for register/immediate sources (always valid), but for a
+memory source, only trust `md_div_by_zero` on the cycle `mem_ack` actually
+fires.
+
+This single fix explains the overwhelming majority of both suites' TIMEOUT
+counts — every memory-source divide whose *first* combinational evaluation
+(before the read completed) happened to see `mem_rdata==0` triggered this,
+which given `mem_rdata`'s zero idle value is unconditional for every
+memory-source divide that reaches this window.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| DIVS | 17.2% (857/4975) | **97.6%** (4856/4975) |
+| DIVU | 19.8% (978/4931) | **97.6%** (4814/4931) |
+
+**Residual (~2.4% both suites): TIMEOUT, 100% on `(d8,An,Xn)`/`(d8,PC,Xn)`
+indexed forms** — after this fix, DIVS/DIVU's remaining failure list is
+*exactly* the same shape as MULS/MULU's (Phase 92) and JMP/JSR's (Phase 90)
+residual indexed-EA timeouts. Four independent instruction families now show
+the identical symptom (indexed EA + TIMEOUT, everything else passing) —
+strong circumstantial evidence they share one root cause somewhere in the
+IFU-redirect or register-swap machinery that indexed addressing touches, but
+this still hasn't been isolated. Worth a dedicated phase now that the
+evidence base is much stronger (4 repro cases across 3 different instruction
+shapes — JMP/JSR use no register-swap at all, MUL/DIV use
+`dyn_bit_get_Dn`/`dec_is_idx` — ruling out anything specific to one
+mechanism).
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

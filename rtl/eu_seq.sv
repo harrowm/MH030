@@ -7357,11 +7357,17 @@ module eu_seq (
             UNIT_DIV: begin
                 ex_result = md_result_lo;
                 ex_v      = md_v;
-                // DIVS.W / DIVU.W overflow: only V is set; N/Z/C unchanged (matches Musashi)
+                // DIVS.W / DIVU.W overflow: V is set, N/Z are unchanged, but C is
+                // always CLEARED (not "unchanged" as Musashi's own reference
+                // implementation does — hand-verified against 887 DIVS.json.gz and
+                // 536 DIVU.json.gz register-direct overflow vectors: C=0 in 100%
+                // of cases regardless of the incoming C value; Musashi is wrong
+                // here too, same class of "undefined behavior doesn't match real
+                // hardware" issue found for ABCD/SBCD/NBCD in Phase 91).
                 if (!ex_is_muldivl && md_v && !md_div_by_zero) begin
                     ex_n = flag_n;
                     ex_z = flag_z;
-                    ex_c = flag_c;
+                    ex_c = 1'b0;
                 end else begin
                     ex_n = md_n;
                     ex_z = md_z;
@@ -8169,7 +8175,16 @@ module eu_seq (
     // -----------------------------------------------------------------------
     // Divide-by-zero trap / CHK-CHK2 out-of-bounds trap (combinational)
     // -----------------------------------------------------------------------
-    assign div_trap = ex_valid && (ex_unit == UNIT_DIV) && md_div_by_zero;
+    // Gated the same way as chk_trap below: for a memory-source divide,
+    // md_div_by_zero is derived combinationally from mem_rdata, which reads
+    // as 0 (its default/idle value) before the bus read actually completes —
+    // without the mem_ack gate, div_trap fired immediately on ex_valid using
+    // that premature all-zero "divisor", triggering a bogus trap sequence
+    // that collided with the still-pending ex_mem_stall and hung the
+    // pipeline permanently (found via $display tracing: mem_ack=0,
+    // mem_rdata=0, md_div_by_zero=1, ex_mem_stall=1, forever).
+    assign div_trap = (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src && md_div_by_zero)
+                    || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && mem_ack && md_div_by_zero);
     // CHK: trap on reg/imm comparison, memory-source ack, or CHK2 second-read ack.
     assign chk_trap = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
                    || (ex_valid && ex_is_chk && ex_is_mem_rd && mem_ack &&
