@@ -1457,6 +1457,95 @@ re-run, JSR spot-check.
 
 ---
 
+## Phase 98 — MOVEM.l and MOVEtoSR root-caused: the last two Harte gaps close, one harness bug and one genuine RTL race → 95.0%/96.3% → 100%/100%
+
+**Goal**: root-cause the last two remaining Harte gaps found in Phase 90 — MOVEM.l
+(95.0%) and MOVEtoSR (96.3%) — the final items on the list.
+
+### MOVEM.l — a test-harness bug, zero RTL change
+
+`run_harte.py --verbose` broken down by EA mode: every mode except `(d8,An,Xn)` and
+`(d8,PC,Xn)` was 100%, both directions (load/store) affected equally, all failures were
+plain FAILs (no TIMEOUT) reporting `no write seen` at the expected addresses. Since this
+looked like the scale-remap machinery not covering the full write range, hand-checked a
+failing case (`MOVEM.l #,(d8,A0,Xn)`, index 265): `get_scale_remap()` computed
+`siz_bytes=2`, but the instruction's actual register mask (`0xafff`, 14 set bits) needs
+`4*14=56` bytes at longword size. Root cause: `get_scale_remap()`'s size-determination
+`if/elif` chain has `elif f_group==4 and f_ss==3: siz_bytes=2  # MOVE SR/CCR ↔ ea` ahead
+of `elif is_movem: siz_bytes = (4 if f_ss==3 else 2) * popcount(mask)` — MOVEM.l's own
+opcode encoding *also* has `f_group==4, f_ss==3` (bits[7:6]=11 selects long size), so the
+generic-looking "MOVE SR/CCR" clause intercepted it first, truncating the scale-remap
+byte range to 2 and leaving most of the transfer's expected-write addresses
+un-redirected from `EA_68000` to `EA_68030` in `compare()` — the exact "else if
+priority-chain, only the first match counts" shape as Phase 96's Scc bug, this time in
+the Python harness rather than the RTL. Fixed by reordering: `is_movem` now checked
+first. `get_operand_ea()` already had this check correctly ordered (MOVEM before the
+generic fallback), so only `get_scale_remap()` needed the fix. **Zero RTL change.**
+Result: MOVEM.l 95.0%→**100%** (4043/4043).
+
+### MOVEtoSR — a genuine RTL race: two register writes to the same physical bank register in one cycle
+
+Every mode except `(A7)+`/`-(A7)` was already 100%; those two showed a clean 100% FAIL
+(no TIMEOUT), always reporting `A7: got <unchanged>, exp <A7-2>` — the auto-decrement
+simply never took effect, only for this specific register. Traced with temporary
+`$display`s across the decode→EX→WB pipeline and into `eu_regfile.sv` directly. The
+decode, EX, and WB stages all computed the correct post-decrement value (confirmed:
+`an_wr_en=1, an_wr_sel=7, an_wr_data=0x7fe`, matching the expected `A7-2` exactly) — the
+bug was inside `eu_regfile.sv`'s combined stack-pointer/SR always_ff block, which has
+**two separate `if` clauses that can both target the same physical bank register
+(`isp_r`/`msp_r`/`usp_r`) in the same clock cycle**:
+1. `if (an_wr_en && an_wr_sel==3'b111) isp_r <= an_wr_data;` — the auto-decrement itself.
+2. `if (sr_wr_en) if (sr_old_sm != sr_new_sm) isp_r <= a7_current;` — SR-write mode-change
+   handling, which saves the *current* A7 into the outgoing bank before the alias
+   switches.
+
+For `MOVE.W -(A7),SR`, both fire in the identical cycle: the auto-decrement (An-update)
+and the SR write (loading the new SR value, which for this specific repro's test data
+happened to flip the M bit, satisfying `sr_old_sm != sr_new_sm`). Both target `isp_r`.
+Since these are two separate non-blocking assignments to the same variable within one
+`always_ff`, the textually-later one wins — clause 2's `a7_current` reads the
+**pre-decrement** value combinationally (0x800, since neither pending update has landed
+yet), silently clobbering clause 1's correct 0x7fe. Real 68030 silicon has no such race
+(these updates are sequential micro-steps, not simultaneous), but the pipelined RTL
+applies both in one cycle, creating a hazard real hardware never faces.
+
+Fix: added `a7_save_val` — `(an_wr_en && an_wr_sel==3'b111) ? an_wr_data : a7_current` —
+so when A7's own auto-update is landing this same cycle, the SR-write's "preserve
+outgoing bank" step uses the *fresh*, correctly-decremented value instead of the stale
+one. A ternary reading `an_wr_en` uncovered a **pre-existing, unrelated testbench gap**:
+`tb/eu_regfile_tb.sv` never drove `an_wr_en`/`an_wr_sel`/`an_wr_data` at all (the DUT
+instantiation simply omits those three ports), so they float at `X` in that standalone
+unit test — harmless for the *existing* `if (an_wr_en && ...)` usage (Verilog treats an
+`X` condition as false, skipping the branch), but an `X ? a : b` ternary propagates `X`
+into the result regardless of which branch "should" apply, breaking test **RF-3e** (ISP
+preservation across an S/M switch) the moment anything started reading `an_wr_en` in a
+ternary. Fixed by adding the three missing signals (defaulted to 0, matching every other
+port) to the testbench's port list — a real, previously-unexercised gap in that unit
+test, not a workaround.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| MOVEM.l | 95.0% (3842/4043 run) | **100%** (4043/4043) |
+| MOVEtoSR | 96.3% (2303/2392 run) | **100%** (2392/2392) |
+
+Spot-checked every other SR-writing instruction (`ANDItoSR`, `EORItoSR`, `ORItoSR`,
+`MOVEfromSR`, `MOVEtoCCR`) since the `eu_regfile.sv` fix touches shared SR-write logic —
+all still **100%**, confirming no regression.
+
+**This closes every Harte gap tracked since Phase 90's sweep.** Remaining known items:
+SBCD's 0.35% residual (Phase 91, documented algorithmic gap, not chased) and ASL.b's 2
+confirmed corpus anomalies (Phase 87) — neither considered a bug. TRAP/RTE/RTR remain
+100% SKIP (need a supervisor initial-state harness capability that doesn't exist yet) —
+a separately-tracked harness limitation, not an RTL gap.
+
+**Verification**: `make test` (32/32 — including the fixed `eu_regfile` unit test),
+`make cosim_grp` (8/8 vs Musashi), full MOVEM.l/MOVEtoSR re-run, 5-suite SR-instruction
+spot-check.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

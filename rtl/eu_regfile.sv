@@ -101,6 +101,13 @@ module eu_regfile (
     assign a7_current = ({sr_r[13], sr_r[12]} == 2'b10) ? isp_r :
                         ({sr_r[13], sr_r[12]} == 2'b11) ? msp_r : usp_r;
 
+    // Value to preserve into the outgoing S/M bank on a mode-changing SR
+    // write: the fresh an_wr_data when A7's own auto-increment/decrement is
+    // landing in this same cycle (see the SR-write block below), else the
+    // plain current value.
+    logic [31:0] a7_save_val;
+    assign a7_save_val = (an_wr_en && an_wr_sel == 3'b111) ? an_wr_data : a7_current;
+
     // -----------------------------------------------------------------------
     // SR write pre-computation
     // -----------------------------------------------------------------------
@@ -224,13 +231,21 @@ module eu_regfile (
                 endcase
             end
 
-            // SR write — save current A7 if mode changes, then update SR
+            // SR write — save current A7 if mode changes, then update SR.
+            // MOVE EA,SR with a -(A7)/(A7)+ source auto-updates A7 in the
+            // *same* cycle the SR write can flip S/M and trigger this bank
+            // save — both target the same old-bank register (e.g. isp_r).
+            // Using the stale a7_current here would silently overwrite the
+            // just-computed auto-increment/decrement with the pre-update
+            // value; use a7_save_val (the fresh an_wr_data when A7's own
+            // auto-update fired this cycle) so the correct post-update value
+            // is what gets preserved into the outgoing bank.
             if (sr_wr_en) begin
                 if (sr_old_sm != sr_new_sm) begin
                     case (sr_old_sm)
-                        2'b10:   isp_r <= a7_current;
-                        2'b11:   msp_r <= a7_current;
-                        default: usp_r <= a7_current;
+                        2'b10:   isp_r <= a7_save_val;
+                        2'b11:   msp_r <= a7_save_val;
+                        default: usp_r <= a7_save_val;
                     endcase
                 end
                 sr_r <= sr_next;

@@ -426,11 +426,17 @@ def get_scale_remap(test):
     #   Group 4, f_ss==3: MOVE SR/CCR to/from memory — SR/CCR are always 16-bit.
     if f_group in (0x9, 0xD, 0xB) and f_ss == 3:
         siz_bytes = 4 if (opcode >> 8) & 1 else 2
+    elif is_movem:
+        # siz_bytes = total transfer: bytes-per-reg × number of set bits in register mask.
+        # Must be checked before the group==4/f_ss==3 "MOVE SR/CCR" case below —
+        # MOVEM.l's own encoding also has f_ss==3 (bits[7:6]=11 selects long size),
+        # so without this ordering MOVEM.l was misclassified as MOVE SR/CCR and got
+        # siz_bytes=2 instead of 4*popcount(mask), truncating the scale-remap byte
+        # range to 2 bytes and leaving the rest of the transfer's expected-write
+        # addresses un-redirected from EA_68000 to EA_68030 in compare().
+        siz_bytes = (4 if f_ss == 3 else 2) * bin(ini['prefetch'][1]).count('1')
     elif f_group == 4 and f_ss == 3:
         siz_bytes = 2   # MOVE SR/CCR ↔ ea: SR and CCR are 16-bit
-    elif is_movem:
-        # siz_bytes = total transfer: bytes-per-reg × number of set bits in register mask
-        siz_bytes = (4 if f_ss == 3 else 2) * bin(ini['prefetch'][1]).count('1')
     elif f_group in (1, 2, 3):
         siz_bytes = {1: 1, 2: 4, 3: 2}[f_group]
     elif f_group == 0xE:

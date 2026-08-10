@@ -31,6 +31,10 @@ module eu_regfile_tb;
     logic [1:0]  wr_siz  = 2'b00;
     logic [31:0] wr_data = 0;
 
+    logic        an_wr_en   = 0;
+    logic [2:0]  an_wr_sel  = 0;
+    logic [31:0] an_wr_data = 0;
+
     logic        pc_wr_en   = 0;
     logic [31:0] pc_wr_data = 0;
     logic [31:0] pc_out;
@@ -61,6 +65,9 @@ module eu_regfile_tb;
         .wr_sel      (wr_sel),
         .wr_siz      (wr_siz),
         .wr_data     (wr_data),
+        .an_wr_en    (an_wr_en),
+        .an_wr_sel   (an_wr_sel),
+        .an_wr_data  (an_wr_data),
         .pc_wr_en    (pc_wr_en),
         .pc_wr_data  (pc_wr_data),
         .pc_out      (pc_out),

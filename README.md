@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 97 summary)
+### Harte Pass Rates (Phase 98 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -233,8 +233,8 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | **DIVS / DIVU** | — | **100% / 100%** | Phase 93: two real bugs — an RTL comment claiming C is "unchanged" on overflow was wrong (must always clear, hand-verified against 1400+ vectors); `div_trap` evaluated `md_div_by_zero` from `mem_rdata` before the memory read actually completed, firing a bogus trap that collided with the pending stall and hung the pipeline. Phase 94: same indexed-EA TIMEOUT root cause and harness fix as MULS/MULU, no RTL change |
 | **Scc** | — | **100%** | Phase 90: found (72.7%). Phase 96: root-caused — Scc's `(xxx).W` abs form and TRAPcc share the same opcode slot family; `f_reg==000` (Scc abs.W) was mislabeled as TRAPcc in decode *and* mislabeled as TRAPcc.L (2 ext words instead of 1) in the ext_count table, in two separate places; `(d16,An)`/`(d8,An,Xn)` had no ext_count entry at all. Fixed all three; TRAPcc.L made reachable as a byproduct (unverified, no dedicated suite) |
 | **PEA / LEA** | — | **100% / 100%** | Phase 90: found (86.0%/89.0%). Phase 97: LEA and PEA's `(d8,An,Xn)` form were the Phase 94/95 68000-vs-68030 scale divergence again (the EA *is* the result here, so a scale mismatch changes it directly, unreplicable, harness skip added, no RTL change); PEA's `(d8,PC,Xn)` was a genuine RTL gap — no decode case existed at all (100% TIMEOUT), plus the fix needed the same `ex_cur_sp` A7-routing PEA's `(d8,An,Xn)` sibling already uses, and the pushed value needed the missing `ex_xn_scaled` term added |
-| **MOVEM.l** | — | **95.0%** | Phase 90: found, not yet root-caused |
-| **MOVEtoSR** | — | **96.3%** | Phase 90: found, not yet root-caused |
+| **MOVEM.l** | — | **100%** | Phase 90: found (95.0%). Phase 98: `get_scale_remap()`'s size calc had a "MOVE SR/CCR ↔ ea" clause (`f_group==4, f_ss==3`) positioned before the MOVEM check — MOVEM.l's own encoding also matches that pattern, truncating the scale-remap byte range to 2 instead of `4×popcount(mask)` and leaving most write addresses unredirected in `compare()`. Harness fix, zero RTL change |
+| **MOVEtoSR** | — | **100%** | Phase 90: found (96.3%, only `(A7)+`/`-(A7)` failing). Phase 98: genuine RTL race — `eu_regfile.sv` had two `if` clauses able to write the same bank register in one cycle (the auto-decrement, and the SR-write's "save A7 before the S/M switch" step), and the textually-later one clobbered the correct decrement with a stale pre-decrement value. Fixed with `a7_save_val`, which uncovered an unrelated pre-existing `tb/eu_regfile_tb.sv` gap (3 ports never driven, floating at X) also fixed |
 | TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
 
 **JMP/JSR harness bug (Phase 90)**: both were 0% (100% SKIP, never ran at
