@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 98 summary)
+### Harte Pass Rates (Phase 99 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -235,7 +235,9 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | **PEA / LEA** | — | **100% / 100%** | Phase 90: found (86.0%/89.0%). Phase 97: LEA and PEA's `(d8,An,Xn)` form were the Phase 94/95 68000-vs-68030 scale divergence again (the EA *is* the result here, so a scale mismatch changes it directly, unreplicable, harness skip added, no RTL change); PEA's `(d8,PC,Xn)` was a genuine RTL gap — no decode case existed at all (100% TIMEOUT), plus the fix needed the same `ex_cur_sp` A7-routing PEA's `(d8,An,Xn)` sibling already uses, and the pushed value needed the missing `ex_xn_scaled` term added |
 | **MOVEM.l** | — | **100%** | Phase 90: found (95.0%). Phase 98: `get_scale_remap()`'s size calc had a "MOVE SR/CCR ↔ ea" clause (`f_group==4, f_ss==3`) positioned before the MOVEM check — MOVEM.l's own encoding also matches that pattern, truncating the scale-remap byte range to 2 instead of `4×popcount(mask)` and leaving most write addresses unredirected in `compare()`. Harness fix, zero RTL change |
 | **MOVEtoSR** | — | **100%** | Phase 90: found (96.3%, only `(A7)+`/`-(A7)` failing). Phase 98: genuine RTL race — `eu_regfile.sv` had two `if` clauses able to write the same bank register in one cycle (the auto-decrement, and the SR-write's "save A7 before the S/M switch" step), and the textually-later one clobbered the correct decrement with a stale pre-decrement value. Fixed with `a7_save_val`, which uncovered an unrelated pre-existing `tb/eu_regfile_tb.sv` gap (3 ports never driven, floating at X) also fixed |
-| TRAP/RTE/RTR | — | — | All SKIP (require supervisor initial state) |
+| **RTS / RTR / RTE** | — | **100% / 100% / 100%** | Was 100% SKIP for the project's entire history (a `get_operand_ea()` decode bug — these opcodes alias a real indexed-EA bit pattern despite having no EA — caused every one to be misrouted through bogus backstops). Phase 99: fixed the decode bug; RTR needed an additional real RTL fix (`eu_seq.sv` advanced SP by 4 instead of 2 after popping the CCR word — a known, self-documented placeholder bug, never revisited since RTR had never run end-to-end); RTE needed 68030 exception-frame-format synthesis (68000 corpus has no format word) |
+| **TRAP / TRAPV-taken** | — | — | Confirmed permanently unfixable, not a gap: our correct 68030 exception-frame push (4 words incl. format/vector word) can never match the reference 68000's native 3-word push — the DUT constructs this as *output*, so (unlike RTE) there's no input to synthesize around. Remains 100% SKIP by design. TRAPV's non-trapping cases pass 100% (3970/3970) |
+| **Odd-restored-PC Address Error** | — | — | **Newly discovered, unfixed RTL gap** (Phase 99): a runtime PC-restore (RTS/RTE/RTR, untested: Bcc/DBcc) landing on an odd address should Address-Error-trap on real 68030 silicon (misaligned instruction fetch faults there, unlike misaligned data access) but our RTL doesn't currently detect it — fetches from the odd PC and hangs. `m68030_ifu.sv`'s `addr_err` is unit-tested in isolation but never exercised through this path. Currently skipped in the harness; candidate for a future phase |
 
 **JMP/JSR harness bug (Phase 90)**: both were 0% (100% SKIP, never ran at
 all) before this phase. `can_run()`'s "EA overlaps STOP runway" check treated

@@ -517,13 +517,21 @@ module ctrl_flow_tb;
         chk ("RTS: A7=0x104",      isp_out,     32'h0000_0104);
 
         // ==================================================================
-        // RTR: M[0x200]=CCR word (0x0015), M[0x204]=return PC (0x8888)
-        //   CCR=0x15 → X=1,N=0,Z=1,V=0,C=1; branch to 0x8888; A7=0x208
+        // RTR: SSP=0x202 → CCR word popped from (A7)=0x202 (word read, A7+=2),
+        // return PC popped from 0x204 (longword read, A7+=4). SSP starts at
+        // 0x202 (not 0x200) specifically so the CCR and PC reads land in two
+        // *different* slots of this testbench's word-addressed `ram[]` model
+        // (indexed by mem_addr[9:2], which ignores the low 2 address bits) —
+        // with SSP=0x200 the real A7+2 PC-read address (0x202) would alias
+        // the exact same ram[] slot as the CCR read (0x200>>2 == 0x202>>2),
+        // which this simplified memory stub can't represent (no byte-lane
+        // steering); starting 2 bytes in avoids that aliasing entirely.
+        //   CCR=0x15 → X=1,N=0,Z=1,V=0,C=1; branch to 0x8888; A7=0x202+6=0x208
         // ==================================================================
         $display("--- RTR ---");
         ram[32'h0200 >> 2] = 32'h0000_0015;
         ram[32'h0204 >> 2] = 32'h0000_8888;
-        set_isp(32'h0000_0200);
+        set_isp(32'h0000_0202);
         run_instr(RTR, 1'b0, 32'h0);
         chk1("RTR: taken",         saw_branch,          1'b1);
         chk ("RTR: target=0x8888", last_target,         32'h0000_8888);

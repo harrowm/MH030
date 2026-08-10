@@ -1546,6 +1546,148 @@ spot-check.
 
 ---
 
+## Phase 99 — RTS/RTE/RTR root-caused (0%/0%/0% SKIP → 100%/100%/100%); TRAP confirmed permanently unfixable; a real RTR RTL bug found and fixed
+
+**Goal**: revisit the previously-tracked "TRAP/RTE/RTR supervisor-state harness limitation"
+item. All were 100% SKIP for the whole project's history — this phase discovered RTS was
+in the identical state (never actually covered by any prior Harte sweep despite looking
+superficially like a solved instruction) and folded it into the same investigation.
+
+### Root cause of the universal SKIP: a `get_operand_ea()` decode bug
+
+RTE (`0x4E73`), RTS (`0x4E75`), RTR (`0x4E77`) and the RESET/NOP/TRAPV fixed-encoding
+"miscellaneous" opcodes all live in the `0100 1110 0111 0xxx` range, where the low 3 bits
+happen to alias the generic mode/reg EA sub-field every OTHER instruction in the decode
+table uses — despite these specific opcodes having no EA operand at all. `get_operand_ea()`
+(and `get_scale_remap()`, and `build_patches()`'s extension-word-masking logic) had no
+explicit exclusion for them, so RTE's fixed bits decoded as `ea_mode=6,ea_reg=3` (a real
+indexed-EA pattern for other opcodes) and the harness went on to compute a bogus non-None
+EA from garbage data (frequently `ini['prefetch'][1]` — just the *next*, unrelated
+instruction's opcode word, already sitting in the pipeline). This mis-routed every one of
+these instructions through the "EA overlaps STOP runway"/"instr_len wild" backstops using
+nonsense inputs, permanently skipping them, and in the extension-word-masking case could
+even *corrupt* the following instruction's opcode bytes if a stray bit happened to match.
+Fixed by adding an explicit opcode exclusion (return `None`/`[]` immediately) to all three
+functions.
+
+### RTS and RTR: pure harness fixes, zero RTL change (beyond the RTR bug below)
+
+With `get_operand_ea()` now correctly returning `None`, RTS/RTR fall through to the same
+"instr_len is expected to be wild for control transfers" reasoning already established for
+JMP/JSR (Phase 95) — added an `is_ret_taken` exemption (opcodes `0x4E73`/`0x4E75`/`0x4E77`)
+from the wild-`instr_len` backstop. Also added a skip for the case where the *popped*
+return PC is itself odd: unlike the Phase 94/95 scale-field divergence (data misalignment,
+which a 68030 doesn't fault on), a misaligned *instruction-fetch* target genuinely should
+Address-Error-trap on real 68030 silicon too — but confirmed via direct repro (RTS index
+423, popping the odd address `0x46d0abc3`) that our RTL does **not** currently detect this
+at all: it fetches from the odd PC anyway, decodes garbage, and hangs forever, never
+reaching the vector-3 handler the test data already supplies. `m68030_ifu.sv`'s `addr_err`
+output is unit-tested in isolation (`ifu_tb.sv` IFU-10) and wired to `m68030_exc.sv`, but
+nothing exercises it through a runtime PC-restore path — since this whole instruction
+family was 100% SKIP before this phase, nothing had ever reached this code path. Documented
+as a genuine, real, but out-of-scope-for-this-phase RTL gap (distinct from the
+unfixable-by-design 68000-vs-68030 divergences); skipped for now via a parity check on the
+value the harness itself controls (reads the popped-PC bytes directly from `ini['ram']`).
+
+### RTR: also a genuine, previously-undiscovered RTL bug
+
+Even after the above fixes, RTR alone showed 100% TIMEOUT on every non-skipped case (RTS
+and RTE were clean). Repro (RTR index 0): final PC came back as complete garbage
+(`0x0cce0000` vs. expected `0xe9db0cce`) and final A7 was off by 2 (`0x808` vs. `0x806`).
+Traced straight to `eu_seq.sv`'s two-phase RTR read FSM:
+
+```systemverilog
+// Simplified: use A7+4 for PC read (real 68030 uses A7+2; fix in later phase)
+rtr_a7_next_r <= ex_ea + 32'd4;
+```
+
+A pre-existing, self-documented placeholder bug from an earlier phase, never revisited
+because RTR had never been exercised end-to-end (100% SKIP the whole time, per the
+previous section). RTR pops a **word**-sized CCR first (2 bytes), not a longword — the
+phase-2 (PC) read address must be `ssp+2`, not `ssp+4`. One-line fix.
+
+This broke a pre-existing regression test (`tb/ctrl_flow_tb.sv`'s RTR case), which had
+encoded the *old, broken* `+4` behavior as its own expected value — its comment literally
+said `M[0x204]=return PC`, matching the wrong stride. The test's underlying memory stub
+(`assign mem_rdata = ram[mem_addr[9:2]]`) is word-addressed and ignores the low 2 bits of
+the address entirely (no byte-lane steering, unlike the full `mem_model.sv` used
+elsewhere) — so with the corrected `+2` stride, the CCR read (at the test's original SSP,
+`0x200`) and the PC read (now at `0x200+2=0x202`) would alias the *same* `ram[]` slot
+(`0x200>>2 == 0x202>>2`), which this simplified stub can't represent. Fixed by starting
+the test's SSP at `0x202` instead of `0x200` — shifts the CCR read to `0x202` (still slot
+`0x80`, no change) and the PC read to `0x202+2=0x204` (slot `0x81`, matching where the
+test already places its PC data) — cleanly avoiding the aliasing without changing what's
+actually being verified.
+
+### RTE: needs the same harness fixes as RTS/RTR, plus frame-format synthesis (Phase 94/95/97-style divergence, but fixable this time)
+
+RTE has the identical `get_operand_ea()`/wild-`instr_len`/odd-restored-PC issues as
+RTS/RTR above, all fixed the same way. But RTE has an *additional* problem unique to it:
+the 68000-captured corpus's native RTE frame is `{SR, PC}` (3 words, no format field —
+that's a 68010+ concept), while our 68030 RTL's RTE unconditionally reads a leading
+longword as `{format/vector nibble, SR}` (`m68030_exc.sv`/`eu_seq.sv`'s `eu_is_rte`
+handling) — replaying 68000 stack bytes as-is would have the 68030 misinterpret the SR's
+top byte as a format code and misparse everything after, another instance of the
+68000-vs-68030 divergence family (Phase 94/95/97). Unlike TRAP (below), this one **is**
+fixable: we fully control RTE's *input* stack contents via `build_patches()`, so a
+compatible 68030 frame can be synthesized instead of replayed as-is. Placed a synthesized
+format-`$0` word (`0x0000` — valid, 0 extra bytes per `eu_seq.sv`'s `rte_frame_extra()`)
+immediately below the test's own `{SR,PC}` bytes, and started the CPU's SSP 2 bytes lower
+so RTE's first longword read lands exactly on `{0x0000, SR}`, then continues unmodified
+into the existing SR/PC bytes. Final SSP naturally comes out correct with no extra
+adjustment (our frame is 8 bytes vs. the reference's 6, and we start 2 bytes lower — the
+math cancels exactly). Also added the same S-bit-clears-so-STOP-would-privilege-fault
+skip already used for the `MOVE EA,SR` family, since RTE can restore SR with S=0.
+
+### TRAP/TRAPV-taken: tried the same exemption, found it's the *unfixable* half of the divergence family
+
+Initially exempted TRAP (`0x4E40`-`0x4E4F`) the same way as RTS/RTE/RTR. Confirmed via a
+full run that ~94% then FAILED with `A7: got 0x7f8, exp 0x7fa` — our correctly-68030
+4-word exception-frame push (format/vector word + SR + PC, per `m68030_exc.sv`'s
+`FMT_SHORT`) versus the reference 68000's native 3-word push (`SR`+`PC`, no format word).
+This is the mirror image of RTE's problem, but **not** fixable the same way: for RTE we
+control the *input* (the stack data RTE reads) and could synthesize compatibility; for
+TRAP the DUT itself *constructs* the frame as *output*, and there is no way to make a
+correct 68030 exception push produce a 68000-shaped result — the two architectures are
+permanently, structurally incompatible here. Reverted the exemption; TRAP remains 100%
+SKIP, this time for a documented, understood, unfixable reason rather than blanket
+harness incapacity. Added (then found moot and left as a no-op-since-unreachable) a
+TRAP-vector/init-region collision check for completeness, in case TRAP is ever revisited.
+
+TRAPV was left out of the exemption from the start once the TRAP result came back — its
+trap-taken path has the identical frame-width problem. It still benefited from the
+`get_operand_ea()` fix alone: non-trapping TRAPV cases that were previously being
+incorrectly skipped (due to the old bogus-EA computation triggering unrelated backstop
+conditions) now correctly run and pass, taking TRAPV from 1981/1981 to 3970/3970 (both
+100%) — the trap-taken subset is still correctly excluded, just for the right reason now.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| RTS | 0% (100% SKIP) | **100%** (4008/4008) |
+| RTR | 0% (100% SKIP) | **100%** (4038/4038) |
+| RTE | 0% (100% SKIP) | **100%** (2047/2047) |
+| TRAPV | 100% (1981/1981) | **100%** (3970/3970, more cases now correctly run) |
+| TRAP | 0% (100% SKIP) | 0% (100% SKIP — confirmed permanently unfixable, not a gap) |
+
+Spot-checked JSR/JMP/BSR/DBcc (share branch/pipeline control logic with RTR's fix) — all
+still **100%**, confirming no regression.
+
+**Remaining known gap, newly discovered, not yet fixed**: our RTL does not currently take
+an Address Error trap when a runtime PC-restore (RTS/RTE/RTR, and likely also Bcc/DBcc)
+lands on an odd address — it fetches from the odd PC and runs off into undefined behavior
+instead. This is architecturally a real 68030 requirement (misaligned *instruction fetch*
+faults on 68030, unlike misaligned data access), previously untested because this whole
+instruction family was 100% SKIP for the project's entire history. Worth a dedicated
+future phase; not attempted here.
+
+**Verification**: `make test` (32/32, including the fixed `ctrl_flow` RTR unit test),
+`make cosim_grp` (8/8 vs Musashi), full RTS/RTR/RTE/TRAP/TRAPV re-run, JSR/JMP/BSR/DBcc
+spot-check.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

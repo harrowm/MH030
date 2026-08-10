@@ -6608,8 +6608,7 @@ module eu_seq (
         end else if (ex_valid && ex_is_rtr && !rtr_phase_r && mem_ack) begin
             rtr_phase_r   <= 1'b1;
             rtr_ccr_r     <= mem_rdata[7:0];  // CCR from word read at (A7)
-            // Simplified: use A7+4 for PC read (real 68030 uses A7+2; fix in later phase)
-            rtr_a7_next_r <= ex_ea + 32'd4;
+            rtr_a7_next_r <= ex_ea + 32'd2;   // A7+2: CCR pop is word-sized, not longword
         end else if (ex_valid && ex_is_rtr && rtr_phase_r && mem_ack) begin
             rtr_phase_r   <= 1'b0;
         end
