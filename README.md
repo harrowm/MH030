@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 95 summary)
+### Harte Pass Rates (Phase 96 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -231,7 +231,7 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | **SBCD** | — | **99.7%** | Phase 91: same fixes as ABCD/NBCD; 28/8065 residual is a genuine algorithmic subtlety (C flag and result-correction are decoupled in real hardware in a way not yet captured) — documented, not guessed at |
 | **MULS / MULU** | — | **100% / 100%** | Phase 92: memory-EA decode was entirely missing, plus a missing bus-read-size override that hung every memory-source multiply, plus a harness `f_ss`/`f_dir` misclassification bug. Phase 94: root-caused the remaining indexed-EA TIMEOUT — the Harte corpus is 68000-captured and faults (Address Error) on misaligned *data* access, which a 68030 legitimately does not; fixed a `gen_harte_hex.py` harness bug that placed the STOP runway using the reference's post-fault PC delta, causing our non-faulting RTL to run into uninitialized memory and hang. No RTL change |
 | **DIVS / DIVU** | — | **100% / 100%** | Phase 93: two real bugs — an RTL comment claiming C is "unchanged" on overflow was wrong (must always clear, hand-verified against 1400+ vectors); `div_trap` evaluated `md_div_by_zero` from `mem_rdata` before the memory read actually completed, firing a bogus trap that collided with the pending stall and hung the pipeline. Phase 94: same indexed-EA TIMEOUT root cause and harness fix as MULS/MULU, no RTL change |
-| **Scc** | — | **72.7%** | Phase 90: found, not yet root-caused |
+| **Scc** | — | **100%** | Phase 90: found (72.7%). Phase 96: root-caused — Scc's `(xxx).W` abs form and TRAPcc share the same opcode slot family; `f_reg==000` (Scc abs.W) was mislabeled as TRAPcc in decode *and* mislabeled as TRAPcc.L (2 ext words instead of 1) in the ext_count table, in two separate places; `(d16,An)`/`(d8,An,Xn)` had no ext_count entry at all. Fixed all three; TRAPcc.L made reachable as a byproduct (unverified, no dedicated suite) |
 | **PEA / LEA** | — | **86.0% / 89.0%** | Phase 90: found, not yet root-caused |
 | **MOVEM.l** | — | **95.0%** | Phase 90: found, not yet root-caused |
 | **MOVEtoSR** | — | **96.3%** | Phase 90: found, not yet root-caused |

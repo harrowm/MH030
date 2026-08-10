@@ -1290,6 +1290,89 @@ re-run.
 
 ---
 
+## Phase 96 — Scc root-caused: real RTL missing-decode + a genuine ext_count mislabeling bug (a real one this time) → 72.7% → 100%
+
+**Goal**: root-cause Scc's 72.7% pass rate, found in Phase 90's sweep and never investigated.
+
+### Investigation
+
+`run_harte.py --verbose` broken down by EA mode showed an unmistakable pattern: `Dn`,
+`(An)`, `(An)+`, `-(An)`, and `(xxx).L` were all 100% PASS, while `(d16,An)`,
+`(d8,An,Xn)`, and `(xxx).W` were all heavily FAIL/TIMEOUT — `(xxx).W` was **100%
+TIMEOUT** (61/61), the others a mix of FAIL and TIMEOUT. The clean split by addressing
+mode (not opcode, not operand data) pointed straight at missing/broken EA decode rather
+than a data-dependent RTL bug.
+
+### Bug 1 — Scc `(xxx).W` was never decoded at all; its opcode slot was stolen by TRAPcc
+
+68k's `0101 cccc 11 mmm rrr` (group 5, `f_ss=11`) encoding is shared between Scc (mode
+selects the write-destination EA) and TRAPcc (mode=111 only, `reg` selects the operand
+size: 100=none, 010=word, 011=long). Scc's own `mode=111` forms use `reg=000` (abs.W)
+and `reg=001` (abs.L) — reg values TRAPcc never uses, since (d16,PC)/(d8,PC,Xn)/#imm
+would be invalid Scc write destinations, so Motorola reused exactly those slots for
+TRAPcc's own operand-size selector instead. `eu_seq.sv`'s Scc memory-EA decode block
+only checked `f_reg == 3'b001` (abs.L) — missing `f_reg == 3'b000` (abs.W) — so every
+Scc abs.W instruction fell through to the **TRAPcc branch**, whose own condition
+(`f_reg == 100 || 010 || 000`) incorrectly included `000` (should have been `011`,
+TRAPcc.L, which was consequently *unreachable* until this fix). TRAPcc doesn't write
+memory, so the intended Scc write silently never happened.
+
+### Bug 2 — `m68030_seq.sv`'s ext_count table had the identical reg=000 mislabel, twice
+
+Even after adding the missing abs.W decode branch in `eu_seq.sv`, `(xxx).W` still
+TIMEOUT out 100%. Traced with a temporary `$display` on `dec_abs_ea_val`/`ext_data` at
+the decode→EX capture point: `ext_data` showed the *raw*, un-remapped `{q[1],q[2]}`
+32-bit form instead of the 1-extension-word convention (`{16'h0, q[1]}` in the low
+half) — meaning `ext_count` was computing to 2, not 1, for this instruction. Added a
+matching debug trace directly on `ext_count` in `m68030_seq.sv`, which showed the value
+oscillating between 1 and 2 within the same clock edge (multiple `always_comb`
+re-evaluations) — the *final* settled value came from an **earlier, higher-priority**
+`else if` in the chain: a pre-existing entry literally commented `// TRAPcc.L has
+2-word operand` matching `f_group==5 && f_ss==11 && f_mode==111 && f_reg==000` —
+**the exact same reg=000-as-TRAPcc.L mislabel as Bug 1, in a completely separate part of
+the file**, assigning `ext_count=2` before the (correctly-fixed) later entry for Scc's
+real abs.L/TRAPcc.L pair (`reg==001||011`) was ever reached. First fix attempt edited
+the *wrong* (later, unreachable) occurrence — a reminder that this file's `else if`
+priority chain means only the *first* match matters, and grepping for all occurrences
+of a suspect condition is essential before declaring a fix complete.
+
+### Fix
+
+- `eu_seq.sv`: added `f_reg == 3'b000` to Scc's memory-EA branch condition; the
+  `(xxx)` case now branches on `f_reg` to pick 1-word sign-extended (abs.W) vs.
+  full 32-bit (abs.L) for `dec_abs_ea_val`. Corrected the TRAPcc branch to
+  `f_reg == 100 || 010 || 011` (was `100 || 010 || 000`), making TRAPcc.L reachable
+  for the first time.
+- `m68030_seq.sv`: fixed the original `reg==000` mislabel to `ext_count=1` (was 2,
+  labeled "TRAPcc.L"); extended the *correct* Scc-abs.L entry to also cover
+  `reg==011` (real TRAPcc.L, 2 ext words); added a new 1-ext-word entry for Scc's
+  `(d16,An)`/`(d8,An,Xn)` modes, which had **no ext_count entry at all** — falling to
+  the `default: ext_count=0` catch-all and corrupting the IFU stream exactly like
+  every prior "missing ext_count entry" bug in this project's history; removed the
+  now-dead/redundant `reg==000` from the later 1-ext-word OR-chain (unreachable
+  after the earlier, corrected entry).
+
+### Results
+
+| Mode | Before | After |
+|------|--------|-------|
+| Scc overall | 72.7% (3557/4895 run) | **100%** (4895/4895) |
+| `(xxx).w` | 0% (61/61 TIMEOUT) | 100% |
+| `(d16,An)` | ~5-10% | 100% |
+| `(d8,An,Xn)` | ~5-10% | 100% |
+| `(xxx).l`, `Dn`, `(An)` family | already 100% | unchanged |
+
+Spot-checked DBcc (same opcode group, unaffected by these changes since its `f_mode`
+condition path never overlaps) — still **100%** (4096/4096), confirming no regression.
+TRAPcc.L has no dedicated Harte suite (only unconditional `TRAP`/`TRAPV` are tested) so
+this fix is unverified by a test but is a genuine correctness improvement — it was
+completely unreachable before.
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), full Scc
+re-run, DBcc spot-check.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

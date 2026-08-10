@@ -3609,7 +3609,7 @@ module eu_seq (
                         // ── Scc to memory ea ───────────────────────
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                      f_mode == 3'b101 || f_mode == 3'b110 ||
-                                     (f_mode == 3'b111 && f_reg == 3'b001)) begin
+                                     (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001))) begin
                             dec_valid       = 1'b1;
                             dec_unit        = UNIT_MOVE;
                             dec_siz         = 2'b01;
@@ -3645,19 +3645,25 @@ module eu_seq (
                                     dec_xn_scale   = ext_data[10:9];
                                     dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
                                 end
-                                3'b111: begin  // (xxx).L: 2 ext words
+                                3'b111: begin
                                     dec_needs_ext  = 1'b1;
                                     dec_abs_ea_en  = 1'b1;
-                                    dec_abs_ea_val = ext_data;  // full 32-bit from both ext words
+                                    if (f_reg == 3'b000)  // (xxx).W: 1 ext word, sign-extended
+                                        dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    else                   // (xxx).L: 2 ext words
+                                        dec_abs_ea_val = ext_data;
                                 end
                                 default: ;
                             endcase
                         // ── TRAPcc ─────────────────────────────────────────
+                        // f_reg: 100=no operand, 010=word operand (TRAPcc.W), 011=long
+                        // operand (TRAPcc.L). f_reg=000/001 belong to Scc's own
+                        // abs.W/abs.L addressing modes (handled above), not TRAPcc.
                         end else if (f_mode == 3'b111 &&
-                                     (f_reg == 3'b100 || f_reg == 3'b010 || f_reg == 3'b000)) begin
+                                     (f_reg == 3'b100 || f_reg == 3'b010 || f_reg == 3'b011)) begin
                             dec_valid       = 1'b1;
                             dec_x_unchanged = 1'b1;
-                            if (f_reg == 3'b010 || f_reg == 3'b000) dec_needs_ext = 1'b1;
+                            if (f_reg == 3'b010 || f_reg == 3'b011) dec_needs_ext = 1'b1;
                             if (eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c))
                                 dec_is_trapv = 1'b1;
                         end

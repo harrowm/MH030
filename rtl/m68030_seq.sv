@@ -339,9 +339,11 @@ module m68030_seq (
             ext_count = 3'd2;
         else if (is_move_mm && move_mm_total_ext_w == 3'd1)
             ext_count = 3'd1;
-        // TRAPcc.L has 2-word operand
+        // Scc (xxx).w — 1 ext word (reg=000; NOT TRAPcc.L, see the reg=001/011
+        // entry below for that — this priority slot used to mislabel reg=000
+        // as "TRAPcc.L" and give it 2 ext words, corrupting the IFU stream)
         else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b000))
-            ext_count = 3'd2;
+            ext_count = 3'd1;
         // CAS2 always needs 2 extension words (Rn1/Dc1/Du1 + Rn2/Dc2/Du2)
         else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
                  (f_dn == 3'b110 || f_dn == 3'b111) &&
@@ -397,9 +399,14 @@ module m68030_seq (
                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 ||
                                         f_reg == 3'b011 || f_reg == 3'b100))))
             ext_count = 3'd1;
-        // Scc abs.L — 2 ext words for 32-bit absolute address
-        else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b001))
+        // Scc abs.L (reg=001) / TRAPcc.L (reg=011) — 2 ext words
+        else if ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) &&
+                 (f_reg == 3'b001 || f_reg == 3'b011))
             ext_count = 3'd2;
+        // Scc (d16,An)/(d8,An,Xn) — 1 ext word
+        else if ((f_group == 4'h5) && (f_ss == 2'b11) &&
+                 (f_mode == 3'b101 || f_mode == 3'b110))
+            ext_count = 3'd1;
         // NBCD abs.L — 2 ext words
         else if ((f_group == 4'h4) && !f_dir && (f_dn == 3'b100) && (f_ss == 2'b00) &&
                  (f_mode == 3'b111 && f_reg == 3'b001))
@@ -480,7 +487,8 @@ module m68030_seq (
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b010)) || // (d16,PC)
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b011)) || // (d8,PC,Xn)
-                 // TRAPcc.W, CAS, BTST/BCHG/BCLR/BSET #n mem — all 1 ext word
+                 // TRAPcc.W (reg=010), CAS, BTST/BCHG/BCLR/BSET #n mem — all 1 ext word
+                 // (Scc abs.W, reg=000, is handled earlier in the priority chain)
                  ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b010)) ||
                  ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
                   (f_dn == 3'b101 || f_dn == 3'b011 || f_dn == 3'b111) && (f_mode == 3'b010)) ||
