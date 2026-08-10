@@ -688,11 +688,36 @@ def can_run(test):
                for off in range(0, max(ea_siz, 1), 2 if ea_siz >= 2 else 1)):
             return False, f'EA {ea:#08x} in init region'
 
+    # JMP/JSR: opcode signature, computed early so the scale-remap check below
+    # can special-case it.
+    f_dn_jj  = (opcode >> 9) & 7
+    f_dir_jj = (opcode >> 8) & 1
+    f_ss_jj  = (opcode >> 6) & 3
+    is_jmp_jsr = (not f_dir_jj) and f_dn_jj == 7 and f_ss_jj in (2, 3) and \
+                 ((opcode >> 12) & 0xF) == 4
+
     # Indexed EA (mode=6) with non-zero scale: the 68030 computes a different EA
     # than the 68000 reference.  get_scale_remap() handles the remapping so these
     # tests can run — skip only when EA_68030 is problematic.
+    #
+    # JMP/JSR are a special case: their "EA" *is* the new PC, not an operand to
+    # patch/redirect. build_patches() places the STOP+NOP runway at
+    # final.pc (the 68000 reference's own, *unscaled* landing address) — for
+    # any scale!=0 JMP/JSR, our correctly-68030-scaled RTL computes a genuinely
+    # different jump target (ea_68030 != ea_68000) and lands somewhere the
+    # runway was never placed, walking off into whatever uninitialized memory
+    # happens to be there and hanging (this is the JMP/JSR indexed-EA TIMEOUT
+    # investigated in Phase 94/95 — confirmed via $display trace: RTL correctly
+    # computes ea_68030 per the scale field, e.g. 0x4d5e9ede for a scale=4 case,
+    # then issues zero further bus requests because that address is unmapped
+    # test-harness territory). Unlike MULS/MULU/DIVS/DIVU (Phase 94), this
+    # isn't limited to the odd-address/Address-Error subset — ANY scale
+    # mismatch sends our RTL to a different address than the one the reference
+    # (and the runway) used, so it's unreplicable whenever scale!=0 at all.
     for remap in get_scale_remap(test):
         ea1, nb = remap['ea_68030'], remap['siz_bytes']
+        if is_jmp_jsr:
+            return False, f'JMP/JSR scale!=0: EA_68030 {ea1:#08x} != EA_68000 (unreplicable, see Phase 95)'
         # Odd-address word/longword → 68030 address error; skip.
         if nb >= 2 and (ea1 & 1):
             return False, f'EA_68030 {ea1:#08x} misaligned (would be addr error)'
@@ -716,11 +741,6 @@ def can_run(test):
     # read or write memory at their EA, so there is no operand data to protect.
     # Without this exemption every JMP/JSR test trivially "overlaps" itself and the
     # suite skips 100% of the time.
-    f_dn_jj  = (opcode >> 9) & 7
-    f_dir_jj = (opcode >> 8) & 1
-    f_ss_jj  = (opcode >> 6) & 3
-    is_jmp_jsr = (not f_dir_jj) and f_dn_jj == 7 and f_ss_jj in (2, 3) and \
-                 ((opcode >> 12) & 0xF) == 4
     if ea_info is not None and not is_jmp_jsr:
         ea, ea_siz = ea_info
         stop_start = (instr_src + instr_len) & 0xFFFFFF

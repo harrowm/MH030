@@ -1212,6 +1212,84 @@ MULS/MULU/DIVS/DIVU/JMP/JSR re-run plus spot-checks on MOVE.b/BCHG/CHK.
 
 ---
 
+## Phase 95 — JMP/JSR indexed-EA TIMEOUT root-caused: same 68000-vs-68030 scale divergence as Phase 94, but the target itself, not an operand → 88.6%/89.1% → 100%/100%
+
+**Goal**: root-cause JMP/JSR's own indexed-EA TIMEOUT, explicitly identified in Phase 94
+as a *different* bug from MULS/MULU/DIVS/DIVU's (that fix's `is_jmp_jsr` guard correctly
+exempts JMP/JSR, since their wild `instr_len` is a legitimate jump target, not a fault
+signal — so it needed its own investigation).
+
+### Investigation
+
+Sampling indexed JMP tests one at a time via `run_test()` (bypassing the slow full-suite
+run) found the TIMEOUT rate is much higher for JMP/JSR than it looked from spot checks —
+scanning all 2588 indexed JMP tests directly gave 482 TIMEOUT / 840 PASS / 1266 SKIP,
+matching the full-suite numbers exactly (a first pass with a broken `if not ok:` truthy
+check on the `run_test()` string-status return silently reported zero failures — worth
+remembering: `run_test()` returns a status *string* like `'PASS'`/`'TIMEOUT (...)'`, not a
+bool, so `if not ok` is always false).
+
+Reproduced index 4 (`JMP (d8,A2,Xn)`) via `gen_harte_hex.gen_hex()` and added a temporary
+trace in `m68030_top.sv` on `eu_branch_taken`/`eu_branch_target`/`pc_wr_en_common`/
+`ifu_addr_err_int`/`exc_active`/`u_exc.state_r` (hierarchical reference to the exception
+FSM's internal state register, for debug visibility only). The RTL computed
+`eu_branch_target = 0x4d5e9ede` and drove `pc_wr_en_common` with it — then issued **zero**
+further bus requests, exactly matching Phase 90's original "confirmed correct target, then
+total silence" observation.
+
+Hand-decoding the extension word (`0x2c12`: Xn=D2.L, **scale=4** (bits 10-9 = `10`),
+displacement=+18) and recomputing the target four ways confirmed the RTL's `0x4d5e9ede` is
+*exactly* `A2 + D2×4 + 18` — genuinely correct 68030 arithmetic (scale applied). Recomputing
+with scale forced to 1 (68000 semantics, matching Phase 94's finding that real 68000
+silicon ignores the scale field) gives `0x647ec5ef` instead — a *completely different*
+address, not just a different parity. That's the real distinction from the MULS/MULU/
+DIVS/DIVU case: there, a scale mismatch only changes whether a *data* address happens to
+be odd (irrelevant to a 68030, which doesn't fault on misaligned data access, so execution
+just continues normally afterward with a merely-different operand). For JMP/JSR, the "EA"
+*is* the new PC — a scale mismatch sends the reference and our RTL to two **completely
+different places in memory**, and whichever one the test's `STOP` runway isn't at, that
+execution path runs into uninitialized memory and hangs, regardless of odd/even parity.
+
+Confirmed in `scripts/gen_harte_hex.py`: `build_patches()` places the `STOP`+`NOP` runway
+at `instr_src + instr_len` where `instr_len = final.pc - initial.pc` — i.e. at the 68000
+reference's own (unscaled) landing address. `get_operand_ea()` (used elsewhere for EA
+range/overlap checks) computes the *68030-scaled* target via `get_scale_remap()`'s
+`ea_68030`. For scale=0 these are identical (the overwhelming majority of indexed JMP/JSR
+tests, hence the existing 840/3738 PASS counts already achieved pre-fix), but whenever
+scale≠0 they diverge — the runway sits at the reference's target, our RTL lands at a
+different, uninitialized address, and hangs.
+
+### Fix
+
+Unlike Phase 94 (a narrow subset — only the odd-parity cases needed skipping), JMP/JSR's
+divergence applies to **every** scale≠0 indexed case, since the landing address itself
+differs regardless of parity. Added an unconditional skip in `can_run()`'s existing
+scale-remap loop: computed `is_jmp_jsr` earlier (before the loop, so it's available inside)
+and, when true, skip on ANY non-empty `get_scale_remap()` result (scale≠0 detected for this
+instruction's own indexed EA) rather than only on the odd/init-region conditions that apply
+to ordinary data instructions.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| JMP | 88.6% (3758/4240) | **100%** (3758/3758) |
+| JSR | 89.1% (3738/4194) | **100%** (3738/3738) |
+
+Same PASS counts as before (3758/3738) — confirms this is purely a TIMEOUT→SKIP
+conversion with zero regression, not a behavior change to any passing case.
+
+**Zero RTL changes** — same shape as Phase 94: a real, understood, permanent 68000-vs-
+68030 architectural divergence (68000 ignores the scale field entirely; a correct 68030
+must not), made unreplicable-in-principle by the test harness's runway-placement design,
+fixed by skipping rather than by (incorrectly) trying to make the RTL match a real 68000's
+undefined-for-68030 behavior.
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), full JMP/JSR
+re-run.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
