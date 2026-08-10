@@ -740,6 +740,26 @@ def can_run(test):
     if ea_info is None and not (1 <= instr_len <= 24):
         return False, 'misaligned EA'
 
+    # Second backstop, for the case ea_info IS resolvable (a normal data-referencing
+    # instruction, not JMP/JSR): a wild instr_len here means the *reference* CPU
+    # (real 68000 hardware) took an Address Error exception mid-instruction — most
+    # commonly because indexed (d8,An,Xn) EAs on real 68000 silicon ignore the
+    # 68020+ scale field entirely (scale is always 1), so an EA that our scale-aware
+    # 68030 RTL computes as even/aligned lands on an *odd* address on the reference,
+    # which faults there but not here. A 68030 legitimately does not fault on
+    # misaligned *data* accesses (only misaligned PC/instruction fetch), so there is
+    # no way to bit-replicate this specific reference behavior — but without this
+    # skip, gen_harte_hex placed the STOP+NOP runway using the reference's huge
+    # post-exception PC delta, so our non-faulting RTL runs straight past it into
+    # never-initialized memory, decodes garbage, and can hang the simulation
+    # (TIMEOUT) instead of cleanly failing. Root-caused via MULS.w indexed-EA
+    # cases #75/#87/#170: reference final SR unchanged but PC jumps to the address
+    # in the vector-3 (address error) table entry, with the classic 68000 7-word
+    # address-error frame on the stack (opcode capture word + odd access address
+    # split across two words + SR + PC). See plan.md for the full writeup.
+    if ea_info is not None and not is_jmp_jsr and not (1 <= instr_len <= 24):
+        return False, f'ea resolved but instr_len={instr_len} wild (reference took an exception we cannot replicate)'
+
     if instr_src < INIT_CODE_END:
         return False, f'instruction at {instr_src:#x} overlaps init region'
 

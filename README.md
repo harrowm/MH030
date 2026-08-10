@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 93 summary)
+### Harte Pass Rates (Phase 94 summary)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -226,11 +226,11 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | Bcc/BSR/DBcc | — | **100%** | Phase 90 sweep |
 | EXG/EXT/LINK/UNLINK/SWAP/NOP/RESET | — | **100%** | Phase 90 sweep |
 | MOVEA/MOVEfromSR/MOVEtoCCR/MOVEM.w/MOVEP | — | ~100% | Phase 90 sweep; MOVEP.w/.l each have 1 unexamined fail |
-| **JMP/JSR** | — | **88.6% / 89.1%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual failures are all TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets, root cause not yet found |
+| **JMP/JSR** | — | **88.6% / 89.1%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual failures are all TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets. Phase 94 showed this is a *different* bug than MULS/MULU/DIVS/DIVU's (below) — likely a genuine missing Address-Error trap for odd indexed jump targets, since 68030 (unlike data access) still faults on misaligned instruction fetch. Not yet fixed |
 | **ABCD / NBCD** | — | **100% / 100%** | Phase 91: N/V are "undefined" per the PRM but real hardware is deterministic — reverse-engineered the actual formulas from raw Harte JSON (Musashi's own reference doesn't match real hardware either); fixed 2 real RTL bugs (Verilog sign-extension gotcha, a 9-bit field overflow) plus a pre-existing `-(An)` A7-step-size bug |
 | **SBCD** | — | **99.7%** | Phase 91: same fixes as ABCD/NBCD; 28/8065 residual is a genuine algorithmic subtlety (C flag and result-correction are decoupled in real hardware in a way not yet captured) — documented, not guessed at |
-| **MULS / MULU** | — | **97.4% / 97.3%** | Phase 92: memory-EA decode was entirely missing (same `f_ss==11` exclusion gap as MULS's sibling AND/OR), plus a missing bus-read-size override that hung every memory-source multiply, plus a 4th instance of the recurring harness `f_ss`/`f_dir` misclassification bug. Residual = indexed-EA TIMEOUT, same shape as JMP/JSR's open issue |
-| **DIVS / DIVU** | — | **97.6% / 97.6%** | Phase 93: two real bugs — an RTL comment claiming C is "unchanged" on overflow was wrong (must always clear, hand-verified against 1400+ vectors); `div_trap` evaluated `md_div_by_zero` from `mem_rdata` before the memory read actually completed, firing a bogus trap that collided with the pending stall and hung the pipeline (explains the mass TIMEOUTs). Residual = indexed-EA timeout, same as JMP/JSR and MULS/MULU |
+| **MULS / MULU** | — | **100% / 100%** | Phase 92: memory-EA decode was entirely missing, plus a missing bus-read-size override that hung every memory-source multiply, plus a harness `f_ss`/`f_dir` misclassification bug. Phase 94: root-caused the remaining indexed-EA TIMEOUT — the Harte corpus is 68000-captured and faults (Address Error) on misaligned *data* access, which a 68030 legitimately does not; fixed a `gen_harte_hex.py` harness bug that placed the STOP runway using the reference's post-fault PC delta, causing our non-faulting RTL to run into uninitialized memory and hang. No RTL change |
+| **DIVS / DIVU** | — | **100% / 100%** | Phase 93: two real bugs — an RTL comment claiming C is "unchanged" on overflow was wrong (must always clear, hand-verified against 1400+ vectors); `div_trap` evaluated `md_div_by_zero` from `mem_rdata` before the memory read actually completed, firing a bogus trap that collided with the pending stall and hung the pipeline. Phase 94: same indexed-EA TIMEOUT root cause and harness fix as MULS/MULU, no RTL change |
 | **Scc** | — | **72.7%** | Phase 90: found, not yet root-caused |
 | **PEA / LEA** | — | **86.0% / 89.0%** | Phase 90: found, not yet root-caused |
 | **MOVEM.l** | — | **95.0%** | Phase 90: found, not yet root-caused |

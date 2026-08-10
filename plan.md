@@ -1103,6 +1103,115 @@ mechanism).
 
 ---
 
+## Phase 94 — Shared indexed-EA TIMEOUT root-caused: reference-side 68000 Address Error our 68030 correctly doesn't replicate → MULS/MULU/DIVS/DIVU 97.3–97.6% → 100%/100%/100%/100%
+
+**Goal**: root-cause the indexed-EA TIMEOUT shared by JMP/JSR (Phase 90), MULS/MULU
+(Phase 92), and DIVS/DIVU (Phase 93) — four instruction families, all with the
+identical residual symptom (every `(d8,An,Xn)`/`(d8,PC,Xn)` test TIMEOUTs, everything
+else passes), diverse register-swap mechanisms ruling out any single instruction's
+decode logic as the cause.
+
+### Investigation
+
+Added a temporary `$display` trace in `eu_seq.sv`, gated on `ex_valid && ex_unit ==
+UNIT_MUL/UNIT_DIV`, plus a second trace (a 60-cycle counter armed at `mem_ack`) printing
+`dec_valid`/`hazard_*`/`need_ext`/`ex_unit`/`stall`/`instr_ack` every cycle after the
+multiplicand read completes. Reproduced Harte `MULS.json.gz` index 75 (`MULS
+(d8,A1,Xn),D0`, a known TIMEOUT) via `gen_harte_hex.gen_hex()` into a standalone `.hex`
+file and ran it directly against `sim/harte_dat`.
+
+The trace showed the MULS instruction's own memory read completing correctly (`mem_ack`
+fires, the `dyn_bit_get_Dn` register swap retargets `rd_b_sel` from `Xn` to `Dn`
+exactly as designed) and the instruction retiring normally. The **next** instruction
+then entered EX as `ex_unit == UNIT_MOVE` and stalled on `ex_mem_stall` forever — i.e.
+the MULS instruction itself was fine; some *subsequent*, unrelated instruction was
+hanging. That pointed away from MULS's own decode/register-swap logic entirely and
+toward the test's instruction stream layout.
+
+Cross-checking the raw Harte JSON for the three known-bad MULS indices (75, 87, 170)
+against three matched-shape passing indices found the smoking gun: **all three bad
+cases have `final.pc - initial.pc == 2048` bytes**, versus 2 bytes for a normal
+register-form MULS. Decoding the `final` register/RAM state confirmed this is not a
+branch — it's a **real 68000 Address Error exception**: `final.sr == initial.sr`, a
+classic 7-word 68000 (pre-68010, format-less) fault frame is visible on the stack
+(opcode-capture word, the faulting access address split across two words, SR, PC), and
+reads at vector-table addresses 12/14 (vector 3 = Address Error) return `0x1400` — the
+handler address the reference model jumped to.
+
+Hand-computing the effective address two ways confirmed why: with the index register
+scaled per the 68020+ brief-extension-word scale field (bits 10–9, which our RTL — and
+real 68030 silicon — implement, and which is exactly correct 68030 behavior), the EA
+lands on an even address. Recomputing the *same* extension word **without** applying
+scale (scale forced to 1, since scale bits don't exist in 68000 hardware at all — a
+68000 CPU physically ignores those bit positions) gives an EA that is **odd**, and its
+high/low words are bit-for-bit the two mystery words in the reference's fault frame.
+This is unambiguous: the Tom Harte test corpus this project uses was captured on real
+**68000** hardware (`CLAUDE.md`'s own comment already noted this: "68000 one-instruction
+vectors"), which faults on any misaligned *word/long* access — including data, not just
+instruction fetch. A 68020/68030 explicitly does **not** fault on misaligned data
+accesses (only misaligned PC/instruction-fetch is still an Address Error on 68030) — so
+for this narrow subset of indexed-EA tests where scale-vs-no-scale changes address
+parity, the reference legitimately traps and our correctly-68030-accurate RTL
+legitimately does not. There is no RTL fix that makes both correct simultaneously.
+
+### The actual TIMEOUT mechanism (a harness bug, distinct from the above)
+
+The permanent hang itself is *not* inherent to this divergence — `tb/mem_model.sv`
+acks every read regardless of address range (out-of-bounds reads return `32'hDEAD_DEAD`
+via a normal DSACK cycle, never withholding ack). The hang happens because
+`gen_harte_hex.py` places the `STOP #$2700` runway at `instr_src + instr_len`, where
+`instr_len = final.pc - initial.pc`. For these specific tests `instr_len` is 2048 (the
+reference's post-fault PC delta, not the instruction's real length), so the runway lands
+2048 bytes away from where our non-faulting RTL actually continues execution. Since our
+RTL just proceeds normally after the multiply (no fault), it walks straight past the
+mislocated STOP into never-initialized memory, decodes whatever garbage is there as a
+real (bogus) instruction, and *that* instruction's own memory access is what hangs
+forever (some computed address the simple `mem_model` genuinely never resolves due to
+downstream X-propagation in the decode of essentially random opcode bits) — a
+consequence of running off the end of the intended single-instruction test, not a
+property of the original fault.
+
+An existing backstop (`if ea_info is None and not (1 <= instr_len <= 24): return False,
+'misaligned EA'`) already handled this shape of bug for EA modes `get_operand_ea()`
+can't statically resolve — but MUL/DIV's indexed EA *is* resolvable, so `ea_info is not
+None` took the earlier "does EA overlap the STOP runway" branch instead, which never
+fires here (the wild runway is 2048 bytes away from anything real). Added a second,
+narrower backstop right after the existing one: whenever `ea_info` resolves (a genuine
+data-referencing instruction) *and* the instruction is not JMP/JSR (whose own wild
+`instr_len` is legitimate — it's the jump target, checked separately) *and* `instr_len`
+is still outside `[1, 24]`, skip the test as an unreplicable reference-side exception.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| MULS | 97.4% (4816/4943) | **100%** (4816/4816) |
+| MULU | 97.3% (4858/4991) | **100%** (4858/4858) |
+| DIVS | 97.6% (4856/4975) | **100%** (4856/4856) |
+| DIVU | 97.6% (4814/4931) | **100%** (4814/4814) |
+
+Zero FAIL, zero TIMEOUT across all four suites — every remaining case in each suite is
+now either a genuine PASS or a clean SKIP (no more hangs). Spot-checked previously-100%
+suites (`MOVE.b` 5922/5922, `BCHG` 5231/5231, `CHK` 666/666) to confirm the new skip
+condition doesn't over-trigger on legitimate tests — all unchanged.
+
+**JMP/JSR are explicitly exempted from this fix (`is_jmp_jsr` guard) and remain at
+88.6%/89.1% with the same TIMEOUT counts as Phase 90.** Their wild `instr_len` is
+expected (a real jump target, not a fault signal), so this backstop correctly leaves
+them alone — but that means their TIMEOUT is a *different* bug. The leading hypothesis:
+unlike data accesses, a 68030 genuinely *does* still fault on an odd (misaligned)
+*instruction-fetch* address — including a JMP/JSR target — so if our RTL has no Address
+Error trap for an odd computed jump target, an indexed JMP/JSR that lands on an odd
+address would need to trap on real 68030 silicon but currently just... doesn't, and
+whatever happens next (fetching from a misaligned PC) may be what hangs. This is a
+plausible genuine RTL gap, not a test-corpus incompatibility like the MUL/DIV case, and
+needs its own dedicated investigation (tracked as the remaining JMP/JSR item).
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), full
+MULS/MULU/DIVS/DIVU/JMP/JSR re-run plus spot-checks on MOVE.b/BCHG/CHK.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
