@@ -1789,6 +1789,83 @@ RTS/RTR/RTE/TRAP/TRAPV re-run, 5-suite spot-check.
 
 ---
 
+## Phase 101 — SBCD's last residual cracked: found the missing distinguishing condition Phase 91 couldn't find → 99.7% → 100%
+
+**Goal**: root-cause SBCD's remaining 28/8065 (0.35%) residual, documented since Phase 91
+as a genuine, not-yet-solved subtlety — C and the result's high-nibble correction are
+decoupled in real hardware in a way the existing `sbcd_borrow_hi` (`s2 < 0`)-only model
+didn't capture, and a brute-force search over the intermediate signals hadn't found a
+clean replacement condition at the time.
+
+### Isolating a clean, small reproducible set
+
+Filtered the raw `SBCD.json.gz` corpus down to just the register-direct opcode form
+(`opcode & 0xF1F8 == 0x8100`, excluding the `-(Ay),-(Ax)` memory form) and re-implemented
+`eu_bcd.sv`'s exact SBCD algorithm in Python. This isolated exactly **9** mismatches (the
+register-direct fraction of the original 28), all sharing an identical, precise
+fingerprint:
+
+- `sbcd_borrow_lo` (low-nibble correction) is **true** in all 9.
+- `sbcd_s2 < 0` (`sbcd_borrow_hi`/C) is **true** in all 9, and **C always matched the
+  expected value already** — confirming Phase 91's framing that C itself was never the
+  problem, only the result's correction decision.
+- The expected result byte in all 9 cases equals the **uncorrected** truncation
+  (`sbcd_s2 & 0xFF`) rather than the `+0xA0`-corrected value the RTL was computing.
+
+### Finding the missing condition
+
+Phase 91 already knew the intermediate `sbcd_s2` value alone can't distinguish the two
+outcomes — the same `sbcd_s2` value (e.g. `-1`) appears in both a "needs correction" case
+and a "must not correct" case elsewhere in the corpus (confirmed directly: test index 713,
+`dst=0xf1,src=0xec,x=0`, `sbcd_s2=-1`, must NOT correct; vs. test index 1258,
+`dst=0xdf,src=0xe0,x=0`, also `sbcd_s2=-1`, but from a `sbcd_borrow_lo=False` path, DOES
+need correction — the two paths that produce numerically identical `sbcd_s2` values need
+opposite treatment, which is exactly the "path information lost" problem Phase 91's
+writeup described). Comparing the 9 residual failures' *raw, uncorrected* high nibbles
+(`dst_hi`, `src_hi` — computed straight from the operand bytes, not derived from `sbcd_s2`
+at all) revealed the missing signal immediately: **every one of the 9 has `dst_hi -
+src_hi == 1` exactly** (e.g. test 713: `dst_hi=0xf, src_hi=0xe`; test 1778 (`SBCD
+D3,D6`): `dst_hi=0x2, src_hi=0x1`).
+
+Verified this new condition (`sbcd_borrow_lo && sbcd_borrow_hi && (dst_hi - src_hi ==
+1)` → suppress the `+0xA0` correction) against the **entire** 1164-case
+`sbcd_borrow_lo && sbcd_s2<0` population (not just the 9 failures) in a standalone Python
+model before touching the RTL: **zero mismatches** — the condition perfectly separates
+all 9 "must not correct" cases from the other 1155 "must correct" cases in that same
+`sbcd_borrow_lo`/`sbcd_s2<0` bucket, with no false positives or negatives anywhere in the
+full register-direct corpus (3948/3948 match after the fix, vs. 3939/3948 before).
+
+### Fix
+
+Added `sbcd_hi_diff = $signed(sub_d[7:4]) - $signed(sub_s[7:4])` (the raw, uncorrected
+nibble difference — deliberately *not* derived from `sbcd_s2`, since that intermediate is
+exactly what loses the distinguishing information) and a `sbcd_suppress_corr` signal
+gating the existing `+0xA0` correction step. C/X are **unchanged** — they already matched
+100% of the time using the existing `sbcd_borrow_hi` test; only the *result's* correction
+decision needed the extra term. For NBCD (`op==BCD_NEG`, where `sub_d` is hardwired to
+`8'h0`), `sbcd_hi_diff` reduces to `0 - src_hi`, which is always `≤0` and can never equal
+`+1` — so this fix is structurally a no-op for NBCD, consistent with NBCD already being
+100% correct and not needing any change.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| SBCD | 99.7% (8037/8065) | **100%** (8065/8065) |
+| ABCD | 100% (8065/8065) | **100%** (8065/8065, unchanged) |
+| NBCD | 100% (8064/8064) | **100%** (8064/8064, unchanged) |
+
+**This closes the last known Harte gap of any kind in the project — no known failing
+test, unconfirmed RTL path, or documented residual remains anywhere.** The only
+non-100% items left are the 2 confirmed Tom Harte corpus data anomalies in ASL.b (Phase
+87, not a bug) and TRAP/TRAPV-taken's permanent 68000-vs-68030 exception-frame-width
+divergence (Phases 99/100, not a bug).
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), full
+SBCD/ABCD/NBCD re-run.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

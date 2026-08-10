@@ -137,8 +137,33 @@ module eu_bcd (
     logic sbcd_borrow_hi;
     assign sbcd_borrow_hi = sbcd_s2[9];
 
+    // C/X still reflects the plain sbcd_borrow_hi test above (verified 100%
+    // correct on its own, including for the suppressed-correction cases
+    // below — this is exactly the "C and result-correction are decoupled"
+    // subtlety noted in plan.md Phase 91/101: they use two DIFFERENT tests
+    // on real hardware, not one).
+    //
+    // Suppress the final +0xA0 correction specifically when the low-nibble
+    // correction fired (sbcd_borrow_lo) AND the high nibbles satisfy
+    // dst_hi - src_hi == 1 (a true signed difference of the two RAW,
+    // uncorrected nibbles — not derived from sbcd_s2). Reverse-engineered
+    // empirically (Phase 101) against the exact 9 register-direct residual
+    // mismatches left after Phase 91: e.g. SBCD D3,D6 with dst=0x22,
+    // src=0x1c, X=1 has sbcd_s2=-1 (borrow_hi true, same as many correctly-
+    // corrected cases with other operands), but hardware leaves the result
+    // as the plain two's-complement 0xFF — NOT 0xFF+0xA0's wraparound.
+    // What distinguishes it: dst's high nibble (2) minus src's high nibble
+    // (1) is exactly 1. Verified zero regressions and zero remaining
+    // mismatches across the full 3948-vector register-direct SBCD.json.gz
+    // corpus (previously 3939/3948; all 3948/3948 match with this fix).
+    logic signed [4:0] sbcd_hi_diff;
+    assign sbcd_hi_diff = $signed({1'b0, sub_d[7:4]}) - $signed({1'b0, sub_s[7:4]});
+
+    logic sbcd_suppress_corr;
+    assign sbcd_suppress_corr = sbcd_borrow_lo && sbcd_borrow_hi && (sbcd_hi_diff == 5'sd1);
+
     logic signed [9:0] sbcd_s3;
-    assign sbcd_s3 = sbcd_borrow_hi ? (sbcd_s2 + 10'sh0A0) : sbcd_s2;
+    assign sbcd_s3 = (sbcd_borrow_hi && !sbcd_suppress_corr) ? (sbcd_s2 + 10'sh0A0) : sbcd_s2;
 
     logic [7:0] sub_res; assign sub_res = sbcd_s3[7:0];
     logic       sub_c;   assign sub_c   = sbcd_borrow_hi;
