@@ -63,6 +63,17 @@ def _jmp_l(addr):
     return _word(0x4EF9) + _long(addr)
 
 
+def _movec_a7_vbr():
+    """MOVEC A7, VBR (opcode 0x4E7B + ext word: A/D=1,reg=111,Rc=0x801)"""
+    return _word(0x4E7B) + _word(0xF801)
+
+
+# Relocated VBR base for RTS/RTE/RTR tests (see is_ret_taken in build_patches()).
+# Sits safely between our init code (< INIT_CODE_END) and the typical test
+# instruction address (~0xC00 across the whole Harte corpus).
+RELOC_VBR = 0x000100
+
+
 def build_patches(test):
     """
     Return dict {byte_addr: byte_value} for all locations that must be
@@ -104,6 +115,17 @@ def build_patches(test):
     is_rte = ini['prefetch'][0] == 0x4E73
     a7_init_val = (a7_val - 2) & 0xFFFFFFFF if is_rte else a7_val
 
+    # RTS/RTE/RTR (is_ret_taken, see can_run()'s matching definition): these
+    # can restore an odd PC, which a real 68030 correctly Address-Error-traps
+    # on (unlike misaligned *data* access — see feedback_harte_68000_vs_68030.md).
+    # The trap reads the vector-3 table entry at VBR+12, which at VBR=0
+    # (the reset default) is address 0xC — squarely inside our own init code
+    # (RESET_PC=8 onward), so the read would return corrupted garbage (part of
+    # our own D0-load instruction's immediate bytes) instead of a real vector.
+    # Relocate VBR via MOVEC to a safe, empty region (RELOC_VBR) so the vector-3
+    # entry can be placed somewhere real, harmless when no address error fires.
+    is_ret_taken = ini['prefetch'][0] in (0x4E73, 0x4E75, 0x4E77)
+
     # ── Reset vectors ────────────────────────────────────────────────────────
     patch(0x000000, _long(a7_init_val))
     patch(0x000004, _long(RESET_PC))
@@ -125,11 +147,23 @@ def build_patches(test):
     usp_val = ini['usp'] if (ini['sr'] & 0x2000) else ini['usp']
     code += _movea_l_imm_a7(usp_val)   # A7 = usp (temp borrow)
     code += _word(0x4E67)               # MOVE A7, USP  (supervisor-only)
+    if is_ret_taken:
+        code += _movea_l_imm_a7(RELOC_VBR)  # A7 = new VBR (temp borrow)
+        code += _movec_a7_vbr()             # MOVEC A7, VBR
     code += _movea_l_imm_a7(a7_init_val)  # restore A7 = ssp / original value
     code += _jmp_l(instr_src)  # jump to instruction at its original address
 
     assert RESET_PC + len(code) <= INIT_CODE_END, (
         f"init code overflows: ends at {RESET_PC + len(code):#x}")
+
+    # ── Vector-3 (Address Error) table entry, relocated ───────────────────────
+    # Points at the same target our own STOP+NOP runway already lands on
+    # (instr_src + instr_len == final.pc - 4 for any control-transfer
+    # instruction, including the reference's own address-error redirect) — so
+    # if the DUT correctly takes the trap, it lands exactly where every other
+    # passing control-transfer test already expects execution to stop.
+    if is_ret_taken:
+        patch(RELOC_VBR + 12, _long(instr_src + instr_len))
 
     patch(RESET_PC, bytes(code))
 
@@ -864,21 +898,38 @@ def can_run(test):
     # A restored PC that's odd causes a genuine Address Error on real 68030
     # silicon too (unlike misaligned *data* access, misaligned *instruction
     # fetch* is not a 68000-only quirk — see feedback_harte_68000_vs_68030.md's
-    # caution note). In principle this is architecturally replicable — but
-    # RTS index 423 (`RTS` popping the odd return address 0x46d0abc3) showed
-    # our RTL does NOT currently take the trap at all: it fetches from the
-    # odd PC anyway, decodes whatever garbage lives there, and runs off
-    # forever (confirmed via direct $display-free repro: TIMEOUT, final PC
-    # garbage, no vector-3 redirect). `m68030_ifu.sv`'s `addr_err` output is
-    # unit-tested in isolation (`ifu_tb.sv`'s IFU-10) and wired to
-    # `m68030_exc.sv`, but nothing exercises it end-to-end through a runtime
-    # PC-restore path — this looks like a genuine, previously-undiscovered
-    # RTL gap (the whole instruction family was 100% SKIP before this phase,
-    # so nothing ever reached this code path). Root-causing and fixing it
-    # properly is out of scope here; skip these specific cases for now and
-    # leave it as a documented, real TODO — this is NOT the same
-    # "unfixable-by-design" 68000-vs-68030 category as the two paragraphs
-    # above, just not yet attempted.
+    # caution note). Phase 100 root-caused and CONFIRMED our RTL's Address Error
+    # mechanism (`m68030_ifu.sv`'s `addr_err` → `m68030_exc.sv`'s vector-3
+    # redirect) is fully functional end-to-end: it was never exercised before
+    # (the whole instruction family was 100% SKIP) because the vector-3 table
+    # read (fixed address VBR+12, and VBR defaults to 0 at reset) collided with
+    # our OWN synthesized init code, which always occupies low addresses
+    # starting at RESET_PC=8 — the read returned corrupted garbage (part of an
+    # unrelated MOVE.L immediate operand) instead of a real vector, and the DUT
+    # ran off decoding that garbage as instructions, hanging forever. Fixed by
+    # relocating VBR (via a synthesized `MOVEC A7,VBR`, found+fixed a matching
+    # missing-`ext_count`-entry gap in `m68030_seq.sv` along the way — MOVEC had
+    # literally never been exercised through the IFU drain path before either,
+    # only unit-tested directly bypassing the prefetch queue) to a safe, empty
+    # region and placing the vector-3 entry there, pointing at the same target
+    # our own STOP+NOP runway already lands on. Confirmed via direct repro (RTS
+    # index 423): the DUT now correctly detects the odd PC, pushes its
+    # exception frame, reads the *correct* relocated vector-3 entry, redirects
+    # PC exactly where expected, and cleanly reaches STOP — no more hang.
+    #
+    # However, this does NOT mean the byte-level comparison passes: Address
+    # Error's exception frame has the exact same width-divergence problem as
+    # TRAP (see feedback_harte_68000_vs_68030.md's fourth+fifth-instance note)
+    # — our 68030 correctly pushes FMT_ADDR (8 words) while the 68000 reference
+    # pushes its native 7-word address-error frame, and since the DUT
+    # constructs this frame as its own *output*, there's no input-side fix
+    # available (unlike RTE's format-word synthesis). Confirmed via the same
+    # repro: `A7: got 0x7f0, exp 0x7f6` plus a cascade of stack-byte mismatches,
+    # while SR/CCR (unaffected by the frame width) matched exactly. So: the
+    # underlying mechanism is now proven correct, but these specific vectors
+    # remain permanently unable to PASS the byte-for-byte Harte comparison —
+    # skip them, same treatment as TRAP, now for a fully confirmed reason
+    # instead of an unresolved unknown.
     if is_ret_taken:
         rm_ret = {a & 0xFFFFFF: v for a, v in ini['ram']}
         ssp = ini['ssp']
@@ -893,8 +944,9 @@ def can_run(test):
             popped_pc = (popped_pc << 8) | rm_ret.get((pc_addr + i) & 0xFFFFFF, 0)
         if popped_pc & 1:
             mnemonic = {0x4E75: 'RTS', 0x4E73: 'RTE', 0x4E77: 'RTR'}[opcode]
-            return False, (f'{mnemonic} restores odd PC {popped_pc:#010x} '
-                            '(Address Error trap not yet implemented for this path)')
+            return False, (f'{mnemonic} restores odd PC {popped_pc:#010x}: Address Error '
+                            'frame width permanently incompatible with 68000 corpus '
+                            '(mechanism confirmed working, see Phase 100)')
 
     # Backstop for complex EA modes that get_operand_ea() returns None for:
     # if instr_len is still wild, the reference took an exception (almost certainly

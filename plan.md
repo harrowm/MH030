@@ -1688,6 +1688,107 @@ spot-check.
 
 ---
 
+## Phase 100 — Odd-restored-PC Address Error investigated: mechanism confirmed fully working, root cause was a vector-table/init-code collision, not a missing feature
+
+**Goal**: follow up on Phase 99's newly-discovered gap — RTS/RTE/RTR popping an odd
+return address never took an Address Error trap, instead running off into garbage and
+hanging. Determine whether this is a real missing RTL feature or something else.
+
+### Investigation
+
+Added temporary `$display` tracing across `m68030_top.sv`'s exception-controller wiring
+(`ifu_addr_err_int`, `exc_active`, `u_exc.state_r`, bus arbiter grants, `s_state`) and
+reproduced RTS index 423 (popping the odd address `0x46d0abc3`) directly against
+`sim/harte_dat`. The first surprise: the mechanism DOES fire. `ifu_addr_err_int` asserts
+the instant the odd PC is loaded, `exc_active` goes high the same cycle, and the exception
+FSM correctly transitions `EXC_IDLE → EXC_PUSH`. It even progresses all the way through
+`EXC_PUSH → EXC_FETCH → EXC_LOAD` and issues a new `pc_wr_en` — so the "hangs forever"
+symptom from Phase 99 wasn't the exception controller stalling at all.
+
+The real bug: the vector-3 (Address Error) table read. `vec_addr = vbr_in + 3*4`, and
+`vbr_in` (from `MOVEC ...,VBR`) defaults to 0 at reset — meaning vector 3 always lives at
+the fixed address `0xC`. But `0xC` sits squarely inside `gen_harte_hex.py`'s own
+synthesized init code, which always starts at `RESET_PC=8` (specifically, address `0xC`
+is 4 bytes into the very first `MOVE.L #imm,D0` instruction's own immediate operand).
+`build_patches()`'s "test data" pass explicitly skips writing anything the test itself
+supplies at addresses inside `[0, INIT_CODE_END)` — "our init code wins" — which meant
+the vector-3 entry the Harte test data DOES correctly supply (confirmed present in
+`ini['ram']`, e.g. `[12,0],[13,0],[14,20],[15,0]` = `0x00001400` for this repro) was
+silently *dropped*, and the exception controller's vector-table read returned whatever
+garbage byte happened to live at that address in our own init code instead (traced:
+`eu_rdata=0xc89f223c`, part of the test's own D0-load immediate value) — sending the DUT
+to redirect PC to a nonsense address, which is what actually caused the observed hang
+(decoding garbage from THAT wrong address, not the exception mechanism itself failing).
+
+### Fix: relocate VBR for RTS/RTE/RTR tests specifically
+
+Since `vec_addr` is entirely VBR-relative, the collision is avoidable by moving VBR away
+from our init code's footprint. Added `MOVEC A7, VBR` to the synthesized init sequence
+(only for `is_ret_taken` — RTS/RTE/RTR — tests, reusing the existing "temp-borrow A7,
+operate, restore A7" pattern already used for the USP setup one step earlier), relocating
+VBR to `0x100` — a safe gap between `INIT_CODE_END` (`0x90`) and the corpus's typical
+instruction address (`~0xC00`). The vector-3 entry is then placed at `0x100+12=0x10C`,
+pointing at the exact same address `stop_addr = instr_src + instr_len` our own STOP+NOP
+runway is *already* placed at for every control-transfer instruction — so a correctly-
+trapping DUT lands exactly where every other passing test in the suite already expects
+execution to stop.
+
+**Found a second, unrelated, real gap along the way**: `MOVEC` (both directions, `0x4E7A`/
+`0x4E7B`) had no `ext_count` entry in `m68030_seq.sv` at all — the classic "missing
+ext_count entry" shape seen many times before in this project — because MOVEC had never
+been exercised through the IFU drain path before either; it's only unit-tested directly
+in `tb/system_tb.sv`, which feeds `instr_word`/`ext_data` straight into `eu_seq`,
+bypassing the prefetch queue entirely. Using it in synthesized init code for the first
+time immediately exposed the gap (would have corrupted the IFU stream with a stale
+extension word). Added the missing entry (`ext_count=1`, matching MOVEC's single
+control-register-selector extension word) — a genuine, permanent RTL correctness fix,
+independent of anything Harte-specific (68010+'s MOVEC has no Harte suite coverage at
+all, since the corpus is 68000-only).
+
+### Result: mechanism confirmed correct, but still can't PASS — a new instance of the frame-width divergence
+
+Re-ran the repro with VBR relocated: `eu_rdata=0x00001400` (the *correct* vector-3
+target, matching the reference exactly), PC redirected there, and the simulation reached
+`STOP` cleanly (`OK`, not `TIMEOUT`) at t=14335. This conclusively validates that
+`m68030_ifu.sv`'s `addr_err` → `m68030_exc.sv`'s vector-3 redirect mechanism was already
+fully correct — it had simply never been given a valid vector table to read from before.
+
+Running the actual byte-level comparison, though, confirms these tests still can't PASS,
+for a *different*, already-understood reason: Address Error's exception frame has the
+identical width-divergence problem as TRAP (Phase 99) — our 68030 correctly pushes
+`FMT_ADDR` (8 words per `m68030_exc.sv`), while the 68000 reference's native address-
+error frame is 7 words. Confirmed via the same repro: `A7: got 0x7f0, exp 0x7f6` plus a
+cascade of stack-byte mismatches, while `SR`/CCR (untouched by the frame-width question)
+matched exactly. Since the DUT constructs this frame as its own *output* (same as TRAP,
+unlike RTE's poppable *input*), there is no harness-side fix available — this is simply
+a fifth confirmed instance of the permanent 68000-vs-68030 divergence family documented
+in `feedback_harte_68000_vs_68030.md`.
+
+Updated the `can_run()` skip message for `is_ret_taken` + odd-restored-PC from Phase 99's
+"not yet implemented" (accurate then, now stale) to a confirmed, evidence-based reason
+matching TRAP's documentation. Pass/skip/fail counts are unchanged from Phase 99 (the same
+cases are still skipped) — the value of this phase is entirely in *converting an unverified
+"might be completely broken" RTL path into a confirmed-correct one*, plus fixing MOVEC's
+real IFU-integration gap.
+
+### Results
+
+| Suite | Phase 99 | Phase 100 |
+|-------|----------|-----------|
+| RTS | 100% (4008/4008) | **100%** (4008/4008, unchanged) |
+| RTR | 100% (4038/4038) | **100%** (4038/4038, unchanged) |
+| RTE | 100% (2047/2047) | **100%** (2047/2047, unchanged) |
+| TRAP | 100% SKIP | **100% SKIP** (unchanged) |
+| TRAPV | 100% (3970/3970) | **100%** (3970/3970, unchanged) |
+
+Spot-checked MOVE.b/BCHG/CHK/JSR/JMP (exercise the shared init-code/`ext_count` paths
+touched by this phase's changes) — all still 100%, confirming no regression.
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), full
+RTS/RTR/RTE/TRAP/TRAPV re-run, 5-suite spot-check.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

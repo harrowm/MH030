@@ -493,7 +493,15 @@ module m68030_seq (
                  ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
                   (f_dn == 3'b101 || f_dn == 3'b011 || f_dn == 3'b111) && (f_mode == 3'b010)) ||
                  ((f_group == 4'h0) && !f_dir && (f_dn == 3'b100) &&
-                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)))
+                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) ||
+                 // MOVEC Rc,Rn (0x4E7A) / MOVEC Rn,Rc (0x4E7B) — 1 ext word
+                 // (control-register selector + Rn). Never previously exercised
+                 // through the IFU drain path (unit-tested directly in
+                 // system_tb.sv, bypassing the prefetch queue) — no Harte suite
+                 // exists for this 68010+-only instruction, so this gap went
+                 // undetected until Phase 100 needed MOVEC in synthesized init
+                 // code for VBR relocation.
+                 (instr_word == 16'h4E7A || instr_word == 16'h4E7B))
             ext_count = 3'd1;
         else
             ext_count = 2'd0;
