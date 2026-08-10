@@ -1373,6 +1373,90 @@ re-run, DBcc spot-check.
 
 ---
 
+## Phase 97 — LEA/PEA root-caused: LEA is the Phase 94/95 68000-vs-68030 scale divergence again; PEA has that *plus* a genuine missing-EA-mode RTL bug → 89.0%/86.0% → 100%/100%
+
+**Goal**: root-cause LEA (89.0%) and PEA (86.0%), found in Phase 90's sweep and never
+investigated.
+
+### Investigation
+
+`run_harte.py --verbose` broken down by EA mode: for both instructions, every mode
+except `(d8,An,Xn)` and `(d8,PC,Xn)` was already 100%. LEA's two indexed modes showed a
+mix of PASS/FAIL (no TIMEOUT at all); PEA's `(d8,An,Xn)` showed the same PASS/FAIL mix,
+but `(d8,PC,Xn)` was **100% TIMEOUT** — a different symptom shape, worth treating as two
+separate bugs from the start.
+
+### Bug 1 (LEA, and PEA's `(d8,An,Xn)`/non-PC-relative indexed forms) — the Phase 94/95 scale divergence, again
+
+Hand-checked LEA test #116 (`LEA (d8,A0,Xn),A2`, FAIL: got `0x024315e2`, expected
+`0x9948131e`). `get_scale_remap()` computes `ea_68030=0x4315e2` (matches the DUT's low
+24 bits exactly) and `ea_68000=0x48131e` (matches the *expected* value's low 24 bits
+exactly) — the identical divergence root-caused in Phase 94 (MULS/MULU/DIVS/DIVU) and
+Phase 95 (JMP/JSR): the Harte corpus is 68000-captured, and 68000 silicon ignores the
+brief-extension-word scale field entirely, while a correctly-68030-accurate RTL applies
+it. For MUL/DIV this only ever changed a *data* address's parity (harmless, since 68030
+doesn't fault on misaligned data). For JMP/JSR the EA *is* the new PC, so scale
+mismatch sent execution to a different address entirely. For LEA/PEA, the EA *is the
+instruction's own result* — the value loaded into `An` (LEA) or pushed to the stack
+(PEA) — so a scale mismatch changes that result directly: not a fault, not a wrong
+jump, just a **permanently different, unreplicable value** whenever scale≠0.
+
+**Fix**: extended `can_run()`'s existing scale-remap skip loop (already handling
+JMP/JSR from Phase 95) with an `is_lea`/`is_pea` case, computed from the opcode
+signature (LEA: `f_group==4, f_dir=1, f_ss==11`; PEA: `f_group==4, f_dir=0, f_dn==4,
+f_ss==01`) — skip unconditionally whenever `get_scale_remap()` detects scale≠0 for
+either. **Zero RTL change** for this part. Result: LEA 89.0%→**100%**; PEA's non-PC
+indexed forms went from a FAIL/PASS mix to clean (skip-adjusted) passes too, leaving
+only PEA `(d8,PC,Xn)`'s TIMEOUT — a different bug, tackled next.
+
+### Bug 2 (PEA `(d8,PC,Xn)` only) — genuinely missing EA-mode decode, a real RTL gap
+
+`eu_seq.sv`'s PEA `f_mode==111` case handled `f_reg==000/001/010` (abs.W/abs.L/
+`(d16,PC)`) but had no arm at all for `f_reg==011` (`(d8,PC,Xn)`) — falling through the
+`case` statement's `default: ;` with `dec_valid` never set, so the instruction never
+entered the pipeline at all (permanent stall, matching the 100% TIMEOUT exactly — this
+was **not** an ext_count issue; `m68030_seq.sv` already had a correct 1-ext-word entry
+for this exact opcode pattern from some earlier, unrelated phase).
+
+Added the missing case, mirroring LEA's already-working `(d8,PC,Xn)` arm
+(`dec_abs_ea_val = decode_pc+2+d8`, plus `dec_dst_reg=Xn`/`dec_is_idx`/`dec_xn_wl`/
+`dec_xn_scale` for the index contribution). First attempt still failed — not with a
+TIMEOUT this time, but with `A7` corrupted to garbage (e.g. got `0x472f3f53`, expected
+`0x000007fc`). Root cause: PEA's `(d8,An,Xn)` sibling case uses a **dedicated
+`ex_cur_sp`-based path** (`ex_ea`/`ex_an_new` both check `ex_is_jsr_idx || ex_is_pea_idx`
+and read the live USP/ISP/MSP directly) specifically *because* `rd_a`/`rd_b` are needed
+for `An`(base)/`Xn`(index) in that form, leaving no port free to also hold `A7` — my new
+`(d8,PC,Xn)` case has the identical problem (`rd_b` holds `Xn`, `rd_a` is unused/stale)
+but I'd only set `dec_is_idx` (for the `ex_xn_scaled` index math), not
+`dec_is_pea_idx` (for the A7-push routing) — so `ex_ea`/`ex_an_new` fell through to
+their default `ex_an_base + ...` path, and `ex_an_base` was never loaded with `A7` for
+this addressing mode. Added `dec_is_pea_idx = 1'b1` to the new case, which correctly
+redirects the push address and A7 update through `ex_cur_sp` (this flag only affects
+*where the stack lives*, not the pushed *value*, which was already correct from
+Bug 2's own `ex_abs_ea_val` fix below — the two are independent).
+
+Also had to fix the pushed *value* itself: PEA's non-indexed abs modes push
+`ex_abs_ea_val` directly (`ex_is_pea ? (ex_abs_jmp_en ? ex_abs_ea_val : ...)`), but that
+never added `ex_xn_scaled` — fine for `reg==000/001/010` (no index register involved)
+but wrong for the new `reg==011` case, which needs `ex_abs_ea_val + ex_xn_scaled`.
+Changed the mux to `ex_abs_ea_val + (ex_is_idx ? ex_xn_scaled : 32'h0)` — a no-op for
+the three existing non-indexed cases, correct for the new one.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| LEA | 89.0% (3645/4094 run) | **100%** (3645/3645) |
+| PEA | 86.0% (3647/4240 run) | **100%** (3750/3750) |
+
+Spot-checked JSR (shares the `ex_is_jsr_idx`/`ex_cur_sp` mechanism Bug 2 extends) and
+LEA itself — both still **100%**, confirming no regression from either change.
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), full LEA/PEA
+re-run, JSR spot-check.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

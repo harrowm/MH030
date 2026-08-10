@@ -3486,6 +3486,21 @@ module eu_seq (
                                     dec_abs_ea_val = decode_pc + 32'd2
                                                    + {{16{ext_data[15]}}, ext_data[15:0]};
                                 end
+                                3'b011: begin  // (d8,PC,Xn): EA = PC+2+d8+Xn*scale
+                                    // rd_a isn't loaded with A7 here (rd_b holds Xn
+                                    // instead), so the A7 push-address/update must go
+                                    // through ex_cur_sp like the (d8,An,Xn) case does —
+                                    // set dec_is_pea_idx so ex_ea/ex_an_new pick that path.
+                                    dec_valid      = 1'b1;
+                                    dec_is_pea_idx = 1'b1;
+                                    dec_abs_ea_val = decode_pc + 32'd2
+                                                   + {{24{ext_data[7]}}, ext_data[7:0]};
+                                    dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                                    dec_reads_dst  = 1'b1;
+                                    dec_is_idx     = 1'b1;
+                                    dec_xn_wl      = ext_data[11];
+                                    dec_xn_scale   = ext_data[10:9];
+                                end
                                 default: ;
                             endcase
                         end
@@ -8415,7 +8430,7 @@ module eu_seq (
                      : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w
                      : (ex_is_pmove64 && ex_pmove_to_mem) ? pmove64_wr_data_w
                      : (pmove64_run_r && pmove64_to_mem_r) ? pmove64_wr_data_w
-                     : ex_is_pea               ? (ex_abs_jmp_en ? ex_abs_ea_val
+                     : ex_is_pea               ? (ex_abs_jmp_en ? (ex_abs_ea_val + (ex_is_idx ? ex_xn_scaled : 32'h0))
                                                                  : (rd_a_data + ex_jump_offset + ex_xn_scaled))
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc
                      : (ex_is_mem_wr && ex_use_imm) ? eu_lane(ex_imm, ex_siz)

@@ -696,12 +696,22 @@ def can_run(test):
     is_jmp_jsr = (not f_dir_jj) and f_dn_jj == 7 and f_ss_jj in (2, 3) and \
                  ((opcode >> 12) & 0xF) == 4
 
+    # LEA (0100 aaa 111 mmm rrr: group 4, f_dir=1, f_ss=11) / PEA (0100 1000 01
+    # mmm rrr: group 4, f_dir=0, f_dn=100, f_ss=01) — same issue as JMP/JSR:
+    # the *result* (the address itself, loaded into An or pushed to the stack)
+    # is the EA, not a value read from it, so a scale mismatch changes the
+    # result directly and unreplicably rather than just changing which byte
+    # gets touched.
+    is_lea = (opcode >> 12) == 0x4 and f_dir_jj and f_ss_jj == 3
+    is_pea = (opcode >> 12) == 0x4 and not f_dir_jj and f_dn_jj == 4 and f_ss_jj == 1
+
     # Indexed EA (mode=6) with non-zero scale: the 68030 computes a different EA
     # than the 68000 reference.  get_scale_remap() handles the remapping so these
     # tests can run — skip only when EA_68030 is problematic.
     #
-    # JMP/JSR are a special case: their "EA" *is* the new PC, not an operand to
-    # patch/redirect. build_patches() places the STOP+NOP runway at
+    # JMP/JSR/LEA/PEA are a special case: their "EA" *is* the instruction's own
+    # result (new PC, or the loaded/pushed address itself), not an operand to
+    # patch/redirect. For JMP/JSR, build_patches() places the STOP+NOP runway at
     # final.pc (the 68000 reference's own, *unscaled* landing address) — for
     # any scale!=0 JMP/JSR, our correctly-68030-scaled RTL computes a genuinely
     # different jump target (ea_68030 != ea_68000) and lands somewhere the
@@ -710,14 +720,22 @@ def can_run(test):
     # investigated in Phase 94/95 — confirmed via $display trace: RTL correctly
     # computes ea_68030 per the scale field, e.g. 0x4d5e9ede for a scale=4 case,
     # then issues zero further bus requests because that address is unmapped
-    # test-harness territory). Unlike MULS/MULU/DIVS/DIVU (Phase 94), this
-    # isn't limited to the odd-address/Address-Error subset — ANY scale
-    # mismatch sends our RTL to a different address than the one the reference
-    # (and the runway) used, so it's unreplicable whenever scale!=0 at all.
+    # test-harness territory). LEA/PEA don't touch the bus at their EA at all —
+    # they just materialize it (into An, or onto the stack) — so the reference's
+    # "expected" register/stack value is ea_68000, while our RTL, using correct
+    # 68030 scale arithmetic, produces ea_68030: a genuine, permanent value
+    # mismatch whenever scale != 0, confirmed via LEA test #116 (`LEA
+    # (d8,A0,Xn),A2`): DUT wrote ea_68030 (0x4315e2), reference expected
+    # ea_68000 (0x48131e) — see Phase 97. Unlike MULS/MULU/DIVS/DIVU (Phase 94),
+    # none of these four are limited to the odd-address/Address-Error subset —
+    # ANY scale mismatch sends our RTL to a different address (or value) than
+    # the one the reference used, so it's unreplicable whenever scale != 0.
     for remap in get_scale_remap(test):
         ea1, nb = remap['ea_68030'], remap['siz_bytes']
         if is_jmp_jsr:
             return False, f'JMP/JSR scale!=0: EA_68030 {ea1:#08x} != EA_68000 (unreplicable, see Phase 95)'
+        if is_lea or is_pea:
+            return False, f'LEA/PEA scale!=0: EA_68030 {ea1:#08x} != EA_68000 (unreplicable, see Phase 97)'
         # Odd-address word/longword → 68030 address error; skip.
         if nb >= 2 and (ea1 & 1):
             return False, f'EA_68030 {ea1:#08x} misaligned (would be addr error)'
