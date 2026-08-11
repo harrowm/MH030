@@ -234,6 +234,19 @@ module stall_hazard_tb;
     localparam JSR_A0_IND     = 16'h4E90; // JSR (A0)
     localparam RTS_OP         = 16'h4E75; // RTS
     localparam NOP_OP         = 16'h4E71;
+    localparam CLR_L_D3       = 16'h4283;
+    localparam CLR_L_D5       = 16'h4285;
+    localparam ADDI_L_D5      = 16'h0685;
+    // MOVEQ #imm,D5 — a single-instruction, no-setup marker (unlike
+    // CLR.L D5;ADDI.L #imm,D5, MOVEQ has no self-hazard of its own, so it's
+    // safe to use as the completion marker for the direct hazard-signal
+    // measurement below without contaminating the count).
+    localparam MOVEQ_D5_100 = 16'h7A64;
+    localparam MOVEQ_D5_101 = 16'h7A65;
+    localparam MOVEQ_D5_102 = 16'h7A66;
+    localparam MOVEQ_D5_103 = 16'h7A67;
+    localparam MOVEQ_D5_104 = 16'h7A68;
+    localparam MOVEQ_D5_105 = 16'h7A69;
 
     // -------------------------------------------------------------------
     // Checks and tasks
@@ -286,6 +299,41 @@ module stall_hazard_tb;
         end
         ct_check(name, saw_ack);
         $display("INFO  %s: hazard_seen=%b", name, hazard_seen);
+    endtask
+
+    // Runs from ct_goto(base_addr) and counts real clk_4x edges where
+    // eu_seq.sv's own hazard_ex/hazard_wb/hazard_ccr signals are asserted,
+    // gated to exactly the cycles decode is processing the consumer
+    // instruction (ct_decode_pc == target_pc) — this is a direct read of
+    // the RTL's own decode-stage hazard flags (u_eu2.u_seq.hazard_*),
+    // never written to in the same statement, so there is no same-
+    // timestep race despite reading combinational signals. marker_val must
+    // be unique per call — D5 is a plain register that keeps its value
+    // across calls, so a repeated marker risks matching a previous call's
+    // leftover value; this task's own timeout loop also uses it as a
+    // safety net in case target_pc is somehow never reached.
+    task automatic ct_measure_hazard_at(
+        input  logic [31:0] base_addr,
+        input  logic [31:0] target_pc,
+        input  logic [31:0] marker_val,
+        output int          stall_cycles
+    );
+        int t;
+        logic reached;
+        ct_goto(base_addr);
+        reached = 1'b0;
+        stall_cycles = 0;
+        for (t = 0; t < 500; t++) begin
+            @(posedge clk_4x); #1;
+            if (ct_decode_pc == target_pc) begin
+                reached = 1'b1;
+                if (u_eu2.u_seq.hazard_ex || u_eu2.u_seq.hazard_wb || u_eu2.u_seq.hazard_ccr)
+                    stall_cycles++;
+            end else if (reached) begin
+                return;   // decode moved past the consumer — measurement complete
+            end
+            if (u_eu2.u_rf.d_reg[5] === marker_val) return;
+        end
     endtask
 
     initial begin
@@ -503,7 +551,103 @@ module stall_hazard_tb;
         end
         repeat(4) @(posedge clk_4x);
 
+        // ===================================================================
+        // Category A precision: exact hazard-stall cycle counts. The main
+        // Category A matrix above only checks "was a stall observed" plus
+        // functional correctness — deliberately, after an earlier direct-
+        // eu_seq-injection attempt at counting exact cycles hit repeated
+        // same-simulation-time-step races (see the file header). This
+        // section closes that gap using real IFU-driven execution, reading
+        // eu_seq.sv's own hazard_ex/hazard_wb/hazard_ccr signals directly
+        // (u_eu2.u_seq.hazard_*) through a pure @(posedge clk_4x)-
+        // synchronized monitor loop — no same-timestep write-then-read
+        // anywhere, since nothing is ever written in the same statement
+        // that reads these signals.
+        //
+        // Two earlier attempts at this were tried and abandoned before
+        // landing here: (1) a differential technique (run a hazard-present
+        // and a hazard-absent sequence, same instruction count, take the
+        // total-cycle delta) worked perfectly for the register-hazard case
+        // (P1, below) by swapping the consumer's source register — but for
+        // the CCR-hazard case (P5) there is no register to swap (SEQ always
+        // structurally reads CCR), so the only way to remove the hazard was
+        // substituting the *producer* (CMP vs NOP), which broke the
+        // "everything else identical" assumption: the two instructions
+        // don't cost the same number of cycles even with no downstream
+        // hazard, so the delta measured that mismatch as much as the
+        // hazard. (2) A calibration-based fix (measure filler-instruction
+        // cost separately, subtract it out) got the right *shape* (linear,
+        // -1 per added gap) but a wrong, non-zero constant offset, most
+        // likely because IFU-prefetch/overlap timing is itself sensitive to
+        // instruction-sequence context in a way that doesn't transfer
+        // cleanly between a calibration pair and the real measurement.
+        // Reading the RTL's own decode-stage hazard signals directly, gated
+        // to the exact cycles decode is processing the consumer instruction
+        // (ct_decode_pc == target_pc), sidesteps both problems entirely —
+        // it's a direct measurement of the actual signal under test, not an
+        // inference from surrounding timing.
+        //
+        // Expected per eu_seq.sv:6031-6050: T0 (producer in EX when
+        // consumer decodes) = hazard_ex + hazard_wb = 2 cycles; T1
+        // (producer in WB) = hazard_wb only = 1 cycle; T2 (producer
+        // committed) = 0.
         // -----------------------------------------------------------------
+        $display("=== Category A precision: exact stall-cycle counts ===");
+        begin
+            int c;
+
+            // P1 (immediate-ALU producer, register hazard): CLR D0;CLR D1;
+            // ADDI.L #7,D0;[fillers];ADD.L D0,D1;MOVEQ #mark,D5.
+            ct_rom[16'h1D00/4] = {CLR_L_D0, CLR_L_D1};
+            ct_rom[16'h1D04/4] = {ADDI_L_D0, 16'h0000};
+            ct_rom[16'h1D08/4] = {16'd7, ADD_L_D0_D1};       // consumer @ 0x1D0A
+            ct_rom[16'h1D0C/4] = {MOVEQ_D5_100, NOP_OP};
+            ct_measure_hazard_at(32'h0000_1D00, 32'h0000_1D0A, 32'd100, c);
+            ct_check("A-precision P1-T0: hazard costs exactly 2 cycles", c == 2);
+
+            ct_rom[16'h1E00/4] = {CLR_L_D0, CLR_L_D1};
+            ct_rom[16'h1E04/4] = {ADDI_L_D0, 16'h0000};
+            ct_rom[16'h1E08/4] = {16'd7, CLR_L_D3};
+            ct_rom[16'h1E0C/4] = {ADD_L_D0_D1, MOVEQ_D5_101};  // consumer @ 0x1E0C
+            ct_measure_hazard_at(32'h0000_1E00, 32'h0000_1E0C, 32'd101, c);
+            ct_check("A-precision P1-T1: hazard costs exactly 1 cycle", c == 1);
+
+            ct_rom[16'h1F00/4] = {CLR_L_D0, CLR_L_D1};
+            ct_rom[16'h1F04/4] = {ADDI_L_D0, 16'h0000};
+            ct_rom[16'h1F08/4] = {16'd7, CLR_L_D3};
+            ct_rom[16'h1F0C/4] = {CLR_L_D3, ADD_L_D0_D1};      // consumer @ 0x1F0E
+            ct_rom[16'h1F10/4] = {MOVEQ_D5_102, NOP_OP};
+            ct_measure_hazard_at(32'h0000_1F00, 32'h0000_1F0E, 32'd102, c);
+            ct_check("A-precision P1-T2: no hazard cost (negative control)", c == 0);
+
+            // P5 (CCR-only producer): CLR D0;CLR D1;CMP.L D1,D0;[fillers];
+            // SEQ D2;MOVEQ #mark,D5. Filler must be NOP, not CLR.L D3 (used
+            // for P1's register-hazard fillers above) — CLR also updates
+            // CCR (Z=1 unconditionally), so it would re-trigger its own
+            // fresh CCR hazard against SEQ and add an extra cycle on top of
+            // the one actually being measured (caught exactly this way:
+            // T1/T2 both read back c=2 instead of the expected 1/0 until
+            // this was fixed).
+            ct_rom[16'h1A00/4] = {CLR_L_D0, CLR_L_D1};
+            ct_rom[16'h1A04/4] = {CMP_L_D1_D0, SEQ_D2};        // consumer @ 0x1A06
+            ct_rom[16'h1A08/4] = {MOVEQ_D5_103, NOP_OP};
+            ct_measure_hazard_at(32'h0000_1A00, 32'h0000_1A06, 32'd103, c);
+            ct_check("A-precision P5-T0: hazard costs exactly 2 cycles", c == 2);
+
+            ct_rom[16'h1B00/4] = {CLR_L_D0, CLR_L_D1};
+            ct_rom[16'h1B04/4] = {CMP_L_D1_D0, NOP_OP};
+            ct_rom[16'h1B08/4] = {SEQ_D2, MOVEQ_D5_104};       // consumer @ 0x1B08
+            ct_measure_hazard_at(32'h0000_1B00, 32'h0000_1B08, 32'd104, c);
+            ct_check("A-precision P5-T1: hazard costs exactly 1 cycle", c == 1);
+
+            ct_rom[16'h1C00/4] = {CLR_L_D0, CLR_L_D1};
+            ct_rom[16'h1C04/4] = {CMP_L_D1_D0, NOP_OP};
+            ct_rom[16'h1C08/4] = {NOP_OP, SEQ_D2};             // consumer @ 0x1C0A
+            ct_rom[16'h1C0C/4] = {MOVEQ_D5_105, NOP_OP};
+            ct_measure_hazard_at(32'h0000_1C00, 32'h0000_1C0A, 32'd105, c);
+            ct_check("A-precision P5-T2: no hazard cost (negative control)", c == 0);
+        end
+
         // stop_first_cycle: STOP immediately followed by a real next
         // instruction that must never execute — confirms STOP genuinely
         // halts (eu_seq.sv:6053-6058's 1-bubble transition into stop_r).
