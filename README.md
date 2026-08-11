@@ -193,7 +193,7 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. Structurally single-instruction — see "Pipeline stall/hazard coverage" below for what this can't reach. See `plan.md §Phase 84` for full results table.
 
-4. **Pipeline stall/hazard tests** (`tb/stall_hazard_tb.sv`, `tb/stall_fsm_tb.sv`, part of `make test`) — bus-arbitration contention, RAW/CCR/autoincrement hazards, control-transfer stall depth, and multi-cycle FSM decode-holdoff across real multi-instruction sequences. See `plan.md §Phase 103`.
+4. **Pipeline stall/hazard tests** (`tb/stall_hazard_tb.sv`, `tb/stall_fsm_tb.sv`, part of `make test`) — bus-arbitration contention, RAW/CCR/autoincrement hazards, control-transfer stall depth, multi-cycle FSM decode-holdoff, interrupt/BERR arrival mid-FSM, and back-to-back FSM composition across real multi-instruction sequences. See `plan.md §Phase 103` and §§105-107.
 
 ```bash
 make test                  # 34/34 regression suite
@@ -203,7 +203,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Pipeline stall/hazard coverage (Phase 103)
+### Pipeline stall/hazard coverage (Phases 103-107)
 
 Every Harte test resets state, executes exactly one instruction, and checks the
 result — by construction it can never exercise anything that spans two
@@ -212,15 +212,32 @@ instructions. This suite covers what that structurally leaves out:
 | Category | File | What it covers |
 |---|---|---|
 | Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU priority under 3-way contention (previously zero coverage), IFU starvation/recovery under a sustained multi-beat burst, DMA held off by `bus_lock` during an RMW cycle |
-| RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences |
+| RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences, plus exact hazard-stall cycle counts (2/1/0) verified via direct RTL signal reads |
 | Control-transfer stall depth | `tb/stall_hazard_tb.sv` | BRA (decode-resolved), JMP (register-indirect + absolute), taken DBF loop, JSR/RTS round trip through real memory |
-| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | 21 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly |
-| DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard rather than the consumer racing ahead |
+| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | 21 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set |
+| DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM (TAS), rather than the consumer racing ahead |
+| Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM); also root-caused a deferred instruction-dispatch race (see below) |
+| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-CAS2: root-caused a severe, deferred hang bug (see below) — currently asserts today's actual (buggy) behavior so `make test` stays green |
+| Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
 
-Only memory-indirect EA (`([bd,An],Xn,od)`) remains deferred — its full-extension-word
-IS/bd/od field interactions have genuine encoding ambiguity even after reading the RTL
-closely, unlike every other source above, which each had an unambiguous decode comment
-or clearly-derivable bit layout to build from.
+Memory-indirect EA (`([bd,An],Xn,od)`) remains deferred — Phase 107 narrowed the
+original "genuine encoding ambiguity" to a specific, falsifiable hypothesis (a
+suspected wrong-bit decode for pre- vs. post-indexed selection in `eu_seq.sv`), but
+the Harte corpus is 68000-captured and has zero coverage of this 68020+-only
+addressing mode, so there's no empirical oracle to verify a fix against without a
+dedicated Musashi-cosim investigation.
+
+**Two known, real, deliberately deferred RTL gaps** were found and thoroughly
+root-caused (not fixed) during this work — see `plan.md §Phase 105`/`§Phase 106`
+and the `feedback_berr_hang_deferred` Claude Code memory note before starting a fix
+for either: (1) an interrupt can land on the exact cycle a newly-ready instruction
+launches into EX right after an FSM retires, and the saved return PC can point at
+that already-executing instruction, causing RTE to silently re-execute it — harmless
+for idempotent instructions, a real risk otherwise; (2) a sustained bus error during
+almost any EU-initiated access (`biu_cache_if.sv`, `biu_multiop_fsm.sv`, and CAS2's
+dedicated datapath, which has no berr signal path at all) hangs the CPU forever
+instead of raising a Bus Error exception, and `m68030_exc.sv`'s `bus_err_req` isn't
+even wired to any EU-side fault source today.
 
 ### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 

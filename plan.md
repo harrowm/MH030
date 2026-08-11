@@ -2156,6 +2156,172 @@ the end).
 
 ---
 
+## Phase 105 — Interrupt-during-CAS2-stall: a real exc-gating fix, plus a second deferred finding
+
+**Why**: user follow-up after Phase 104 ("is there anything else we can do to further
+test the stalls?") produced a 4-item list, agreed in order: (1) exact stall-cycle-count
+verification, (2) interrupt arrival during a multi-cycle FSM stall, (3) BERR mid-FSM
+abort/recovery, (4) remaining gaps (memory-indirect EA, back-to-back FSMs, wait-states
+on FSM beats). Item (1) split into two parts (Category A exact hazard cycles, Category B
+exact bus-cycle counts) and was completed first, adding a "precision" section to
+`tb/stall_hazard_tb.sv` (P1/P5, register and CCR hazards, exact 2/1/0-cycle stalls
+verified via direct hierarchical signal reads rather than differential timing, which
+proved unreliable — see the file's own header comment) and a `data_ds_count`-bracketed
+bus-cycle check to 6 representative Category B FSMs in `tb/stall_fsm_tb.sv` (TAS=2,
+MOVEM=2, CMPM=2, CAS2=2, MOVEP=4, ADDX.L=3), all matching architectural expectation on
+the first real run. This entry covers item (2).
+
+Built a new test in `tb/stall_fsm_tb.sv` injecting a level-7 (NMI) interrupt mid-CAS2 —
+does the interrupt get deferred until CAS2 fully retires, or does it hijack the bus
+mid-sequence?
+
+**Real bug found and fixed**: `m68030_exc.sv`'s `exc_pending` had no instruction-
+boundary gating at all — `int_pending` (purely combinational on IPL/mask) could hijack
+the bus mid-CAS2. Confirmed with a first version of the test (no gating): CAS2's own
+dependent-instruction marker never fired, only the interrupt handler's did. Real 68030
+silicon only samples IPL between instructions; bus/address error are the only genuinely
+asynchronous exceptions. Fixed by adding an `eu_busy` input port to `m68030_exc` (wired
+from the existing top-level `eu_busy` net, == `eu_seq.sv`'s `stall`) and gating *only*
+`int_pending`'s branch of the `exc_pending` priority mux on `!eu_busy` — bus/addr error
+stay unconditional, and every synchronous instruction-originated exception
+(illegal/priv/trace/CHK/TRAPV/trap/...) stays unconditional too, since those are already
+synchronized to the instruction that raises them. `tb/exc_tb.sv` (the standalone EXC unit
+test) needed a matching `eu_busy=0` default added to its wildcard `.*` port connection.
+
+**Second, deeper finding — root-caused but deliberately deferred**: with the fix in
+place, a trace (temporary `$display`s, since removed) showed the interrupt correctly
+waits for CAS2's full 2-cycle bus sequence to complete (asserted explicitly in the test:
+`ds_at_exc - d0 == 2`), but then preempts at the very next instruction boundary — which
+can land on the *exact same cycle* the immediately-following instruction (already sitting
+decoded and hazard-free in DECODE throughout CAS2's stall) launches into EX, since
+`instr_ack = dec_valid && !stall` fires combinationally the instant `stall` clears, with
+zero gap cycle. The exception controller's `snap_pc_r` samples `ifu_decode_pc` on that
+same edge, before decode_pc has advanced past the just-launched instruction — so the
+saved return PC points at an instruction that has already begun (and, for a 1-cycle ALU
+op, already committed via WB) executing. RTE later resumes there and silently re-executes
+it. Harmless in the test as built (`CLR.L D5` is idempotent — confirmed via trace: D5
+briefly read back 0 mid-exception-push, then again after RTE, same value both times) —
+but a non-idempotent instruction in that exact slot (ADD, an autoincrement/decrement EA,
+a memory write) would be double-executed after any interrupt landing on that specific
+cycle. A real fix needs `int_pending` (or equivalent) threaded into `eu_seq.sv`'s own
+`stall` so the newly-ready instruction is held in DECODE for one extra cycle instead of
+launching on the recognition edge — `eu_seq.sv` currently has zero IPL awareness at all
+(confirmed via its module port list) — plus a full Harte re-verification once touched,
+since `stall` is the single most shared signal in the EU. Documented in the test's own
+header comment (`tb/stall_fsm_tb.sv`) rather than fixed in this pass.
+
+**Results**: new test passes cleanly (handler ends in a real `RTE`, no hand-crafted
+frame needed — the exception controller auto-generates it correctly). `make test` 34/34,
+`make cosim_grp` 8/8, RTS/RTR/RTE/TRAPV Harte suites re-run and still 100% (the four
+most `m68030_exc.sv`-adjacent suites, since the fix touches shared exception-priority
+logic).
+
+---
+
+## Phase 106 — BERR-mid-CAS2: a severe, deliberately deferred multi-file hang bug
+
+**Why**: item (3) of the Phase 105 follow-up list. Same investigative approach as Phase
+105: inject a bus error mid-CAS2 in `tb/stall_fsm_tb.sv`, see what happens.
+
+The very first version (BERR held for exactly one cycle, mirroring `biu_tb.sv`'s own
+isolated P4-2 BERR-abort unit test) gave a misleadingly clean result — D5/D6 both
+completed normally, no hang. Holding `berr_n` continuously asserted (a sustained fault,
+not a single pulse) instead uncovered a real, severe, previously-undiscovered bug
+spanning several files. Full root-cause chain (see [[feedback_berr_hang_deferred]] in
+Claude Code memory for the standalone write-up):
+
+1. `biu_cycle_gen.sv` correctly detects the fault — raw `eu_berr` pulses on a ~32-cycle
+   retry cadence for as long as `berr_n` stays asserted.
+2. Nothing downstream consumes that pulse to actually abort. `biu_multiop_fsm.sv`
+   (MOVEM/MOVEP): `MO_CYCING` only transitions on `sf_eu_ack`, no `sf_eu_berr` arm — its
+   own `eu_mo_berr` output pulses correctly but nothing acts on it, so `mo_state` hangs
+   forever. CAS2 is worse: it has **no berr signal path at all** (dedicated datapath
+   directly in `biu_cycle_gen.sv`, `eu_cas2_req`/`eu_cas2_ack` with no `eu_cas2_berr` —
+   confirmed via a full grep of `m68030_biu.sv`'s port list). `biu_cache_if.sv` (ordinary
+   non-FSM EU reads/writes) has the identical shape: its `sf_berr` input is wired in but
+   never read anywhere inside the module; `m68030_biu.sv:678`'s own comment even flags
+   half of this (`// eu_berr routed direct from cycle_gen (cache_if.eu_berr is always
+   0)`) — a known, partial workaround that never actually fixed the hang, since
+   `eu_seq.sv`'s `mem_berr` input is separately documented as ignored.
+3. Even if any FSM correctly aborted, `m68030_exc.sv`'s `bus_err_req` is wired only from
+   `ifu_bus_err` (instruction fetch) — an EU-side (data) fault has no path to the
+   exception controller at all today. `exc_frame_valid`/`fault_valid_biu` (already
+   correctly computed by `biu_exc_capture`, with correct frame-format $9/$A/$B
+   determination) are dangling — confirmed via grep, not just untested.
+4. A real fix additionally needs a sticky-to-pulse conversion: both `fault_valid`
+   (`biu_cycle_gen.sv`) and `frame_valid` (`biu_exc_capture.sv`) are deliberately latched
+   "until reset" (BIU-090) so frame data stays stable through the whole `EXC_PUSH`
+   sequence — wiring either directly into `bus_err_req` would permanently lock the
+   priority encoder into Bus Error after the *first* fault ever seen.
+   `m68030_ifu.sv`'s own `bus_err_r` already solves this correctly (clears on
+   `pc_wr_en`, the same pulse the exception controller issues when it finally loads the
+   handler PC) — the EU-side path needs the identical pattern, not currently present.
+
+Given the fix spans `biu_cache_if.sv`, `biu_multiop_fsm.sv` (and likely
+`biu_burst_ctrl.sv`/coprocessor paths, not individually re-checked), `m68030_biu.sv`'s
+`eu_berr` wiring, and `m68030_top.sv`/`m68030_exc.sv`'s `bus_err_req` + `fault_addr`
+muxing (note: `m68030_exc.sv`'s `fault_addr` currently comes from `ifu_bus_err_addr`
+specifically, while `fault_data`/`fault_ssw`/`bus_err_fmt` already come from the
+shared/generic BIU capture — an existing inconsistency even for the IFU case, worth
+reconciling in the same pass) — plus a full Harte re-verification once touched, since
+`biu_cache_if` sits on every single EU/IFU memory access — this is **deliberately left
+unfixed**, root-caused and fully documented (in the test's own header comment and in
+Claude Code memory) rather than rushed into this same pass. This is the same judgment
+call as Phase 105's dispatch-race finding, applied to a more severe bug.
+
+**Results**: the new BERR-mid-CAS2 test asserts *today's actual* (buggy) behavior —
+BIU-level fault detection still fires (`cg_eu_berr_raw` pulses), but `eu_busy` stays
+stuck and `exc_active` is never seen — so `make test` stays green while the gap stays
+visible for a dedicated future phase. `make test` 34/34, `make cosim_grp` 8/8
+(testbench-only change, no RTL touched this phase).
+
+---
+
+## Phase 107 — Back-to-back FSM composition + wait-states on FSM beats
+
+**Why**: item (4) of the Phase 105 follow-up list — the last of the four originally
+agreed items.
+
+**T4a (back-to-back FSMs)**: every existing Category B case pairs one FSM with an
+*ordinary* dependent instruction afterward, never FSM directly into FSM. Added
+`TAS (A0)` immediately followed by `MOVEM.L (A0)+,D0-D1` with no instruction (not even a
+MOVEA) between them — TAS never modifies `An`, so the two `ex_mem_stall` FSMs are truly
+adjacent at the opcode level. Also incidentally exercises write-then-read ordering across
+the boundary: TAS's write sets bit7 of the very longword MOVEM reads immediately
+afterward; D0 correctly reflects it (`0x80112233`, not a stale `0x00112233`). The naive
+bus-cycle-count expectation (TAS's own 2 + MOVEM's own 2 = 4, from each instruction's
+earlier standalone Phase-105 measurement) was wrong — actual is 8. Root cause: by this
+point in the file the MMU has been left enabled with a transparent TT0 since Phase 104's
+B-20/B-21 tests (deliberate, established behavior), and every access after that pays an
+extra ATC/TT0 lookup even though it never faults — 4 logical accesses × 2 = 8, exactly.
+Corrected the expected value with an inline comment rather than treating it as a bug;
+D0/D1/memory all independently confirm exactly one clean execution, not a duplicated one.
+
+**T4b (wait-states on FSM beats)**: Category D (Phase 103) only ever applied the
+`wait_states` knob to a single-beat simple producer. Re-ran TAS (2 bus beats: read then
+write) at `wait_states=0` vs `wait_states=3`, confirming the stretched DSACK composes
+correctly with *every* beat of a real multi-phase FSM (elapsed cycles measurably larger),
+not just an ordinary access.
+
+**Memory-indirect EA (the third sub-item): still deferred, no fix or new test.** Read
+`eu_seq.sv`'s decode closely enough to narrow Phase 103's vague "genuine encoding
+ambiguity" down to one specific, falsifiable hypothesis: `dec_memind_is_post` (pre- vs.
+post-indexed selection for `([bd,An],Xn,od)`) is driven by `fi_is_s` (`ext_data[6]`, the
+extension word's **Index-Suppress** bit), where the 68020 PRM defines pre/post-indexed
+selection via the **I/IS field's bit 2** (`fi_iis[2]`, a different bit entirely) instead
+— a plausible real decode bug, not just a vague documentation gap. Left unfixed: the
+Harte corpus is 68000-captured (confirmed elsewhere in this project) and has zero
+coverage of this 68020+-only addressing mode, so there is no empirical oracle to verify
+a fix against without a dedicated Musashi-cosim investigation (Musashi does implement
+68020 addressing modes; Harte does not).
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8. This closes the 4-item follow-up
+list from Phase 104 — items (1)-(4) all addressed (2 with real RTL fixes verified
+end-to-end, 2 with severe/plausible bugs thoroughly root-caused and deliberately
+deferred to dedicated future phases rather than rushed).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
