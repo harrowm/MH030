@@ -926,6 +926,141 @@ module stall_fsm_tb;
             check("INT-mid-CAS2: interrupt handler ran and RTE'd back (D6=12345)", u_top.u_eu.u_rf.d_reg[6] === 32'd12345);
         end
 
+        // -----------------------------------------------------------------
+        // Task #3 (post-Phase-104 follow-up list): BERR arriving mid-FSM —
+        // does a sustained bus error partway through a locked CAS2 sequence
+        // produce a clean Bus Error exception, or does it corrupt/hang the
+        // FSM? Investigated by direct RTL tracing (temporary $display
+        // probes of berr_n/eu_berr/cg_eu_berr_raw/biu_cache_if's own
+        // `state`/mo_state, since removed) before writing this permanent
+        // test, because the very first version (BERR held for exactly one
+        // cycle, mirroring biu_tb.sv's own isolated P4-2 BERR-abort unit
+        // test pattern) gave a misleadingly clean result: D5/D6 both
+        // completed normally, no hang. Holding berr_n continuously
+        // asserted (rather than a single-cycle pulse) instead of a clean
+        // exception uncovered a **real, severe, previously-undiscovered
+        // RTL bug spanning several files**, root-caused as follows:
+        //
+        //   1. biu_cycle_gen.sv correctly detects the fault and pulses its
+        //      raw eu_berr signal once per retry attempt (confirmed via
+        //      trace: cg_eu_berr_raw toggles on a ~32-cycle cadence for as
+        //      long as berr_n stays asserted) — the BIU's own fault
+        //      *detection* is solid, matching what biu_tb.sv's isolated
+        //      P4-2/P4-3 unit tests already established.
+        //   2. **CAS2 itself has no berr signaling path at all.** Unlike
+        //      MOVEM/MOVEP (which share biu_multiop_fsm.sv's generic
+        //      eu_mo_req/eu_mo_ack/eu_mo_berr trio — that module has the
+        //      identical class of bug: MO_CYCING only transitions on
+        //      `sf_eu_ack`, no `sf_eu_berr` arm at all, and although its
+        //      own `eu_mo_berr` *output* does correctly pulse
+        //      (`assign eu_mo_berr = sf_eu_berr && (mo_state==MO_CYCING)`),
+        //      nothing consumes it, so mo_state sits in MO_CYCING forever),
+        //      CAS2 has its own dedicated 4-cycle datapath directly in
+        //      biu_cycle_gen.sv (m68030_biu.sv's port list has
+        //      `eu_cas2_req`/`eu_cas2_ack` but no `eu_cas2_berr` at all —
+        //      confirmed by grep, not an oversight in this write-up). So
+        //      CAS2 doesn't even get as far as "detects the fault but
+        //      can't act on it" — there is structurally no wire for it to
+        //      find out a fault happened, an even more severe instance of
+        //      the same bug class.
+        //   3. **biu_cache_if.sv has the identical bug** for ordinary
+        //      (non-FSM) EU reads/writes: its CI_D_MISS/CI_WRITE/CI_FILL_*
+        //      states also only transition on `sf_ack_rise`; the `sf_berr`
+        //      input (wired in, `rtl/m68030_biu.sv:480`) is declared but
+        //      never read anywhere in the module. `m68030_biu.sv:678`'s own
+        //      comment even flags half of this: `// eu_berr routed direct
+        //      from cycle_gen (cache_if.eu_berr is always 0)` — a known,
+        //      partial workaround (routes the *plain* eu_berr output
+        //      around the dead cache_if.eu_berr) that never actually fixed
+        //      the underlying hang, since eu_seq.sv's own `mem_berr` input
+        //      is separately documented as ignored (see below).
+        //   4. Even if either FSM correctly aborted, **m68030_exc.sv's
+        //      bus_err_req is wired only from `ifu_bus_err`**
+        //      (m68030_top.sv:447) — an EU-side fault has no path to the
+        //      exception controller at all today. `m68030_biu` already
+        //      computes everything needed for a correct frame (frame
+        //      format $9/$A/$B, SSW, fault address/data, via
+        //      biu_exc_capture) but the aggregate `exc_frame_valid` output
+        //      is wired to a top-level net that is never read anywhere
+        //      (`fault_valid_biu` likewise) — both confirmed dangling via
+        //      grep, not just untested.
+        //   5. A real fix additionally needs a sticky-to-pulse conversion:
+        //      both `fault_valid` (biu_cycle_gen) and `frame_valid`
+        //      (biu_exc_capture) are deliberately latched "until reset"
+        //      (each module's own comment, matching BIU-090) so the frame
+        //      data stays stable throughout the whole EXC_PUSH sequence —
+        //      wiring either directly into bus_err_req would permanently
+        //      lock the priority encoder into Bus Error after the *first*
+        //      fault ever seen. m68030_ifu.sv's own `bus_err_r` already
+        //      solves this correctly (clears on `pc_wr_en`, the same pulse
+        //      the exception controller issues when it finally loads the
+        //      handler PC) — the EU-side fix needs the identical pattern,
+        //      not currently present anywhere for the EU path.
+        //
+        // Given the fix spans biu_cache_if.sv, biu_multiop_fsm.sv (and
+        // likely biu_burst_ctrl.sv/coprocessor paths, not individually
+        // re-checked here), m68030_biu.sv's eu_berr wiring, and
+        // m68030_top.sv/m68030_exc.sv's bus_err_req + fault_addr muxing —
+        // plus a full Harte re-verification once touched, since cache_if
+        // is on every single EU/IFU memory access — this is deliberately
+        // root-caused and documented here rather than fixed in this same
+        // pass. This test asserts *today's actual* (buggy) behavior so
+        // `make test` stays green and the gap stays visible for a
+        // dedicated future phase, matching the project's established
+        // "document, don't silently drop" convention (see e.g. the
+        // TRAP/Address-Error frame-width divergence in plan.md Phases
+        // 99-100, or the dispatch-race finding earlier in this same file).
+        // -----------------------------------------------------------------
+        $display("=== BERR mid-CAS2 sequence ===");
+        begin
+            int t, dd0;
+            logic saw_biu_berr, injected3;
+            rom[16'h1C00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+            rom[16'h1C04/4] = {16'h3C00, MOVEA_L_IMM_A1};
+            rom[16'h1C08/4] = {16'h0000, 16'h3C04};
+            rom[16'h1C0C/4] = {CAS2_L, CAS2_EXT1};
+            rom[16'h1C10/4] = {CAS2_EXT2, CLR_L_D5};
+            rom[16'h1C14/4] = {ADDI_L_D5, 16'h0000};
+            rom[16'h1C18/4] = {16'd777, NOP_OP};
+            saw_biu_berr = 1'b0;
+            injected3 = 1'b0;
+            dd0 = data_ds_count;
+            for (t = 0; t < 12000; t++) begin
+                @(posedge clk_4x); #1;
+                if (!injected3 && data_ds_count != dd0) begin
+                    injected3 = 1'b1;
+                    berr_n = 1'b0;   // sustained fault — never deasserted
+                end
+                // CAS2 has its own dedicated 4-cycle datapath directly in
+                // biu_cycle_gen.sv (eu_cas2_req/eu_cas2_ack) — unlike
+                // MOVEM/MOVEP (which go through biu_multiop_fsm.sv's
+                // generic eu_mo_req/eu_mo_ack/eu_mo_berr), CAS2 has **no
+                // berr output of its own at all** (grepped m68030_biu.sv's
+                // full port list: eu_cas2_ack exists, eu_cas2_berr does
+                // not) — an even more severe instance of the same bug
+                // class, so this watches the shared BIU-internal raw fault
+                // signal instead (cg_eu_berr_raw, the same one that also
+                // drives the misleading top-level eu_berr per the finding
+                // above) to confirm the BIU layer itself still detects the
+                // fault even though CAS2 has no way to be told about it.
+                if (u_top.u_biu.cg_eu_berr_raw) saw_biu_berr = 1'b1;
+            end
+            berr_n = 1'b1;
+            check("BERR-mid-CAS2: injected mid-sequence", injected3);
+            check("BERR-mid-CAS2: BIU layer still detects the fault (cg_eu_berr_raw pulsed) even though CAS2 has no berr output to receive it",
+                  saw_biu_berr);
+            // KNOWN GAP (see comment above): today, biu_multiop_fsm.sv's
+            // mo_state never leaves MO_CYCING on a berr, so the FSM hangs
+            // and no Bus Error exception is ever taken. These two checks
+            // document that current (incorrect) behavior; once the fix
+            // above lands, they should flip to eu_busy===0 and
+            // exc_active===1 having been seen, with a proper frame pushed.
+            check("BERR-mid-CAS2: KNOWN GAP - EU pipeline left stalled (eu_busy stuck, no recovery)",
+                  u_top.eu_busy === 1'b1);
+            check("BERR-mid-CAS2: KNOWN GAP - no Bus Error exception was ever taken",
+                  u_top.exc_active === 1'b0);
+        end
+
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
