@@ -165,7 +165,55 @@ module stall_fsm_tb;
     localparam ADDI_L_D2      = 16'h0682;
     localparam ADDI_L_D3      = 16'h0683;
     localparam ADDI_L_D4      = 16'h0684;
+    localparam CLR_L_D5       = 16'h4285;
+    localparam ADDI_L_D5      = 16'h0685;
     localparam NOP_OP         = 16'h4E71;
+    // CAS.L Dc,Du,(A0): opcode 0000_111_0_11_010_000 (f_dn=111=long,
+    // f_mode=010=(An)) per eu_seq.sv's dec_is_cas block. Ext word:
+    // [8:6]=Dc(compared, ->D1=001), [2:0]=Du(written on match, ->D2=010).
+    localparam CAS_L_D1D2_A0  = 16'h0ED0;
+    localparam CAS_EXT        = 16'h0042;
+    // CAS2.L: opcode 0x0EFC (f_dn=111, f_mode/f_reg=111/100), per the exact
+    // ext-word bit layout documented at eu_seq.sv's dec_is_cas2 block:
+    //   ext1 (ext_data[31:16]): [14:12]=Dc2, [10:8]=Du2, [3]=Rn2_an, [2:0]=Rn2
+    //   ext2 (ext_data[15:0]):  [14:12]=Dc1, [10:8]=Du1, [3]=Rn1_an, [2:0]=Rn1
+    // Using Rn1=A0, Rn2=A1, Dc1=D1, Du1=D2, Dc2=D3, Du2=D4.
+    localparam CAS2_L         = 16'h0EFC;
+    localparam CAS2_EXT1      = 16'h3409;  // Dc2=D3,Du2=D4,Rn2_an=1,Rn2=A1
+    localparam CAS2_EXT2      = 16'h1208;  // Dc1=D1,Du1=D2,Rn1_an=1,Rn1=A0
+    localparam ADDI_L_D1      = 16'h0681;
+    // MOVEP.L D1,(d16,A0) store form: 0000 DDD1 dir siz 001 AAA per
+    // eu_seq.sv's dec_is_movep block. f_dn=D1(001), f_dir=1(fixed for
+    // MOVEP), f_ss=11(store=1,long=1), f_mode=001(fixed), f_reg=A0(000).
+    localparam MOVEP_L_D1_A0  = 16'h03C8;
+    // MOVE16 (A0)+,(A1)+ form 00: group 1111, f_dn=001(cpid), f_mode=001
+    // (form-00 selector), f_reg=A0(src). Ext word [14:12]=Am(dst)=A1.
+    localparam MOVE16_A0P_A1P = 16'hF208;
+    localparam MOVE16_EXT     = 16'h1000;  // Am=A1 at ext[14:12]
+    // Predecrement-memory-form FSM instructions, all "1<grp> Ax 1 <ss> 001 Ay":
+    // ADDX.L -(A1),-(A0): group=1101, Ax=A0(000), ss=10(long), Ay=A1(001).
+    localparam ADDX_L_A1_A0   = 16'hD189;
+    // ABCD -(A1),-(A0): group=1100, Ax=A0, ss=00(fixed), Ay=A1.
+    localparam ABCD_A1_A0     = 16'hC109;
+    // PACK -(A1),-(A0),#0: group=1000, Ax=A0, ss=01(PACK), Ay=A1; #adj ext=0.
+    localparam PACK_A1_A0     = 16'h8149;
+    // BFINS D1,(A0){8:8}: group 1110, f_dn=111(bitfield marker+BFINS op),
+    // f_dir=1, f_ss=11(fixed), f_mode=010=(An), f_reg=A0(000).
+    localparam BFINS_D1_A0    = 16'hEFD0;
+    localparam BFINS_EXT      = 16'h1208;  // Dn=D1, offset=8 (imm), width=8 (imm)
+    // CMP2.L (A0),D1: group 0000, f_dn=010(long), f_dir=0, f_ss=11(fixed),
+    // f_mode=010=(An), f_reg=A0(000). Ext: D/A=0(Dn), Rn=D1(001), bit11=0(CMP2 not CHK2).
+    localparam CMP2_L_A0_D1   = 16'h04D0;
+    localparam CMP2_EXT       = 16'h1000;
+    // MOVE.L (A0),(A1): both src and dst memory-indirect.
+    localparam MOVE_L_A0_A1   = 16'h2290;
+    localparam MOVEA_L_IMM_A7 = 16'h2E7C;
+    localparam RTR_OP         = 16'h4E77;
+    localparam RTE_OP         = 16'h4E73;
+    localparam RESET_OP       = 16'h4E70;
+    // MOVEM.L D0/D1,-(A0): store form, mask bit15=D0,bit14=D1 (predecrement
+    // mask order is reversed from the increment form used in B-2).
+    localparam MOVEM_L_PREDEC_A0 = 16'h48E0;
 
     // -------------------------------------------------------------------
     // Checks
@@ -327,6 +375,209 @@ module stall_fsm_tb;
         rom[16'h0708/4] = {MOVE_L_A0_D0, ADD_L_D0_D1};
         rom[16'h2600/4] = 32'h0000_000D;
 
+        // -----------------------------------------------------------------
+        // B-5: CAS.L D1,D2,(A0) — single-address atomic compare-and-swap.
+        // Not checking the CAS's own compare/write result here (Harte
+        // already covers CAS functional correctness exhaustively) — only
+        // that decode correctly resumes with an unrelated dependent instr.
+        // -----------------------------------------------------------------
+        // 0x0800: MOVEA.L #0x2700,A0
+        rom[16'h0800/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0804/4] = {16'h2700, CAS_L_D1D2_A0};
+        // 0x0808: CAS ext word ; CLR.L D5
+        rom[16'h0808/4] = {CAS_EXT, CLR_L_D5};
+        // 0x080C: ADDI.L #555,D5 (unrelated dependent instr)
+        rom[16'h080C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0810/4] = {16'd555, NOP_OP};
+
+        // -----------------------------------------------------------------
+        // B-6: CAS2.L (Dc1:Dc2,Du1:Du2,(A0):(A1)) — 4-phase dual-address
+        // atomic (the most complex ex_mem_stall FSM: bus_lock held across
+        // all 4 phases without releasing the bus). Same "decode resumes
+        // correctly" check as CAS, not re-verifying CAS2's own semantics.
+        // -----------------------------------------------------------------
+        // 0x0900: MOVEA.L #0x2700,A0 ; MOVEA.L #0x2704,A1
+        rom[16'h0900/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0904/4] = {16'h2700, MOVEA_L_IMM_A1};
+        rom[16'h0908/4] = {16'h0000, 16'h2704};
+        // 0x090C: CAS2.L opcode ; ext1
+        rom[16'h090C/4] = {CAS2_L, CAS2_EXT1};
+        // 0x0910: ext2 ; CLR.L D5
+        rom[16'h0910/4] = {CAS2_EXT2, CLR_L_D5};
+        // 0x0914: ADDI.L #666,D5 (unrelated dependent instr)
+        rom[16'h0914/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0918/4] = {16'd666, NOP_OP};
+
+        // -----------------------------------------------------------------
+        // B-7: MOVEP.L D1,(0x0010,A0) — byte-interleaved store (stride 2).
+        // Checked directly (not just "decode resumed") since the byte
+        // interleave is a distinctive, easy-to-verify pattern.
+        // -----------------------------------------------------------------
+        // 0x0A00: MOVEA.L #0x2800,A0
+        rom[16'h0A00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0A04/4] = {16'h2800, CLR_L_D1};
+        // 0x0A08: ADDI.L #0xAABBCCDD,D1
+        rom[16'h0A08/4] = {ADDI_L_D1, 16'hAABB};
+        rom[16'h0A0C/4] = {16'hCCDD, MOVEP_L_D1_A0};
+        // 0x0A10: MOVEP ext (d16=0x0010) ; CLR.L D5
+        rom[16'h0A10/4] = {16'h0010, CLR_L_D5};
+        // 0x0A14: ADDI.L #777,D5 (unrelated dependent instr)
+        rom[16'h0A14/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0A18/4] = {16'd777, NOP_OP};
+
+        // -----------------------------------------------------------------
+        // B-8: MOVE16 (A0)+,(A1)+ — 16-byte STERM burst block move.
+        // -----------------------------------------------------------------
+        // 0x0B00: MOVEA.L #0x2900,A0 ; MOVEA.L #0x2A00,A1
+        rom[16'h0B00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0B04/4] = {16'h2900, MOVEA_L_IMM_A1};
+        rom[16'h0B08/4] = {16'h0000, 16'h2A00};
+        // 0x0B0C: MOVE16 opcode ; ext (Am=A1)
+        rom[16'h0B0C/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
+        // 0x0B10: CLR.L D5 ; ADDI.L D5 opcode
+        rom[16'h0B10/4] = {CLR_L_D5, ADDI_L_D5};
+        // 0x0B14: ext MSW=0 ; ext LSW=888 (unrelated dependent instr)
+        rom[16'h0B14/4] = {16'h0000, 16'd888};
+        // Source data for the 16-byte block.
+        rom[16'h2900/4] = 32'h1111_1111;
+        rom[16'h2904/4] = 32'h2222_2222;
+        rom[16'h2908/4] = 32'h3333_3333;
+        rom[16'h290C/4] = 32'h4444_4444;
+
+        // -----------------------------------------------------------------
+        // B-9/B-10/B-11: predecrement-memory-form FSMs — ADDX.L, ABCD, PACK
+        // -(Ay),-(Ax). Same "decode resumes correctly" idiom as CAS/CAS2/
+        // CMPM (Harte already covers each instruction's own arithmetic
+        // exhaustively); each gets its own fresh scratch-memory region so
+        // the 3-phase predecrement (read Ay, read Ax, write) never
+        // underflows into another test's data.
+        // -----------------------------------------------------------------
+        // B-9: ADDX.L -(A1),-(A0) @ 0x0C00
+        rom[16'h0C00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0C04/4] = {16'h2E04, MOVEA_L_IMM_A1};
+        rom[16'h0C08/4] = {16'h0000, 16'h2D04};
+        rom[16'h0C0C/4] = {ADDX_L_A1_A0, CLR_L_D5};
+        rom[16'h0C10/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0C14/4] = {16'd901, NOP_OP};
+
+        // B-10: ABCD -(A1),-(A0) @ 0x0D00
+        rom[16'h0D00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0D04/4] = {16'h2E10, MOVEA_L_IMM_A1};
+        rom[16'h0D08/4] = {16'h0000, 16'h2D10};
+        rom[16'h0D0C/4] = {ABCD_A1_A0, CLR_L_D5};
+        rom[16'h0D10/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0D14/4] = {16'd902, NOP_OP};
+
+        // B-11: PACK -(A1),-(A0),#0 @ 0x0E00
+        rom[16'h0E00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0E04/4] = {16'h2E20, MOVEA_L_IMM_A1};
+        rom[16'h0E08/4] = {16'h0000, 16'h2D20};
+        rom[16'h0E0C/4] = {PACK_A1_A0, 16'h0000};
+        rom[16'h0E10/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h0E14/4] = {16'h0000, 16'd903};
+
+        // -----------------------------------------------------------------
+        // B-12: BFINS D1,(A0){8:8} — memory bitfield insert.
+        // -----------------------------------------------------------------
+        rom[16'h0F00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0F04/4] = {16'h2F00, BFINS_D1_A0};
+        rom[16'h0F08/4] = {BFINS_EXT, CLR_L_D5};
+        rom[16'h0F0C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0F10/4] = {16'd904, NOP_OP};
+
+        // -----------------------------------------------------------------
+        // B-13: CMP2.L (A0),D1 — bounds check (CMP2 form, not CHK2, so it
+        // can't trap and redirect execution out from under this test).
+        // -----------------------------------------------------------------
+        rom[16'h1000/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1004/4] = {16'h3000, CMP2_L_A0_D1};
+        rom[16'h1008/4] = {CMP2_EXT, CLR_L_D5};
+        rom[16'h100C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1010/4] = {16'd905, NOP_OP};
+
+        // -----------------------------------------------------------------
+        // B-14: MOVE.L (A0),(A1) — both source and destination are memory
+        // EAs. Checked directly (a plain longword copy is easy to verify).
+        // -----------------------------------------------------------------
+        rom[16'h1100/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1104/4] = {16'h3100, MOVEA_L_IMM_A1};
+        rom[16'h1108/4] = {16'h0000, 16'h3200};
+        rom[16'h110C/4] = {MOVE_L_A0_A1, CLR_L_D5};
+        rom[16'h1110/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1114/4] = {16'd906, NOP_OP};
+        rom[16'h3100/4] = 32'hDEAD_BEEF;
+
+        // -----------------------------------------------------------------
+        // B-15: RTR — 2-phase stack read (CCR word, then PC longword).
+        // Frame is hand-constructed in memory (not pushed by a prior
+        // instruction in this test) since RTR expects a pre-existing
+        // frame; restored PC points straight at the dependent instruction,
+        // so a successful RTR IS what makes the dependent instruction run.
+        // -----------------------------------------------------------------
+        rom[16'h1200/4] = {MOVEA_L_IMM_A7, 16'h0000};
+        rom[16'h1204/4] = {16'h3302, RTR_OP};
+        // A7=0x3302 (even, a legal SP — RTR/RTS don't require SP to be
+        // longword-aligned, only word-aligned) rather than a round 4-byte-
+        // aligned address: this makes RTR's *own* CCR(word)+PC(long) frame
+        // land with the PC portion naturally 4-byte aligned at 0x3304 (SP+2)
+        // instead of spanning two words at a misaligned address — this
+        // testbench's simplified inline memory model (copied from
+        // cosim_grp_tb.sv, `rd_word = rom[ext_a[13:2]]`) always serves a
+        // full aligned word regardless of the requested address's low bits,
+        // so a genuinely misaligned longword read that should span two
+        // different rom[] slots instead silently re-reads the same slot
+        // twice. A real 68030 BIU splits a misaligned access into two
+        // separate bus cycles at two different addresses (exercised and
+        // confirmed working via Harte's own misaligned-access coverage) —
+        // this is a testbench memory-model limitation, not an RTL gap, so
+        // side-stepping it here (a legal SP choice, not a workaround for a
+        // real restriction) is the right fix rather than deepening the
+        // model to handle arbitrary misalignment.
+        // CCR word at 0x3302 (lower half of this slot); PC at 0x3304
+        // (a separate, 4-byte-aligned slot) = 0x1208.
+        rom[16'h3300/4] = {16'h0000, 16'h0000};   // upper half unused (before SP)
+        rom[16'h3304/4] = 32'h0000_1208;
+        // 0x1208: dependent instruction (only reached if RTR redirected here)
+        rom[16'h1208/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h120C/4] = {16'h0000, 16'd907};
+
+        // -----------------------------------------------------------------
+        // B-16: RTE — format-$0 frame (format/vector word + SR, then PC;
+        // see plan.md Phase 99 for why 68030 RTE always expects a leading
+        // format word). SR restored with S=1 so supervisor mode (and A7's
+        // SSP alias, which every other test in this file relies on)
+        // continues unaffected for the tests that follow.
+        // -----------------------------------------------------------------
+        rom[16'h1300/4] = {MOVEA_L_IMM_A7, 16'h0000};
+        rom[16'h1304/4] = {16'h3400, RTE_OP};
+        // Frame at 0x3400: {format=0,vector=0}/SR=0x2000 longword, then PC
+        // longword (4-byte aligned, no misalignment this time).
+        rom[16'h3400/4] = {16'h0000, 16'h2000};
+        rom[16'h3404/4] = 32'h0000_1308;
+        // 0x1308: dependent instruction
+        rom[16'h1308/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h130C/4] = {16'h0000, 16'd908};
+
+        // -----------------------------------------------------------------
+        // B-17: RESET — pulses RSTOUT for ~2047 internal ticks (Phase-
+        // documented) without halting the CPU; the following instruction
+        // must still execute once the pulse ends.
+        // -----------------------------------------------------------------
+        rom[16'h1400/4] = {RESET_OP, CLR_L_D5};
+        rom[16'h1404/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1408/4] = {16'd909, NOP_OP};
+
+        // -----------------------------------------------------------------
+        // B-18: MOVEM.L D0/D1,-(A0) — multi-beat register-list STORE (the
+        // write-side companion to B-2's load form; predecrement mask order
+        // is reversed, per MOVEM_L_PREDEC_A0's comment).
+        // -----------------------------------------------------------------
+        rom[16'h1500/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1504/4] = {16'h3510, MOVEM_L_PREDEC_A0};
+        rom[16'h1508/4] = {16'hC000, CLR_L_D5};
+        rom[16'h150C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1510/4] = {16'd910, NOP_OP};
+
         // ----- run to completion, checking each case in turn -----
         run_and_check("B-1: TAS dependent instr ran (D2=111)", 2, 32'd111, 3000);
         check8("B-1: TAS set bit7 of tested byte", rom[16'h2000/4][31:24], 8'hCE);
@@ -366,6 +617,39 @@ module stall_fsm_tb;
             check("D-3 vs D-1: wait states measurably lengthen the cycle",
                   elapsed5 > elapsed0 + 3);
         end
+
+        run_and_check("B-5: CAS dependent instr ran (D5=555)", 5, 32'd555, 3000);
+
+        run_and_check("B-6: CAS2 dependent instr ran (D5=666)", 5, 32'd666, 3000);
+
+        run_and_check("B-7: MOVEP dependent instr ran (D5=777)", 5, 32'd777, 3000);
+        check8("B-7: MOVEP byte0 (D1[31:24]) at A0+16",   rom[16'h2810/4][31:24], 8'hAA);
+        check8("B-7: MOVEP byte1 (D1[23:16]) at A0+18",   rom[16'h2810/4][15:8],  8'hBB);
+        check8("B-7: MOVEP byte2 (D1[15:8]) at A0+20",    rom[16'h2814/4][31:24], 8'hCC);
+        check8("B-7: MOVEP byte3 (D1[7:0]) at A0+22",     rom[16'h2814/4][15:8],  8'hDD);
+
+        run_and_check("B-8: MOVE16 dependent instr ran (D5=888)", 5, 32'd888, 3000);
+        check32("B-8: MOVE16 beat0 copied", rom[16'h2A00/4], 32'h1111_1111);
+        check32("B-8: MOVE16 beat1 copied", rom[16'h2A04/4], 32'h2222_2222);
+        check32("B-8: MOVE16 beat2 copied", rom[16'h2A08/4], 32'h3333_3333);
+        check32("B-8: MOVE16 beat3 copied", rom[16'h2A0C/4], 32'h4444_4444);
+        check32("B-8: MOVE16 A0 post-increment (+16)", u_top.u_eu.u_rf.a_reg[0], 32'h0000_2910);
+        check32("B-8: MOVE16 A1 post-increment (+16)", u_top.u_eu.u_rf.a_reg[1], 32'h0000_2A10);
+
+        run_and_check("B-9: ADDX.L dependent instr ran (D5=901)", 5, 32'd901, 3000);
+        run_and_check("B-10: ABCD dependent instr ran (D5=902)", 5, 32'd902, 3000);
+        run_and_check("B-11: PACK dependent instr ran (D5=903)", 5, 32'd903, 3000);
+
+        run_and_check("B-12: BFINS dependent instr ran (D5=904)", 5, 32'd904, 3000);
+        run_and_check("B-13: CMP2 dependent instr ran (D5=905)", 5, 32'd905, 3000);
+        run_and_check("B-14: MOVE mem-mem dependent instr ran (D5=906)", 5, 32'd906, 3000);
+        check32("B-14: MOVE.L (A0),(A1) copied", rom[16'h3200/4], 32'hDEAD_BEEF);
+
+        run_and_check("B-15: RTR redirected to dependent instr (D5=907)", 5, 32'd907, 8000);
+        run_and_check("B-16: RTE redirected to dependent instr (D5=908)", 5, 32'd908, 8000);
+        run_and_check("B-17: RESET dependent instr ran (D5=909)", 5, 32'd909, 8000);
+        run_and_check("B-18: MOVEM store dependent instr ran (D5=910)", 5, 32'd910, 8000);
+        check32("B-18: MOVEM store A0 post-decrement (-8)", u_top.u_eu.u_rf.a_reg[0], 32'h0000_3508);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
