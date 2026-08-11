@@ -214,6 +214,20 @@ module stall_fsm_tb;
     // MOVEM.L D0/D1,-(A0): store form, mask bit15=D0,bit14=D1 (predecrement
     // mask order is reversed from the increment form used in B-2).
     localparam MOVEM_L_PREDEC_A0 = 16'h48E0;
+    // MMU (cpid=0) instructions: all share opcode 1111_000_dir_ss_mode_reg
+    // (group F, f_dn=000 selects the MMU coprocessor) — the specific
+    // sub-operation is entirely carried in the extension word's
+    // mmu_op_type field (ext[15:13]), not the opcode word itself, per
+    // eu_seq.sv:398 and its dec_is_pflush/dec_is_ptest/dec_is_pmove64
+    // decode block.
+    localparam PFLUSHA_OP     = 16'hF000;  // f_mode/f_reg=0 (no EA needed)
+    localparam PFLUSHA_EXT    = 16'h2000;  // op_type=001(PFLUSH), sub_mode=010(all)
+    localparam PTEST_A0_OP    = 16'hF010;  // f_mode=010=(An), f_reg=A0
+    localparam PTEST_EXT      = 16'h8000;  // op_type=100(PTEST)
+    localparam PMOVE_A0_OP    = 16'hF010;  // same opcode word as PTEST —
+    localparam PMOVE_CRP_EXT  = 16'h4800;  // op_type=010(PMOVE),sub=100(CRP),dr=0(load)
+    localparam PMOVE_TC_EXT   = 16'h4400;  // op_type=010(PMOVE),sub=010(TC),dr=0(load)
+    localparam PMOVE_TT0_EXT  = 16'h4200;  // op_type=010(PMOVE),sub=001(TT0),dr=0(load)
 
     // -------------------------------------------------------------------
     // Checks
@@ -578,6 +592,49 @@ module stall_fsm_tb;
         rom[16'h150C/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h1510/4] = {16'd910, NOP_OP};
 
+        // -----------------------------------------------------------------
+        // B-19: PFLUSHA — flush entire ATC, no EA/bus operand needed.
+        // -----------------------------------------------------------------
+        rom[16'h1600/4] = {PFLUSHA_OP, PFLUSHA_EXT};
+        rom[16'h1604/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1608/4] = {16'h0000, 16'd911};
+
+        // -----------------------------------------------------------------
+        // B-20: PTEST (A0). m68030_mmu.sv's PTEST FSM only enters its walk
+        // state when tc_e is set (`ptest_req && tc_e`) — with the MMU left
+        // disabled (TC.E=0, this file's default state, same as every prior
+        // test), eu_ptest_ack never fires and the FSM hangs forever. So
+        // this test first PMOVEs a TC value with E=1 and a TT0 configured
+        // fully transparent (LAM=0xFF wildcards every address bit, so every
+        // VA passes through unmodified) — same "avoid a real table walk"
+        // technique as biu_tb.sv's own P6-6 TT0-bypass test, just widened
+        // to match any VA rather than one specific range — so PTEST
+        // resolves immediately without needing any actual page-table data.
+        // -----------------------------------------------------------------
+        rom[16'h1700/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1704/4] = {16'h3800, PMOVE_A0_OP};     // PMOVE (A0),TC
+        rom[16'h1708/4] = {PMOVE_TC_EXT, MOVEA_L_IMM_A0};
+        rom[16'h170C/4] = {16'h0000, 16'h3804};
+        rom[16'h1710/4] = {PMOVE_A0_OP, PMOVE_TT0_EXT}; // PMOVE (A0),TT0
+        rom[16'h1714/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1718/4] = {16'h3700, PTEST_A0_OP};
+        rom[16'h171C/4] = {PTEST_EXT, CLR_L_D5};
+        rom[16'h1720/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1724/4] = {16'd912, NOP_OP};
+        rom[16'h3800/4] = 32'h8000_0000;  // TC: E=1, PS/IS/TIA/TIB/TIC=0
+        rom[16'h3804/4] = 32'h00FF_80E0;  // TT0: LAB=0,LAM=0xFF(any VA),E=1,FCM=any
+
+        // -----------------------------------------------------------------
+        // B-21: PMOVE (A0),CRP — 64-bit load, 2 bus cycles (hi word first).
+        // Same opcode word as PTEST (0xF010); the sub-operation is entirely
+        // carried in the extension word's mmu_op_type field.
+        // -----------------------------------------------------------------
+        rom[16'h1800/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1804/4] = {16'h3600, PMOVE_A0_OP};
+        rom[16'h1808/4] = {PMOVE_CRP_EXT, CLR_L_D5};
+        rom[16'h180C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1810/4] = {16'd913, NOP_OP};
+
         // ----- run to completion, checking each case in turn -----
         run_and_check("B-1: TAS dependent instr ran (D2=111)", 2, 32'd111, 3000);
         check8("B-1: TAS set bit7 of tested byte", rom[16'h2000/4][31:24], 8'hCE);
@@ -651,6 +708,16 @@ module stall_fsm_tb;
         run_and_check("B-18: MOVEM store dependent instr ran (D5=910)", 5, 32'd910, 8000);
         check32("B-18: MOVEM store A0 post-decrement (-8)", u_top.u_eu.u_rf.a_reg[0], 32'h0000_3508);
 
+        run_and_check("B-19: PFLUSHA dependent instr ran (D5=911)", 5, 32'd911, 3000);
+        run_and_check("B-20: PTEST dependent instr ran (D5=912)", 5, 32'd912, 3000);
+        // B-21 runs with the MMU now enabled (B-20 set TC.E=1) — every bus
+        // access, including plain instruction fetches, now goes through an
+        // ATC/TT0 lookup first. TT0 is configured fully transparent (no
+        // faults, no real table walk), but the lookup itself still costs
+        // real cycles per access, so this needs a much larger budget than
+        // every earlier MMU-disabled test in this file.
+        run_and_check("B-21: PMOVE CRP dependent instr ran (D5=913)", 5, 32'd913, 20000);
+
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
@@ -660,7 +727,7 @@ module stall_fsm_tb;
     end
 
     initial begin
-        #500000;
+        #800000;
         $display("FAIL  Hard timeout");
         $finish;
     end
