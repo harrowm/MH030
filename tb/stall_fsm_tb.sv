@@ -68,10 +68,27 @@ module stall_fsm_tb;
 
     wire [31:0] rd_word = (ext_a[13:2] < MEM_WORDS) ? rom[ext_a[13:2]] : 32'hDEAD_DEAD;
 
-    logic ds_active_r;
+    // wait_states injects N extra clk_4x-cycle-granular... actually S-state
+    // cycles of DSACK latency on top of the baseline 1-cycle ack, for
+    // Category D (wait-state + hazard composition). 0 reproduces the
+    // original fixed 1-cycle-latency behavior used by every other test in
+    // this file and by cosim_grp_tb.sv.
+    int wait_states = 0;
+
+    logic       ds_active_r;
+    logic [7:0] ws_cnt_r;
+    wire        ds_req = !ext_ds_n & !ext_as_n;
     always_ff @(posedge clk_4x or negedge rst_n) begin
-        if (!rst_n) ds_active_r <= 1'b0;
-        else        ds_active_r <= !ext_ds_n & !ext_as_n;
+        if (!rst_n) begin
+            ds_active_r <= 1'b0;
+            ws_cnt_r    <= 8'd0;
+        end else if (!ds_req) begin
+            ds_active_r <= 1'b0;
+            ws_cnt_r    <= 8'd0;
+        end else if (!ds_active_r) begin
+            if (ws_cnt_r >= wait_states[7:0]) ds_active_r <= 1'b1;
+            else                              ws_cnt_r    <= ws_cnt_r + 8'd1;
+        end
     end
 
     wire dsack0_n = ~ds_active_r;
@@ -139,6 +156,9 @@ module stall_fsm_tb;
     localparam MOVEM_L_A0P    = 16'h4CD8;  // MOVEM.L (A0)+,<mask ext word>
     localparam CMPM_B_A0P_A1P = 16'hB109;  // CMPM.B (A0)+,(A1)+
     localparam BCHG_D2_A0     = 16'h0550;  // BCHG D2,(A0)
+    localparam MOVE_L_A0_D0   = 16'h2010;  // MOVE.L (A0),D0
+    localparam CLR_L_D1       = 16'h4281;
+    localparam ADD_L_D0_D1    = 16'hD280;  // D1 = D1 + D0
     localparam CLR_L_D2       = 16'h4282;
     localparam CLR_L_D3       = 16'h4283;
     localparam CLR_L_D4       = 16'h4284;
@@ -184,6 +204,29 @@ module stall_fsm_tb;
             if (u_top.u_eu.u_rf.d_reg[reg_idx] === exp_val) begin saw_ack = 1'b1; break; end
         end
         check(name, saw_ack);
+    endtask
+
+    // Same as run_and_check, but also reports how many clk_4x edges elapsed
+    // — used by Category D to confirm a stretched (wait-stated) bus cycle
+    // genuinely composes with the downstream RAW hazard rather than the
+    // consumer racing ahead of a slow read.
+    task automatic run_and_check_timed(
+        input  string       name,
+        input  int          reg_idx,
+        input  logic [31:0] exp_val,
+        input  int          budget,
+        output int          elapsed
+    );
+        int t;
+        logic saw_ack;
+        saw_ack = 0;
+        elapsed = budget;
+        for (t = 0; t < budget; t++) begin
+            @(posedge clk_4x); #1;
+            if (u_top.u_eu.u_rf.d_reg[reg_idx] === exp_val) begin saw_ack = 1'b1; elapsed = t; break; end
+        end
+        check(name, saw_ack);
+        $display("INFO  %s: elapsed=%0d clk_4x cycles (wait_states=%0d)", name, elapsed, wait_states);
     endtask
 
     initial begin
@@ -258,6 +301,32 @@ module stall_fsm_tb;
         // rom[0x2300] left at default fill (0x4E71_4E71); top byte 0x4E =
         // 0b0100_1110 already has bit3 set, so BCHG clears it -> 0x46.
 
+        // -----------------------------------------------------------------
+        // Category D: DSACK wait-state stretching composed with a
+        // downstream RAW hazard. Same producer/consumer pair (MOVE.L
+        // (A0),D0 -> ADD.L D0,D1) run three times with wait_states=0,2,5 —
+        // if the consumer ever raced ahead of a slow read instead of
+        // correctly extending the stall to cover it, D1 would come back
+        // wrong (reading D0 before the real data arrived), not just slow.
+        // -----------------------------------------------------------------
+        // D-1 (wait_states=0) @ 0x0500
+        rom[16'h0500/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0504/4] = {16'h2400, CLR_L_D1};
+        rom[16'h0508/4] = {MOVE_L_A0_D0, ADD_L_D0_D1};
+        rom[16'h2400/4] = 32'h0000_0007;
+
+        // D-2 (wait_states=2) @ 0x0600
+        rom[16'h0600/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0604/4] = {16'h2500, CLR_L_D1};
+        rom[16'h0608/4] = {MOVE_L_A0_D0, ADD_L_D0_D1};
+        rom[16'h2500/4] = 32'h0000_0009;
+
+        // D-3 (wait_states=5) @ 0x0700
+        rom[16'h0700/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0704/4] = {16'h2600, CLR_L_D1};
+        rom[16'h0708/4] = {MOVE_L_A0_D0, ADD_L_D0_D1};
+        rom[16'h2600/4] = 32'h0000_000D;
+
         // ----- run to completion, checking each case in turn -----
         run_and_check("B-1: TAS dependent instr ran (D2=111)", 2, 32'd111, 3000);
         check8("B-1: TAS set bit7 of tested byte", rom[16'h2000/4][31:24], 8'hCE);
@@ -271,6 +340,32 @@ module stall_fsm_tb;
 
         run_and_check("B-4: BCHG dependent instr ran (D4=444)", 4, 32'd444, 3000);
         check8("B-4: BCHG toggled bit3 of tested byte", rom[16'h2300/4][31:24], 8'h46);
+
+        // Category D: wait_states set between test cases, well before (58+
+        // NOP instructions of margin) each one's own bus read actually
+        // occurs, so the change is guaranteed to take effect in time.
+        begin
+            int elapsed0, elapsed2, elapsed5;
+            wait_states = 0;
+            run_and_check_timed("D-1: wait_states=0, D1=7", 1, 32'd7, 3000, elapsed0);
+
+            wait_states = 2;
+            run_and_check_timed("D-2: wait_states=2, D1=9", 1, 32'd9, 3000, elapsed2);
+
+            wait_states = 5;
+            run_and_check_timed("D-3: wait_states=5, D1=13", 1, 32'd13, 3000, elapsed5);
+            wait_states = 0;
+
+            // Coarse composition sanity check: 5 injected wait states must
+            // measurably lengthen the observed cycle count relative to 0
+            // wait states (each wait state is 1 extra clk_4x tick here,
+            // not a full S-state, since this model isn't S-state-phased —
+            // see the wait_states comment above ds_active_r) — confirms the
+            // wait-state knob genuinely affects timing, not just that the
+            // functional result stayed correct by coincidence.
+            check("D-3 vs D-1: wait states measurably lengthen the cycle",
+                  elapsed5 > elapsed0 + 3);
+        end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
