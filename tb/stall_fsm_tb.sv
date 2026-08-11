@@ -1061,6 +1061,83 @@ module stall_fsm_tb;
                   u_top.exc_active === 1'b0);
         end
 
+        // -----------------------------------------------------------------
+        // Task #4a (post-Phase-104 follow-up list): back-to-back FSM
+        // composition — two *different* multi-cycle ex_mem_stall FSMs with
+        // no ordinary instruction between them, to check decode-holdoff
+        // correctly composes across an FSM-to-FSM transition (every
+        // Category B case so far pairs one FSM with a plain dependent
+        // instruction afterward, never FSM-then-FSM directly).
+        // TAS (A0) — an indivisible RMW lock — immediately followed by
+        // MOVEM.L (A0)+,D0-D1, reusing the *same* A0 with no MOVEA between
+        // them (TAS never modifies An), so the two FSMs are truly adjacent
+        // at the opcode level. Also incidentally checks write-then-read
+        // ordering across the boundary: TAS's write sets bit7 of the top
+        // byte of the very longword MOVEM reads immediately afterward, so
+        // a stale/racy read would show up as D0's top bit not reflecting
+        // the TAS write.
+        // -----------------------------------------------------------------
+        rom[16'h1D00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1D04/4] = {16'h3D00, TAS_A0};
+        rom[16'h1D08/4] = {MOVEM_L_A0P, 16'h0003};
+        rom[16'h1D0C/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1D10/4] = {16'h0000, 16'd444};
+        rom[16'h3D00/4] = 32'h0011_2233;  // top byte 0x00 -> TAS sets bit7 -> 0x80
+        rom[16'h3D04/4] = 32'h4455_6677;
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("T4a: back-to-back TAS->MOVEM dependent instr ran (D5=444)", 5, 32'd444, 4000);
+            c1 = data_ds_count;
+            // 4 logical accesses (TAS read, TAS write, MOVEM read x2) x 2,
+            // not x1: by this point in the file the MMU has been left
+            // enabled with a transparent TT0 since B-20/B-21 (Phase 104's
+            // own established, intentional behavior — every subsequent
+            // access pays an extra ATC/TT0 lookup even though it never
+            // faults or produces a real table walk). B-1/B-2's own
+            // standalone counts (2 each) were measured earlier in the
+            // file, before the MMU got enabled, so they don't apply here —
+            // this is a timing difference from already-documented MMU
+            // state, not a sign of a duplicated/corrupted sequence (D0/D1/
+            // memory below all confirm exactly one clean execution).
+            check32("T4a: TAS(2) + MOVEM(2) = 4 logical accesses x2 (MMU-enabled ATC lookup overhead) = 8 bus cycles",
+                    c1 - c0, 32'd8);
+            check32("T4a: MOVEM's D0 reflects TAS's write (top byte 0x80, not stale 0x00)",
+                    u_top.u_eu.u_rf.d_reg[0], 32'h8011_2233);
+            check32("T4a: MOVEM's D1 loaded correctly", u_top.u_eu.u_rf.d_reg[1], 32'h4455_6677);
+            check8("T4a: TAS itself set bit7 in memory", rom[16'h3D00/4][31:24], 8'h80);
+        end
+
+        // -----------------------------------------------------------------
+        // Task #4b: DSACK wait-states applied to an FSM instruction's own
+        // multi-beat bus cycles, not just Category D's single-beat simple
+        // producer. Reuses TAS (2 bus beats: read then write) with the
+        // existing global `wait_states` knob (already proven against
+        // mem_model's DSACK generation in Category D) — confirms a
+        // stretched bus cycle composes correctly with *every* beat of a
+        // multi-phase FSM, not just a single ordinary access.
+        // -----------------------------------------------------------------
+        rom[16'h1E00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1E04/4] = {16'h3E00, TAS_A0};
+        rom[16'h1E08/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1E0C/4] = {16'h0000, 16'd333};
+        rom[16'h3E00/4] = 32'h0000_0000;
+        rom[16'h1F00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1F04/4] = {16'h3F80, TAS_A0};
+        rom[16'h1F08/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1F0C/4] = {16'h0000, 16'd335};
+        rom[16'h3F80/4] = 32'h0000_0000;
+        begin
+            int elapsed0, elapsed3;
+            wait_states = 0;
+            run_and_check_timed("T4b-1: TAS wait_states=0, D5=333", 5, 32'd333, 4000, elapsed0);
+            wait_states = 3;
+            run_and_check_timed("T4b-2: TAS wait_states=3, D5=335", 5, 32'd335, 4000, elapsed3);
+            wait_states = 0;
+            check("T4b: wait states measurably lengthen a real FSM's own bus beats (not just a simple producer)",
+                  elapsed3 > elapsed0);
+        end
+
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
