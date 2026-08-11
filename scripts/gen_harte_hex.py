@@ -577,6 +577,34 @@ def get_operand_ea(test):
     if opcode in (0x4E70, 0x4E71, 0x4E73, 0x4E75, 0x4E76, 0x4E77):
         return None
 
+    # MOVEP (0000 ddd1 oo001 aaa, opmode oo: 00=word-read,01=long-read,
+    # 10=word-write,11=long-write): its fixed bits[5:3]="001" alias ea_mode=1
+    # ("An register direct, no memory operand") in the generic decode below,
+    # despite MOVEP *always* being memory-referencing — its addressing is a
+    # fixed (d16,An) form encoded outside the normal mode/reg field entirely.
+    # Without this explicit case, MOVEP's EA (and thus the "lands in our init
+    # code region" collision check) was never computed at all — found via a
+    # full-corpus retest (Phase 102) turning up 1 residual failure each in
+    # MOVEP.w/.l where the (d16,An) EA happened to land inside the harness's
+    # own init-code region, silently returning corrupted data instead of the
+    # test's own correctly-supplied bytes there (same shape as the Phase 99
+    # TRAP-vector collision and Phase 100 Address-Error-vector collision —
+    # this project's recurring "an operand address isn't range-checked
+    # against our own low-address init code" bug class).
+    if (opcode & 0xF138) == 0x0108:
+        movep_an  = opcode & 0x7
+        movep_d16 = rw(2)
+        if movep_d16 >= 0x8000:
+            movep_d16 -= 0x10000
+        an_val = ((ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp'])
+                  if movep_an == 7 else ini[f'a{movep_an}']) & 0xFFFFFFFF
+        movep_ea = (an_val + movep_d16) & 0xFFFFFFFF
+        # Byte-interleaved footprint: word touches [ea, ea+2], long touches
+        # [ea, ea+6] — both step by 2, matching the range(0,siz,2) convention
+        # can_run()'s overlap checks already use for word/long-sized EAs.
+        movep_is_long = (opcode >> 6) & 1
+        return movep_ea & 0xFFFFFF, (7 if movep_is_long else 3)
+
     f_group = (opcode >> 12) & 0xF
     f_dn    = (opcode >>  9) & 0x7
     f_dir   = (opcode >>  8) & 0x1
@@ -779,10 +807,18 @@ def can_run(test):
     # Misaligned EA: word or longword access to an odd address causes a 68000/68030
     # address error.  The reference sim then runs the exception handler, landing
     # final.pc at a random location — the test cannot be replayed in our harness.
+    #
+    # MOVEP is exempt: unlike a normal word/long transfer, it's semantically a
+    # sequence of individual BYTE accesses at EA, EA+2, EA+4, EA+6 — each one
+    # inherently byte-aligned, so an odd EA is completely legal and never
+    # faults (get_operand_ea() returns siz_bytes=3/7 for MOVEP purely to
+    # describe its footprint span for the init-region/runway overlap checks
+    # below, not as a real word/long access size).
+    is_movep = (opcode & 0xF138) == 0x0108
     ea_info = get_operand_ea(test)
     if ea_info is not None:
         ea, ea_siz = ea_info
-        if ea_siz >= 2 and (ea & 1):
+        if ea_siz >= 2 and (ea & 1) and not is_movep:
             return False, 'misaligned EA'
         # Check all addresses in the range (handles 24-bit wrap-around for MOVEM)
         if any(((ea + off) & 0xFFFFFF) < INIT_CODE_END
@@ -867,6 +903,58 @@ def can_run(test):
         if any(stop_start <= ((ea + off) & 0xFFFFFF) < stop_end
                for off in range(0, max(ea_siz, 1), 2 if ea_siz >= 2 else 1)):
             return False, f'EA {ea:#08x} overlaps STOP runway'
+
+    # ADDX/SUBX memory form (-(Ay),-(Ax)): two independent predecrement
+    # addresses, neither exposed via the single-EA-field get_operand_ea()
+    # above (they come from separate address registers with their own
+    # auto-decrement, not a standard mode/reg EA), so the destination address
+    # was never checked against the STOP+NOP runway at all. Found via a
+    # full-corpus retest (Phase 102): 1/8065 ADDX.w tests happened to land
+    # Ax's post-decrement address exactly inside the runway immediately after
+    # a 2-byte instruction, corrupting the runway's NOP bytes with the ADDX
+    # write and hanging/misbehaving downstream. Mirrors the ordinary EA
+    # overlap check above, just computing both addresses by hand since
+    # there's no single get_operand_ea() call that covers this shape.
+    # f_ss==3 required: ADDX/SUBX's own size field is only ever byte/word/long
+    # (0/1/2) — without this exclusion the mask alone coincidentally matches
+    # some SUBA.l/ADDA.l register-direct opcodes too (e.g. `SUBA.l A2,A0` =
+    # 0x91CA: group=9, bit8=1, and its An-direct source EA field happens to
+    # supply bits[5:3]="001"/bit3=1, landing on the exact same bit pattern as
+    # the ADDX/SUBX predecrement-memory-form marker purely by coincidence —
+    # crashed with `KeyError: 3` in the `{0:1,1:2,2:4}` size lookup below when
+    # first found via the Phase 102 full-corpus retest, since ADDA/SUBA's own
+    # f_ss==3 has no entry there). Same recurring "fixed bits alias an
+    # unrelated instruction family's EA field" shape as several earlier
+    # phases, just introduced fresh in this phase's own new code.
+    f_ss_addx = (opcode >> 6) & 3
+    is_addx_mem = (opcode & 0xF138) == 0xD108 and f_ss_addx != 3
+    is_subx_mem = (opcode & 0xF138) == 0x9108 and f_ss_addx != 3
+    if is_addx_mem or is_subx_mem:
+        ax_reg = (opcode >> 9) & 7
+        ay_reg = opcode & 7
+        siz_bytes = {0: 1, 1: 2, 2: 4}[f_ss_addx]
+
+        def _get_an_val(reg):
+            if reg == 7:
+                return (ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']) & 0xFFFFFFFF
+            return ini[f'a{reg}'] & 0xFFFFFFFF
+
+        def _step(reg):
+            return 2 if (reg == 7 and siz_bytes == 1) else siz_bytes
+
+        ay_addr = (_get_an_val(ay_reg) - _step(ay_reg)) & 0xFFFFFFFF
+        # Ax's predecrement compounds on Ay's already-decremented value when
+        # the two registers are the same (same rule as Phase 91's ABCD/SBCD
+        # same-register fix and Phase 82's MOVE fix).
+        ax_base = ay_addr if ax_reg == ay_reg else _get_an_val(ax_reg)
+        ax_addr = (ax_base - _step(ax_reg)) & 0xFFFFFF
+        stop_start = (instr_src + instr_len) & 0xFFFFFF
+        stop_end   = (stop_start + 4 + 8 * 2) & 0xFFFFFF
+        if any(stop_start <= ((ax_addr + off) & 0xFFFFFF) < stop_end
+               for off in range(siz_bytes)):
+            return False, f'ADDX/SUBX dest {ax_addr:#08x} overlaps STOP runway'
+        if any((ax_addr + off) & 0xFFFFFF < INIT_CODE_END for off in range(siz_bytes)):
+            return False, f'ADDX/SUBX dest {ax_addr:#08x} in init region'
 
     # RTS/RTE/RTR: fixed-encoding return instructions with no EA operand at all
     # (get_operand_ea() returns None for all of them — see its own

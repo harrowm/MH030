@@ -201,7 +201,7 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
-### Harte Pass Rates (Phase 101 summary)
+### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 
 | Family | Sizes | Pass rate | Notes |
 |--------|-------|-----------|-------|
@@ -221,11 +221,11 @@ python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suit
 | ASR/LSL/LSR/ROL/ROR | b/w/l | **100%** (all) | Phase 87 full sweep |
 | ROXL/ROXR | b/w/l | **100%** (all) | Phase 87: found + fixed a real `eu_shifter.sv` bug — `count==0` register-count ROX must set `C=X` per 68k PRM, RTL cleared it to 0 like the other 6 shift/rotate types |
 | CHK | — | **100%** | Phase 84: `(d8,An,Xn)` indexed EA added, no port needed. Phase 86: remaining EA modes (`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)`) added — `(d8,PC,Xn)` needed the same swap trick, no port needed either |
-| ADDX/SUBX | b/w/l | ~100% | Phase 90 sweep; ADDX.w has 1 unexamined fail |
+| ADDX/SUBX | b/w/l | **100%** | Phase 90 sweep (ADDX.w had 1 unexamined fail). Phase 102: root-caused — the `-(Ay),-(Ax)` destination address comes from a separate auto-decrementing register, invisible to the harness's single-EA-field collision check, so it was never checked against the STOP+NOP runway; 1/8065 cases coincidentally landed there. Added a dedicated check |
 | ANDI/EORI/ORI to CCR/SR | — | **100%** | Phase 90 sweep |
 | Bcc/BSR/DBcc | — | **100%** | Phase 90 sweep |
 | EXG/EXT/LINK/UNLINK/SWAP/NOP/RESET | — | **100%** | Phase 90 sweep |
-| MOVEA/MOVEfromSR/MOVEtoCCR/MOVEM.w/MOVEP | — | ~100% | Phase 90 sweep; MOVEP.w/.l each have 1 unexamined fail |
+| MOVEA/MOVEfromSR/MOVEtoCCR/MOVEM.w/MOVEP | — | **100%** | Phase 90 sweep (MOVEP.w/.l each had 1 unexamined fail). Phase 102: root-caused — MOVEP's fixed encoding aliases `ea_mode=1` ("no memory operand") in the harness's generic EA decode, so its `(d16,An)` EA was never computed or range-checked; both failures landed inside the harness's own init-code region |
 | **JMP/JSR** | — | **100% / 100%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual was TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets. Phase 95: root-caused — scale≠0 sends our correctly-68030-scaled RTL to a genuinely different jump target than the 68000 reference (unlike MULS/MULU/DIVS/DIVU's case, this isn't limited to odd-address parity — the landing *address itself* differs), and the harness's STOP runway is only ever placed at the reference's target, so our RTL runs off into uninitialized memory. Fixed by skipping scale≠0 indexed JMP/JSR tests (unreplicable by construction). No RTL change |
 | **ABCD / NBCD** | — | **100% / 100%** | Phase 91: N/V are "undefined" per the PRM but real hardware is deterministic — reverse-engineered the actual formulas from raw Harte JSON (Musashi's own reference doesn't match real hardware either); fixed 2 real RTL bugs (Verilog sign-extension gotcha, a 9-bit field overflow) plus a pre-existing `-(An)` A7-step-size bug |
 | **SBCD** | — | **100%** | Phase 91: same fixes as ABCD/NBCD (99.7%, 28/8065 residual — C and result-correction decoupled in real hardware in a way not yet captured). Phase 101: found the missing condition — every residual case has `dst_hi - src_hi == 1` (raw, uncorrected nibbles); C was always correct, only the `+0xA0` result correction needed suppressing in that specific case. Verified against the full 1164-case ambiguous population with zero mismatches |

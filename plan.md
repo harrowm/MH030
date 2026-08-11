@@ -1866,6 +1866,109 @@ SBCD/ABCD/NBCD re-run.
 
 ---
 
+## Phase 102 — Full-corpus retest across all 124 Harte suites: found and fixed 3 more residuals, confirming 100% (or documented-non-bug) everywhere in the project
+
+**Goal**: with every previously-tracked gap closed (Phases 90-101), run every single Harte
+suite in the corpus end-to-end to confirm there's nothing left, rather than trusting the
+cumulative "should be 100%" bookkeeping.
+
+### Method
+
+Ran all 124 test files (121 `.json.gz` + 3 `.json.bin`) sequentially, one `run_harte.py`
+invocation per suite, scanning every result for anything other than a clean 100% (of what
+ran — documented skips are expected and don't count against this). Found 6 suites with a
+problem; two turned out to be pre-existing bugs this retest specifically caught, one was
+a bug introduced by this phase's own fix, and three were false alarms from CPU contention
+between concurrently-running verification sweeps (not real issues — re-ran them in
+isolation and confirmed clean).
+
+### Bug 1 — MOVEP's EA was never being computed at all (harness gap, zero RTL change)
+
+MOVEP.w and MOVEP.l each had exactly 1 residual failure, previously noted in project docs
+as "1 unexamined fail" since Phase 90's original sweep but never investigated. Root cause:
+MOVEP's fixed encoding (`0000 ddd1 oo001 aaa`) has bits[5:3]="001" — which `get_operand_ea()`'s
+generic decode interprets as `ea_mode=1` ("An register direct, no memory operand"), despite
+MOVEP *always* being memory-referencing via a fixed `(d16,An)` form encoded entirely
+outside the normal mode/reg field. This is the exact same "fixed-encoding opcode aliases a
+real EA-field bit pattern" bug class as Phase 99's RTE/RTS/RTR discovery — MOVEP's EA was
+never being range-checked against the harness's own init-code region at all. Both failing
+tests had their `(d16,An)` displacement land inside `[0, INIT_CODE_END)`, silently reading
+whatever byte happened to live in the harness's own bootstrap code instead of the test's
+own correctly-supplied data. Added an explicit MOVEP case to `get_operand_ea()` (computing
+the real `(d16,An)` EA and a footprint size — 3 bytes for word, 7 for long, matching the
+byte-interleaved `EA, EA+2, [EA+4, EA+6]` access pattern) so the existing collision checks
+now see it. Also had to exempt MOVEP from the generic "word/long access to an odd address
+is misaligned" check — MOVEP is semantically a sequence of individual *byte* accesses, so
+an odd EA is completely legal and never faults, unlike a real word/long transfer.
+
+### Bug 2 — ADDX/SUBX's memory-form destination address was never checked either
+
+ADDX.w had 1 residual failure (also a long-standing "1 unexamined fail" per project docs).
+Root cause: the `-(Ay),-(Ax)` memory form's destination address comes from a *separate*
+address register with its own auto-decrement — not a standard single mode/reg EA field —
+so `get_operand_ea()` never computed it and the existing "EA overlaps STOP runway" check
+had no visibility into it at all. The one failing case had Ax's post-decrement address
+land exactly inside the STOP+NOP runway immediately following a short 2-byte instruction
+— an extremely rare coincidence (1/8065), but a real, previously-undetected gap in the
+harness's collision coverage. Added a dedicated check in `can_run()` that computes both
+predecrement addresses by hand (reusing the same A7-byte-steps-by-2 and same-register-
+compounding rules already established for ABCD/SBCD in Phase 91) and checks the
+destination against both the STOP runway and the init-code region.
+
+### Bug 3 — introduced by Bug 2's own fix, caught by the same retest before it ever shipped
+
+Running the fix immediately crashed `SUBA.l` with `KeyError: 3` inside the new ADDX/SUBX
+check. Root cause: the opcode-mask used to detect ADDX/SUBX's memory form
+(`opcode & 0xF138 == 0xD108/0x9108`) coincidentally also matches some `SUBA.l`/`ADDA.l`
+register-direct opcodes (e.g. `SUBA.l A2,A0` = `0x91CA`) — their own `An`-direct source EA
+field independently produces the identical bit pattern in bits[5:3]/[3] purely by
+coincidence, the same recurring bug class as Bug 1/2 above, just introduced fresh by this
+phase's own new code rather than a pre-existing one. Fixed by excluding `f_ss==3`
+(ADDX/SUBX's size field is only ever byte/word/long — `f_ss==3` is exclusively ADDA/SUBA's
+own long-form signature, which can never coincide with a legitimate ADDX/SUBX encoding).
+Verified the normal `SUB/ADD Dn,<ea>` memory-destination form (opmode bits8=1 with
+`f_ss∈{0,1,2}`) can never produce this same collision either, since its destination EA
+never legally uses mode `001` (An-direct) — that combination is an invalid/unused encoding
+for that instruction family, so there's no second hidden collision path left to find.
+
+### False alarms — CPU contention, not bugs
+
+`ORItoSR`, `RESET`, and `ROL.b` each showed an empty/truncated result in the main sweep's
+log (no PASS/FAIL summary at all). Investigating found this was simply resource
+contention: the main 124-suite sweep, plus 1-2 concurrent verification sweeps re-testing
+the fixes above, oversubscribed the machine's CPU enough that these specific suites (which
+happen to have very few skips, so nearly all ~8065 tests actually simulate) blew past
+their subprocess timeout and got killed mid-run — the wrapper shell script doesn't check
+exit codes, so it logged them as "done" regardless. Re-ran all three in isolation with no
+concurrent load: all three came back a clean 100% immediately. Not a real issue, but a
+reminder to always re-verify a `TIMEOUT`/empty result in isolation before treating it as
+a genuine RTL or harness bug, especially when running multiple heavy sweeps in parallel.
+
+### Results
+
+| Suite | Before | After |
+|-------|--------|-------|
+| MOVEP.w | 8064/8065 (1 fail) | **100%** (8064/8064) |
+| MOVEP.l | 8063/8064 (1 fail) | **100%** (8063/8063) |
+| ADDX.w | 5464/5465 (1 fail) | **100%** (5464/5464) |
+| SUBA.l | crashed (`KeyError: 3`) | **100%** (5217/5217) |
+
+Spot-checked ADDA.l/SUBA.w/ADDA.w (share the opcode-mask collision risk) and
+ADDX.b/l/SUBX.b/w/l (share the new predecrement-collision-check code path) — all still
+**100%**, confirming zero regressions from either fix.
+
+**Every one of the 124 Harte suites in the corpus is now either 100% pass (of what
+ran) or a documented, confirmed non-bug** — ASL.b's 2/8065 corpus data anomalies (Phase
+87) and TRAP/TRAPV-taken's permanent 68000-vs-68030 exception-frame-width divergence
+(Phases 99/100, 100% SKIP by design). No known failing test, unconfirmed RTL path, or
+undocumented residual remains anywhere in the project.
+
+**Verification**: `make test` (32/32), `make cosim_grp` (8/8 vs Musashi), all 124 Harte
+suites individually re-run to completion (several multiple times, to rule out
+contention-induced false results).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
