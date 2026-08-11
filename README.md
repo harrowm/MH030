@@ -214,14 +214,13 @@ instructions. This suite covers what that structurally leaves out:
 | Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU priority under 3-way contention (previously zero coverage), IFU starvation/recovery under a sustained multi-beat burst, DMA held off by `bus_lock` during an RMW cycle |
 | RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences |
 | Control-transfer stall depth | `tb/stall_hazard_tb.sv` | BRA (decode-resolved), JMP (register-indirect + absolute), taken DBF loop, JSR/RTS round trip through real memory |
-| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | Representative cross-section (TAS, MOVEM.L, CMPM.B, BCHG) of the ~23 `ex_mem_stall` sources in `eu_seq.sv` — verifies decode stays held off for the FSM's full duration and a real dependent instruction after it executes correctly |
+| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | 21 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly |
 | DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard rather than the consumer racing ahead |
 
-Remaining FSM sources (CAS2, PFLUSH/PTEST/PMOVE64, MOVE16, MOVEP, ADDX/SUBX mem,
-bitfield mem, PACK/UNPK mem, RTE/RTR, memory-indirect EA) are deferred — they need
-MMU/coprocessor setup or multi-phase addressing with meaningfully higher hand-encoding
-risk than the representative set above. `tb/stall_fsm_tb.sv`'s pattern is built to
-accept more rows incrementally.
+Only memory-indirect EA (`([bd,An],Xn,od)`) remains deferred — its full-extension-word
+IS/bd/od field interactions have genuine encoding ambiguity even after reading the RTL
+closely, unlike every other source above, which each had an unambiguous decode comment
+or clearly-derivable bit layout to build from.
 
 ### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 

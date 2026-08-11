@@ -2077,6 +2077,85 @@ the original approved plan.
 
 ---
 
+## Phase 104 — Category B completed: all ~23 ex_mem_stall FSM sources now have decode-holdoff coverage
+
+**Why**: Phase 103 shipped Category B with only 4 representative FSM sources (TAS, MOVEM
+load, CMPM, BCHG), explicitly deferring the rest as higher-risk hand-encoding work. User
+asked to pick these up next, starting with CAS2 (the architecturally most complex one).
+
+Added 17 more FSM instructions to `tb/stall_fsm_tb.sv`, each following the same idiom
+established in Phase 103 — a genuinely *unrelated* dependent instruction immediately
+after the FSM instruction, checked by register value (Harte already covers each
+instruction's own functional correctness exhaustively via Phases 90-102), with direct
+memory/register verification added wherever cheap and unambiguous (MOVEP's byte
+interleave, MOVE16's 16-byte copy, MOVEM store's post-decrement address, etc.):
+
+- **CAS.L / CAS2.L**: opcode and extension-word bit layout taken directly from
+  `eu_seq.sv`'s own decode comments — CAS2 is the single most complex `ex_mem_stall` FSM
+  (4 phases, `bus_lock` held throughout). Both passed on the first real attempt.
+- **MOVEP.L** (store form): verified byte-by-byte against the expected stride-2
+  interleave. **MOVE16**: verified the full 16-byte copy plus both registers'
+  post-increment.
+- **ADDX.L / ABCD / PACK** `-(Ay),-(Ax)`: the three-phase predecrement-memory shape,
+  each given its own scratch memory region so the predecrement never underflows into
+  another test's data.
+- **BFINS** (memory form), **CMP2.L** (not CHK2, so it can't trap and derail the test),
+  **MOVE.L (An),(Am)** (both operands memory, checked as a plain longword copy).
+- **RTR / RTE**: hand-constructed stack frames (RTR has no format word; RTE needs a
+  format-$0 frame per Phase 99's finding) with the restored PC pointing straight at each
+  test's own dependent instruction, so a successful pop *is* what makes the check pass.
+  RTE's restored SR keeps S=1 so supervisor mode doesn't change out from under the rest
+  of the file. **Real bug found in the test, not the RTL**: RTR's first attempt used a
+  4-byte-aligned SP, which makes its own CCR(word)+PC(long) frame land with the PC
+  portion at a genuinely misaligned address (SP+2) — spanning two different words in
+  this testbench's simplified inline memory model (copied from `cosim_grp_tb.sv`, which
+  always serves one full aligned word per request regardless of the requested address's
+  low bits). Traced via bus-cycle-level `$display` of `ext_a`/`ext_d_in` and found the
+  PC's second half never got read, leaving it 0 and sending execution to the reset
+  vector instead of the intended target. Fixed by choosing an SP that isn't 4-byte-
+  aligned (0x3302 instead of 0x3300) — a legal SP value (68k only requires word
+  alignment), not a workaround for a real restriction; RTR/RTS are already 100% in
+  Harte's own corpus (which uses a variety of real captured SP values), so this reads
+  as a testbench memory-model limitation rather than a proven RTL gap.
+- **RESET**: confirms the ~2047-tick RSTOUT pulse doesn't halt the CPU and the following
+  instruction still runs once it ends.
+- **MOVEM.L D0/D1,-(A0)**: the store-side companion to Phase 103's load-form test,
+  exercising the predecrement mask's reversed bit order (bit15=D0) and its own
+  post-decrement address arithmetic.
+- **PFLUSHA / PTEST / PMOVE (TC/TT0/CRP)**: the deferred MMU group, tackled last as
+  planned given the highest setup complexity.
+  - PFLUSHA needs no EA/bus operand — passed immediately.
+  - **PTEST root-caused a genuine hang, not a testbench mistake**: `m68030_mmu.sv`'s
+    PTEST FSM only enters its walk state when `ptest_req && tc_e`
+    (`rtl/m68030_mmu.sv:126`); with the MMU left disabled (TC.E=0, the default state
+    every other test in the file runs under), `eu_ptest_ack` never fires and the FSM
+    waits forever — this is exactly how it should behave (PTEST needs the MMU turned
+    on to mean anything), the test's setup was simply incomplete. Fixed by PMOVE-
+    loading a TC value with E=1 and a TT0 configured fully transparent (LAM=0xFF
+    wildcards every address bit) before PTEST, so it resolves immediately without
+    needing any real page-table data — the same "avoid a real table walk" technique
+    `biu_tb.sv`'s own P6-6 test already uses, just widened from one matched address
+    range to match any VA.
+  - **PMOVE (A0),CRP then hit a budget problem caused by the above**: enabling the MMU
+    for PTEST has a side effect on every instruction after it — every bus access,
+    including plain opcode fetches, now goes through an ATC/TT0 lookup first. TT0
+    stays transparent (no faults, no real walk) but the lookup itself costs real extra
+    cycles per access. Confirmed via bus-cycle-level `$display` tracing that this was
+    purely a budget shortfall (3000 cycles) rather than a second hang; PMOVE CRP's
+    budget grew to 20000 and passed cleanly.
+
+Every FSM source in the ~23-item inventory now has decode-holdoff coverage except
+memory-indirect EA (`([bd,An],Xn,od)`), left deferred per Phase 103's own note — its
+full-extension-word IS/bd/od field interactions have genuine encoding ambiguity even
+after reading the RTL closely, unlike every case in this phase, which each had an
+unambiguous decode comment or clearly-derivable bit layout to work from.
+
+**Results**: 21 of the 23 originally-inventoried FSM sources now covered (up from 4).
+`make test` 34/34, `make cosim_grp` 8/8, after every batch along the way (not just at
+the end).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
