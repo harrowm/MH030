@@ -147,6 +147,24 @@ module stall_fsm_tb;
         .cback_n      (cback_n)
     );
 
+    // Free-running counter of data-space (fc=101, supervisor data) DS#
+    // assertions — every setup instruction in this file (MOVEA.L #imm,An)
+    // and every dependent-check instruction (CLR.L/ADDI.L/MOVEQ, all
+    // register-immediate) touches zero data-space bus cycles, so counting
+    // this delta across exactly one FSM instruction's own execution window
+    // gives its real bus-cycle count with no separate scoping/windowing
+    // needed: the FSM instruction's own reads/writes are the *only* thing
+    // that can move this counter during that window. Used by the Category
+    // B precision checks below (task #33 in the post-Phase-104 follow-up
+    // list) to verify each FSM's bus-cycle count matches the
+    // architecturally-expected number, not just eventual completion.
+    int data_ds_count = 0;
+    logic ext_ds_n_prev = 1'b1;
+    always_ff @(posedge clk_4x) begin
+        if (!ext_ds_n && ext_ds_n_prev && ext_fc == 3'b101) data_ds_count <= data_ds_count + 1;
+        ext_ds_n_prev <= ext_ds_n;
+    end
+
     // -------------------------------------------------------------------
     // Instruction encodings
     // -------------------------------------------------------------------
@@ -636,15 +654,40 @@ module stall_fsm_tb;
         rom[16'h1810/4] = {16'd913, NOP_OP};
 
         // ----- run to completion, checking each case in turn -----
-        run_and_check("B-1: TAS dependent instr ran (D2=111)", 2, 32'd111, 3000);
+        // Category B precision: exact data-bus-cycle counts (task #33 in
+        // the post-Phase-104 follow-up list). Bracketing data_ds_count
+        // immediately before/after each run_and_check call is a clean
+        // window with no separate scoping needed — every setup and
+        // dependent-check instruction in this file is register/immediate
+        // only (zero data-space bus cycles), so the delta can only reflect
+        // the FSM instruction's own bus activity.
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("B-1: TAS dependent instr ran (D2=111)", 2, 32'd111, 3000);
+            c1 = data_ds_count;
+            check32("B-1: TAS bus cycles = 2 (read+write, locked)", c1 - c0, 32'd2);
+        end
         check8("B-1: TAS set bit7 of tested byte", rom[16'h2000/4][31:24], 8'hCE);
 
-        run_and_check("B-2: MOVEM dependent instr ran (D2=222)", 2, 32'd222, 3000);
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("B-2: MOVEM dependent instr ran (D2=222)", 2, 32'd222, 3000);
+            c1 = data_ds_count;
+            check32("B-2: MOVEM bus cycles = 2 (one longword read per register)", c1 - c0, 32'd2);
+        end
         check32("B-2: MOVEM D0 loaded", u_top.u_eu.u_rf.d_reg[0], 32'h1111_1111);
         check32("B-2: MOVEM D1 loaded", u_top.u_eu.u_rf.d_reg[1], 32'h2222_2222);
         check32("B-2: MOVEM A0 post-increment (2 beats)", u_top.u_eu.u_rf.a_reg[0], 32'h0000_2108);
 
-        run_and_check("B-3: CMPM dependent instr ran (D3=333)", 3, 32'd333, 3000);
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("B-3: CMPM dependent instr ran (D3=333)", 3, 32'd333, 3000);
+            c1 = data_ds_count;
+            check32("B-3: CMPM bus cycles = 2 (one byte read per operand)", c1 - c0, 32'd2);
+        end
 
         run_and_check("B-4: BCHG dependent instr ran (D4=444)", 4, 32'd444, 3000);
         check8("B-4: BCHG toggled bit3 of tested byte", rom[16'h2300/4][31:24], 8'h46);
@@ -677,9 +720,27 @@ module stall_fsm_tb;
 
         run_and_check("B-5: CAS dependent instr ran (D5=555)", 5, 32'd555, 3000);
 
-        run_and_check("B-6: CAS2 dependent instr ran (D5=666)", 5, 32'd666, 3000);
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("B-6: CAS2 dependent instr ran (D5=666)", 5, 32'd666, 3000);
+            c1 = data_ds_count;
+            // CAS2 always reads both operands (2 cycles); it only writes
+            // back (2 more cycles, 4 total) if the compare matches. D1/D3
+            // (Dc1/Dc2) hold whatever stale values persisted from earlier
+            // tests and were never set to match ct_dram's contents, so the
+            // compare is expected to mismatch — read-only, 2 cycles.
+            $display("INFO  B-6: CAS2 bus cycles = %0d", c1 - c0);
+            check32("B-6: CAS2 bus cycles = 2 (compare mismatch, read-only)", c1 - c0, 32'd2);
+        end
 
-        run_and_check("B-7: MOVEP dependent instr ran (D5=777)", 5, 32'd777, 3000);
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("B-7: MOVEP dependent instr ran (D5=777)", 5, 32'd777, 3000);
+            c1 = data_ds_count;
+            check32("B-7: MOVEP bus cycles = 4 (one byte write per interleaved byte)", c1 - c0, 32'd4);
+        end
         check8("B-7: MOVEP byte0 (D1[31:24]) at A0+16",   rom[16'h2810/4][31:24], 8'hAA);
         check8("B-7: MOVEP byte1 (D1[23:16]) at A0+18",   rom[16'h2810/4][15:8],  8'hBB);
         check8("B-7: MOVEP byte2 (D1[15:8]) at A0+20",    rom[16'h2814/4][31:24], 8'hCC);
@@ -693,7 +754,13 @@ module stall_fsm_tb;
         check32("B-8: MOVE16 A0 post-increment (+16)", u_top.u_eu.u_rf.a_reg[0], 32'h0000_2910);
         check32("B-8: MOVE16 A1 post-increment (+16)", u_top.u_eu.u_rf.a_reg[1], 32'h0000_2A10);
 
-        run_and_check("B-9: ADDX.L dependent instr ran (D5=901)", 5, 32'd901, 3000);
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            run_and_check("B-9: ADDX.L dependent instr ran (D5=901)", 5, 32'd901, 3000);
+            c1 = data_ds_count;
+            check32("B-9: ADDX.L bus cycles = 3 (read Ay, read Ax, write Ax)", c1 - c0, 32'd3);
+        end
         run_and_check("B-10: ABCD dependent instr ran (D5=902)", 5, 32'd902, 3000);
         run_and_check("B-11: PACK dependent instr ran (D5=903)", 5, 32'd903, 3000);
 
