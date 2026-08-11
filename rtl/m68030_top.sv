@@ -448,6 +448,7 @@ module m68030_top #(
         .addr_err_req (ifu_addr_err_int),
         .ipl_sync     (ipl_sync),
         .ipl_mask     (eu_ipl_mask),
+        .eu_busy      (eu_busy),
         .illegal_req  (eu_illegal_req_w),
         .priv_req     (eu_priv_req_w),
         .trace_req    (eu_trace_req_w),

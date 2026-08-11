@@ -246,6 +246,8 @@ module stall_fsm_tb;
     localparam PMOVE_CRP_EXT  = 16'h4800;  // op_type=010(PMOVE),sub=100(CRP),dr=0(load)
     localparam PMOVE_TC_EXT   = 16'h4400;  // op_type=010(PMOVE),sub=010(TC),dr=0(load)
     localparam PMOVE_TT0_EXT  = 16'h4200;  // op_type=010(PMOVE),sub=001(TT0),dr=0(load)
+    localparam CLR_L_D6       = 16'h4286;
+    localparam ADDI_L_D6      = 16'h0686;
 
     // -------------------------------------------------------------------
     // Checks
@@ -784,6 +786,145 @@ module stall_fsm_tb;
         // real cycles per access, so this needs a much larger budget than
         // every earlier MMU-disabled test in this file.
         run_and_check("B-21: PMOVE CRP dependent instr ran (D5=913)", 5, 32'd913, 20000);
+
+        // -----------------------------------------------------------------
+        // Interrupt arrival mid-FSM (task #2 in the post-Phase-104
+        // follow-up list): does a level-7 (NMI, bypasses the IPL mask
+        // entirely — SR's mask defaults to 7 at reset, so a maskable level
+        // would need an extra MOVE-to-SR setup step just to be
+        // recognizable at all, which isn't the point of this test) request
+        // that arrives *during* a locked CAS2 sequence get deferred until
+        // CAS2 fully completes, or does it hijack the bus mid-sequence?
+        //
+        // Investigated first by reading the RTL: m68030_exc.sv's exception
+        // FSM had no eu_busy/ex_mem_stall input at all — exc_pending (and
+        // therefore exc_active = state_r != EXC_IDLE) was purely
+        // combinational on the IPL lines and mask, with no instruction-
+        // boundary gating of its own. **This turned out to be a genuine,
+        // previously-undiscovered RTL bug**: real 68030 silicon only
+        // samples IPL at instruction boundaries (bus/address error are the
+        // only truly asynchronous exceptions — the fault IS the in-flight
+        // bus cycle failing). Confirmed with a first version of this test
+        // (no eu_busy gating): CAS2's own D5=1234 dependent-instruction
+        // marker never fired at all, only the interrupt handler's D6=12345
+        // did — i.e. the interrupt was hijacking the bus mid-CAS2 rather
+        // than waiting for it to retire. Fixed by adding an `eu_busy` port
+        // to m68030_exc (wired from the existing top-level `eu_busy` net,
+        // == eu_seq.sv's `stall`) and gating *only* int_pending's own
+        // branch of the exc_pending priority mux on `!eu_busy` — bus/addr
+        // error stay unconditional, and every synchronous instruction-
+        // originated exception (illegal/priv/trace/CHK/TRAPV/trap/...)
+        // stays unconditional too, since those are already synchronized to
+        // the instruction that raises them.
+        //
+        // With the fix in place, a *second* subtlety showed up empirically
+        // (via a temporary $display trace of eu_busy/exc_active/
+        // data_ds_count/decode_pc — since removed): the interrupt is
+        // correctly deferred until CAS2's FSM fully retires (both bus
+        // phases land before exc_active ever asserts — checked below as an
+        // explicit cycle-count assertion), but it then preempts at the
+        // very next instruction boundary, which lands *before* this test's
+        // own CLR.L D5/ADDI.L "CAS2 completed" marker pair gets to run —
+        // CAS2 itself is atomic, but ordinary instructions following it
+        // are not glued to it. That is correct 68k semantics, not a bug:
+        // only CAS2's own FSM has an atomicity guarantee. So the handler
+        // now ends in RTE (real hardware auto-generates the return frame;
+        // no hand-crafted stack needed, unlike B-16 above, which was
+        // itself testing RTE's own decode logic in isolation) and this
+        // test's pass criteria are (a) CAS2's full bus-cycle count elapses
+        // before exc_active ever asserts, and (b) both markers eventually
+        // reach their expected values after the RTE returns control to
+        // the resumed instruction stream.
+        //
+        // That same trace also caught a **third, deeper, and still-open**
+        // finding, deliberately deferred rather than fixed here: CLR.L D5
+        // (the instruction immediately after CAS2) was observed to launch
+        // into EX and fully commit (D5 briefly read back 0, mid-exception-
+        // push) on the *exact same cycle* eu_busy first dropped to 0 —
+        // because it had already sat fully decoded and hazard-free in
+        // DECODE throughout CAS2's stall, `instr_ack = dec_valid && !stall`
+        // fires combinationally the instant `stall` clears, with no gap
+        // cycle. But the exception controller's snap_pc_r *also* samples
+        // ifu_decode_pc on that identical edge, and decode_pc had not yet
+        // advanced past CLR.L D5 at that instant — so the saved return PC
+        // pointed at CLR.L D5's own (already-executing) address, and RTE
+        // later resumed there, silently *re-running* it. This test can't
+        // see it (confirmed via the trace, not asserted below) because
+        // CLR is idempotent — but a non-idempotent instruction in that
+        // exact slot (ADD, an autoincrement/decrement EA, a memory write)
+        // would be double-executed after any interrupt that happens to
+        // land on the specific cycle a multi-cycle FSM retires directly
+        // into an already-decoded, hazard-free follow-on instruction. Real
+        // fix needs `int_pending` (or an equivalent "would take it now"
+        // signal) threaded into eu_seq.sv's own `stall` so the newly-ready
+        // instruction is held in DECODE for one extra cycle rather than
+        // launching on the recognition edge — genuinely new cross-module
+        // plumbing (eu_seq.sv currently has no IPL awareness at all, see
+        // module port list), plus a full Harte re-verification once
+        // touched, since `stall` is the single most shared signal in the
+        // EU. Deferred to its own future phase rather than rushed in here;
+        // documented in plan.md/CLAUDE.md so it isn't lost.
+        // -----------------------------------------------------------------
+        $display("=== Interrupt arrival during a locked CAS2 sequence ===");
+        begin
+            int t, d0, d1, ds_at_exc;
+            logic injected, exc_seen;
+
+            // Level-7 autovector: vector 31, at VBR(=0)+31*4=0x7C. Handler
+            // address stored there; handler itself sets D6 as its own
+            // completion marker, distinct from CAS2's D5 marker below,
+            // then RTEs back into the interrupted instruction stream.
+            rom[16'h007C/4] = 32'h0000_0080;
+            rom[16'h0080/4] = {CLR_L_D6, ADDI_L_D6};
+            rom[16'h0084/4] = {16'h0000, 16'd12345};
+            rom[16'h0088/4] = {RTE_OP, NOP_OP};
+
+            // Fresh CAS2.L instance (same opcode/ext-word layout as B-6,
+            // reusing Rn1=A0/Rn2=A1), at a new address/data region so it
+            // doesn't disturb B-6's own already-verified result.
+            rom[16'h1900/4] = {MOVEA_L_IMM_A0, 16'h0000};
+            rom[16'h1904/4] = {16'h3900, MOVEA_L_IMM_A1};
+            rom[16'h1908/4] = {16'h0000, 16'h3904};
+            rom[16'h190C/4] = {CAS2_L, CAS2_EXT1};
+            rom[16'h1910/4] = {CAS2_EXT2, CLR_L_D5};
+            rom[16'h1914/4] = {ADDI_L_D5, 16'h0000};
+            rom[16'h1918/4] = {16'd1234, NOP_OP};
+
+            d0 = data_ds_count;
+            injected = 1'b0;
+            exc_seen = 1'b0;
+            ds_at_exc = -1;
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                // Inject the moment CAS2's first bus cycle is observed —
+                // i.e. mid-sequence, not before it starts.
+                if (!injected && (data_ds_count != d0)) begin
+                    injected = 1'b1;
+                    ipl_n = 3'b000;   // level 7 (NMI): all IPL lines asserted (active-low)
+                end
+                // IPL is a level input on real hardware, sampled once per
+                // instruction boundary; holding it asserted forever would
+                // cause a legitimate re-recognition at every subsequent
+                // boundary (an interrupt storm), not a CAS2/FSM bug. Drop
+                // it back to idle the cycle after the controller first
+                // acts on it, same as a real interrupt source deasserting
+                // once its request is acknowledged.
+                if (injected && !exc_seen && u_top.exc_active) begin
+                    exc_seen  = 1'b1;
+                    ds_at_exc = data_ds_count;
+                    ipl_n     = 3'b111;
+                end
+                if (u_top.u_eu.u_rf.d_reg[5] === 32'd1234 && u_top.u_eu.u_rf.d_reg[6] === 32'd12345)
+                    break;
+            end
+            ipl_n = 3'b111;   // deassert before any later test could see it
+            check("INT-mid-CAS2: injected mid-sequence (not before it started)", injected);
+            check("INT-mid-CAS2: exception was recognized at all", exc_seen);
+            check32("INT-mid-CAS2: CAS2's full 2-cycle bus sequence completed before the interrupt was taken (not truncated mid-FSM)",
+                    ds_at_exc - d0, 32'd2);
+            check("INT-mid-CAS2: CAS2 itself completed (D5=1234)", u_top.u_eu.u_rf.d_reg[5] === 32'd1234);
+            check("INT-mid-CAS2: interrupt handler ran and RTE'd back (D6=12345)", u_top.u_eu.u_rf.d_reg[6] === 32'd12345);
+        end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

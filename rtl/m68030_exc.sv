@@ -33,6 +33,13 @@ module m68030_exc (
     input  logic        addr_err_req,
     input  logic [2:0]  ipl_sync,       // synchronized IPL[2:0]
     input  logic [2:0]  ipl_mask,       // SR[10:8] current interrupt mask
+    input  logic        eu_busy,        // EU mid-instruction (multi-cycle FSM in
+                                         // flight, e.g. CAS2/MOVEM/MOVE16) — real
+                                         // 68030 silicon only samples IPL at
+                                         // instruction boundaries; bus/address
+                                         // error remain asynchronous (the fault
+                                         // IS the in-flight bus cycle failing, so
+                                         // there is no boundary to wait for)
     input  logic        illegal_req,
     input  logic        priv_req,
     input  logic        trace_req,
@@ -133,7 +140,7 @@ module m68030_exc (
             exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
         end else if (addr_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_ADDR;
-        end else if (int_pending) begin
+        end else if (int_pending && !eu_busy) begin
             exc_pending = 1'b1; pend_vec = int_vec;       pend_fmt = FMT_SHORT;
         end else if (illegal_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ILLEGAL;   pend_fmt = FMT_SHORT;
