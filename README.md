@@ -187,19 +187,41 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 **Test strategy**: Three independent verification layers:
 
-1. **Unit + integration regression** (`make test`) — 32 testbenches covering BIU S-state timing, EU instruction decode, exception frames, MMU, cache, and full-chip co-simulation. 32/32 pass.
+1. **Unit + integration regression** (`make test`) — 34 testbenches covering BIU S-state timing, EU instruction decode, exception frames, MMU, cache, full-chip co-simulation, and pipeline stall/hazard behavior. 34/34 pass.
 
 2. **Bus co-simulation** (`make cosim_grp`) — run 8 opcode-group assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle. All 8 groups pass.
 
-3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. See `plan.md §Phase 84` for full results table.
+3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. Structurally single-instruction — see "Pipeline stall/hazard coverage" below for what this can't reach. See `plan.md §Phase 84` for full results table.
+
+4. **Pipeline stall/hazard tests** (`tb/stall_hazard_tb.sv`, `tb/stall_fsm_tb.sv`, part of `make test`) — bus-arbitration contention, RAW/CCR/autoincrement hazards, control-transfer stall depth, and multi-cycle FSM decode-holdoff across real multi-instruction sequences. See `plan.md §Phase 103`.
 
 ```bash
-make test                  # 32/32 regression suite
+make test                  # 34/34 regression suite
 make cosim_grp             # 8 opcode group bus comparisons (DUT vs Musashi)
 make dat-synth             # 50-vector synthetic dat-replay cosim; 50/50 pass
 make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
+
+### Pipeline stall/hazard coverage (Phase 103)
+
+Every Harte test resets state, executes exactly one instruction, and checks the
+result — by construction it can never exercise anything that spans two
+instructions. This suite covers what that structurally leaves out:
+
+| Category | File | What it covers |
+|---|---|---|
+| Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU priority under 3-way contention (previously zero coverage), IFU starvation/recovery under a sustained multi-beat burst, DMA held off by `bus_lock` during an RMW cycle |
+| RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences |
+| Control-transfer stall depth | `tb/stall_hazard_tb.sv` | BRA (decode-resolved), JMP (register-indirect + absolute), taken DBF loop, JSR/RTS round trip through real memory |
+| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | Representative cross-section (TAS, MOVEM.L, CMPM.B, BCHG) of the ~23 `ex_mem_stall` sources in `eu_seq.sv` — verifies decode stays held off for the FSM's full duration and a real dependent instruction after it executes correctly |
+| DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard rather than the consumer racing ahead |
+
+Remaining FSM sources (CAS2, PFLUSH/PTEST/PMOVE64, MOVE16, MOVEP, ADDX/SUBX mem,
+bitfield mem, PACK/UNPK mem, RTE/RTR, memory-indirect EA) are deferred — they need
+MMU/coprocessor setup or multi-phase addressing with meaningfully higher hand-encoding
+risk than the representative set above. `tb/stall_fsm_tb.sv`'s pattern is built to
+accept more rows incrementally.
 
 ### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 

@@ -1969,6 +1969,114 @@ contention-induced false results).
 
 ---
 
+## Phase 103 — Pipeline stall/hazard test suite (Categories A-E): the first coverage gap Harte structurally cannot reach
+
+**Why**: Every one of the 124 Harte suites (Phases 90-102) resets state, executes
+exactly one instruction, and checks the result — by construction this can never
+exercise anything that spans two instructions. The user asked specifically what stall
+conditions exist on the 68030's 3-stage pipeline and whether they're all implemented
+and tested. Investigation (two Explore agents, one inventorying every stall/hazard
+signal in the RTL, one surveying existing testbench patterns) found the RTL logic for
+six independent stall categories was present, but coverage was thin: two hand-written
+RAW-hazard cases total (`eu_seq_tb.sv`'s G1/G2), and **zero** coverage of bus-arbitration
+contention (`biu_arbiter`'s MMU>EU>IFU>DMA priority was wired into `biu_tb.sv` but never
+driven with two-plus requesters asserted simultaneously). Planned and built via
+`EnterPlanMode`; plan approved before implementation (`~/.claude/plans/compressed-hopping-cocoa.md`).
+
+### Category C — bus arbitration contention (`tb/biu_tb.sv`, new test block)
+
+Three new checks reusing existing `mmu_walk_req`/`cg_eu_req`/`ifu_req_tb` wiring and
+`check`/`check32`/`wait_bus_idle` tasks:
+- **ARB-1** (MMU>EU>IFU priority): drives a genuine 2-level MMU table walk (same
+  ATC-miss setup as the existing P6-7 case) concurrently with a `p4_direct`-forced EU
+  request and an IFU fetch request, verifying strict grant order end to end. Had to
+  route `cg_eu_req` through `p4_direct` from the very start (`p4_eu_req` held low until
+  the walk is confirmed in progress via `mmu_walk_done_out` polling) — this isolated
+  BIU-level testbench wires `eu_req_tb` into both the MMU walk trigger *and* (via
+  `biu_sizing_fsm`) the raw EU bus port unconditionally, since the real EU-pipeline
+  interlock that withholds `eu_req` until translation completes lives in `eu_seq.sv`,
+  outside the BIU entirely — without pre-selecting `p4_direct`, `sizing_fsm`'s own
+  natural request raced `mmu_walk_req` at the arbiter and gave a false "grant_eu during
+  walk" failure that was a testbench artifact, not a real arbiter bug (confirmed by
+  reading `biu_arbiter.sv`'s registered priority-mux logic directly).
+- **ARB-2** (IFU starvation + recovery): a genuine multi-beat `biu_multiop_fsm`
+  transfer (6-longword MOVEM-style read, which holds its own request across all beats
+  without releasing the bus) with `ifu_req_tb` asserted throughout — confirms zero
+  `grant_ifu` for the whole burst, then prompt recovery once it ends. A first attempt
+  using hand-pulsed `p4_direct` back-to-back reads had real idle gaps between beats
+  (from deasserting/reasserting the request line each beat) during which the arbiter
+  legitimately granted IFU — not a bug, just unrepresentative of "sustained" activity;
+  switching to the real multi-beat FSM client fixed it.
+- **ARB-3** (DMA held off by `bus_lock`): confirms external DMA (BR#/BGACK#) is held
+  off while an RMW cycle has `bus_lock` asserted, granted once it releases. A first
+  attempt asserting BR#/BGACK# at the same instant as the RMW request raced the
+  arbiter's own `bus_idle` sampling window before `bus_lock` (a registered `cycle_gen`
+  output) had actually turned on; fixed by polling for `bus_lock==1` first.
+
+### Category A+E — RAW/CCR/autoincrement hazards + control-transfer stall depth (new `tb/stall_hazard_tb.sv`)
+
+`m68030_ifu`+`m68030_seq`+`m68030_eu` wired directly (mirroring `pipeline_tb.sv`), with
+real (not stubbed) instruction ROM and data RAM. Covers: immediate-ALU, autoincrement-An,
+long-latency-multiply, and CCR-only hazard producers, each followed by a real dependent
+consumer with no gap / a 1-instruction gap / a multi-instruction gap; and control-transfer
+stall depth for BRA (decode-resolved), JMP via register-indirect and absolute EA, a taken
+DBF loop-to-fallthrough, and a JSR/RTS round trip through real memory.
+
+An earlier version of the hazard tests used direct `eu_seq` `instr_word` injection
+(mirroring `eu_seq_tb.sv`'s G1/G2 technique) to hand-count exact stall cycles — abandoned
+after repeated same-simulation-time-step races between a blocking assignment and reading
+the combinational decode logic it feeds gave inconsistent, hard-to-reason-about results
+across otherwise-equivalent producer/consumer pairs (traced with hierarchical `$display`
+probes of `hazard_ex`/`hazard_wb`/`dec_src_reg`/`dec_dst_reg` before concluding the
+technique itself, not the RTL, was the problem). Rebuilt on real instruction fetch through
+the IFU instead — the pipeline advances on its own real timing with no hand-counted edge
+sequence to get subtly wrong, and every check converged cleanly on the first real attempt
+once rebuilt this way. Also had to add the `pc_wr_en`/`pc_wr_data` OR/mux glue (folding the
+EU's own `branch_taken`/`branch_target` into the testbench's PC-override signal) that
+normally lives in `m68030_top.sv` — without it, `branch_taken` computed correctly but
+never actually redirected PC, since this harness instantiates the IFU/SEQ/EU directly
+without the top level. A `stop_first_cycle` STOP-halt check runs last, since STOP
+permanently halts the shared EU instance for the rest of the simulation.
+
+### Category B — multi-cycle FSM decode-holdoff (new `tb/stall_fsm_tb.sv`)
+
+Full `m68030_top` + inline memory model, reusing `cosim_grp_tb.sv`'s exact proven wiring
+(fixed-latency DSACK, same byte-lane write-back case statement), since these are
+genuinely multi-bus-cycle instructions where the real BIU/arbiter path matters. Covers a
+representative cross-section of the ~23 `ex_mem_stall` sources inventoried from the RTL —
+TAS (single-instruction RMW lock), MOVEM.L (multi-beat register-list load), CMPM.B
+(2-phase register-pair read+compare), and BCHG (generic memory-RMW, the decode shape
+shared by most of ORI/ANDI/ADDQ/Scc/memory-shift/NBCD/etc.) — each followed by a
+genuinely *unrelated* dependent instruction (deliberately not consuming the FSM's own
+result: the property under test is "did decode correctly resume", not re-verifying
+functional correctness Harte already covers exhaustively). All four passed on the first
+real run once the opcodes were hand-derived and cross-checked. The remaining FSM sources
+(CAS2, PFLUSH/PTEST/PMOVE64, MOVE16, MOVEP, ADDX/SUBX mem, bitfield mem, PACK/UNPK mem,
+RTE/RTR, memory-indirect EA) are deferred — they need MMU/coprocessor setup or multi-phase
+addressing that carries meaningfully higher hand-encoding risk — left for a follow-up
+phase; the table-driven pattern here is built to accept more rows incrementally.
+
+### Category D — DSACK wait-state + hazard composition (`tb/stall_fsm_tb.sv`, extended)
+
+Extended Category B's fixed-latency DSACK model with an injectable `wait_states` knob (a
+plain testbench `int`, not a module parameter, so it can change between test cases within
+one simulation — 0 reproduces the exact original behavior every other test in the file and
+`cosim_grp_tb.sv` rely on). Runs the same `MOVE.L (A0),D0` → `ADD.L D0,D1` producer/consumer
+pair three times with `wait_states`=0,2,5: the primary check is still functional
+correctness (if the consumer ever raced ahead of a slow read, D1 would come back *wrong*,
+not just slow), cross-checked with a coarse elapsed-cycle-count comparison confirming 5
+wait states measurably lengthens execution relative to 0 (1986→2079→2339 clk_4x ticks),
+so the composition isn't passing by coincidence.
+
+**Results**: all four categories pass. `make test` 34/34 (32 pre-existing + `stall_hazard`
++ `stall_fsm`), `make cosim_grp` 8/8. This is the first test suite in the project targeting
+inter-instruction pipeline behavior specifically — everything before this phase either
+tested a single instruction in isolation (Harte) or a handful of hand-picked multi-
+instruction integration smoke tests. See `~/.claude/plans/compressed-hopping-cocoa.md` for
+the original approved plan.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
