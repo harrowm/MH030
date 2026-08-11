@@ -125,6 +125,10 @@ $(SIM)/pipeline:    rtl/m68030_ifu.sv rtl/m68030_seq.sv $(EU_SRCS) \
                    tb/pipeline_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/stall_hazard: rtl/m68030_ifu.sv rtl/m68030_seq.sv $(EU_SRCS) \
+                   tb/stall_hazard_tb.sv | $(SIM)
+	$(IVCOMP)
+
 $(SIM)/exc:        rtl/m68030_exc.sv                  tb/exc_tb.sv        | $(SIM)
 	$(IVCOMP)
 
@@ -197,7 +201,7 @@ ALL_TESTS := \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/ctrl_flow $(SIM)/ea_modes $(SIM)/data_move $(SIM)/alu_reg $(SIM)/alu_mem $(SIM)/bitfield $(SIM)/bcd_pack $(SIM)/system $(SIM)/exception $(SIM)/atomic \
     $(SIM)/special_instr $(SIM)/ea_extended $(SIM)/cmpm \
-    $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/exc $(SIM)/mmu \
+    $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke
 
