@@ -197,6 +197,24 @@ $(VOBJ):
 sim/vmustest: $(VOBJ)/Vmustest_tb | $(SIM)
 	cp $< $@
 
+# ── Verilator build for the batched Harte runner (see plan.md's Harte-sweep-
+# performance investigation) ─────────────────────────────────────────────────
+VOBJ_HARTE := obj_harte_vbatch
+VLATOR_FLAGS_HARTE := --cc -sv --Mdir $(VOBJ_HARTE) --top-module harte_verilator_tb \
+                --x-assign 0 --x-initial 0 -Wno-fatal -Wno-WIDTHTRUNC \
+                -Wno-WIDTHEXPAND -Wno-CASEINCOMPLETE -Wno-INITIALDLY \
+                --public -fno-dfg
+
+$(VOBJ_HARTE)/Vharte_verilator_tb: $(TOP_SRCS) tb/harte_verilator_tb.sv tb/harte_verilator_main.cpp | $(VOBJ_HARTE)
+	$(VLATOR) $(VLATOR_FLAGS_HARTE) --exe tb/harte_verilator_main.cpp $(TOP_SRCS) tb/harte_verilator_tb.sv
+	$(MAKE) -C $(VOBJ_HARTE) -f Vharte_verilator_tb.mk OPT_FAST="-O2"
+
+$(VOBJ_HARTE):
+	mkdir -p $(VOBJ_HARTE)
+
+sim/harte_vbatch: $(VOBJ_HARTE)/Vharte_verilator_tb | $(SIM)
+	cp $< $@
+
 # ── Bare-metal test hex generation (requires vasmm68k_mot in PATH) ──────────
 tests/%.bin: tests/%.s
 	vasmm68k_mot -Fbin -m68030 $< -o $@

@@ -2613,6 +2613,94 @@ usable alternative, not yet the default.
 
 ---
 
+## Phase 111 — Chunk-size tuning + Verilator backend (`tb/harte_verilator_tb.sv`)
+
+**Chunk-size tuning**: ran the full 124-suite corpus through `run_harte_batch.py`
+(Icarus backend) at `--chunk-size 2000` per the user's request to try a larger batch —
+measurably *worse*, not better: `TST.b` (8064 tests) went from 67.7s (chunk-size 300,
+864% CPU) to 107.4s (399% CPU), `CMP.b` from ~35s to 109.4s. Root cause: at chunk-size
+2000 an 8065-test suite only splits into 5 chunks, so at most 5 of the 10 `-j` workers
+ever have anything to run — parallelism becomes chunk-*count*-limited, not `-j`-limited.
+Swept 100/150/300/2000 on `TST.b` to find the actual shape of the curve: 100/150/300 are
+all within noise of each other (66-68s, 864-903% CPU) — a clear plateau once chunk count
+is comfortably above the 10 workers (27+ chunks), with no further benefit from shrinking
+further, just slightly more total CPU-seconds spent on repeated elaboration overhead.
+Landed on chunk-size 150 as the default: same performance as 300 for large suites, better
+fan-out for the mid-sized suites that make up most of the corpus (median runnable count
+~5217 → ~35 chunks at size 150 vs ~17 at size 300). Ran the full 124-suite corpus at this
+setting — confirmed the tool itself scales cleanly (7+ suites clean before this phase's
+next step superseded the run), no correctness regressions.
+
+**Verilator backend**: even fully saturating all 10 cores with Icarus (864-903% CPU),
+throughput had a hard ceiling — user asked to investigate further, since we were now
+CPU-bound on simulation speed itself, not parallelism. This project already had a
+proven, *committed* (Phase 78, not part of this session) Verilator flow for a different,
+smaller (~60-test) Musashi-based suite (`tb/mustest_tb.sv` / `tb/mustest_main.cpp` /
+`sim/vmustest`) with a Makefile comment claiming "100-1000x faster than Icarus" — worth
+checking directly rather than trusting the comment. Built both `sim/mustest` (Icarus) and
+`sim/vmustest` (Verilator) fresh and ran the same 60-test corpus through each: the Icarus
+binary turned out to be broken/bit-rotted (0/60 pass, unrelated pre-existing issue, not
+investigated further — mustest predates and is superseded by the Harte corpus for actual
+verification) while the Verilator binary worked correctly (58/60, the 2 fails pre-existing
+and unrelated to this session). This didn't give a clean speed A/B (broken baseline, and
+mustest's own per-test shape differs a lot from Harte's), but it *did* confirm Verilator
+can correctly compile and run this exact 68030 RTL, and — critically — `tb/mustest_main.cpp`
+is a working, reusable template for exactly the C++ driver pattern needed: poke a test's
+initial state directly into the DUT's memory array via `rootp->...__DOT__...` hierarchical
+access, clock through `eval()`, read final register state back the same way. No `$readmemh`,
+no SV-side loop, no interpreter — just compiled C++ calling into compiled RTL.
+
+Built `tb/harte_verilator_tb.sv` (same dense 24-bit memory model and DUT wiring as
+`tb/harte_batch_tb.sv`, but memory is poked by C++ directly instead of `$readmemh`, and
+there's no `$display`-based `MEMWRITE` tracing in the hot loop — see below) and
+`tb/harte_verilator_main.cpp` (the manifest-loop driver, directly modeled on
+`mustest_main.cpp`). Key design choice: **read final memory state directly instead of
+tracing writes cycle-by-cycle.** Harte's own JSON test format only ever specifies
+initial/final memory snapshots, never an intermediate bus trace — so cycle-accurate
+`MEMWRITE` capture (which `tb/harte_batch_tb.sv` does via `$display` in the write-capture
+`always_ff`) is strictly more than the reference oracle itself can verify. Reading back
+just the handful of addresses that matter (from `final['ram']` plus both sides of any
+scale-remap, computed in Python and passed to C++ via a small per-test "blob" file: `P n`
+patch entries then `W m` watch addresses) gives the identical pass/fail verdict with none
+of the per-cycle print-formatting overhead. Output format matches
+`tb/harte_batch_tb.sv` exactly (`=== TEST N ===`/`REGSTATE`/`MEMWRITE`/`OK`|`TIMEOUT`|
+`ADDRERR`/`ENDTEST`), so `run_harte_batch.py`'s existing `split_batch_output()`/
+`parse_block()`/`compare()` needed zero changes — added as a `--backend {icarus,verilator}`
+flag, with `run_chunk_verilator()`/`gen_vblob()` as the only new functions.
+
+Two build issues, both quick fixes: Verilator treats any comment starting with the literal
+word "Verilator" as a pragma directive (`%Error-BADVLTPRAGMA`) — reworded the file's own
+header comment. And Verilator wraps unpacked SV arrays in a `VlUnpacked<T,N>` template in
+this version rather than exposing a raw C pointer (`mustest_main.cpp` was written against
+an older/different Verilator version where `auto&` binding sufficed for direct indexing) —
+made `mem_write_byte`/`mem_read_byte` templates so they work with either.
+
+**Validation, same rigor as the Icarus backend**: 20/20 then 2500/2500 on ADD.b, 4043/4043
+on MOVEM.l (the harder multi-beat-FSM case) — all matching `compare()` exactly, zero
+differences from every prior Icarus-based run. **Full 124-suite corpus**: 3m18s wall time
+(`PASS 689711 FAIL 2 SKIP 293652 TIMEOUT 0` — the 2 fails are the exact same, already-
+documented `ASL.b` corpus anomaly, opcode `e502`, indices 1583/1761, identical signature
+to every prior run this session). Down from the original ~6 hours -- **roughly 110x**.
+Per-suite comparisons against the Icarus batch backend: ADD.b full suite 1.4s (Icarus
+batch: ~12s single-process, ~100s+ for the full 2500) — roughly 175-200x faster; MOVEM.l
+full suite 3.4s (Icarus batch: ~156s for just 400 of its 8065 tests) — roughly 470x
+faster on the *harder* case, an even bigger relative win than for cheap instructions,
+since Verilator amortizes per-*cycle* interpretation cost, not just per-*process* spawn
+cost — MOVEM.l's many real bus cycles per test benefit proportionally more, unlike Icarus
+batching where cheap instructions saw the big win and expensive ones barely improved
+(Phase 110: ~5.4x vs ~1.1x). CPU utilization during the full sweep was lower (~474%) than
+the Icarus runs (~870-900%), suggesting Python-side orchestration (blob-file writing,
+subprocess spawn, thread coordination) is now closer to the bottleneck than raw RTL
+simulation speed -- not investigated further given 3m18s is already dramatically faster
+than needed.
+
+**Still not the default**: `run_harte.py` (original per-process) remains what Gap 1+2/
+Phase 109 was verified against; `run_harte_batch.py --backend verilator` is now the
+fastest validated option but hasn't yet been substituted into that role for a real RTL
+change's verification gate.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

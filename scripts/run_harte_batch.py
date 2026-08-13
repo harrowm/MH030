@@ -35,12 +35,13 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-REPO    = Path(__file__).parent.parent
-SIM_BIN = REPO / 'sim' / 'harte_batch'
+REPO         = Path(__file__).parent.parent
+SIM_BIN      = REPO / 'sim' / 'harte_batch'      # Icarus backend
+VSIM_BIN     = REPO / 'sim' / 'harte_vbatch'     # Verilator backend
 
 sys.path.insert(0, str(Path(__file__).parent))
 from parse_harte   import decode_file
-from gen_harte_hex import gen_hex, can_run
+from gen_harte_hex import gen_hex, can_run, build_patches, get_scale_remap
 from run_harte     import compare   # identical comparison logic, not reimplemented
 
 
@@ -96,7 +97,67 @@ def parse_block(buf):
     return regs, writes, status
 
 
+# ── Verilator blob generation ────────────────────────────────────────────────
+
+def gen_vblob(test):
+    """Text blob for tb/harte_verilator_main.cpp: patches to apply into mem[]
+    before reset, and addresses to read back afterward. Watch-list covers
+    final['ram']'s own addresses plus both sides of any scale-remap (the
+    68030-accurate address our DUT actually writes to for indexed EAs, and
+    the 68000-reference address, in case a test needs the un-remapped one) —
+    over-including addresses is harmless, run_harte.compare() only acts on
+    the ones it actually needs."""
+    patches, _ = build_patches(test)
+    watch = {addr for addr, _ in test['final']['ram']}
+    for remap in get_scale_remap(test):
+        ea0, ea1, nb = remap['ea_68000'], remap['ea_68030'], remap['siz_bytes']
+        watch.update(range(ea0, ea0 + nb))
+        watch.update(range(ea1, ea1 + nb))
+
+    lines = [f"P {len(patches)}"]
+    lines.extend(f"{addr:x} {val:x}" for addr, val in patches.items())
+    lines.append(f"W {len(watch)}")
+    lines.extend(f"{addr:x}" for addr in sorted(watch))
+    return '\n'.join(lines) + '\n'
+
+
 # ── Chunk runner ─────────────────────────────────────────────────────────────
+
+def run_chunk_verilator(tests, cycles, timeout_s):
+    """Verilator-backend equivalent of run_chunk(): write one manifest + N
+    blob files, run ONE sim/harte_vbatch process. Output format matches
+    tb/harte_batch_tb.sv exactly, so split_batch_output()/parse_block() are
+    reused unchanged."""
+    blobdir = tempfile.mkdtemp(prefix='harte_vbatch_')
+    try:
+        manifest_path = os.path.join(blobdir, 'manifest.txt')
+        paths = []
+        for i, t in enumerate(tests):
+            p = os.path.join(blobdir, f'{i:05d}.blob')
+            with open(p, 'w') as f:
+                f.write(gen_vblob(t))
+            paths.append(p)
+        with open(manifest_path, 'w') as f:
+            f.write('\n'.join(paths) + '\n')
+
+        try:
+            result = subprocess.run(
+                [str(VSIM_BIN), f'+manifest={manifest_path}', f'+cycles={cycles}'],
+                capture_output=True, text=True, timeout=timeout_s
+            )
+            out = result.stdout
+        except subprocess.TimeoutExpired:
+            out = ''
+
+        blocks = split_batch_output(out)
+        rows = []
+        for i, t in enumerate(tests):
+            regs, writes, status = parse_block(blocks.get(i, []))
+            rows.append((t, regs, writes, status))
+        return rows
+    finally:
+        shutil.rmtree(blobdir, ignore_errors=True)
+
 
 def run_chunk(tests, cycles, timeout_s):
     """Write one manifest + N hex files for this chunk, run ONE vvp process,
@@ -143,11 +204,20 @@ def main():
     ap.add_argument('--timeout-cycles', type=int, default=8000)
     ap.add_argument('--chunk-size',     type=int, default=300)
     ap.add_argument('--jobs', '-j',     type=int, default=8,
-                    help='parallel vvp batch processes (default 8)')
+                    help='parallel batch processes (default 8)')
+    ap.add_argument('--backend',        choices=['icarus', 'verilator'], default='icarus',
+                    help='simulation backend (default icarus)')
     args = ap.parse_args()
 
-    if not SIM_BIN.exists():
-        print(f"ERROR: {SIM_BIN} not found — run: make sim/harte_batch", file=sys.stderr)
+    if args.backend == 'verilator':
+        sim_bin, run_fn = VSIM_BIN, run_chunk_verilator
+        build_hint = 'make sim/harte_vbatch'
+    else:
+        sim_bin, run_fn = SIM_BIN, run_chunk
+        build_hint = 'make sim/harte_batch'
+
+    if not sim_bin.exists():
+        print(f"ERROR: {sim_bin} not found — run: {build_hint}", file=sys.stderr)
         sys.exit(1)
 
     total_pass = total_fail = total_skip = total_timeout = 0
@@ -180,7 +250,7 @@ def main():
 
         results = []
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futs = [pool.submit(run_chunk, c, args.timeout_cycles, chunk_timeout)
+            futs = [pool.submit(run_fn, c, args.timeout_cycles, chunk_timeout)
                     for c in chunks]
             for fut in as_completed(futs):
                 results.extend(fut.result())

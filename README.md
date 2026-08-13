@@ -203,6 +203,30 @@ make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
 python3 -u scripts/run_harte.py tests/harte/ADD.b.json.gz    # single Harte suite
 ```
 
+**Fast full-corpus sweep** (Phases 110-111): the original per-process runner above spawns
+one `vvp` process per test (~0.2s each, ~99% fixed elaboration overhead), so a full
+124-suite sweep takes ~6 hours. `scripts/run_harte_batch.py` batches many tests into far
+fewer processes — same `can_run`/`gen_hex`/`compare` logic underneath, validated to
+produce identical verdicts (zero differences across ADD.b, MOVEM.l, and the full corpus).
+A Verilator backend compiles the DUT to native code instead of interpreting it, and wins
+even bigger on expensive multi-cycle instructions than cheap ones (the opposite of the
+Icarus-batching result) since it amortizes per-*cycle* cost, not just per-process spawn
+cost:
+
+```bash
+make sim/harte_batch        # Icarus batched backend
+make sim/harte_vbatch       # Verilator batched backend
+python3 -u scripts/run_harte_batch.py tests/harte/*.json.gz tests/harte/*.json.bin \
+    --backend verilator -j 10 --chunk-size 300   # full 124-suite corpus in ~3m18s
+```
+
+Full-corpus result: `PASS 689711 FAIL 2 SKIP 293652 TIMEOUT 0` — the 2 fails are the same
+documented `ASL.b` corpus anomaly (below), zero other differences from the original
+per-process runner. Not yet the default for RTL-change verification gates, which still
+use `run_harte.py`. See `plan.md §Phase 110`/`§Phase 111` for the full investigation
+(including two dead ends: tiered memory-array sizing and SystemVerilog associative
+arrays, both rejected before landing on batching).
+
 ### Pipeline stall/hazard coverage (Phases 103-108)
 
 Every Harte test resets state, executes exactly one instruction, and checks the
