@@ -151,7 +151,10 @@ module eu_seq_tb;
         .bit_z          (bit_z),
         .instr_ack      (instr_ack),
         .seq_busy       (seq_busy),
-        .div_trap       (div_trap)
+        .div_trap       (div_trap),
+        .int_pending    (1'b0),
+        .eu_int_ready   (),
+        .exc_active     (1'b0)
     );
 
     eu_regfile u_rf (

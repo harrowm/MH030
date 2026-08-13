@@ -98,7 +98,8 @@ module biu_cache_if (
         CI_FILL_3 = 4'd5,
         CI_D_MISS = 4'd6,
         CI_WRITE  = 4'd7,
-        CI_DONE   = 4'd8
+        CI_DONE   = 4'd8,
+        CI_BERR   = 4'd9
     } ci_state_t;
 
     ci_state_t state;
@@ -178,6 +179,8 @@ module biu_cache_if (
                         data_i[idx_r][0] <= sf_rdata;
                         if (woff_r == 2'd0) fill_rdata_r <= sf_rdata;
                         state <= CI_FILL_1;
+                    end else if (sf_berr) begin
+                        state <= CI_BERR;
                     end
                 end
                 CI_FILL_1: begin
@@ -185,6 +188,8 @@ module biu_cache_if (
                         data_i[idx_r][1] <= sf_rdata;
                         if (woff_r == 2'd1) fill_rdata_r <= sf_rdata;
                         state <= CI_FILL_2;
+                    end else if (sf_berr) begin
+                        state <= CI_BERR;
                     end
                 end
                 CI_FILL_2: begin
@@ -192,6 +197,8 @@ module biu_cache_if (
                         data_i[idx_r][2] <= sf_rdata;
                         if (woff_r == 2'd2) fill_rdata_r <= sf_rdata;
                         state <= CI_FILL_3;
+                    end else if (sf_berr) begin
+                        state <= CI_BERR;
                     end
                 end
                 CI_FILL_3: begin
@@ -201,6 +208,8 @@ module biu_cache_if (
                         tag_i[idx_r]   <= vtag_r;
                         valid_i[idx_r] <= 1'b1;
                         state <= CI_DONE;
+                    end else if (sf_berr) begin
+                        state <= CI_BERR;
                     end
                 end
 
@@ -215,6 +224,8 @@ module biu_cache_if (
                             valid_d[idx_r]        <= 1'b1;
                         end
                         state <= CI_DONE;
+                    end else if (sf_berr) begin
+                        state <= CI_BERR;
                     end
                 end
 
@@ -225,11 +236,23 @@ module biu_cache_if (
                             data_d[idx_r][woff_r] <= wdata_r;
                         end
                         state <= CI_DONE;
+                    end else if (sf_berr) begin
+                        state <= CI_BERR;
                     end
                 end
 
                 CI_DONE: begin
                     // eu_ack fires this cycle; return to idle
+                    state <= CI_IDLE;
+                end
+
+                CI_BERR: begin
+                    // eu_berr fires this cycle; return to idle. Mirrors
+                    // CI_DONE's structure exactly, just for the abort path —
+                    // previously this state didn't exist at all, so a fault
+                    // during CI_D_MISS/CI_WRITE/CI_FILL_* left `state` stuck
+                    // forever waiting for an `sf_ack_rise` that a genuinely
+                    // faulted cycle will never produce.
                     state <= CI_IDLE;
                 end
 
@@ -300,6 +323,10 @@ module biu_cache_if (
             CI_DONE: begin
                 eu_rdata = fill_rdata_r;
                 eu_ack   = 1'b1;
+            end
+
+            CI_BERR: begin
+                eu_berr  = 1'b1;
             end
 
             default: ;  // CI_IDLE: sf_req=0, eu_ack=0

@@ -144,6 +144,11 @@ module m68030_top #(
     // EU output wires
     // ───────────────────────────────────────────────────────────────────────
     logic        eu_instr_ack, eu_busy;
+    // Interrupt dispatch-race handshake: exc's int_pending flows into eu_seq
+    // (via m68030_eu), and eu_seq's "deliberately holding a ready instruction
+    // in DECODE" pulse flows back, replacing the old !eu_busy gate (which
+    // raced with an instruction launching the same cycle stall cleared).
+    logic        exc_int_pending_w, eu_int_ready_w;
     logic [31:0] eu_pc_out, eu_vbr_out;
     logic [31:0] eu_usp_out, eu_msp_out, eu_isp_out;
     logic [15:0] eu_sr_out;
@@ -249,6 +254,34 @@ module m68030_top #(
     assign pc_wr_data_common = boot_pulse    ? init_pc           :
                                exc_new_pc_wr ? exc_new_pc        :
                                                eu_branch_target;
+
+    // ───────────────────────────────────────────────────────────────────────
+    // EU-side (data) bus error: sticky-to-pulse conversion.
+    // exc_frame_valid (biu_exc_capture, via m68030_biu) is deliberately
+    // latched "until reset" (BIU-090) so the frame's captured fault data
+    // stays stable through the whole EXC_PUSH sequence — it stays high
+    // forever after the very first fault, not just for one cycle. Setting
+    // eu_bus_err_r on its *level* would re-trigger every single cycle after
+    // that (exc_frame_valid is still 1 by the time pc_wr_en_common finally
+    // clears it, so a level-triggered set would immediately win the race
+    // back to 1 the same cycle) — must key off its rising edge instead, so
+    // eu_bus_err_r only latches once per genuine new fault. Mirrors
+    // m68030_ifu.sv's own bus_err_r, which already solves the same problem
+    // correctly by clearing on pc_wr_en — the same pulse the exception
+    // controller issues once it finally loads the handler PC.
+    // ───────────────────────────────────────────────────────────────────────
+    logic exc_frame_valid_prev_r;
+    always_ff @(posedge clk_4x or negedge rst_n)
+        if (!rst_n) exc_frame_valid_prev_r <= 1'b0;
+        else        exc_frame_valid_prev_r <= exc_frame_valid;
+    wire exc_frame_valid_rise = exc_frame_valid && !exc_frame_valid_prev_r;
+
+    logic eu_bus_err_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                      eu_bus_err_r <= 1'b0;
+        else if (pc_wr_en_common)        eu_bus_err_r <= 1'b0;
+        else if (exc_frame_valid_rise)   eu_bus_err_r <= 1'b1;
+    end
 
     // ───────────────────────────────────────────────────────────────────────
     // SSP write mux — boot sets init_ssp; EXC updates after frame push
@@ -418,6 +451,9 @@ module m68030_top #(
         .supervisor    (eu_supervisor),
         .master_mode   (eu_master_mode),
         .ipl_mask      (eu_ipl_mask),
+        .int_pending   (exc_int_pending_w),
+        .eu_int_ready  (eu_int_ready_w),
+        .exc_active    (exc_active),
         .div_trap      (eu_div_trap),
         .chk_trap      (eu_chk_trap),
         .eu_trap_req   (eu_trap_req_w),
@@ -444,11 +480,12 @@ module m68030_top #(
         .clk_4x       (clk_4x),
         .rst_n        (rst_n),
         // Exception sources
-        .bus_err_req  (ifu_bus_err),
+        .bus_err_req  (ifu_bus_err | eu_bus_err_r),
         .addr_err_req (ifu_addr_err_int),
         .ipl_sync     (ipl_sync),
         .ipl_mask     (eu_ipl_mask),
-        .eu_busy      (eu_busy),
+        .int_pending_out(exc_int_pending_w),
+        .int_ready    (eu_int_ready_w),
         .illegal_req  (eu_illegal_req_w),
         .priv_req     (eu_priv_req_w),
         .trace_req    (eu_trace_req_w),
@@ -463,7 +500,7 @@ module m68030_top #(
         // Fault snapshot
         .fault_pc     (ifu_decode_pc),
         .fault_sr     (eu_sr_out),
-        .fault_addr   (ifu_bus_err_addr),
+        .fault_addr   (ifu_bus_err ? ifu_bus_err_addr : fault_addr_biu),
         .fault_ssw    (exc_ssw),
         .bus_err_fmt  (exc_frame_format),   // format code from biu_exc_capture
         .fault_data   (fault_data_biu),     // DOB from biu at fault time

@@ -33,8 +33,16 @@ module m68030_exc (
     input  logic        addr_err_req,
     input  logic [2:0]  ipl_sync,       // synchronized IPL[2:0]
     input  logic [2:0]  ipl_mask,       // SR[10:8] current interrupt mask
-    input  logic        eu_busy,        // EU mid-instruction (multi-cycle FSM in
-                                         // flight, e.g. CAS2/MOVEM/MOVE16) — real
+    output logic        int_pending_out,// combinational int_pending, exported so
+                                         // eu_seq.sv can hold a ready instruction
+                                         // in DECODE for exactly one cycle rather
+                                         // than let it launch the same edge this
+                                         // module would otherwise recognize the
+                                         // interrupt on (see int_ready below)
+    input  logic        int_ready,      // pulses from eu_seq.sv (via m68030_eu)
+                                         // the one cycle a ready-to-dispatch
+                                         // instruction is being deliberately held
+                                         // in DECODE instead of launching — real
                                          // 68030 silicon only samples IPL at
                                          // instruction boundaries; bus/address
                                          // error remain asynchronous (the fault
@@ -124,6 +132,7 @@ module m68030_exc (
     assign ipl_mask_l  = ipl_mask;
     assign int_pending = (ipl_sync_l != 3'b000) && (ipl_sync_l > ipl_mask_l);
     assign int_vec     = VEC_AV1 - 8'd1 + {5'd0, ipl_sync_l};
+    assign int_pending_out = int_pending;
 
     // -----------------------------------------------------------------------
     // Priority encoder (combinational)
@@ -140,7 +149,7 @@ module m68030_exc (
             exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
         end else if (addr_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_ADDR;
-        end else if (int_pending && !eu_busy) begin
+        end else if (int_pending && int_ready) begin
             exc_pending = 1'b1; pend_vec = int_vec;       pend_fmt = FMT_SHORT;
         end else if (illegal_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ILLEGAL;   pend_fmt = FMT_SHORT;

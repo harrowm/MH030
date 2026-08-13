@@ -29,7 +29,11 @@ module exc_tb;
     // -----------------------------------------------------------------------
     logic        bus_err_req  = 0, addr_err_req = 0;
     logic [2:0]  ipl_sync     = 0, ipl_mask     = 0;
-    logic        eu_busy      = 0;  // standalone EXC unit test has no EU; never busy
+    logic        int_pending_out;   // DUT output, unused directly by this testbench
+    logic        int_ready    = 1;  // standalone EXC unit test has no EU/eu_seq
+                                     // dispatch-race handshake; always ready,
+                                     // matching the pre-Phase-108 always-!eu_busy
+                                     // behavior these tests were written against
     logic        illegal_req  = 0, priv_req      = 0;
     logic        trace_req    = 0, linea_req      = 0;
     logic        linef_req    = 0, fmt_err_req    = 0;

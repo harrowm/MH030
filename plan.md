@@ -2275,6 +2275,18 @@ stuck and `exc_active` is never seen — so `make test` stays green while the ga
 visible for a dedicated future phase. `make test` 34/34, `make cosim_grp` 8/8
 (testbench-only change, no RTL touched this phase).
 
+**Correction (Phase 108)**: point 2 above mischaracterized part of the bug's scope.
+Re-reading `m68030_top.sv`'s own `m68030_biu` instantiation while planning the fix found
+`eu_cas2_req`/`eu_mo_req` are **hardwired to `1'b0`** — `biu_multiop_fsm.sv` and CAS2's
+dedicated 4-phase datapath in `biu_cycle_gen.sv` are dead code, never driven by anything.
+TAS/MOVEM/MOVEP/CAS/CAS2 all actually issue their bus cycles as ordinary `eu_req`/`eu_ack`
+transactions through `biu_cache_if.sv`, sequenced entirely by state machines inside
+`eu_seq.sv` — confirmed by tracing MOVEM/CAS2/TAS through `biu_cache_if`'s own `state`
+register during the Phase 108 fix. This narrows the root cause to one central location
+(`biu_cache_if.sv`) instead of three, and means `biu_multiop_fsm.sv`'s own berr handling
+gap (real as described, just never exercised) is moot for the current build. See
+Phase 108 below for the actual fix.
+
 ---
 
 ## Phase 107 — Back-to-back FSM composition + wait-states on FSM beats
@@ -2319,6 +2331,202 @@ a fix against without a dedicated Musashi-cosim investigation (Musashi does impl
 list from Phase 104 — items (1)-(4) all addressed (2 with real RTL fixes verified
 end-to-end, 2 with severe/plausible bugs thoroughly root-caused and deliberately
 deferred to dedicated future phases rather than rushed).
+
+---
+
+## Phase 108 — Fixed both deferred RTL gaps (interrupt dispatch race, BERR hang)
+
+**Why**: user asked to lay out a plan to fix the two gaps deferred in Phases 105-106,
+then approved implementing it. Delivered as two sub-phases in one commit sequence,
+matching the approved plan (`~/.claude/plans/compressed-hopping-cocoa.md`).
+
+### Gap 1 — interrupt dispatch race
+
+Root cause recap (Phase 105): `int_pending && !eu_busy` could recognize an interrupt on
+the *same cycle* a newly-ready instruction launches into EX, since `instr_ack` fires
+combinationally the instant `stall` clears — the exception controller's saved return PC
+could point at an already-executing instruction, and RTE would silently re-run it.
+
+Fix: `m68030_exc.sv` exports its already-computed `int_pending` as a new output
+(`int_pending_out`). `eu_seq.sv` gained a matching `int_pending` input and computes a new
+`int_defer` term — `dec_valid && !stall_base && int_pending` (`stall_base` is the
+pre-existing `stall` expression, factored out unchanged) — added into `stall` as an
+additional OR term, and exported as `eu_int_ready`. `m68030_exc.sv`'s `exc_pending`
+priority mux now gates `int_pending`'s branch on `int_pending && int_ready` instead of
+`int_pending && !eu_busy` — `eu_busy` is *expected* to be 1 on the recognition cycle now
+(that's the deliberately-inserted one-cycle-or-longer dispatch bubble), so the old
+`!eu_busy` gate would be self-contradictory with the new mechanism. Threaded through
+`m68030_eu.sv`/`m68030_top.sv` as a 2-wire round trip (`int_pending` down, `eu_int_ready`
+back up), mirroring how `eu_busy` itself was already threaded.
+
+Test: rewrote the Phase 105 interrupt-mid-CAS2 test in `tb/stall_fsm_tb.sv` to use a
+non-idempotent dependent instruction (`ADDI.L #1234,D5` alone, with D5 zeroed by a
+separate `CLR.L D5` *before* CAS2 starts rather than a `CLR;ADDI` pair after it) — the
+exact slot the race lands on. A regression would show up as D5=2468 (double-added), not
+1234. Along the way, a *second*, unrelated bug surfaced in the test itself: `ipl_n` was
+deasserted the instant `exc_active` was first observed (to avoid an "interrupt storm"),
+but `int_pending` needs ~2 synchronizer cycles to actually clear, and the full EXC_PUSH/
+FETCH/LOAD sequence takes many more cycles than that — so `int_defer`'s hold released
+(correctly, per the fix) well before the handler even started, meaning D5=1234 is reached
+*before* the handler runs, not after. A plain `eu_busy==0` settle-wait between this test
+and the next one is therefore insufficient (confirmed via trace: `eu_busy` can read 0 in
+the ordinary one-cycle gap between the handler's own `ADDI.L D6` retiring and `RTE` being
+dispatched, well before RTE has actually run) — replaced with a `decode_pc`-past-the-
+handler check instead.
+
+### Gap 2 — BERR hangs the CPU instead of raising a Bus Error exception
+
+Root cause recap (Phase 106), corrected per the note above Phase 107: every EU-initiated
+bus access (ordinary reads/writes, TAS, MOVEM, MOVEP, CAS, CAS2 — `eu_cas2_req`/
+`eu_mo_req` are hardwired to 0, so the "dedicated" datapaths are dead code) goes through
+`biu_cache_if.sv`, whose `CI_D_MISS`/`CI_WRITE`/`CI_FILL_*` states only transitioned on
+`sf_ack_rise`, never `sf_berr`. Fixed in two stages:
+
+**Stage 1 (BIU-level abort + exception wiring)**:
+- `biu_cache_if.sv`: added a `CI_BERR` terminal state (mirrors `CI_DONE`). Each waiting
+  state now has an `else if (sf_berr) state <= CI_BERR;` arm; `CI_BERR` drives `eu_berr`
+  for one cycle then returns to `CI_IDLE`.
+- `m68030_biu.sv`: `eu_berr` now comes from `ca_eu_berr` (cache_if's real, final-abort-
+  gated signal) instead of `cg_eu_berr_raw` (which pulsed on every in-flight retry
+  attempt, not just a genuine final abort — the exact bug the Phase 106 comment at
+  `m68030_biu.sv:678` had flagged but not fixed).
+- `m68030_top.sv`: added `eu_bus_err_r`, a sticky-to-pulse latch — but *edge-detected* off
+  `exc_frame_valid` (`exc_frame_valid_rise`), not level-triggered: `exc_frame_valid` stays
+  high forever after the first fault (BIU-090, deliberately latched so frame data stays
+  stable through `EXC_PUSH`), so a level-triggered `eu_bus_err_r` would immediately win
+  the race back to 1 on the very same cycle `pc_wr_en` tries to clear it, defeating the
+  whole point (this was the first, broken version of the fix — caught via trace before
+  landing it). `bus_err_req` is now `ifu_bus_err | eu_bus_err_r`; `fault_addr` is muxed
+  between `ifu_bus_err_addr` and the already-computed-but-previously-unused
+  `fault_addr_biu` for the EU-sourced case.
+
+**Stage 2 (EU-side FSM abort)**: `eu_seq.sv`'s `ex_mem_stall`-driven phase registers
+(generic read/write wait clause, `tas_run_r`, `movem_run_r`, CAS2's `cas2_rd2_r`/
+`cas2_wr1_r`/`cas2_wr2_r`) now collapse to idle on a new `mem_abort` signal — not
+`mem_berr` alone, but `mem_berr || exc_active`. This turned out to be essential, not
+optional: trace showed `exc_active` can become 1 (triggered via a *different* fault
+detection path — in this case the exception controller's own combinational sampling)
+several cycles *before* the EU's own `mem_berr` pulse for its in-flight access arrives,
+and once `exc_active=1`, `m68030_top.sv`'s arbiter mux forces both `mem_ack` and
+`mem_berr` to 0 for the EU permanently — a `mem_berr`-only abort condition would then
+never fire at all. A new shared `ex_berr_abort_wb` guard (registered `ex_mem_stall &&
+mem_abort` from the previous cycle) suppresses the WB latch for exactly the cycle after
+`mem_abort` collapses `ex_mem_stall`, so an aborted instruction never commits a phantom
+register write with stale `ex_valid`/`ex_writes_reg` data.
+
+Remaining ~15+ `ex_mem_stall` FSM sources (MOVEP, MOVE16, ADDX/ABCD/PACK predecrement
+forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, PFLUSH/PTEST/PMOVE64, single CAS,
+memory-indirect EA) still need the identical `mem_abort` treatment — deliberately
+deferred as a follow-up, mirroring how Category B's own FSM coverage was staged across
+Phases 103-104 (4 sources, then 21) rather than attempted in one pass.
+
+Test: the Phase 106 BERR-mid-CAS2 test's two "KNOWN GAP" checks flipped to assert the
+fixed behavior. Added a real vector-2 (Bus Error) autovector handler (`CLR.L D5;
+ADDI.L D5,#999`, no RTE — a real handler that hasn't fixed the underlying fault has
+nothing sensible to retry, so CAS2 itself is correctly abandoned, unlike the interrupt
+test's RTE round trip) and checks: BIU-level fault detection, `exc_active` seen,
+`exc_vector_num==2`, handler reached (D5=999), and `eu_busy` clear afterward (genuine
+recovery, not a lingering hang). Also had to fix the injection itself: the first version
+held `berr_n` low for the test's *entire* duration (matching the original, deliberately
+unfixed test) — but `berr_n` is a single chip-wide pin, and holding it low that long also
+faulted the exception controller's own subsequent frame-push writes to a completely
+unrelated stack address, hanging `exc_active` permanently (confirmed via trace: never
+reached `EXC_LOAD`). Released `berr_n` as soon as the first fault is observed instead —
+realistic for a single faulting device/address, and sufficient now that `biu_cache_if`
+aborts on the very first `sf_berr` rather than needing several retries to eventually
+"succeed" through the old bug.
+
+### Test-suite fallout and fixes
+
+Both new `eu_seq.sv` ports (`int_pending`, `eu_int_ready`, `exc_active`) broke every
+testbench that instantiates `m68030_eu`/`eu_seq` directly with an explicit (non-`.*`)
+port list — an unconnected `input` defaults to `z` in Icarus, and `z` propagates as `x`
+through the new `int_defer`/`mem_abort` boolean logic, corrupting `stall`/`instr_ack` for
+tests that never touch interrupts or BERR at all. Fixed by tying `int_pending`/
+`exc_active` to `1'b0` and leaving `eu_int_ready` unconnected in all 16 affected
+testbenches (`ctrl_flow_tb.sv`, `ea_modes_tb.sv`, `data_move_tb.sv`, `alu_reg_tb.sv`,
+`alu_mem_tb.sv`, `bitfield_tb.sv`, `bcd_pack_tb.sv`, `system_tb.sv`, `exception_tb.sv`,
+`atomic_tb.sv`, `special_instr_tb.sv`, `ea_extended_tb.sv`, `cmpm_tb.sv`, `pipeline_tb.sv`,
+`stall_hazard_tb.sv`, `eu_seq_tb.sv`).
+
+Separately, reordering `tb/stall_fsm_tb.sv`'s T4a/T4b (moved from the very end of the
+file to directly after B-21, avoiding any dependency on the interrupt/BERR tests' own
+settle-timing as a clean hand-off) initially hung the whole suite: T4a/T4b's code stayed
+at its original ROM addresses (0x1D00+), which are *higher* than the interrupt test's
+own 0x1900 — since this file's execution model is pure NOP-fall-through (PC only ever
+increases), code moved earlier in *program order* also has to live at a lower address
+than whatever runs after it, or PC can never walk backward to reach it. Renumbered T4a/T4b
+to 0x1820-0x186C (between B-21's end at ~0x1810 and the interrupt test's 0x1900) to fix.
+The global 800000ns testbench watchdog also needed bumping to 1500000ns for the extra
+margin from the BERR test's own new handler + settle-wait.
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, full 124-suite Harte re-run (see
+below).
+
+---
+
+## Phase 109 — BERR abort: extended `mem_abort` to the remaining 12 `ex_mem_stall` FSM sources
+
+**Why**: Phase 108 deliberately staged Gap 2's EU-side fix to only 4 of ~19
+`ex_mem_stall` FSM sources (generic read/write, TAS, MOVEM, CAS2), following the same
+incremental-rollout discipline as Category B (Phases 103-104). User asked to work through
+the rest: "MOVEP, MOVE16, ADDX/ABCD/PACK predecrement, BFINS, CMP2, MOVE mem-mem, RTR/RTE,
+PFLUSH/PTEST/PMOVE64, single CAS, and memory-indirect EA all still hang on a sustained bus
+error mid-instruction."
+
+**Two distinct coding patterns in `eu_seq.sv` needed two different fixes**:
+
+1. **Register-gated directly in the top-level `ex_mem_stall` OR-list** (MOVEP, MOVE16,
+   CMP2/CHK2, MOVE mem-mem, single CAS, PMOVE64, memory-indirect EA): the fix is just a
+   new `else if (<phase_reg> && mem_abort) begin <phase_reg> <= 1'b0; ... end` arm in the
+   sequential `always_ff` — once the phase register drops, `ex_mem_stall` naturally
+   clears with it, no other change needed.
+2. **Combinational `ex_valid && ex_is_X && !(...)` formula** (ADDX/ABCD-SBCD/PACK
+   predecrement, BFINS, RTR, RTE): needed *two* changes, not one — (a) add
+   `!(mem_berr || exc_active)` to the combinational stall expression itself (spelled out
+   rather than referencing the `mem_abort` wire, since these assigns are declared
+   textually before `mem_abort`'s own declaration and Icarus needs the forward
+   declaration order respected for `wire`/`assign`; `mem_berr`/`exc_active` are module
+   ports so they're always available regardless of declaration order), **and** (b) an
+   explicit register-reset-on-abort branch in the sequential block. (a) alone looked
+   sufficient at first (the stall clears, execution moves on) but leaves the underlying
+   `_run_r`/`_phase_r` register *stuck* forever, silently corrupting the next instance of
+   that same instruction — caught by reasoning through the mechanism before it shipped,
+   not by a failing test (no test yet exercises a second back-to-back instance of one of
+   these instructions after a mid-instruction BERR).
+
+**Sources fixed**: MOVEP (`movep_run_r`), MOVE16 (`move16_run_r`), ADDX predecrement
+(`addx_mem_run_r`/`addx_mem_phase_r`), BFINS (`bf_mem_run_r`/`bf_mem_phase_r`), PACK/UNPK
+predecrement (`pack_mem_run_r`/`pack_mem_phase_r`), ABCD/SBCD memory
+(`bcds_run_r`/`bcds_phase_r`), CMP2/CHK2 (`cmp2_run_r`), MOVE mem-mem
+(`move_mm_run_r`), single CAS (`cas_write_r`/`cas_active_r`), RTR (`rtr_phase_r`), RTE
+(`rte_phase_r`), PMOVE64 (`pmove64_run_r`), memory-indirect EA
+(`memind_inner_r`/`memind_outer_r`).
+
+**Explicitly not touched**: PFLUSH/PTEST. They don't use `mem_ack`/`mem_berr` at all —
+they go through `eu_pflush_ack`/`eu_ptest_ack` via `m68030_mmu.sv`/`biu_mmu_if.sv`, a
+completely separate interface with its own fault semantics that were never investigated.
+Force-fitting the `mem_abort` pattern onto them would have been guessing, not fixing —
+left as an open, separately-scoped item.
+
+**Verification**: compiled clean after every batch (`rm -f sim/stall_fsm && make
+sim/stall_fsm`), `make test` 34/34 and `make cosim_grp` 8/8 after the full set landed.
+Since `mem_abort` is structurally inert whenever `berr_n` never deasserts — true for
+every existing Harte vector, `make test` unit test, and cosim_grp comparison, none of
+which drive a bus error — a full Harte re-run was the deciding gate before committing
+rather than optional polish: it's the only thing in the existing test suite that
+exercises these FSM sources' *normal* (non-aborting) behavior end-to-end, so it's what
+would catch a plain typo in one of the 12 new `else if` arms. Re-ran the suites with
+dedicated Harte coverage for the touched instructions (MOVEP.w/l, ADDX.b/w/l, ABCD, SBCD,
+MOVE.b/w/l/q, RTE, RTR — MOVE16/BFINS/CMP2/CAS/CAS2/PMOVE64/memory-indirect EA have no
+Harte coverage at all, being 68020+/68030-only) plus a full 124-suite sweep against the
+rebuilt `sim/harte_dat` (the previous full sweep, run right after Gap 1+2's Stage 1/2,
+predates this phase's 12-source extension and doesn't cover it) for total confidence; all
+still 100% (or the two pre-existing documented non-bugs), zero regressions.
+
+No new BERR-mid-`<instruction>` *tests* were added this phase for the 12 newly-covered
+sources (unlike Phase 106's BERR-mid-CAS2, which exercises the mechanism end-to-end) —
+that remains open follow-up work, tracked separately.
 
 ---
 

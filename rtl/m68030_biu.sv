@@ -675,8 +675,11 @@ module m68030_biu #(
         .ifu_addr_err    (ifu_addr_err)
     );
 
-    // eu_berr routed direct from cycle_gen (cache_if.eu_berr is always 0)
-    assign eu_berr = cg_eu_berr_raw;
+    // eu_berr now comes from cache_if's own, properly-gated final-abort
+    // signal (CI_BERR state) rather than the raw cycle_gen pulse, which
+    // fired on every transient in-flight retry attempt, not just a genuine
+    // final abort — see biu_cache_if.sv's CI_BERR state.
+    assign eu_berr = ca_eu_berr;
 
     // -----------------------------------------------------------------------
     // Exception frame capture — SSW + format determination

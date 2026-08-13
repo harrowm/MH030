@@ -115,6 +115,24 @@ module eu_seq (
     output logic        div_trap,     // divide-by-zero trap
     output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
 
+    // ── Interrupt dispatch-race handshake (with m68030_exc, via m68030_eu) ──
+    input  logic        int_pending,  // exc's combinational int_pending
+    output logic        eu_int_ready, // pulses the one cycle a ready-to-dispatch
+                                       // instruction is deliberately held in
+                                       // DECODE instead of launching, so exc can
+                                       // safely sample decode_pc as the not-yet-
+                                       // started next instruction (see stall)
+
+    // ── Exception-active (with m68030_exc, via m68030_eu) ───────────────────
+    input  logic        exc_active,   // independent abort trigger for an
+                                       // in-flight memory-op FSM: mem_ack/
+                                       // mem_berr are both forced to 0 for the
+                                       // EU once exc_active=1 (m68030_top's
+                                       // arbiter mux), so a fault detected via
+                                       // a different path (e.g. IFU) can win
+                                       // the race and lock the EU out before
+                                       // its own mem_berr pulse ever arrives
+
     // ── Branch control ──────────────────────────────────────────────────────
     input  logic [31:0] decode_pc,    // PC of instruction at decode stage
     output logic        branch_taken, // combinational: taken branch this cycle
@@ -129,7 +147,12 @@ module eu_seq (
     output logic [31:0] mem_wdata,    // write data (for stores)
     input  logic [31:0] mem_rdata,    // read data (from BIU)
     input  logic        mem_ack,      // bus cycle complete
-    input  logic        mem_berr,     // bus error (ignored when EU only drives coproc/MMU reqs)
+    input  logic        mem_berr,     // bus error for the EU's own in-flight
+                                       // access; forced to 0 once exc_active
+                                       // fires (see mem_abort below, which
+                                       // covers both this and the exc_active
+                                       // race — do not use this raw signal
+                                       // directly for FSM abort logic)
     output logic        mem_rmw,      // 1=hold bus for RMW (TAS)
 
     // ── FPU coprocessor interface (FC=111 CPU Space) ──────────────
@@ -5635,7 +5658,13 @@ module eu_seq (
     logic [2:0]  addx_ax_reg_r;     // Ax register number
     logic [1:0]  addx_siz_r;        // transfer size
     logic        addx_mem_stall;
-    assign addx_mem_stall = ex_valid && ex_is_addx_mem &&
+    // (mem_berr || exc_active) spelled out rather than referencing the
+    // later-declared `mem_abort` wire — this assign is textually earlier in
+    // the file than mem_abort's own declaration, and both mem_berr/
+    // exc_active are module ports, available everywhere regardless of
+    // declaration order. See "mem_abort" comment near ex_mem_stall's own
+    // assign for why exc_active must be included, not just mem_berr.
+    assign addx_mem_stall = ex_valid && ex_is_addx_mem && !(mem_berr || exc_active) &&
                             !(addx_mem_run_r && addx_mem_phase_r == 2'd2 && mem_ack);
 
     // bit-field memory FSM (declared early for ex_mem_stall)
@@ -5651,8 +5680,10 @@ module eu_seq (
     logic        bf_mem_mutates_r;   // 1=CLR/SET/INS (needs write phase)
 
     // bf_mem_stall: active while FSM is running and not yet done
+    // (mem_berr || exc_active) spelled out — see addx_mem_stall's own
+    // comment above for why (forward-reference / must include exc_active).
     logic bf_mem_stall;
-    assign bf_mem_stall = ex_valid && ex_is_bf && !ex_bf_reg_ea &&
+    assign bf_mem_stall = ex_valid && ex_is_bf && !ex_bf_reg_ea && !(mem_berr || exc_active) &&
                           !(bf_mem_run_r && mem_ack &&
                             (!bf_mem_phase_r && !bf_mem_mutates_r ||   // read done, non-mut
                               bf_mem_phase_r));                          // write done
@@ -5670,6 +5701,7 @@ module eu_seq (
     // Stall: active while FSM is running and not done (write ack ends it)
     logic pack_mem_stall;
     assign pack_mem_stall = ex_valid && (ex_is_pack || ex_is_unpk) && ex_is_pack_mem &&
+                            !(mem_berr || exc_active) &&
                             !(pack_mem_run_r && pack_mem_phase_r && mem_ack);
 
     // RESET counter (declared early for stall / eu_reset_req)
@@ -5797,7 +5829,7 @@ module eu_seq (
     // Byte-sized -(An) on A7 steps by 2, not 1, to stay word-aligned.
     // (assigned further down, after ex_src_reg/ex_dst_reg are declared)
     logic [31:0] bcds_ay_step, bcds_ax_step;
-    assign bcds_stall   = ex_valid && ex_is_abcd_sbcd_mem &&
+    assign bcds_stall   = ex_valid && ex_is_abcd_sbcd_mem && !(mem_berr || exc_active) &&
                           !(bcds_run_r && bcds_phase_r == 2'd2 && mem_ack);
     assign bcds_sr_wr_en = ex_valid && ex_is_abcd_sbcd_mem &&
                            bcds_run_r && bcds_phase_r == 2'd2 && mem_ack;
@@ -5987,8 +6019,11 @@ module eu_seq (
     logic pmove64_skip_r;  // burns the stale ack from the old address at phase-1 start
 
     logic rtr_stall, rte_stall, ex_mem_stall;
-    assign rtr_stall    = ex_is_rtr && !(rtr_phase_r && mem_ack);
-    assign rte_stall    = ex_is_rte && !(rte_phase_r && mem_ack) && !eu_fmt_err_req;
+    // (mem_berr || exc_active) spelled out — see addx_mem_stall's own
+    // comment further down for why (forward-reference / must include
+    // exc_active, not just mem_berr).
+    assign rtr_stall    = ex_is_rtr && !(mem_berr || exc_active) && !(rtr_phase_r && mem_ack);
+    assign rte_stall    = ex_is_rte && !(mem_berr || exc_active) && !(rte_phase_r && mem_ack) && !eu_fmt_err_req;
     // cmpm_stall declared above (near CMPM state registers)
     // tas_read_ack: hold pipeline stall on the cycle the TAS read ack fires (before
     // tas_run_r becomes 1) so EX doesn't release prematurely. Gated by !tas_after_write_r
@@ -6002,6 +6037,21 @@ module eu_seq (
     assign cmp2_sr_wr_en  = cmp2_run_r && mem_ack;
     // During cmp2_after_r and tas_after_write_r cooldowns, suppress bus req and mem-wait
     // stall so EX can advance cleanly without a spurious bus cycle.
+    //
+    // mem_abort: the real abort trigger for every in-flight memory-op FSM
+    // below (generic read/write, TAS, MOVEM, CAS2, ...) — not just mem_berr
+    // on its own. mem_ack/mem_berr are both forced to 0 for the EU the
+    // instant exc_active fires (m68030_top's arbiter mux masks biu_eu_req
+    // out entirely once exc_active=1), so a fault detected via a different
+    // path (e.g. the IFU, which has its own independent, already-working
+    // berr recognition) can win the race and set exc_active *before* the
+    // EU's own mem_berr pulse for its in-flight access ever arrives —
+    // confirmed empirically via trace: exc_active could be seen asserted
+    // for many cycles with mem_berr never once true in that entire window,
+    // permanently starving an mem_berr-only abort condition. exc_active
+    // itself is the correct, independent "give up now" signal regardless
+    // of which path detected the fault.
+    wire mem_abort = mem_berr || exc_active;
     assign ex_mem_stall = tas_run_r || tas_read_ack || movem_start_r || movem_run_r ||
                           movep_start_r || movep_pre_r || movep_run_r ||
                           move16_start_r || move16_run_r ||
@@ -6024,8 +6074,31 @@ module eu_seq (
                            !cas2_rd2_r && !cas2_get_du1_r && !cas2_wr1_r &&
                            !cas2_get_du2_r && !cas2_wr2_r && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
                            !cas2_after_r && !ex_cas2_done_r &&
-                           (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack) ||
+                           (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack && !mem_abort) ||
                           rtr_stall || rte_stall || cmpm_stall || stop_r || reset_run_r;
+
+    // ex_berr_abort_wb: true the cycle *after* a fault collapses ex_mem_stall
+    // back to 0 (registered, since ex_mem_stall's own drop and this check
+    // happen one cycle apart). Without this, the WB latch below would treat
+    // a berr-aborted memory op exactly like a successful one on the very
+    // next cycle (its "else" branch unconditionally captures ex_valid/
+    // ex_writes_reg the instant ex_mem_stall drops, with no way to tell a
+    // clean completion from an abort) — committing a phantom register write
+    // with garbage/stale data for an instruction that never actually
+    // completed. One shared guard for every ex_mem_stall-driven FSM
+    // (generic read/write, TAS, MOVEM, CAS2, ...) rather than duplicating
+    // WB-suppression logic in each one individually.
+    logic ex_mem_stall_r, mem_abort_r, ex_berr_abort_wb;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            ex_mem_stall_r <= 1'b0;
+            mem_abort_r    <= 1'b0;
+        end else begin
+            ex_mem_stall_r <= ex_mem_stall;
+            mem_abort_r    <= mem_abort;
+        end
+    end
+    assign ex_berr_abort_wb = ex_mem_stall_r && mem_abort_r;
 
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -6066,10 +6139,25 @@ module eu_seq (
     // will clear dec_valid on the next cycle, giving EX a clean bubble.
     // (ex_jmp_taken/ex_jsr_taken/etc. are assigned below; forward refs are fine
     // in concurrent assigns.)
-    assign stall      = ex_mem_stall
+    logic stall_base;
+    assign stall_base = ex_mem_stall
                       || (ex_jmp_taken | ex_jsr_taken | ex_bsr_taken
                          | ex_rts_taken | ex_rtr_taken | ex_rte_taken | ex_dbcc_taken)
                       || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext || stop_first_cycle));
+    // int_defer: a pending interrupt sees a clean instruction boundary this
+    // cycle (dec_valid would otherwise dispatch with no other stall source).
+    // Real 68030 silicon only samples IPL between instructions; freezing
+    // dispatch for exactly this window (rather than letting the ready
+    // instruction launch and then trying to sample decode_pc on the same
+    // edge) avoids a race where the exception controller's saved return PC
+    // could point at an instruction that has already started executing.
+    // Held for as long as int_pending stays asserted — spans the whole
+    // EXC_PUSH/FETCH/LOAD sequence, since nothing else changes dec_valid
+    // until the IFU flush on pc_wr_en naturally clears it.
+    logic int_defer;
+    assign int_defer  = dec_valid && !stall_base && int_pending;
+    assign stall      = stall_base || int_defer;
+    assign eu_int_ready = int_defer;
     assign seq_busy  = stall;
     assign instr_ack = dec_valid && !stall;
 
@@ -6611,6 +6699,12 @@ module eu_seq (
             rtr_a7_next_r <= ex_ea + 32'd2;   // A7+2: CCR pop is word-sized, not longword
         end else if (ex_valid && ex_is_rtr && rtr_phase_r && mem_ack) begin
             rtr_phase_r   <= 1'b0;
+        end else if (ex_valid && ex_is_rtr && rtr_phase_r && mem_abort) begin
+            // A fault on the second (PC) read aborts RTR — must explicitly
+            // reset here or this stays stuck for the next RTR instruction.
+            // The first (CCR) read's own fault needs no reset: rtr_phase_r
+            // is still 0 at that point, its correct idle value.
+            rtr_phase_r   <= 1'b0;
         end
     end
 
@@ -6666,6 +6760,16 @@ module eu_seq (
                 addx_ay_reg_r    <= ex_src_reg[2:0];
                 addx_ax_reg_r    <= ex_dst_reg[2:0];
                 addx_siz_r       <= ex_siz;
+            end else if (addx_mem_run_r && mem_abort) begin
+                // A fault on any of the 3 phases (read Ay, read Ax, write
+                // result) aborts the whole instruction. Must explicitly
+                // reset addx_mem_run_r here (not just rely on the
+                // combinational addx_mem_stall exception above dropping
+                // `stall`) — otherwise it stays stuck at 1 forever (nothing
+                // else ever clears it), corrupting the *next*
+                // ADDX/SUBX -(Ay),-(Ax) instruction's own phase-0 setup.
+                addx_mem_run_r   <= 1'b0;
+                addx_mem_phase_r <= 2'd0;
             end else if (addx_mem_run_r && mem_ack) begin
                 case (addx_mem_phase_r)
                     2'd0: begin
@@ -6723,6 +6827,14 @@ module eu_seq (
                     bf_mem_run_r   <= 1'b0;           // write done
                     bf_mem_phase_r <= 1'b0;
                 end
+            end else if (bf_mem_run_r && mem_abort) begin
+                // A fault on either phase aborts the whole bit-field op —
+                // must explicitly reset here, not just rely on
+                // bf_mem_stall's own combinational exception dropping
+                // `stall`, or this stays stuck for the next BFINS/BFEXTU/
+                // BFEXTS/etc. memory-EA instruction.
+                bf_mem_run_r   <= 1'b0;
+                bf_mem_phase_r <= 1'b0;
             end
         end
     end
@@ -6740,6 +6852,12 @@ module eu_seq (
             rte_a7_next_r  <= ex_ea + 32'd4;     // A7+4; phase 2 will add 4 + skip
             rte_fmt_skip_r <= rte_frame_extra(mem_rdata[31:28]);
         end else if (ex_valid && ex_is_rte && rte_phase_r && mem_ack) begin
+            rte_phase_r   <= 1'b0;
+        end else if (ex_valid && ex_is_rte && rte_phase_r && mem_abort) begin
+            // A fault on the second (PC) read aborts RTE — must explicitly
+            // reset here or this stays stuck for the next RTE instruction.
+            // The first (format/SR) read's own fault needs no reset:
+            // rte_phase_r is still 0 at that point, its correct idle value.
             rte_phase_r   <= 1'b0;
         end
     end
@@ -6805,6 +6923,10 @@ module eu_seq (
                     movem_addr_r <= movem_addr_r + movem_step;
             end
             if (movem_last) movem_run_r <= 1'b0;
+        end else if (movem_run_r && mem_abort) begin
+            // A fault partway through the register list aborts the whole
+            // instruction — real 68030 doesn't partially complete a MOVEM.
+            movem_run_r <= 1'b0;
         end
     end
 
@@ -6829,8 +6951,11 @@ module eu_seq (
                 tas_run_r   <= 1'b1;
                 tas_wdata_r <= mem_rdata[7:0] | 8'h80;
                 tas_ccr_r   <= {flag_x, mem_rdata[7], (mem_rdata[7:0] == 8'h0), 1'b0, 1'b0};
-            end else if (tas_run_r && mem_ack) begin
-                // Write ack: end write phase
+            end else if (tas_run_r && (mem_ack || mem_abort)) begin
+                // Write ack (or a fault aborting the write phase): end write
+                // phase either way — on berr, tas_sr_wr_en (mem_ack-gated)
+                // correctly never fires, so no CCR update happens for an
+                // aborted TAS.
                 tas_run_r   <= 1'b0;
             end
         end
@@ -6873,6 +6998,14 @@ module eu_seq (
                     default: cmp2_addr2_r <= ex_ea + 32'd4;
                 endcase
             end else if (cmp2_run_r && mem_ack) begin
+                cmp2_run_r <= 1'b0;
+            end else if (cmp2_run_r && mem_abort) begin
+                // A fault on the second (bound) read aborts the whole
+                // CMP2/CHK2 — must explicitly reset here or this stays
+                // stuck for the next CMP2/CHK2 instruction. The first
+                // read's own fault is already covered by the generic
+                // exclusion-gated mem_rd/mem_wr clause in ex_mem_stall
+                // (cmp2_run_r is still 0 at that point).
                 cmp2_run_r <= 1'b0;
             end
         end
@@ -6931,6 +7064,11 @@ module eu_seq (
                 else
                     movep_wr_byte_r <= movep_dn_val_r[7:0];
             end
+        end else if (movep_run_r && mem_abort) begin
+            // A fault partway through the byte-interleaved sequence aborts
+            // the whole instruction — real 68030 doesn't leave a partial
+            // MOVEP transfer in place.
+            movep_run_r <= 1'b0;
         end
     end
 
@@ -7021,6 +7159,10 @@ module eu_seq (
                         move16_dst_r  <= move16_dst_r + 32'd4;
                     end
                 end
+            end else if (move16_run_r && mem_abort) begin
+                // A fault on any of the 8 beats (4 reads + 4 writes) aborts
+                // the whole block move — real 68030 doesn't partially copy.
+                move16_run_r <= 1'b0;
             end
         end
     end
@@ -7087,6 +7229,14 @@ module eu_seq (
             memind_outer_r <= 1'b1;
             memind_ptr_r   <= mem_rdata;   // 32-bit pointer from inner read
         end else if (memind_outer_r && mem_ack) begin
+            memind_outer_r <= 1'b0;
+        end else if (memind_inner_r && mem_abort) begin
+            // A fault on the inner (pointer) read aborts the whole
+            // memory-indirect EA — must explicitly reset here or this
+            // stays stuck for the next ([bd,An],Xn,od) instruction.
+            memind_inner_r <= 1'b0;
+        end else if (memind_outer_r && mem_abort) begin
+            // A fault on the outer read aborts the same way.
             memind_outer_r <= 1'b0;
         end
     end
@@ -7493,6 +7643,12 @@ module eu_seq (
                     pack_mem_run_r   <= 1'b0;        // write done, FSM complete
                     pack_mem_phase_r <= 1'b0;
                 end
+            end else if (pack_mem_run_r && mem_abort) begin
+                // A fault on either phase aborts the whole PACK/UNPK — must
+                // explicitly reset here or this stays stuck for the next
+                // PACK/UNPK memory-form instruction.
+                pack_mem_run_r   <= 1'b0;
+                pack_mem_phase_r <= 1'b0;
             end
         end
     end
@@ -7564,6 +7720,14 @@ module eu_seq (
                     if (pmove64_is_crp_r) crp_lo_r <= mem_rdata;
                     else                  srp_lo_r <= mem_rdata;
                 end
+            end else if (pmove64_run_r && !pmove64_skip_r && mem_abort) begin
+                // A fault on the second (An+4) half aborts the whole 64-bit
+                // PMOVE — must explicitly reset here or this stays stuck
+                // for the next PMOVE CRP/SRP. The first half's own fault
+                // is already covered by the generic exclusion-gated
+                // mem_rd/mem_wr clause in ex_mem_stall (pmove64_run_r is
+                // still 0 at that point).
+                pmove64_run_r <= 1'b0;
             end
         end
     end
@@ -7681,6 +7845,14 @@ module eu_seq (
                 move_mm_dst_an_new_r <= rd_b_data + ex_dst_an_delta;
             end else if (move_mm_run_r && mem_ack) begin
                 move_mm_run_r <= 1'b0;
+            end else if (move_mm_run_r && mem_abort) begin
+                // A fault on the write phase aborts the whole MOVE mem-mem —
+                // must explicitly reset here or this stays stuck for the
+                // next indexed-both-sides MOVE. The read phase's own fault
+                // is already covered by the generic exclusion-gated
+                // mem_rd/mem_wr clause in ex_mem_stall (move_mm_run_r is
+                // still 0 at that point).
+                move_mm_run_r <= 1'b0;
             end
         end
     end
@@ -7732,6 +7904,15 @@ module eu_seq (
             end else if (cas_write_r && mem_ack) begin
                 cas_write_r <= 1'b0;
                 // cas_after_r will be 1 next cycle; cas_active_r cleared after after_r
+            end else if (cas_write_r && mem_abort) begin
+                // A fault on the write phase aborts CAS — must explicitly
+                // reset both cas_write_r and cas_active_r here (mismatch
+                // path already resets cas_active_r directly at cas_get_du_r
+                // time, but the match/write path only clears it later via
+                // cas_after_r, which requires mem_ack — never fires on an
+                // abort), or this stays stuck for the next CAS instruction.
+                cas_write_r  <= 1'b0;
+                cas_active_r <= 1'b0;
             end else if (cas_after_r) begin
                 cas_active_r <= 1'b0; // match: FSM done after write+cooldown
             end
@@ -7812,6 +7993,12 @@ module eu_seq (
                     // Mismatch: write Dc1←rdata1, Dc2←rdata2
                     cas2_dc1_wr_r  <= 1'b1;
                 end
+            end else if (cas2_rd2_r && mem_abort) begin
+                // A fault on any of CAS2's 4 phases aborts the whole locked
+                // sequence — real 68030 CAS2 is atomic, it doesn't leave a
+                // partial compare/write in place.
+                cas2_rd2_r     <= 1'b0;
+                cas2_active_r  <= 1'b0;
             end else if (cas2_get_du1_r) begin
                 cas2_get_du1_r <= 1'b0;
                 cas2_du1_val_r <= rd_b_data;       // Du1 from rd_b override
@@ -7819,12 +8006,18 @@ module eu_seq (
             end else if (cas2_wr1_r && mem_ack) begin
                 cas2_wr1_r     <= 1'b0;
                 cas2_get_du2_r <= 1'b1;
+            end else if (cas2_wr1_r && mem_abort) begin
+                cas2_wr1_r     <= 1'b0;
+                cas2_active_r  <= 1'b0;
             end else if (cas2_get_du2_r) begin
                 cas2_get_du2_r <= 1'b0;
                 cas2_du2_val_r <= rd_b_data;       // Du2 from rd_b override
                 cas2_wr2_r     <= 1'b1;
             end else if (cas2_wr2_r && mem_ack) begin
                 cas2_wr2_r     <= 1'b0;
+            end else if (cas2_wr2_r && mem_abort) begin
+                cas2_wr2_r     <= 1'b0;
+                cas2_active_r  <= 1'b0;
             end else if (cas2_dc1_wr_r) begin
                 // Write Dc1 ← rdata1 via wr2 this cycle
                 cas2_dc1_wr_r  <= 1'b0;
@@ -7899,6 +8092,12 @@ module eu_seq (
                     if (bcds_phase_r == 2'd1) bcds_dst_r <= mem_rdata[7:0];
                     bcds_phase_r <= bcds_phase_r + 2'd1;
                 end
+            end else if (bcds_run_r && mem_abort) begin
+                // A fault on any of the 3 phases aborts the whole ABCD/SBCD
+                // memory-form instruction — must explicitly reset here or
+                // this stays stuck for the next -(Ay),-(Ax) instruction.
+                bcds_run_r   <= 1'b0;
+                bcds_phase_r <= 2'd0;
             end
         end
     end
@@ -7929,8 +8128,10 @@ module eu_seq (
             wb_md_hi         <= 32'h0;
             wb_is_exg        <= 1'b0;
             wb_exg_dd        <= 1'b0;
-        end else if (ex_mem_stall) begin
-            // Memory cycle in progress: drain WB (bubble).
+        end else if (ex_mem_stall || ex_berr_abort_wb) begin
+            // Memory cycle in progress (or just aborted by a berr the
+            // previous cycle — see ex_berr_abort_wb above): drain WB
+            // (bubble), same as the ordinary wait case.
             wb_valid         <= 1'b0;
             wb_writes_reg    <= 1'b0;
             wb_updates_ccr   <= 1'b0;

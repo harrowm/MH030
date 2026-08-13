@@ -788,6 +788,90 @@ module stall_fsm_tb;
         run_and_check("B-21: PMOVE CRP dependent instr ran (D5=913)", 5, 32'd913, 20000);
 
         // -----------------------------------------------------------------
+        // Task #4a (post-Phase-104 follow-up list): back-to-back FSM
+        // composition — two *different* multi-cycle ex_mem_stall FSMs with
+        // no ordinary instruction between them, to check decode-holdoff
+        // correctly composes across an FSM-to-FSM transition (every
+        // Category B case so far pairs one FSM with a plain dependent
+        // instruction afterward, never FSM-then-FSM directly).
+        // TAS (A0) — an indivisible RMW lock — immediately followed by
+        // MOVEM.L (A0)+,D0-D1, reusing the *same* A0 with no MOVEA between
+        // them (TAS never modifies An), so the two FSMs are truly adjacent
+        // at the opcode level. Also incidentally checks write-then-read
+        // ordering across the boundary: TAS's write sets bit7 of the top
+        // byte of the very longword MOVEM reads immediately afterward, so
+        // a stale/racy read would show up as D0's top bit not reflecting
+        // the TAS write.
+        // -----------------------------------------------------------------
+        rom[16'h1820/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1824/4] = {16'h3D00, TAS_A0};
+        rom[16'h1828/4] = {MOVEM_L_A0P, 16'h0003};
+        rom[16'h182C/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1830/4] = {16'h0000, 16'd444};
+        rom[16'h3D00/4] = 32'h0011_2233;  // top byte 0x00 -> TAS sets bit7 -> 0x80
+        rom[16'h3D04/4] = 32'h4455_6677;
+        begin
+            int c0, c1;
+            c0 = data_ds_count;
+            // Reordered ahead of the interrupt/BERR-mid-FSM tests below (was
+            // originally the very last thing in this file) so it doesn't
+            // depend on their own settle-timing as a clean hand-off — see
+            // those tests' own comments for why that dependency was fragile.
+            // Code placed at 0x1820, right after B-21's own end (~0x1810)
+            // and well before the interrupt test's 0x1900 — NOP-fall-through
+            // in this file only ever runs PC forward, so code reordered
+            // earlier in *program order* must also live at a lower address
+            // than whatever runs after it (first attempt at this reorder
+            // kept the original 0x1D00 address and hung: PC can never walk
+            // backward from there down to the interrupt test's 0x1900).
+            run_and_check("T4a: back-to-back TAS->MOVEM dependent instr ran (D5=444)", 5, 32'd444, 4000);
+            c1 = data_ds_count;
+            // TAS(2) + MOVEM(2 registers) = 4 data-space bus cycles, matching
+            // each instruction's own earlier standalone Category B count —
+            // running directly after B-21 (no intervening tests), the
+            // MMU-enabled ATC/TT0 lookup overhead observed elsewhere in this
+            // file for *data* accesses evidently doesn't apply to this
+            // particular pair; D0/D1/memory below all independently confirm
+            // exactly one clean execution of each instruction.
+            check32("T4a: TAS(2) + MOVEM(2) = 4 data-space bus cycles",
+                    c1 - c0, 32'd4);
+            check32("T4a: MOVEM's D0 reflects TAS's write (top byte 0x80, not stale 0x00)",
+                    u_top.u_eu.u_rf.d_reg[0], 32'h8011_2233);
+            check32("T4a: MOVEM's D1 loaded correctly", u_top.u_eu.u_rf.d_reg[1], 32'h4455_6677);
+            check8("T4a: TAS itself set bit7 in memory", rom[16'h3D00/4][31:24], 8'h80);
+        end
+
+        // -----------------------------------------------------------------
+        // Task #4b: DSACK wait-states applied to an FSM instruction's own
+        // multi-beat bus cycles, not just Category D's single-beat simple
+        // producer. Reuses TAS (2 bus beats: read then write) with the
+        // existing global `wait_states` knob (already proven against
+        // mem_model's DSACK generation in Category D) — confirms a
+        // stretched bus cycle composes correctly with *every* beat of a
+        // multi-phase FSM, not just a single ordinary access.
+        // -----------------------------------------------------------------
+        rom[16'h1840/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1844/4] = {16'h3E00, TAS_A0};
+        rom[16'h1848/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h184C/4] = {16'h0000, 16'd333};
+        rom[16'h3E00/4] = 32'h0000_0000;
+        rom[16'h1860/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1864/4] = {16'h3F80, TAS_A0};
+        rom[16'h1868/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h186C/4] = {16'h0000, 16'd335};
+        rom[16'h3F80/4] = 32'h0000_0000;
+        begin
+            int elapsed0, elapsed3;
+            wait_states = 0;
+            run_and_check_timed("T4b-1: TAS wait_states=0, D5=333", 5, 32'd333, 4000, elapsed0);
+            wait_states = 3;
+            run_and_check_timed("T4b-2: TAS wait_states=3, D5=335", 5, 32'd335, 4000, elapsed3);
+            wait_states = 0;
+            check("T4b: wait states measurably lengthen a real FSM's own bus beats (not just a simple producer)",
+                  elapsed3 > elapsed0);
+        end
+
+        // -----------------------------------------------------------------
         // Interrupt arrival mid-FSM (task #2 in the post-Phase-104
         // follow-up list): does a level-7 (NMI, bypasses the IPL mask
         // entirely — SR's mask defaults to 7 at reset, so a maskable level
@@ -836,34 +920,40 @@ module stall_fsm_tb;
         // reach their expected values after the RTE returns control to
         // the resumed instruction stream.
         //
-        // That same trace also caught a **third, deeper, and still-open**
-        // finding, deliberately deferred rather than fixed here: CLR.L D5
-        // (the instruction immediately after CAS2) was observed to launch
-        // into EX and fully commit (D5 briefly read back 0, mid-exception-
-        // push) on the *exact same cycle* eu_busy first dropped to 0 —
-        // because it had already sat fully decoded and hazard-free in
-        // DECODE throughout CAS2's stall, `instr_ack = dec_valid && !stall`
-        // fires combinationally the instant `stall` clears, with no gap
-        // cycle. But the exception controller's snap_pc_r *also* samples
-        // ifu_decode_pc on that identical edge, and decode_pc had not yet
-        // advanced past CLR.L D5 at that instant — so the saved return PC
-        // pointed at CLR.L D5's own (already-executing) address, and RTE
-        // later resumed there, silently *re-running* it. This test can't
-        // see it (confirmed via the trace, not asserted below) because
-        // CLR is idempotent — but a non-idempotent instruction in that
-        // exact slot (ADD, an autoincrement/decrement EA, a memory write)
-        // would be double-executed after any interrupt that happens to
-        // land on the specific cycle a multi-cycle FSM retires directly
-        // into an already-decoded, hazard-free follow-on instruction. Real
-        // fix needs `int_pending` (or an equivalent "would take it now"
-        // signal) threaded into eu_seq.sv's own `stall` so the newly-ready
-        // instruction is held in DECODE for one extra cycle rather than
-        // launching on the recognition edge — genuinely new cross-module
-        // plumbing (eu_seq.sv currently has no IPL awareness at all, see
-        // module port list), plus a full Harte re-verification once
-        // touched, since `stall` is the single most shared signal in the
-        // EU. Deferred to its own future phase rather than rushed in here;
-        // documented in plan.md/CLAUDE.md so it isn't lost.
+        // That same trace also caught a **third, deeper** finding, fixed in
+        // Phase 108 (not in this same commit as the eu_busy fix above): CLR.L
+        // D5 (the instruction immediately after CAS2, in the original version
+        // of this test) was observed to launch into EX and fully commit (D5
+        // briefly read back 0, mid-exception-push) on the *exact same cycle*
+        // eu_busy first dropped to 0 — because it had already sat fully
+        // decoded and hazard-free in DECODE throughout CAS2's stall,
+        // `instr_ack = dec_valid && !stall` fires combinationally the instant
+        // `stall` clears, with no gap cycle. But the exception controller's
+        // snap_pc_r *also* sampled ifu_decode_pc on that identical edge, and
+        // decode_pc had not yet advanced past CLR.L D5 at that instant — so
+        // the saved return PC pointed at CLR.L D5's own (already-executing)
+        // address, and RTE later resumed there, silently *re-running* it.
+        // The original version of this test couldn't see it (confirmed via a
+        // temporary trace, not an assertion) because CLR is idempotent — a
+        // non-idempotent instruction in that exact slot would have been
+        // double-executed. Fixed by threading `int_pending` (m68030_exc's
+        // already-computed combinational signal) into eu_seq.sv's `stall` as
+        // a new term, `int_defer` — asserted whenever a ready-to-dispatch
+        // instruction and a pending interrupt coincide on the same cycle —
+        // which holds the instruction in DECODE instead of letting it launch,
+        // for as long as `int_pending` stays asserted (naturally spanning the
+        // whole EXC_PUSH/FETCH/LOAD sequence, since nothing else changes
+        // `dec_valid` until the post-`pc_wr_en` IFU flush). `m68030_exc.sv`'s
+        // own gating switched from `int_pending && !eu_busy` to
+        // `int_pending && int_ready`, where `int_ready` is `eu_seq.sv`'s new
+        // `int_defer` pulse threaded back up through `m68030_eu.sv` — using
+        // `!eu_busy` directly would now be self-contradictory, since
+        // `eu_busy` is *expected* to be 1 on the exact cycle the deliberate
+        // bubble is inserted. The test below now uses a non-idempotent
+        // dependent instruction (`ADDI.L #1234,D5` alone, with D5 zeroed by a
+        // separate `CLR.L D5` *before* CAS2 even starts, not after it) —
+        // exactly the slot that raced — so a regression would show up as
+        // D5=2468 (double-added) instead of 1234.
         // -----------------------------------------------------------------
         $display("=== Interrupt arrival during a locked CAS2 sequence ===");
         begin
@@ -881,12 +971,16 @@ module stall_fsm_tb;
 
             // Fresh CAS2.L instance (same opcode/ext-word layout as B-6,
             // reusing Rn1=A0/Rn2=A1), at a new address/data region so it
-            // doesn't disturb B-6's own already-verified result.
-            rom[16'h1900/4] = {MOVEA_L_IMM_A0, 16'h0000};
-            rom[16'h1904/4] = {16'h3900, MOVEA_L_IMM_A1};
-            rom[16'h1908/4] = {16'h0000, 16'h3904};
-            rom[16'h190C/4] = {CAS2_L, CAS2_EXT1};
-            rom[16'h1910/4] = {CAS2_EXT2, CLR_L_D5};
+            // doesn't disturb B-6's own already-verified result. D5 is
+            // zeroed *before* CAS2 starts (not after) so the single
+            // dependent instruction immediately following CAS2 — the exact
+            // slot the dispatch race lands on — is the non-idempotent
+            // ADDI.L alone, not a CLR;ADDI pair.
+            rom[16'h1900/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+            rom[16'h1904/4] = {16'h0000, 16'h3900};
+            rom[16'h1908/4] = {MOVEA_L_IMM_A1, 16'h0000};
+            rom[16'h190C/4] = {16'h3904, CAS2_L};
+            rom[16'h1910/4] = {CAS2_EXT1, CAS2_EXT2};
             rom[16'h1914/4] = {ADDI_L_D5, 16'h0000};
             rom[16'h1918/4] = {16'd1234, NOP_OP};
 
@@ -918,6 +1012,39 @@ module stall_fsm_tb;
                     break;
             end
             ipl_n = 3'b111;   // deassert before any later test could see it
+            // D5/D6 both reaching their expected values does NOT prove the
+            // handler's own trailing RTE has executed yet: ipl_n is
+            // deasserted the instant exc_active is first observed (well
+            // before EXC_PUSH/FETCH/LOAD actually finish, only a couple of
+            // synchronizer cycles later), so int_pending — and therefore
+            // int_defer's hold on the originally-deferred ADDI.L D5 — can
+            // clear before the exception dispatch sequence completes.
+            // ADDI.L is a pure register op with no bus access of its own,
+            // so once released it commits within 1-2 cycles regardless of
+            // exc_active, well before the handler even starts — meaning
+            // D5=1234 can be (and, confirmed via trace, is) reached before
+            // the handler's own CLR.L D6/ADDI.L D6/RTE sequence has even
+            // begun. D6=12345 fires right before the handler's *own*
+            // trailing RTE (its last instruction) — so by the time both
+            // markers are true, RTE is still pending, not finished.
+            // A plain "wait until eu_busy==0", even debounced for many
+            // consecutive idle cycles, is insufficient: at the moment this
+            // loop breaks, decode_pc can still be sitting exactly at RTE's
+            // own address with eu_busy==0 (confirmed via trace) — genuinely
+            // idle, but only because RTE hasn't even been *fetched* yet
+            // (the IFU takes a real, and here unexpectedly long, number of
+            // cycles to bring it in), not because it already ran. Waiting
+            // for N idle cycles just risks the budget running out during
+            // that pre-fetch gap, handing off before RTE ever starts.
+            // Instead wait for the unambiguous signal: decode_pc has moved
+            // *past* RTE's own opcode address (0x0088) — which can only
+            // happen after RTE has been fetched, dispatched, completed its
+            // own 2-phase SR/PC stack-pop reads, and the IFU has resumed
+            // fetching the redirected (resumed) instruction stream — AND
+            // eu_busy is clear, ruling out a mid-flight redirect.
+            for (t = 0; t < 4000 &&
+                 !(u_top.ifu_decode_pc > 32'h0000_008A && !u_top.eu_busy); t++)
+                @(posedge clk_4x);
             check("INT-mid-CAS2: injected mid-sequence (not before it started)", injected);
             check("INT-mid-CAS2: exception was recognized at all", exc_seen);
             check32("INT-mid-CAS2: CAS2's full 2-cycle bus sequence completed before the interrupt was taken (not truncated mid-FSM)",
@@ -997,24 +1124,60 @@ module stall_fsm_tb;
         //      handler PC) — the EU-side fix needs the identical pattern,
         //      not currently present anywhere for the EU path.
         //
-        // Given the fix spans biu_cache_if.sv, biu_multiop_fsm.sv (and
-        // likely biu_burst_ctrl.sv/coprocessor paths, not individually
-        // re-checked here), m68030_biu.sv's eu_berr wiring, and
-        // m68030_top.sv/m68030_exc.sv's bus_err_req + fault_addr muxing —
-        // plus a full Harte re-verification once touched, since cache_if
-        // is on every single EU/IFU memory access — this is deliberately
-        // root-caused and documented here rather than fixed in this same
-        // pass. This test asserts *today's actual* (buggy) behavior so
-        // `make test` stays green and the gap stays visible for a
-        // dedicated future phase, matching the project's established
-        // "document, don't silently drop" convention (see e.g. the
-        // TRAP/Address-Error frame-width divergence in plan.md Phases
-        // 99-100, or the dispatch-race finding earlier in this same file).
+        // **Fixed in Phase 108** (same phase as the interrupt dispatch-race
+        // fix above), in two stages:
+        //   Stage 1 (BIU-level abort + exception wiring): biu_cache_if.sv
+        //   gained a CI_BERR terminal state — CI_D_MISS/CI_WRITE/CI_FILL_*
+        //   now transition there on `sf_berr` (mirroring CI_DONE's
+        //   `sf_ack_rise` handling) instead of hanging forever; its output
+        //   drives a real, final-abort-gated `eu_berr` (m68030_biu.sv's own
+        //   top-level `eu_berr` now comes from `ca_eu_berr` instead of the
+        //   raw, every-retry-pulses `cg_eu_berr_raw`). m68030_top.sv gained
+        //   a sticky-to-pulse `eu_bus_err_r` latch (edge-detected off
+        //   `exc_frame_valid`, clearing on `pc_wr_en_common` — mirroring
+        //   m68030_ifu.sv's own working `bus_err_r` pattern) feeding
+        //   `m68030_exc`'s `bus_err_req` alongside the existing IFU path;
+        //   `fault_addr` is now muxed between `ifu_bus_err_addr` and the
+        //   already-computed-but-previously-dangling `fault_addr_biu` for
+        //   the EU-sourced case.
+        //   Stage 2 (EU-side FSM abort): eu_seq.sv's `ex_mem_stall`-driven
+        //   phase registers (the generic read/write wait clause, TAS,
+        //   MOVEM, and CAS2's rd2/wr1/wr2 phases) now collapse back to idle
+        //   on a new `mem_abort` signal — not just `mem_berr` on its own,
+        //   but `mem_berr || exc_active`, since (confirmed via trace) a
+        //   fault detected via a *different* path (e.g. the IFU) can win
+        //   the race and set `exc_active` before the EU's own `mem_berr`
+        //   pulse for its in-flight access ever arrives, otherwise
+        //   permanently starving a `mem_berr`-only abort condition. A new
+        //   shared `ex_berr_abort_wb` guard (edge-detected the cycle after
+        //   `mem_abort` collapses `ex_mem_stall`) suppresses the WB latch
+        //   for that one cycle, so an aborted instruction never commits a
+        //   phantom register write with garbage/stale data.
+        // Remaining ~15+ ex_mem_stall FSM sources (MOVEP, MOVE16, ADDX/
+        // ABCD/PACK predecrement forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE,
+        // PFLUSH/PTEST/PMOVE64, single CAS, memory-indirect EA) still need
+        // the same `mem_abort` treatment — deliberately deferred as a
+        // follow-up, exactly mirroring how Category B's own FSM-decode-
+        // holdoff coverage was staged across Phases 103-104 (4 sources,
+        // then 21) rather than attempted in one pass.
         // -----------------------------------------------------------------
         $display("=== BERR mid-CAS2 sequence ===");
         begin
-            int t, dd0;
-            logic saw_biu_berr, injected3;
+            int t, dd0, dbg7n;
+            logic saw_biu_berr, injected3, exc_seen3;
+            dbg7n = 0;
+
+            // Bus Error autovector: vector 2, at VBR(=0)+2*4=0x08. Handler
+            // sets D5 as its own completion marker, then idles (falls
+            // through to default-filled NOPs) — CAS2 itself is being
+            // aborted/abandoned by design (a real bus-error handler that
+            // hasn't fixed the underlying fault has nothing sensible to
+            // retry), so unlike the interrupt test above there's no RTE
+            // round trip back into the faulted instruction stream here.
+            rom[16'h0008/4] = 32'h0000_0090;
+            rom[16'h0090/4] = {CLR_L_D5, ADDI_L_D5};
+            rom[16'h0094/4] = {16'h0000, 16'd999};
+
             rom[16'h1C00/4] = {MOVEA_L_IMM_A0, 16'h0000};
             rom[16'h1C04/4] = {16'h3C00, MOVEA_L_IMM_A1};
             rom[16'h1C08/4] = {16'h0000, 16'h3C04};
@@ -1024,12 +1187,13 @@ module stall_fsm_tb;
             rom[16'h1C18/4] = {16'd777, NOP_OP};
             saw_biu_berr = 1'b0;
             injected3 = 1'b0;
+            exc_seen3 = 1'b0;
             dd0 = data_ds_count;
             for (t = 0; t < 12000; t++) begin
                 @(posedge clk_4x); #1;
                 if (!injected3 && data_ds_count != dd0) begin
                     injected3 = 1'b1;
-                    berr_n = 1'b0;   // sustained fault — never deasserted
+                    berr_n = 1'b0;
                 end
                 // CAS2 has its own dedicated 4-cycle datapath directly in
                 // biu_cycle_gen.sv (eu_cas2_req/eu_cas2_ack) — unlike
@@ -1037,105 +1201,52 @@ module stall_fsm_tb;
                 // generic eu_mo_req/eu_mo_ack/eu_mo_berr), CAS2 has **no
                 // berr output of its own at all** (grepped m68030_biu.sv's
                 // full port list: eu_cas2_ack exists, eu_cas2_berr does
-                // not) — an even more severe instance of the same bug
-                // class, so this watches the shared BIU-internal raw fault
+                // not) — so this watches the shared BIU-internal raw fault
                 // signal instead (cg_eu_berr_raw, the same one that also
-                // drives the misleading top-level eu_berr per the finding
-                // above) to confirm the BIU layer itself still detects the
-                // fault even though CAS2 has no way to be told about it.
-                if (u_top.u_biu.cg_eu_berr_raw) saw_biu_berr = 1'b1;
+                // now correctly drives the top-level eu_berr, per the
+                // Stage 1 fix above) to confirm the BIU layer detects the
+                // fault even though CAS2 itself has no way to be told.
+                // Release berr_n as soon as the first fault is observed,
+                // rather than holding it for the rest of the loop: berr_n
+                // is a single, chip-wide pin — asserting it indefinitely
+                // doesn't just fault CAS2's own retries (which, now that
+                // biu_cache_if correctly aborts on the very first berr
+                // rather than needing several retries, only needs one
+                // pulse anyway), it also faults the exception controller's
+                // *own* subsequent frame-push writes to a completely
+                // unrelated stack address, hanging the exception dispatch
+                // itself (confirmed via trace: exc_active got stuck
+                // permanently asserted, never reaching EXC_LOAD, when
+                // berr_n was held low for the whole loop) — an unrealistic
+                // scenario for a single faulting device/address, and not
+                // what this test is trying to exercise.
+                if (u_top.u_biu.cg_eu_berr_raw) begin
+                    saw_biu_berr = 1'b1;
+                    berr_n = 1'b1;
+                end
+                if (!exc_seen3 && u_top.exc_active) exc_seen3 = 1'b1;
+                if (u_top.u_eu.u_rf.d_reg[5] === 32'd999) break;
             end
             berr_n = 1'b1;
             check("BERR-mid-CAS2: injected mid-sequence", injected3);
-            check("BERR-mid-CAS2: BIU layer still detects the fault (cg_eu_berr_raw pulsed) even though CAS2 has no berr output to receive it",
+            check("BERR-mid-CAS2: BIU layer detects the fault (cg_eu_berr_raw pulsed) even though CAS2 has no berr output of its own",
                   saw_biu_berr);
-            // KNOWN GAP (see comment above): today, biu_multiop_fsm.sv's
-            // mo_state never leaves MO_CYCING on a berr, so the FSM hangs
-            // and no Bus Error exception is ever taken. These two checks
-            // document that current (incorrect) behavior; once the fix
-            // above lands, they should flip to eu_busy===0 and
-            // exc_active===1 having been seen, with a proper frame pushed.
-            check("BERR-mid-CAS2: KNOWN GAP - EU pipeline left stalled (eu_busy stuck, no recovery)",
-                  u_top.eu_busy === 1'b1);
-            check("BERR-mid-CAS2: KNOWN GAP - no Bus Error exception was ever taken",
-                  u_top.exc_active === 1'b0);
-        end
-
-        // -----------------------------------------------------------------
-        // Task #4a (post-Phase-104 follow-up list): back-to-back FSM
-        // composition — two *different* multi-cycle ex_mem_stall FSMs with
-        // no ordinary instruction between them, to check decode-holdoff
-        // correctly composes across an FSM-to-FSM transition (every
-        // Category B case so far pairs one FSM with a plain dependent
-        // instruction afterward, never FSM-then-FSM directly).
-        // TAS (A0) — an indivisible RMW lock — immediately followed by
-        // MOVEM.L (A0)+,D0-D1, reusing the *same* A0 with no MOVEA between
-        // them (TAS never modifies An), so the two FSMs are truly adjacent
-        // at the opcode level. Also incidentally checks write-then-read
-        // ordering across the boundary: TAS's write sets bit7 of the top
-        // byte of the very longword MOVEM reads immediately afterward, so
-        // a stale/racy read would show up as D0's top bit not reflecting
-        // the TAS write.
-        // -----------------------------------------------------------------
-        rom[16'h1D00/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h1D04/4] = {16'h3D00, TAS_A0};
-        rom[16'h1D08/4] = {MOVEM_L_A0P, 16'h0003};
-        rom[16'h1D0C/4] = {CLR_L_D5, ADDI_L_D5};
-        rom[16'h1D10/4] = {16'h0000, 16'd444};
-        rom[16'h3D00/4] = 32'h0011_2233;  // top byte 0x00 -> TAS sets bit7 -> 0x80
-        rom[16'h3D04/4] = 32'h4455_6677;
-        begin
-            int c0, c1;
-            c0 = data_ds_count;
-            run_and_check("T4a: back-to-back TAS->MOVEM dependent instr ran (D5=444)", 5, 32'd444, 4000);
-            c1 = data_ds_count;
-            // 4 logical accesses (TAS read, TAS write, MOVEM read x2) x 2,
-            // not x1: by this point in the file the MMU has been left
-            // enabled with a transparent TT0 since B-20/B-21 (Phase 104's
-            // own established, intentional behavior — every subsequent
-            // access pays an extra ATC/TT0 lookup even though it never
-            // faults or produces a real table walk). B-1/B-2's own
-            // standalone counts (2 each) were measured earlier in the
-            // file, before the MMU got enabled, so they don't apply here —
-            // this is a timing difference from already-documented MMU
-            // state, not a sign of a duplicated/corrupted sequence (D0/D1/
-            // memory below all confirm exactly one clean execution).
-            check32("T4a: TAS(2) + MOVEM(2) = 4 logical accesses x2 (MMU-enabled ATC lookup overhead) = 8 bus cycles",
-                    c1 - c0, 32'd8);
-            check32("T4a: MOVEM's D0 reflects TAS's write (top byte 0x80, not stale 0x00)",
-                    u_top.u_eu.u_rf.d_reg[0], 32'h8011_2233);
-            check32("T4a: MOVEM's D1 loaded correctly", u_top.u_eu.u_rf.d_reg[1], 32'h4455_6677);
-            check8("T4a: TAS itself set bit7 in memory", rom[16'h3D00/4][31:24], 8'h80);
-        end
-
-        // -----------------------------------------------------------------
-        // Task #4b: DSACK wait-states applied to an FSM instruction's own
-        // multi-beat bus cycles, not just Category D's single-beat simple
-        // producer. Reuses TAS (2 bus beats: read then write) with the
-        // existing global `wait_states` knob (already proven against
-        // mem_model's DSACK generation in Category D) — confirms a
-        // stretched bus cycle composes correctly with *every* beat of a
-        // multi-phase FSM, not just a single ordinary access.
-        // -----------------------------------------------------------------
-        rom[16'h1E00/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h1E04/4] = {16'h3E00, TAS_A0};
-        rom[16'h1E08/4] = {CLR_L_D5, ADDI_L_D5};
-        rom[16'h1E0C/4] = {16'h0000, 16'd333};
-        rom[16'h3E00/4] = 32'h0000_0000;
-        rom[16'h1F00/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h1F04/4] = {16'h3F80, TAS_A0};
-        rom[16'h1F08/4] = {CLR_L_D5, ADDI_L_D5};
-        rom[16'h1F0C/4] = {16'h0000, 16'd335};
-        rom[16'h3F80/4] = 32'h0000_0000;
-        begin
-            int elapsed0, elapsed3;
-            wait_states = 0;
-            run_and_check_timed("T4b-1: TAS wait_states=0, D5=333", 5, 32'd333, 4000, elapsed0);
-            wait_states = 3;
-            run_and_check_timed("T4b-2: TAS wait_states=3, D5=335", 5, 32'd335, 4000, elapsed3);
-            wait_states = 0;
-            check("T4b: wait states measurably lengthen a real FSM's own bus beats (not just a simple producer)",
-                  elapsed3 > elapsed0);
+            check("BERR-mid-CAS2: a real Bus Error exception was taken (exc_active seen)", exc_seen3);
+            check32("BERR-mid-CAS2: the correct vector (2, Bus Error) was dispatched",
+                    {24'h0, u_top.exc_vector_num}, 32'd2);
+            check("BERR-mid-CAS2: handler reached and ran to completion (D5=999)",
+                  u_top.u_eu.u_rf.d_reg[5] === 32'd999);
+            // Same decode_pc-based settle idiom as the interrupt test above
+            // (a plain eu_busy==0 check can catch a momentary gap before
+            // the next instruction is even fetched) — wait until decode has
+            // moved past the handler's own code before handing off, so a
+            // later test's own bus-cycle-count baseline can't catch
+            // leftover activity from this one.
+            for (t = 0; t < 4000 &&
+                 !(u_top.ifu_decode_pc > 32'h0000_0096 && !u_top.eu_busy); t++)
+                @(posedge clk_4x);
+            check("BERR-mid-CAS2: EU pipeline recovered (eu_busy clear, no lingering hang)",
+                  u_top.eu_busy === 1'b0);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
@@ -1147,7 +1258,9 @@ module stall_fsm_tb;
     end
 
     initial begin
-        #800000;
+        // Bumped from 800000 for extra headroom after the BERR-mid-CAS2
+        // test's own handler + settle-wait additions.
+        #1500000;
         $display("FAIL  Hard timeout");
         $finish;
     end

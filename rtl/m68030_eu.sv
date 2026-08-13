@@ -50,6 +50,24 @@ module m68030_eu (
     output logic        master_mode,  // SR[12]
     output logic [2:0]  ipl_mask,     // SR[10:8]
 
+    // ── Interrupt dispatch-race handshake (with m68030_exc, via top) ──────
+    input  logic        int_pending,  // exc's combinational int_pending
+    output logic        eu_int_ready, // pulses the one cycle a ready-to-dispatch
+                                       // instruction is deliberately held in
+                                       // DECODE instead of launching
+
+    // ── Exception-active (with m68030_exc, via top) ────────────────────────
+    input  logic        exc_active,   // once set, biu_eu_req is masked out of
+                                       // the arbiter and mem_ack/mem_berr are
+                                       // both forced to 0 for the EU — an
+                                       // in-flight EU memory-op FSM (TAS/
+                                       // MOVEM/CAS2/...) needs this as an
+                                       // independent abort trigger, since a
+                                       // fault detected via any OTHER path
+                                       // (e.g. IFU) can win the race and set
+                                       // exc_active before the EU's own
+                                       // mem_berr pulse ever reaches it
+
     // ── Branch signals (to IFU via top) ──────────────────────────────────
     input  logic [31:0] decode_pc,    // PC of instruction at decode (from IFU)
     output logic        branch_taken, // combinational: taken branch this cycle
@@ -216,6 +234,9 @@ module m68030_eu (
         .q3_word      (q3_word),
         .ext34_data   (ext34_data),
         .ext_valid    (ext_valid),
+        .int_pending  (int_pending),
+        .eu_int_ready (eu_int_ready),
+        .exc_active   (exc_active),
         .rd_a_sel     (rd_a_sel),
         .rd_a_siz     (rd_a_siz),
         .rd_a_data    (rd_a_data),
