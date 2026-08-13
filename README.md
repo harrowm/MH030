@@ -281,13 +281,34 @@ a full Harte re-run — these are all Harte-covered instructions today, unlike P
 passes automated `buscmp.py` comparison (two different, both pre-existing and
 unrelated causes) despite being hand-verified correct.
 
-**Deliberately out of scope, staged as Stages 2-4** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): ALU-mem-src and
-dynamic BTST-family (needs the `dyn_bit_get_Dn` deferred-register trick extended to
-the full-format case); Scc/CHK/CMP2-CHK2/ADDQ-SUBQ/LEA-JMP-JSR indexed; MOVEM's own
-extended form (different base ext_count) and MOVE mem-to-mem's dst-side full-format
-support; and long (32-bit) bd/od displacements for any family (needs a genuine
-4th/5th extension-word data path this project doesn't have wired up).
+**Phase 117 (Stage 2 of extending this beyond MOVE)** covered ALU-mem-src (ADD/SUB/
+CMP/AND/OR/EOR/ADDA/SUBA/CMPA/MULU/MULS/DIVU/DIVS memory forms, both directions) and
+dynamic BTST/BCHG/BCLR/BSET — the highest real-world-value families left, since these
+are among the most common uses of indexed addressing in compiled code. Surveyed every
+remaining brief-only `dec_ea_offset` site in `eu_seq.sv` (26 found beyond Stage 1's 4)
+before changing anything: 2 were false positives (already correctly handled by Phase
+115's own MOVE/MOVEA blocks), 12 were ALU-mem-src (ADD and SUB share one physical
+decode block via a `grp_aop(f_group)` helper, so no separate ADD-specific sites
+existed to find), 2 were the dynamic bit-ops, and the remaining ~10 map to Stage 3/4
+families. `is_alu_mem_src_mode110` turned out simpler than expected: the pre-existing
+`is_alu_mem_src` ext_count flag already covers both directions (doesn't check
+`f_dir`), so narrowing it to `f_mode==3'b110` alone covered all 12 sites at once — the
+`dyn_bit_get_Dn` deferred-register mechanism (proven in Phases 81-84) needed zero
+changes, confirming it's orthogonal to the EA-offset fix. Verified with a new
+Musashi-cosim test (`tests/memind7.s`, ADD+OR, cleanly automated) plus a hand-verified
+one (`tests/memind8.s`, BSET — hit the same byte-transfer bus-logging quirk Stage 1's
+TAS uncovered, not a real bug) and a full Harte re-run, the highest-value gate yet in
+this rollout given how heavily ADD/SUB/CMP/AND/OR/EOR/BTST-family/MUL/DIV are
+exercised by the corpus — zero regressions. See `plan.md §Phase 117` for the full
+writeup.
+
+**Deliberately out of scope, staged as Stages 3-4** (see
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown, sites already
+located during Phase 117's survey): Scc/CHK/CMP2-CHK2/ADDQ-SUBQ/LEA-JMP-JSR indexed,
+MOVE-to/from-SR/CCR; MOVEM's own extended form (different base ext_count) and MOVE
+mem-to-mem's dst-side full-format support; and long (32-bit) bd/od displacements for
+any family (needs a genuine 4th/5th extension-word data path this project doesn't
+have wired up).
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,

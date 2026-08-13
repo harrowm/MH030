@@ -1095,7 +1095,7 @@ module eu_seq (
                                 dec_needs_ext  = 1'b1;
                                 dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
                             end
-                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn, Dn via override
+                            3'b110: begin  // (d8,An,Xn) brief, or full (bd,An,Xn): rd_a=An, rd_b=Xn, Dn via override
                                 dec_src_reg        = {1'b1, f_reg};
                                 dec_reads_src      = 1'b1;
                                 dec_dst_reg        = {ext_data[15], ext_data[14:12]};
@@ -1103,7 +1103,14 @@ module eu_seq (
                                 dec_is_idx         = 1'b1;
                                 dec_xn_wl          = ext_data[11];
                                 dec_xn_scale       = ext_data[10:9];
-                                dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                                // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd
+                                // extension, same template as Stage 1 -- see TAS's
+                                // own comment in the mode=110 unary-op family above
+                                // for the full reasoning. dyn_bit_get_Dn's own
+                                // register-conflict handling is orthogonal and
+                                // already correct unchanged.
+                                dec_ea_offset      = fi_is_full ? fi_bd
+                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext      = 1'b1;
                                 dec_is_dyn_bit_idx = 1'b1;
                                 dec_dyn_bit_reg    = f_dn;
@@ -4047,7 +4054,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── OR Dn, (xxx).W/(xxx).L — absolute memory destination ──
@@ -4103,7 +4114,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── OR #imm, Dn — immediate source (group 8 encoding) ──
@@ -4161,7 +4176,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                         dec_md_op          = f_dir ? DIV_SW : DIV_UW;
@@ -4328,7 +4347,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── SUB Dn, (xxx).W/(xxx).L — absolute memory destination ──
@@ -4384,7 +4407,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── SUB (ea),Dn — memory source → register dest ────
@@ -4480,7 +4507,11 @@ module eu_seq (
                             dec_is_idx         = 1'b1;
                             dec_xn_wl          = ext_data[11];
                             dec_xn_scale       = ext_data[10:9];
-                            dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                            // same template as Stage 1 -- see TAS's own comment in the
+                            // mode=110 unary-op family for the full reasoning.
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;  // An_dst (addr reg) read after mem_ack
                             dec_dyn_bit_is_an  = 1'b1;
@@ -4640,7 +4671,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── EOR Dn, (xxx).W/(xxx).L — absolute memory destination ──
@@ -4695,7 +4730,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── CMP #imm, Dn — immediate source (group B encoding) ──
@@ -4791,7 +4830,11 @@ module eu_seq (
                             dec_is_idx         = 1'b1;
                             dec_xn_wl          = ext_data[11];
                             dec_xn_scale       = ext_data[10:9];
-                            dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                            // same template as Stage 1 -- see TAS's own comment in the
+                            // mode=110 unary-op family for the full reasoning.
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;  // An (addr reg) read after mem_ack
                             dec_dyn_bit_is_an  = 1'b1;
@@ -5008,7 +5051,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── AND Dn, (xxx).W/(xxx).L — absolute memory destination ──
@@ -5064,7 +5111,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                     // ── AND #imm, Dn — immediate source (group C encoding) ──
@@ -5125,7 +5176,11 @@ module eu_seq (
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning.
+                        dec_ea_offset      = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                         dec_md_op          = f_dir ? MUL_SW : MUL_UW;

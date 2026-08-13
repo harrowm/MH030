@@ -214,9 +214,37 @@ module m68030_seq (
                               f_dn == 3'b011 || f_dn == 3'b101) && (f_mode == 3'b110);
     assign is_shift_mode110 = (f_group == 4'he) && (f_ss == 2'b11) && !f_dn[2] && (f_mode == 3'b110);
 
+    // Stage 2 (plan.md Phase 117): ALU-mem-src (ADD/SUB/CMP/AND/OR/EOR/ADDA/
+    // SUBA/CMPA/MULU/MULS/DIVU/DIVS memory forms, both directions -- "Dn,ea"
+    // RMW dest and "ea,Dn" source share the same f_mode/f_group encoding,
+    // distinguished elsewhere by f_dir, so one flag covers both) and dynamic
+    // BTST/BCHG/BCLR/BSET Dn,ea. is_alu_mem_src (declared further down in
+    // this file; continuous assigns are declaration-order-independent) is
+    // already exactly the right condition for the first group once narrowed
+    // to f_mode==110 specifically -- it doesn't check f_dir at all, and its
+    // own f_mode==110 baseline is already confirmed ext_count=1 via the
+    // existing (is_alu_mem_src && !is_alu_mem_src_long) bucket (mode=110
+    // can never be the abs.L case is_alu_mem_src_long checks for). Dynamic
+    // bit-ops get their own new flag mirroring their existing (inline,
+    // unnamed) ext_count condition, narrowed the same way. PC-relative
+    // (d8,PC,Xn) forms for both families are deliberately not included here
+    // (same boundary Stage 1 drew) -- their EA offset comes from a
+    // differently-shaped dec_abs_ea_val computation, not dec_ea_offset,
+    // needing separate handling not attempted this pass.
+    // is_alu_mem_src itself is declared further down in this file; Icarus
+    // does not support forward-referencing a continuous-assign net across
+    // declaration order (unlike some other tools), so its own condition is
+    // inlined here rather than referenced, narrowed to mode=110 directly.
+    logic is_alu_mem_src_mode110, is_dyn_bit_mode110;
+    assign is_alu_mem_src_mode110 =
+        (f_group == 4'h8 || f_group == 4'h9 || f_group == 4'hb ||
+         f_group == 4'hc || f_group == 4'hd) && (f_mode == 3'b110);
+    assign is_dyn_bit_mode110 = (f_group == 4'h0) && f_dir && (f_mode == 3'b110);
+
     logic mode110_ea_src;
     assign mode110_ea_src = is_move_idx_src || is_tas_mode110 || is_nbcd_mode110 ||
-                            is_negx_clr_neg_not_tst_mode110 || is_shift_mode110;
+                            is_negx_clr_neg_not_tst_mode110 || is_shift_mode110 ||
+                            is_alu_mem_src_mode110 || is_dyn_bit_mode110;
     logic is_memind_full;
     assign is_memind_full = mode110_ea_src && peek_fi_full;
     logic is_lea_idx;        // LEA (d8,An,Xn)

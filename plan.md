@@ -3213,11 +3213,81 @@ this phase specifically since TAS/NBCD/NEGX/CLR/NEG/NOT/TST/shift-rotate are *al
 Harte-covered instructions today, unlike Phase 115's MOVE work where Harte had zero
 coverage of the mode at all) — **696590 PASS, 2 FAIL (the same pre-existing documented
 ASL.b corpus anomaly, opcode `0xe502`, not a regression), 0 TIMEOUT**, identical to
-baseline. Stages 2-4 (ALU-mem-src + dynamic BTST family; Scc/CHK/CMP2-CHK2/ADDQ-SUBQ/
-LEA-JMP-JSR indexed; MOVEM's own extended form + MOVE mem-to-mem's dst-side support +
-long 32-bit bd/od displacements) remain deliberately deferred, per the approved plan —
-each is its own multi-session investigation-plus-verification effort at this
-project's established pace.
+baseline.
+
+---
+
+## Phase 117 — Stage 2 of extending full-format mode=110 EA support beyond MOVE:
+## ALU-mem-src (ADD/SUB/CMP/AND/OR/EOR/ADDA/SUBA/CMPA/MULU/MULS/DIVU/DIVS memory
+## forms) and dynamic BTST/BCHG/BCLR/BSET
+
+**Goal**: continue the staged rollout from Phase 116 (user asked to "continue through
+the rest of the phases"). Stage 2 per the approved plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`): ALU-mem-src and dynamic bit-ops,
+expected to need the `dyn_bit_get_Dn` deferred-register trick (proven in Phases 81-84)
+extended to the full-format case.
+
+**Site survey first**: grepped every remaining brief-only `dec_ea_offset =
+{{24{ext_data[7]}}, ext_data[7:0]};` site in `eu_seq.sv` (26 found after Stage 1's 4
+were already fixed) and read each one's own surrounding context to map it to an
+instruction family before touching anything — avoided assuming the ext_count table's
+own grouping matched eu_seq.sv's actual decode-block boundaries. Found: 2 sites were
+already correctly guarded inside `if (!fi_is_full)` (Phase 115's own MOVE/MOVEA
+blocks — false positives from the grep, not bugs); 12 sites were ALU-mem-src (OR/AND/
+EOR/CMP/CMPA/ADDA-SUBA/MULU-MULS/DIVU-DIVS, plus SUB *and* ADD sharing one physical
+code block each via a `grp_aop(f_group)` helper that selects the ALU op from
+`f_group`, so "SUB Dn,(d8,An,Xn)"'s own comment covers ADD's identical opcode shape
+too — found by reading the code, not assumed from naming); 2 sites were dynamic
+BTST/BCHG/BCLR/BSET (mode=110 only — its own PC-relative `(d8,PC,Xn)` sibling uses a
+differently-shaped `dec_abs_ea_val` computation instead of `dec_ea_offset`, so it's
+out of scope here, matching the same boundary Stage 1 already drew for its own
+families); the remaining ~10 sites belong to LEA, CHK, MOVE-to/from-SR/CCR, Scc,
+ADDQ/SUBQ, and MOVEM/MOVE-mem-to-mem — read and identified for later stages but not
+touched this pass.
+
+**`is_alu_mem_src_mode110` turned out simpler than expected**: `m68030_seq.sv`
+already has an `is_alu_mem_src` flag for `ext_count` purposes covering exactly groups
+8/9/B/C/D (OR/SUB-SUBA/CMP-EOR-CMPA/AND-MUL/ADD-ADDA) with `f_mode` including 110 —
+and critically, it doesn't check `f_dir` at all, so it's already `true` for *both*
+"Dn,ea" (RMW dest) and "ea,Dn" (source) directions, which share the same opcode-field
+encoding. Narrowing it to `f_mode==3'b110` alone was sufficient to exactly match all
+12 ALU sites with no further per-direction logic needed. (Couldn't directly reference
+`is_alu_mem_src` itself from `mode110_ea_src`'s own earlier declaration point — Icarus
+doesn't support forward-referencing a continuous-assign net across declaration order
+the way some other tools do — so inlined the same condition instead of restructuring
+declaration order.) `is_dyn_bit_mode110` mirrors dynamic bit-ops' own existing
+(previously inline/unnamed) `ext_count` condition the same way. Both confirmed to have
+baseline ext_count=1 for mode=110 before relying on the unchanged
+`ext_count = memind_ext_count` override.
+
+**`rtl/eu_seq.sv`**: same one-line template as Stage 1 applied to all 14 sites
+(12 ALU-mem-src + 2 dynamic bit-ops) — `dec_ea_offset = fi_is_full ? fi_bd : <brief>`.
+The `dyn_bit_get_Dn` register-conflict mechanism needed zero changes, confirming the
+plan's own expectation that it's orthogonal to the EA-offset fix.
+
+**Found a testbench logging quirk while building the dynamic-bit-op test, distinct
+from Stage 1's two**: `tests/memind7.s` initially combined ADD (memory source),
+OR (memory-dest RMW), and BSET (dynamic bit-op) in one file — ADD and OR compared
+cleanly via `buscmp.py`, but BSET's own byte-sized RMW read/write showed a mismatch
+that looked alarming at first (`got 00000005 exp 00000000` for a read) until direct
+inspection showed the DUT's own bus logger prints the *full* 32-bit internal register
+for a byte-sized transfer instead of masking to just the transferred byte, while
+Musashi's reference logs only the relevant byte — the actually-relevant top byte
+(address 4-byte-aligned, byte offset 0) matched exactly (`$00` read, `$08` written)
+in both once inspected directly. This is the same shape of gap as Stage 1's TAS
+finding (a locked/byte-sized transfer logging differently than a plain read/write),
+just a different trigger. Split the test in two: `tests/memind7.s` (ADD+OR only,
+compares cleanly, wired into `make cosim_memind`) and `tests/memind8.s` (BSET,
+hand-verified, not wired — same precedent as Stage 1's exclusions).
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, `make cosim_memind` now 3/3
+(added `buscmp-memind7`), and a full 121-suite Harte re-run — the highest-value gate
+of any phase in this rollout so far, since ADD/SUB/CMP/AND/OR/EOR/BTST-family/MUL/DIV
+are among the most heavily-exercised instructions in the entire Harte corpus —
+**696590 PASS, 2 FAIL (the same pre-existing documented ASL.b anomaly), 0 TIMEOUT**,
+identical to baseline, zero regressions. Stages 3-4 (LEA/CHK/MOVE-SR-CCR/Scc/
+ADDQ-SUBQ indexed; MOVEM extended form + MOVE mem-to-mem dst-side + long bd/od)
+remain deferred, sites already identified during this phase's own survey.
 
 ---
 
