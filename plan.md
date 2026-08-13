@@ -2792,6 +2792,76 @@ closed.
 
 ---
 
+## Phase 113 — PFLUSH/PTEST BERR handling: investigated, found already correct
+
+**Why**: the last `ex_mem_stall` source without `mem_abort` coverage (Phases 108-109
+deliberately left PFLUSH/PTEST untouched, since they route through `eu_pflush_ack`/
+`eu_ptest_ack` via `m68030_mmu.sv`/`biu_mmu_if.sv` — a completely different interface
+from `mem_ack`/`mem_berr` — rather than guess at unexplored fault semantics).
+
+**Static analysis first**: PFLUSH turns out to be architecturally immune to BERR --
+`biu_mmu_if.sv`'s `pflush_ack` fires purely from an internal ATC-array comparison
+(matching FC/VA against existing entries), no bus access at all, so there is nothing
+for a bus error to interrupt. PTEST is different -- it walks the real page tables over
+the bus via `biu_mmu_if.sv`'s `MS_WALK_A`/`MS_WALK_B`/`MS_WALK_C` states -- but those
+states already had their own `if (mmu_berr) begin fault_r<=1; ms_state<=MS_FAULT; end`
+arm (predating this session, present since the MMU table walker was first built), and
+`m68030_mmu.sv`'s `MM_WAIT` state already treats a `biu_fault` result as just another
+terminal case feeding `MM_DONE` (setting `mmusr_r=16'h8000`, the bus-fault flag) --
+`ptest_ack` fires regardless of hit or fault, so `eu_seq.sv`'s `ptest_run_r` should
+already un-stall correctly with zero RTL changes needed.
+
+**Built a real test to confirm rather than trust the static reading** (this whole
+investigation's own governing discipline), mirroring the existing BERR-mid-CAS2 test's
+shape in `tb/stall_fsm_tb.sv`. Needed a *genuine* table walk -- B-20's existing PTEST
+coverage (Phase 104) uses a fully-transparent TT0 (`LAM=0xFF`, matches any VA) that
+never touches the bus at all, so there's no in-flight read to interrupt. Configured a
+real 2-level-capable walk (`TC=0x8C0AA000`: E=1, PS=12, TIA=10, TIB=10 -- reused
+verbatim from `tb/biu_tb.sv`'s own proven P6-7 walk test) with TT0 disabled and CRP
+pointing at a fresh base (`0x2000`, relocated from P6-7's `0x40` to avoid this file's
+own address usage), then injected a bus error on the walk's own first read
+(`u_top.u_biu.mmu_walk_req` rising) via the existing `berr_n` pin.
+
+**First attempt got the expected outcome wrong**, copying the shape of every other
+BERR-mid-`<X>` test in this file (which all expect a genuine Bus Error exception,
+vector 2, dispatched to a shared handler). PTEST doesn't work that way: per real 68030
+architecture, PTEST reports a translation fault via MMUSR and simply continues to the
+next instruction -- it does not trap, unlike an ordinary faulting data access. The
+test's own break condition (waiting for the shared handler's D5=999 marker) never
+fired, so the watch loop ran its full 12000-cycle budget -- and since this file's
+execution model is pure NOP fall-through with nothing to halt it, decode wandered
+~1.5KB further down the instruction stream and directly into this same test's own
+table-walk data area (`0x2000`), decoding uninitialized/leftover memory as
+instructions and hanging on a real but entirely unrelated `eu_addr_err`. Root-caused
+via a temporary per-cycle trace of `ptest_run_r`/`mm_state`/`ms_state`/`ptest_ack`/
+`biu_fault`, which showed the *actual* sequence working exactly as predicted --
+`biu_fault` fires, `mm_state` reaches `MM_DONE` with `ptest_ack=1` a cycle later,
+`ptest_run_r` clears immediately after, PC advances normally to the next instruction
+-- confirming the static analysis and revealing the test's own wrong expectations, not
+an RTL bug, was the reason for the failure. Rewrote the test to check the actually-
+correct outcome (`!exc_active` throughout, decode continues past PTEST, this test's
+own follow-on marker is reached) and break as soon as `ptest_run_r` clears rather than
+waiting for a dispatch that correctly never comes. Also hit, in sequence, two smaller
+testbench timing gaps typical of this file's style: D5 leaking a stale marker value
+from the *previous* test (needed an explicit `CLR.L D5` before this test's own code,
+not just before the watch loop), and this test's own code sitting far enough past the
+shared vector-2 handler's tail that the existing "decode past 0x96" settle-wait
+(written for BERR-mid-CAS2's purposes) doesn't guarantee decode has reached *this*
+test's actual code -- needed an explicit wait for `decode_pc` to reach `0x1CFC`,
+budgeted generously since NOP fall-through across ~1.8KB takes on the order of 30
+cycles per NOP.
+
+**Result: zero RTL changes.** `tb/stall_fsm_tb.sv` gained a new BERR-mid-PTEST test
+(all checks passing): injection confirmed, BIU-level fault detection confirmed, no
+exception taken (correct per architecture), and the EU pipeline demonstrably
+continues normally past the faulted PTEST. `make test` 34/34, `make cosim_grp` 8/8 --
+both trivially unaffected, since this phase touched only the testbench. This closes
+the last open item in the Phase 108-109 BERR-abort rollout: **all ~19 `ex_mem_stall`
+sources are now confirmed correctly handled**, 16 via the `mem_abort` fix and PFLUSH/
+PTEST via mechanisms that were already correct before this session began.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

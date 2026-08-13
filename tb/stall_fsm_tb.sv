@@ -1249,6 +1249,137 @@ module stall_fsm_tb;
                   u_top.eu_busy === 1'b0);
         end
 
+        // -----------------------------------------------------------------
+        // BERR mid-PTEST: the last ex_mem_stall source deliberately left
+        // out of Phase 109's mem_abort rollout (PFLUSH/PTEST use a
+        // different ack/fault interface -- eu_pflush_ack/eu_ptest_ack via
+        // m68030_mmu.sv/biu_mmu_if.sv -- not mem_ack/mem_berr, so the
+        // pattern used for the other 16 sources doesn't directly apply).
+        // Investigation before writing this test found PFLUSH is
+        // architecturally immune: pflush_ack fires purely from an internal
+        // ATC-array comparison (biu_mmu_if.sv), no bus access at all, so
+        // there is nothing for a BERR to interrupt. PTEST is different --
+        // it walks the real page tables over the bus via biu_mmu_if.sv's
+        // MS_WALK_A/B/C states -- but those states already have their own
+        // `if (mmu_berr) begin fault_r<=1; ms_state<=MS_FAULT; end` arm
+        // (predates this session), and m68030_mmu.sv's MM_WAIT state
+        // already treats `biu_fault` as just another terminal case feeding
+        // MM_DONE (setting mmusr_r=16'h8000, bus fault) -- ptest_ack fires
+        // regardless of hit/fault, so eu_seq.sv's ptest_run_r should
+        // already un-stall correctly with zero RTL changes needed. This
+        // test exists to confirm that empirically rather than trust the
+        // static reading, following this whole investigation's own
+        // "verify, don't assume" discipline.
+        //
+        // Needs a genuine table walk (not B-20's TT0-transparent shortcut,
+        // which never touches the bus at all) so there's a real bus read
+        // in flight to interrupt. TC=0x8C0AA000 (E=1, PS=12, TIA=10,
+        // TIB=10) and the VA/index math are reused verbatim from
+        // tb/biu_tb.sv's own proven P6-7 walk test (crp_base there was
+        // 0x40; relocated to 0x2000 here, clear of every other address
+        // this file already uses). CRP only needs a valid "this points to
+        // a table, go read it" descriptor (DT=10) at a fresh base -- the
+        // table's own *contents* at that address don't need to be
+        // meaningful, since the whole point is to fault the read before
+        // its data would ever be interpreted.
+        //
+        // Unlike every other BERR-mid-<X> test in this file, PTEST does
+        // NOT trap on a translation fault -- per real 68030 architecture
+        // it just reports the failure via MMUSR and continues to the next
+        // instruction, same as a normal (non-faulting) PTEST. First attempt
+        // at this test wrongly assumed a vector-2 dispatch (copying the
+        // other tests' shape) and never broke out of its own watch loop,
+        // which let this file's NOP-fall-through execution model march
+        // 12000 cycles straight through this test's own code and into its
+        // table-walk data area (0x2000), decoding leftover/uninitialized
+        // memory as instructions and hanging on a real (unrelated)
+        // eu_addr_err. Root-caused via a temporary per-cycle trace of
+        // ptest_run_r/mm_state/ms_state/ptest_ack/biu_fault before fixing.
+        // -----------------------------------------------------------------
+        $display("=== BERR mid-PTEST sequence ===");
+        begin
+            int t;
+            logic saw_biu_berr, injected4, exc_seen4;
+
+            rom[16'h2300/4] = 32'h8C0A_A000;  // TC: E=1,PS=12,TIA=10,TIB=10
+            rom[16'h2304/4] = 32'h0000_0000;  // TT0: disabled (E=0)
+            rom[16'h2308/4] = 32'h0000_0000;  // CRP hi (limit, unused)
+            rom[16'h230C/4] = 32'h0000_2002;  // CRP lo: base=0x2000, DT=10 (table)
+
+            // D5 must be cleared first: an earlier test's own completion
+            // marker leaks over (real CPU state, not reset between these
+            // sequential blocks) -- without this, a break condition keyed
+            // on D5 could "succeed" on stale state before this test's own
+            // code ever runs.
+            rom[16'h1CFC/4] = {NOP_OP, CLR_L_D5};
+            rom[16'h1D00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+            rom[16'h1D04/4] = {16'h2300, PMOVE_A0_OP};      // PMOVE (A0),TC
+            rom[16'h1D08/4] = {PMOVE_TC_EXT, MOVEA_L_IMM_A0};
+            rom[16'h1D0C/4] = {16'h0000, 16'h2304};
+            rom[16'h1D10/4] = {PMOVE_A0_OP, PMOVE_TT0_EXT}; // PMOVE (A0),TT0
+            rom[16'h1D14/4] = {MOVEA_L_IMM_A0, 16'h0000};
+            rom[16'h1D18/4] = {16'h2308, PMOVE_A0_OP};      // PMOVE (A0),CRP
+            rom[16'h1D1C/4] = {PMOVE_CRP_EXT, MOVEA_L_IMM_A0};
+            rom[16'h1D20/4] = {16'h0040, 16'h1000};         // A0 = VA 0x00401000
+            rom[16'h1D24/4] = {PTEST_A0_OP, PTEST_EXT};      // PTEST (A0)
+            // Reached once PTEST completes -- with or without a translation
+            // fault, per real 68030 semantics (no trap either way).
+            rom[16'h1D28/4] = {CLR_L_D5, ADDI_L_D5};
+            rom[16'h1D2C/4] = {16'h0000, 16'd998};
+            rom[16'h1D30/4] = {NOP_OP, NOP_OP};
+
+            // This file's execution model is pure NOP fall-through, and this
+            // test's own code sits ~7KB past the shared vector-2 handler's
+            // tail (0x98) -- the earlier BERR-mid-CAS2 settle-wait only
+            // confirms decode has moved past the *handler*, not that it has
+            // marched all the way here yet.
+            for (t = 0; t < 150000 && u_top.ifu_decode_pc < 32'h0000_1CFC; t++)
+                @(posedge clk_4x);
+            check("BERR-mid-PTEST: reached this test's own code (not stuck earlier)",
+                  u_top.ifu_decode_pc >= 32'h0000_1CFC);
+
+            saw_biu_berr = 1'b0;
+            injected4    = 1'b0;
+            exc_seen4    = 1'b0;
+            for (t = 0; t < 12000; t++) begin
+                @(posedge clk_4x); #1;
+                if (!injected4 && u_top.u_biu.mmu_walk_req) begin
+                    injected4 = 1'b1;
+                    berr_n    = 1'b0;
+                end
+                if (u_top.u_biu.cg_mmu_berr || u_top.u_biu.cg_eu_berr_raw) begin
+                    saw_biu_berr = 1'b1;
+                    berr_n = 1'b1;
+                end
+                if (!exc_seen4 && u_top.exc_active) exc_seen4 = 1'b1;
+                // Break as soon as PTEST's own FSM retires (ptest_run_r
+                // clears) -- unlike the other BERR-mid-<X> tests, we must
+                // not wait for a vector-2 dispatch that correctly never
+                // comes, or NOP fall-through wanders into this test's own
+                // table-walk data (see the header comment above).
+                if (injected4 && !u_top.u_eu.u_seq.ptest_run_r) break;
+            end
+            berr_n = 1'b1;
+            check("BERR-mid-PTEST: injected mid-walk", injected4);
+            check("BERR-mid-PTEST: BIU layer detects the fault", saw_biu_berr);
+            check("BERR-mid-PTEST: no exception taken (PTEST reports a translation fault via MMUSR and continues, it does not trap)",
+                  !exc_seen4);
+            // >= 0x1D30 (the NOP right after ADDI.L), not just past CLR.L's
+            // own address -- decode_pc reaching ADDI.L's opcode only means
+            // it has *started* decoding, not that it has retired and
+            // written D5 back yet (same class of gap as Phase 108's own
+            // decode_pc-vs-eu_busy timing notes elsewhere in this file).
+            for (t = 0; t < 4000 &&
+                 !(u_top.ifu_decode_pc >= 32'h0000_1D30 && !u_top.eu_busy); t++)
+                @(posedge clk_4x);
+            // A few extra cycles: decode_pc reaching the NOP just past
+            // ADDI.L only means decode has moved on, not that ADDI.L's own
+            // writeback has necessarily landed in the same cycle.
+            repeat(8) @(posedge clk_4x);
+            check("BERR-mid-PTEST: EU pipeline recovered and continued past PTEST (D5=998 via this test's own follow-on code)",
+                  u_top.u_eu.u_rf.d_reg[5] === 32'd998);
+        end
+
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
@@ -1258,9 +1389,11 @@ module stall_fsm_tb;
     end
 
     initial begin
-        // Bumped from 800000 for extra headroom after the BERR-mid-CAS2
-        // test's own handler + settle-wait additions.
-        #1500000;
+        // Bumped from 800000 for the BERR-mid-CAS2 test, then from 1500000
+        // for BERR-mid-PTEST's own settle-wait (the CPU has to walk ~7KB of
+        // NOP fall-through to reach that test's code) plus its main watch
+        // loop.
+        #4500000;
         $display("FAIL  Hard timeout");
         $finish;
     end

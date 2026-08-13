@@ -241,7 +241,7 @@ instructions. This suite covers what that structurally leaves out:
 | Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | 21 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set |
 | DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM (TAS), rather than the consumer racing ahead |
 | Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM), then a second, deeper dispatch-race bug (Phase 108) |
-| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-CAS2: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109) — only PFLUSH/PTEST remain, see below |
+| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-CAS2: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct — see below |
 | Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
 
 Memory-indirect EA (`([bd,An],Xn,od)`) remains deferred — Phase 107 narrowed the
@@ -264,10 +264,14 @@ fixed by giving `biu_cache_if.sv` a real abort path and wiring a proper EU-side
 `bus_err_req` into `m68030_exc.sv` (Phase 108), then extended from the initial 4 sources
 (ordinary reads/writes, TAS, MOVEM, CAS2) to 16 of ~19 `ex_mem_stall` sources — also
 MOVEP, MOVE16, ADDX/ABCD/SBCD/PACK predecrement forms, BFINS, CMP2/CHK2, MOVE mem-mem,
-RTR/RTE, PMOVE64, single CAS, and memory-indirect EA (Phase 109). **Only PFLUSH/PTEST
-remain** — they route through a different ack/fault interface
-(`m68030_mmu.sv`/`biu_mmu_if.sv`) that hasn't been investigated yet, deliberately left
-open rather than force-fitting the same pattern.
+RTR/RTE, PMOVE64, single CAS, and memory-indirect EA (Phase 109). **PFLUSH/PTEST
+investigated last** (Phase 113) — they route through a different ack/fault interface
+(`m68030_mmu.sv`/`biu_mmu_if.sv`), and turned out to already be correctly handled: PFLUSH
+never touches the bus at all (pure internal ATC-array comparison, nothing for a BERR to
+interrupt), and PTEST's table walker already had its own `mmu_berr` handling predating
+this session. A new BERR-mid-PTEST test confirms it end-to-end. Zero RTL changes needed
+— this closes the BERR-abort rollout completely, all ~19 `ex_mem_stall` sources
+confirmed correct.
 
 ### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 
