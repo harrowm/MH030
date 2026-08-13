@@ -192,6 +192,47 @@ module m68030_seq (
                            (peek_fi_iis[1:0] == 2'b11) ? 3'd2 : 3'd0;
         memind_ext_count = 3'd1 + memind_bd_words + memind_od_words;
     end
+
+    // Stage 4 (plan.md Phase 119): MOVEM's own full-format mode=110 EA.
+    // Unlike every other family in this rollout, MOVEM's baseline layout
+    // already occupies BOTH ext words before any full-format concept
+    // applies -- mask=q1 (ifu_ext_data[31:16]), EA descriptor=q2
+    // (ifu_ext_data[15:0]) -- so the descriptor's own is_full/bdsz/iis bits
+    // live at q2's position (bits [8]/[5:4]/[2:0] of the raw 32-bit
+    // ifu_ext_data), not q1's (peek_fi_full/etc above read q1's bits,
+    // correct for every single-EA-word family but wrong here -- reading
+    // them for MOVEM would inspect the mask's own bits, not the
+    // descriptor's). ext_count is additive on top of MOVEM's 2-word
+    // baseline (mask + descriptor), not a wholesale override like
+    // is_memind_full's, since that baseline is what non-null bd/od needs
+    // *more than*, not a value to replace. Only the word-bd, non-indirect
+    // sub-case (fi_iis==000, fi_bdsz==10) is actually decoded correctly
+    // (eu_seq.sv's own MOVEM (d8,An,Xn) block, using q3_word for the bd
+    // value); every other full-format sub-case (genuine indirect, long bd)
+    // still degrades to the brief interpretation for dec_ea_offset, same
+    // "least-wrong fallback" every other family in this rollout uses for
+    // memory-indirect -- but movem_ext_count still accounts for their words
+    // to avoid desyncing the IFU stream even where the resulting EA value
+    // itself is wrong, mirroring memind_ext_count's own reasoning above.
+    logic        peek_fi_full_movem;  assign peek_fi_full_movem = ifu_ext_data[8];
+    logic [1:0]  peek_fi_bdsz_movem;  assign peek_fi_bdsz_movem = ifu_ext_data[5:4];
+    logic [2:0]  peek_fi_iis_movem;   assign peek_fi_iis_movem  = ifu_ext_data[2:0];
+    logic [2:0] movem_bd_words, movem_od_words, movem_ext_count;
+    always_comb begin
+        movem_bd_words = (peek_fi_bdsz_movem == 2'b10) ? 3'd1 :
+                          (peek_fi_bdsz_movem == 2'b11) ? 3'd2 : 3'd0;
+        movem_od_words = (peek_fi_iis_movem == 3'b000) ? 3'd0 :
+                          (peek_fi_iis_movem[1:0] == 2'b10) ? 3'd1 :
+                          (peek_fi_iis_movem[1:0] == 2'b11) ? 3'd2 : 3'd0;
+        movem_ext_count = 3'd2 + movem_bd_words + movem_od_words;
+    end
+    // is_movem itself only covers the -(An)/(An)+/(An) modes (f_mode ∈
+    // {100,011,010}), not the indexed mode -- is_movem_2ext (declared
+    // above, already includes f_mode==110 alongside (d16,An)/abs.W/(d16,PC)/
+    // (d8,PC,Xn)) is the correct base condition to narrow down instead.
+    logic is_movem_idx_full;
+    assign is_movem_idx_full = is_movem_2ext && (f_mode == 3'b110) && peek_fi_full_movem;
+
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
     // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
@@ -456,7 +497,15 @@ module m68030_seq (
         // covered family's baseline is safely 1 word, matching what
         // memind_ext_count degrades to when the extension word turns out to
         // be brief or full-with-null-bd/od.
-        if (is_memind_full)
+        // is_movem_idx_full checked ahead of is_memind_full too -- MOVEM is
+        // deliberately not part of mode110_ea_src (its own 2-word baseline
+        // needs additive, not override, arithmetic -- see its own
+        // declaration above), so there's no overlap between the two, but
+        // ordering it first keeps the "most specific match wins" convention
+        // this whole chain already follows.
+        if (is_movem_idx_full)
+            ext_count = movem_ext_count;
+        else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 3'd2 : 3'd1;

@@ -347,7 +347,11 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # memind2=word bd, post (MOVE); memind3=word bd+word od (post) and null
 # bd+word od (pre) (MOVE); memind7=word bd (ADD memory-source, OR memory-
 # dest RMW -- Stage 2's ALU-mem-src family); memind10=word bd (PEA + JSR
-# indexed -- Stage 3, also confirms the is_jsr_idx ext_count fix).
+# indexed -- Stage 3, also confirms the is_jsr_idx ext_count fix);
+# memind11=word bd (MOVEM.L store+load indexed -- Stage 4, the first family
+# in this rollout needing additive rather than override ext_count
+# arithmetic, since MOVEM's own baseline already occupies 2 ext words
+# before any full-format concept applies).
 #
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
@@ -388,8 +392,13 @@ buscmp-memind10: $(SIM)/cosim_grp winuae/tests/memind10_ref.log tests/memind10.h
 	    | grep "^BUS" > /tmp/_dut_memind10.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind10.log winuae/tests/memind10_ref.log \
 	    --reads-only --dut-may-continue
+buscmp-memind11: $(SIM)/cosim_grp winuae/tests/memind11_ref.log tests/memind11.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind11.hex +grp=memind11 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind11.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind11.log winuae/tests/memind11_ref.log \
+	    --reads-only --dut-may-continue
 
-cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10
+cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

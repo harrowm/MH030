@@ -330,13 +330,31 @@ full 124-suite Harte re-run — PASS 702142, FAIL 2 (same documented ASL.b anoma
 Scc/CHK/ADDQ-SUBQ/LEA/JMP/JSR/PEA/MOVEtoSR. See `plan.md §Phase 118` for the full
 writeup.
 
+**Phase 119 (Stage 4a)** covered MOVEM's own extended-EA form — the first family in
+this rollout needing additive rather than override `ext_count` arithmetic, since
+MOVEM's baseline is already 2 extension words (register mask + EA descriptor) before
+any full-format concept applies, unlike every earlier family's baseline of 1. The
+existing `is_memind_full`/`fi_bd` machinery reads the wrong word for MOVEM (the mask,
+not the descriptor) in two independent spots, so dedicated MOVEM-specific peek signals
+and a genuine third extension word (`q3_word`, previously only used by MOVEM's own
+abs.L case) were needed for the bd value. **Found a real bug via cosim**: the first
+draft's gating flag was based on a pre-existing signal that structurally excludes the
+indexed EA mode entirely — compiled clean but produced a visibly wrong address (and,
+tellingly, reads where a store should write) in the very first test; fixed by basing
+it on the correct pre-existing flag instead. Verified via `tests/memind11.s` (MOVEM.L
+store+load through full-format indexed EA, cleanly automated) and a full Harte re-run
+— PASS 702142, FAIL 2 (same documented anomaly), 0 TIMEOUT, zero regressions, with
+MOVEM.l's own 100%-passing Harte suite as the key gate proving the common brief-EA
+paths are undisturbed. See `plan.md §Phase 119` for the full writeup.
+
 **Deliberately out of scope, remaining as Stage 4** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): MOVEM's own
-extended form (different base ext_count) and MOVE mem-to-mem's dst-side full-format
-support; long (32-bit) bd/od displacements for any family (needs a genuine 4th/5th
-extension-word data path this project doesn't have wired up); and, newly identified
-in Phase 118, CMP2/CHK2's indexed form (needs its own investigation, not just the
-fi_bd template, since the decode doesn't exist at all today).
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): MOVE mem-to-mem's
+dst-side full-format support (needs two independent full-format EA states
+simultaneously); long (32-bit) bd/od displacements for any family (needs a genuine
+4th/5th extension-word data path this project doesn't have wired up) — both
+substantially larger than anything done in this rollout so far; and, identified in
+Phase 118, CMP2/CHK2's indexed form (needs its own investigation, not just the fi_bd
+template, since the decode doesn't exist at all today).
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,

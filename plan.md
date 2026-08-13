@@ -3378,6 +3378,90 @@ phase, not simply deferred by choice like the others) remain open.
 
 ---
 
+## Phase 119 — Stage 4a: MOVEM's own full-format mode=110 EA (additive ext_count arithmetic)
+
+**Goal**: continue the rollout (user: "continue through the rest of the phases") into
+Stage 4, per `~/.claude/plans/compressed-hopping-cocoa.md`. Started with MOVEM's own
+extended-EA form since the plan already flagged it as needing "different arithmetic
+than Stage 1-3's families" but didn't flag it as needing new hardware plumbing the way
+the other two Stage 4 items (MOVE mem-to-mem dst-side, long bd/od) do — the most
+tractable of the three remaining pieces.
+
+**Why MOVEM is genuinely different**: every family in Stages 1-3 has a baseline
+`ext_count` of exactly 1 for `f_mode==110` (a single extension word), which
+`is_memind_full`'s override (`ext_count = memind_ext_count = 1 + bd_words + od_words`)
+replaces wholesale. MOVEM's own baseline is already 2 — a register mask word (q1,
+`ifu_ext_data[31:16]`) plus the EA descriptor itself (q2, `ifu_ext_data[15:0]`) —
+*before* any full-format concept applies, so the existing `fi_is_full`/`fi_bd`/
+`is_memind_full` machinery is wrong for it in two independent ways: (1)
+`peek_fi_full`/`peek_fi_bdsz`/`peek_fi_iis` (in `m68030_seq.sv`) read q1's own bits
+(`ifu_ext_data[24]` etc.) — correct for every single-EA-word family, but for MOVEM q1
+is the *mask*, not the descriptor, so they'd inspect the wrong word entirely; (2)
+`fi_bd` (in `eu_seq.sv`) reads a non-null bd value from `ext_data[31:16]` — for MOVEM
+that slot holds the mask too, so even with the right full/bdsz/iis bits, the actual bd
+*value* would come from the wrong place. A genuine third extension word (q3) is needed
+for MOVEM's own bd, which the project already had plumbed as a general-purpose
+pass-through (`ifu_q3_word`/`eu_q3_word`/`q3_word`, used by MOVEM's own pre-existing
+abs.L case) but had never been used for this.
+
+**`m68030_seq.sv`**: added `peek_fi_full_movem`/`peek_fi_bdsz_movem`/
+`peek_fi_iis_movem`, reading from `ifu_ext_data[8]`/`[5:4]`/`[2:0]` (q2's own bit
+positions, not q1's) — and `movem_bd_words`/`movem_od_words`/`movem_ext_count`
+(`= 2 + bd_words + od_words`, additive on MOVEM's 2-word baseline, mirroring
+`memind_ext_count`'s own reasoning but starting from a different baseline). Gated by a
+new `is_movem_idx_full` flag, checked first in the `ext_count` priority chain (ahead of
+`is_memind_full`, though the two never actually overlap since MOVEM was deliberately
+never added to `mode110_ea_src`). **Hit one real bug while wiring this up**: first
+draft based `is_movem_idx_full` on the pre-existing `is_movem` flag — compiled and ran
+clean, but produced a visibly wrong EA (`$204` instead of the expected `$304`) in the
+very first cosim test. Traced it to `is_movem`'s own condition, which only covers the
+`-(An)`/`(An)+`/`(An)` modes (`f_mode ∈ {100,011,010}`) — it explicitly excludes the
+indexed mode entirely, so `is_movem_idx_full` was structurally always false regardless
+of the extension word's own full/brief bit. Fixed by basing it on `is_movem_2ext`
+instead (the pre-existing flag that already *does* cover `f_mode==110` alongside
+`(d16,An)`/abs.W/`(d16,PC)`/`(d8,PC,Xn)`), narrowed to `f_mode==3'b110` specifically.
+**Eu_ext_data mux**: no change needed — `is_memind_full`'s own q1/q2 swap (needed for
+every single-EA family, whose descriptor would otherwise land in the wrong half) was
+never extended to MOVEM, so the plain `ext_count>=2` branch already delivers the
+correct natural packing (mask high, descriptor low) MOVEM's own decode already expects.
+
+**`eu_seq.sv`**: MOVEM's `f_mode==110` case arm now computes `dec_ea_offset` as
+`(fi_is_full && fi_bdsz==2'b10 && fi_iis==3'b000) ? sign_extend(q3_word) :
+<brief 8-bit offset>` — reusing the module's existing `fi_is_full`/`fi_bdsz`/`fi_iis`
+signals directly (they already read from `ext_data`'s low half, which for MOVEM's own
+natural packing already holds the descriptor — no MOVEM-specific duplicate needed
+there, only the `m68030_seq.sv` peek signals needed their own copy, since *that* file
+reads the raw, differently-offset `ifu_ext_data`). Only the word-bd, non-indirect
+sub-case is decoded correctly; genuine memory-indirect and long bd degrade to the
+brief interpretation, the same "least-wrong fallback" boundary every other family in
+this rollout draws — but `movem_ext_count` still accounts for those cases' own extra
+words so the IFU stream doesn't desync even where the resulting address is wrong,
+mirroring `memind_ext_count`'s own reasoning.
+
+**Musashi-cosim test**: `tests/memind11.s` (MOVEM.L store then load, both through the
+same full-format word-bd indexed EA) — compares cleanly via `buscmp.py`, wired into
+`make cosim_memind`. First run (before the `is_movem`→`is_movem_2ext` fix) failed
+exactly as expected given the bug: DUT read from `$204` (A0+D2, bd silently dropped)
+where the reference read `$304` (A0+D2+$100) — a clean, unambiguous signal, and also
+visibly the *wrong bus operation entirely* (reads where a MOVEM store should write),
+a symptom of decode corruption rather than a simple wrong-offset bug, which helped
+narrow the search quickly once noticed.
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, `make cosim_memind` now 5/5
+(added `buscmp-memind11`), and a full 124-suite Harte re-run (Verilator batch backend)
+— **PASS 702142, FAIL 2 (the same pre-existing documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0**, matching the Phase 112 baseline exactly, zero regressions — MOVEM.l is a
+100%-passing, heavily-exercised Harte suite, making this the gate that actually proves
+the fix didn't disturb the far more common brief-EA/standard-EA-mode MOVEM paths.
+Stage 4's other two items (MOVE mem-to-mem dst-side full-format support, long 32-bit
+bd/od displacements) remain open — both are substantially larger undertakings than
+everything done in this rollout so far (the former needs two independent EAs' worth of
+full-format state simultaneously; the latter needs a genuine new 4th/5th
+extension-word *data* path this project has never wired up, `ifu_ext5_valid` existing
+only as a timing gate today), and are deliberately not attempted in this same phase.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
