@@ -186,6 +186,8 @@ module stall_fsm_tb;
     localparam CLR_L_D5       = 16'h4285;
     localparam ADDI_L_D5      = 16'h0685;
     localparam NOP_OP         = 16'h4E71;
+    localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
+    localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
     // CAS.L Dc,Du,(A0): opcode 0000_111_0_11_010_000 (f_dn=111=long,
     // f_mode=010=(An)) per eu_seq.sv's dec_is_cas block. Ext word:
     // [8:6]=Dc(compared, ->D1=001), [2:0]=Du(written on match, ->D2=010).
@@ -309,6 +311,129 @@ module stall_fsm_tb;
         end
         check(name, saw_ack);
         $display("INFO  %s: elapsed=%0d clk_4x cycles (wait_states=%0d)", name, elapsed, wait_states);
+    endtask
+
+    // Every source exercised by run_berr_mid_test (below) is deliberately
+    // faulted and, by design, never returns to its own main instruction
+    // stream (there's nothing sensible to retry -- see the shared vector-2
+    // handler's own header comment). That means the *only* way decode_pc
+    // ever reaches the *next* test's code is via this handler's own exit
+    // path, not natural NOP fall-through (the main stream is permanently
+    // abandoned mid-instruction). The handler's own tail always jumps to a
+    // fixed parking spot (PARK_ADDR, a tight BRA_SELF self-loop) rather
+    // than straight to the next test's real code -- claim_park() below is
+    // what actually redirects hardware onward, and it's called from
+    // *inside* run_berr_mid_test itself, right as the testbench becomes
+    // ready to watch, not from the previous test. This matters: hardware
+    // keeps running in real time regardless of testbench/SystemVerilog
+    // program order -- a first version that jumped the handler straight to
+    // the next test's address let hardware race ahead and run that whole
+    // test to normal (unfaulted) completion *before* its own
+    // run_berr_mid_test call even started watching, since a short
+    // instruction sequence (MOVEP, MOVE16, etc.) completes in a few hundred
+    // cycles, far faster than the previous test's own trailing "EU
+    // recovered" wait takes to return. Parking first and only releasing
+    // when the watcher is actually ready closes that race structurally --
+    // hardware has nowhere to go until claim_park() sends it there.
+    localparam PARK_ADDR = 32'h0000_00A0;
+
+    task automatic claim_park(input logic [31:0] next_addr);
+        rom[16'h00A0/4] = {JMP_ABS_L_OP, next_addr[31:16]};
+        rom[16'h00A4/4] = {next_addr[15:0], NOP_OP};
+    endtask
+
+    // Shared BERR-mid-<instruction> watch loop, factored out of the
+    // original BERR-mid-CAS2 test (Phase 108) once it became clear the
+    // exact same shape applies to every ex_mem_stall source that goes
+    // through the generic mem_ack/mem_berr path (i.e. everything except
+    // PTEST, which reports translation faults via MMUSR instead of
+    // trapping -- see the dedicated BERR-mid-PTEST test, which cannot use
+    // this task). Caller is responsible for: placing this test's own code
+    // (starting with a CLR.L D5, since D5's value leaks across these
+    // sequential test blocks -- real CPU state, not reset between them)
+    // at code_start_addr, and for reusing the shared vector-2 handler
+    // (rom[0x08]->0x90, D5=999 on completion) already installed by the
+    // very first BERR-mid-CAS2 test.
+    task automatic run_berr_mid_test(input string test_name, input logic [31:0] code_start_addr,
+                                      input int skip_cycles = 0,
+                                      input logic [31:0] next_addr = 32'h0);
+        int t, dd0, cyc_seen;
+        logic saw_biu_berr, injected, exc_seen, d5_seen_999, d5_now_999;
+
+        for (t = 0; t < 150000 && u_top.ifu_decode_pc < code_start_addr; t++)
+            @(posedge clk_4x);
+        check({test_name, ": reached own code"}, u_top.ifu_decode_pc >= code_start_addr);
+
+        saw_biu_berr = 1'b0;
+        injected     = 1'b0;
+        exc_seen     = 1'b0;
+        cyc_seen     = 0;
+        dd0 = data_ds_count;
+        // D5 leaks across these sequential test blocks (real CPU state, not
+        // reset between them) -- every test's own code leads with a CLR.L D5
+        // specifically so the watch loop below can use D5===999 as its own
+        // completion marker. But decode_pc reaching code_start_addr only
+        // means the *first* word there has been fetched, not that this
+        // test's own leading CLR.L D5 has actually retired yet -- if the
+        // previous test's own handler already left D5=999, checking the raw
+        // value would break on stale data immediately, before this test has
+        // done anything at all (confirmed: silently no-op'd every 2nd/3rd
+        // test in a 12-test chain). Snapshot D5 here and only trust a later
+        // *transition into* 999 (not just "currently reads 999") as this
+        // test's own genuine completion.
+        d5_seen_999 = (u_top.u_eu.u_rf.d_reg[5] === 32'd999);
+        for (t = 0; t < 12000; t++) begin
+            @(posedge clk_4x); #1;
+            // skip_cycles lets a source with several genuine bus cycles
+            // before the one under test (e.g. RTR/RTE's first stack read,
+            // which -- unlike the second -- already recovers correctly on
+            // its own per Phase 109, since rtr_phase_r/rte_phase_r are
+            // still at their idle value 0 when a fault hits phase 0) target
+            // a *later* cycle instead of always the first.
+            if (!injected && data_ds_count != dd0) begin
+                dd0 = data_ds_count;
+                if (cyc_seen >= skip_cycles) begin
+                    injected = 1'b1;
+                    berr_n = 1'b0;
+                end else begin
+                    cyc_seen++;
+                end
+            end
+            if (u_top.u_biu.cg_eu_berr_raw) begin
+                saw_biu_berr = 1'b1;
+                berr_n = 1'b1;
+            end
+            if (!exc_seen && u_top.exc_active) exc_seen = 1'b1;
+            d5_now_999 = (u_top.u_eu.u_rf.d_reg[5] === 32'd999);
+            if (d5_now_999 && !d5_seen_999) break;
+            d5_seen_999 = d5_now_999;
+        end
+        berr_n = 1'b1;
+        check({test_name, ": injected mid-sequence"}, injected);
+        check({test_name, ": BIU layer detects the fault"}, saw_biu_berr);
+        check({test_name, ": a real Bus Error exception was taken"}, exc_seen);
+        check32({test_name, ": correct vector (2, Bus Error) dispatched"},
+                {24'h0, u_top.exc_vector_num}, 32'd2);
+        check({test_name, ": handler reached and ran to completion (D5=999)"},
+              u_top.u_eu.u_rf.d_reg[5] === 32'd999);
+        for (t = 0; t < 4000 &&
+             !(u_top.ifu_decode_pc > 32'h0000_0096 && !u_top.eu_busy); t++)
+            @(posedge clk_4x);
+        check({test_name, ": EU pipeline recovered (eu_busy clear, no lingering hang)"},
+              u_top.eu_busy === 1'b0);
+        // Release the park to the next test's code *now*, right as this
+        // task is about to return -- not any earlier. Hardware is
+        // currently sitting in the park (having reached it during the
+        // watch loop above), and the very next statement in the caller's
+        // program order is the next test's own run_berr_mid_test call, so
+        // its settle-wait is already active by the time hardware notices
+        // the release and jumps out. Releasing any earlier (e.g. from the
+        // *calling* test itself, at its own start, pointing at itself) was
+        // tried and is wrong: this same test's own fault, which happens
+        // later in real hardware time, would find its own stale claim
+        // still sitting there and loop back into itself instead of
+        // reaching whoever comes next.
+        if (next_addr != 32'h0) claim_park(next_addr);
     endtask
 
     initial begin
@@ -1168,15 +1293,30 @@ module stall_fsm_tb;
             dbg7n = 0;
 
             // Bus Error autovector: vector 2, at VBR(=0)+2*4=0x08. Handler
-            // sets D5 as its own completion marker, then idles (falls
-            // through to default-filled NOPs) — CAS2 itself is being
-            // aborted/abandoned by design (a real bus-error handler that
-            // hasn't fixed the underlying fault has nothing sensible to
-            // retry), so unlike the interrupt test above there's no RTE
+            // sets D5 as its own completion marker, then unconditionally
+            // jumps to the shared parking spot (PARK_ADDR) — CAS2 itself is
+            // being aborted/abandoned by design (a real bus-error handler
+            // that hasn't fixed the underlying fault has nothing sensible
+            // to retry), so unlike the interrupt test above there's no RTE
             // round trip back into the faulted instruction stream here.
+            // Originally this just fell through into default-filled NOPs,
+            // which was harmless for this one-off test but became a real
+            // bug once this same shared handler got reused by
+            // run_berr_mid_test for 12 more sources (below): falling
+            // through NOP-marches all the way down to 0x100, silently
+            // re-executing the *entire* file from B-1 onward after every
+            // one of those tests' own faults, corrupting shared
+            // register/SR/memory state for everything downstream. Jumping
+            // to a fixed, always-parked spot instead — and having each
+            // *next* test claim it for itself only once it's actually
+            // ready to watch (see claim_park()'s own header comment for
+            // why that direction of control matters) — fixes that cleanly.
             rom[16'h0008/4] = 32'h0000_0090;
             rom[16'h0090/4] = {CLR_L_D5, ADDI_L_D5};
             rom[16'h0094/4] = {16'h0000, 16'd999};
+            rom[16'h0098/4] = {JMP_ABS_L_OP, PARK_ADDR[31:16]};
+            rom[16'h009C/4] = {PARK_ADDR[15:0], NOP_OP};
+            rom[16'h00A0/4] = {BRA_SELF, NOP_OP};   // PARK_ADDR default: self-park until claimed
 
             rom[16'h1C00/4] = {MOVEA_L_IMM_A0, 16'h0000};
             rom[16'h1C04/4] = {16'h3C00, MOVEA_L_IMM_A1};
@@ -1247,6 +1387,17 @@ module stall_fsm_tb;
                 @(posedge clk_4x);
             check("BERR-mid-CAS2: EU pipeline recovered (eu_busy clear, no lingering hang)",
                   u_top.eu_busy === 1'b0);
+            // Release the park to BERR-mid-PTEST's code *now*, right before
+            // this block ends -- not any earlier (see claim_park()'s own
+            // header comment for why the timing matters: hardware is
+            // currently sitting in the park, having reached it during the
+            // watch loop above, and PTEST's own settle-wait starts
+            // immediately after this block, with zero simulated time in
+            // between). BERR-mid-PTEST doesn't go through
+            // run_berr_mid_test (PTEST never faults, so it can't release
+            // the park for whoever comes after it the same way), so it
+            // must be claimed for it explicitly, here.
+            claim_park(32'h0000_1CFC);
         end
 
         // -----------------------------------------------------------------
@@ -1379,6 +1530,162 @@ module stall_fsm_tb;
             check("BERR-mid-PTEST: EU pipeline recovered and continued past PTEST (D5=998 via this test's own follow-on code)",
                   u_top.u_eu.u_rf.d_reg[5] === 32'd998);
         end
+
+        // -----------------------------------------------------------------
+        // BERR-mid-<X> for the remaining 12 of the 13 ex_mem_stall sources
+        // Phase 109 fixed with the mem_abort pattern (memory-indirect EA's
+        // own BERR test is deliberately deferred until task #3's decode
+        // investigation resolves whether that addressing mode's own EA
+        // computation is even correct -- building a BERR test on top of a
+        // suspected-buggy decode would be premature). Each reuses its
+        // corresponding B-N test's exact, already-proven opcode encoding
+        // and operand addresses -- safe to reuse here since every B-N
+        // test's own checks (in the "run to completion" section above)
+        // have already completed by the time any of this code runs, this
+        // being a purely sequential (not parallel) initial block.
+        //
+        // Must first disable the MMU that BERR-mid-PTEST just enabled with
+        // a deliberately incomplete table (CRP pointing at a table that was
+        // never populated, since the whole point of that test was to fault
+        // the walk before its data would matter). Left enabled, every one
+        // of these 12 tests' own memory accesses would ALSO trigger a table
+        // walk through that same broken table instead of hitting physical
+        // memory directly -- confirmed the hard way, as the actual cause of
+        // an earlier attempt where every single one of these 12 tests
+        // failed identically with zero bus activity ever observed.
+        // -----------------------------------------------------------------
+        rom[16'h1D80/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1D84/4] = {16'h1DA0, PMOVE_A0_OP};      // PMOVE (A0),TC
+        rom[16'h1D88/4] = {PMOVE_TC_EXT, NOP_OP};
+        rom[16'h1DA0/4] = 32'h0000_0000;                 // TC: E=0 (disabled)
+
+        // Code for these 12 lives tightly packed in 0x1E00-0x2100 --
+        // comfortably below PTEST's own data at 0x2300 -- specifically to
+        // keep each settle-wait's NOP-fall-through distance short (an
+        // earlier attempt placed this code out past 0x2A00 and blew the
+        // global watchdog partway through, since marching that much
+        // further compounds badly across 12 back-to-back tests). Reused
+        // operand/data addresses (0x2700, 0x2800, 0x2900, 0x2E04 etc.) are
+        // untouched -- only these tests' own *code* addresses moved.
+
+        // single CAS.L D1,D2,(A0) -- reuses B-5's exact setup (0x2700).
+        rom[16'h1E00/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1E04/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1E08/4] = {16'h2700, CAS_L_D1D2_A0};
+        rom[16'h1E0C/4] = {CAS_EXT, CLR_L_D5};
+        rom[16'h1E10/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h1E14/4] = {16'd997, NOP_OP};
+        // CAS always faults here, so (same as BERR-mid-CAS2 above) the only
+        // path onward is the handler's own exit, via the park -- release it
+        // to MOVEP's code once this test itself is done watching.
+        run_berr_mid_test("BERR-mid-CAS", 32'h0000_1E00, .next_addr(32'h0000_1E40));
+
+        // MOVEP.L D1,(0x0010,A0) -- reuses B-7's exact setup (0x2800).
+        rom[16'h1E40/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1E44/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1E48/4] = {16'h2800, CLR_L_D1};
+        rom[16'h1E4C/4] = {ADDI_L_D1, 16'hAABB};
+        rom[16'h1E50/4] = {16'hCCDD, MOVEP_L_D1_A0};
+        rom[16'h1E54/4] = {16'h0010, NOP_OP};
+        run_berr_mid_test("BERR-mid-MOVEP", 32'h0000_1E40, .next_addr(32'h0000_1E80));
+
+        // MOVE16 (A0)+,(A1)+ -- reuses B-8's exact source data (0x2900).
+        rom[16'h1E80/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1E84/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1E88/4] = {16'h2900, MOVEA_L_IMM_A1};
+        rom[16'h1E8C/4] = {16'h0000, 16'h2A00};
+        rom[16'h1E90/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
+        run_berr_mid_test("BERR-mid-MOVE16", 32'h0000_1E80, .next_addr(32'h0000_1EC0));
+
+        // ADDX.L -(A1),-(A0) -- reuses B-9's exact scratch addresses.
+        rom[16'h1EC0/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1EC4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1EC8/4] = {16'h2E04, MOVEA_L_IMM_A1};
+        rom[16'h1ECC/4] = {16'h0000, 16'h2D04};
+        rom[16'h1ED0/4] = {ADDX_L_A1_A0, NOP_OP};
+        run_berr_mid_test("BERR-mid-ADDX", 32'h0000_1EC0, .next_addr(32'h0000_1F00));
+
+        // ABCD -(A1),-(A0) -- also covers SBCD (shared bcds_run_r
+        // mechanism, per Phase 109) -- reuses B-10's scratch addresses.
+        rom[16'h1F00/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1F04/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1F08/4] = {16'h2E10, MOVEA_L_IMM_A1};
+        rom[16'h1F0C/4] = {16'h0000, 16'h2D10};
+        rom[16'h1F10/4] = {ABCD_A1_A0, NOP_OP};
+        run_berr_mid_test("BERR-mid-ABCD", 32'h0000_1F00, .next_addr(32'h0000_1F40));
+
+        // PACK -(A1),-(A0),#0 -- reuses B-11's scratch addresses.
+        rom[16'h1F40/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1F44/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1F48/4] = {16'h2E20, MOVEA_L_IMM_A1};
+        rom[16'h1F4C/4] = {16'h0000, 16'h2D20};
+        rom[16'h1F50/4] = {PACK_A1_A0, 16'h0000};
+        run_berr_mid_test("BERR-mid-PACK", 32'h0000_1F40, .next_addr(32'h0000_1F80));
+
+        // BFINS D1,(A0){8:8} -- reuses B-12's exact setup (0x2F00).
+        rom[16'h1F80/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1F84/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1F88/4] = {16'h2F00, BFINS_D1_A0};
+        rom[16'h1F8C/4] = {BFINS_EXT, NOP_OP};
+        run_berr_mid_test("BERR-mid-BFINS", 32'h0000_1F80, .next_addr(32'h0000_1FC0));
+
+        // CMP2.L (A0),D1 -- also covers CHK2 (shared cmp2_run_r mechanism,
+        // per Phase 109) -- reuses B-13's exact setup (0x3000).
+        rom[16'h1FC0/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h1FC4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1FC8/4] = {16'h3000, CMP2_L_A0_D1};
+        rom[16'h1FCC/4] = {CMP2_EXT, NOP_OP};
+        run_berr_mid_test("BERR-mid-CMP2", 32'h0000_1FC0, .next_addr(32'h0000_2000));
+
+        // MOVE.L (A0),(A1) -- both source and dest are memory EAs, reuses
+        // B-14's exact source address (0x3100).
+        rom[16'h2000/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2004/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2008/4] = {16'h3100, MOVEA_L_IMM_A1};
+        rom[16'h200C/4] = {16'h0000, 16'h3200};
+        rom[16'h2010/4] = {MOVE_L_A0_A1, NOP_OP};
+        run_berr_mid_test("BERR-mid-MOVE-mem-mem", 32'h0000_2000, .next_addr(32'h0000_2040));
+
+        // RTR -- reuses B-15's exact frame (0x3302/0x3304). Phase 109's fix
+        // was specifically for the *second* stack read (the PC longword) --
+        // the first (CCR word) already recovered correctly on its own,
+        // since rtr_phase_r is still at its idle value 0 when a fault hits
+        // phase 0. To fault that second read, injection must fire as soon
+        // as the *first* read's own completion is observed (same as every
+        // other 2-phase source here, e.g. CAS2's skip_cycles=0 default) --
+        // NOT skip_cycles=1, which (off-by-one) waits for a third
+        // ds_count change that a 2-phase instruction never produces, so
+        // injected never fires and RTR silently runs to completion,
+        // corrupting downstream state. A successful RTR would redirect PC
+        // away entirely; forcing the second read to fault means it never
+        // does, so (unlike every other test here) there's no dependent
+        // "next instruction" at all -- the shared task's own
+        // vector-2/D5=999 checks are the whole test.
+        rom[16'h2040/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2044/4] = {MOVEA_L_IMM_A7, 16'h0000};
+        rom[16'h2048/4] = {16'h3302, RTR_OP};
+        run_berr_mid_test("BERR-mid-RTR", 32'h0000_2040, .next_addr(32'h0000_2080));
+
+        // RTE -- reuses B-16's exact frame (0x3400/0x3404). Same reasoning
+        // as RTR above (rte_phase_r's own fix was for the second read too;
+        // injection must fire on the *first* ds_count change, not the
+        // nonexistent third one skip_cycles=1 was waiting for).
+        rom[16'h2080/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2084/4] = {MOVEA_L_IMM_A7, 16'h0000};
+        rom[16'h2088/4] = {16'h3400, RTE_OP};
+        run_berr_mid_test("BERR-mid-RTE", 32'h0000_2080, .next_addr(32'h0000_20C0));
+
+        // PMOVE (A0),CRP -- 64-bit load, 2 bus cycles -- reuses B-21's exact
+        // source address (0x3600). Unlike RTR/RTE, both halves of this load
+        // go through the same pmove64_run_r phase register (register-gated
+        // directly in the top-level ex_mem_stall OR-list, not the
+        // combinational-formula pattern), so injecting on the first cycle
+        // already exercises the fix -- no skip_cycles needed.
+        rom[16'h20C0/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h20C4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h20C8/4] = {16'h3600, PMOVE_A0_OP};
+        rom[16'h20CC/4] = {PMOVE_CRP_EXT, NOP_OP};
+        run_berr_mid_test("BERR-mid-PMOVE64", 32'h0000_20C0);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

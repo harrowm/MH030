@@ -241,7 +241,7 @@ instructions. This suite covers what that structurally leaves out:
 | Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | 21 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set |
 | DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM (TAS), rather than the consumer racing ahead |
 | Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM), then a second, deeper dispatch-race bug (Phase 108) |
-| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-CAS2: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct — see below |
+| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-instruction: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct; dedicated fault-injection tests added for all 12 remaining `mem_abort` sources, finding and fixing a real RTL bug along the way — only the first-ever fault in a session was reported (Phase 114) — see below |
 | Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
 
 Memory-indirect EA (`([bd,An],Xn,od)`) remains deferred — Phase 107 narrowed the
@@ -251,27 +251,41 @@ the Harte corpus is 68000-captured and has zero coverage of this 68020+-only
 addressing mode, so there's no empirical oracle to verify a fix against without a
 dedicated Musashi-cosim investigation.
 
-**Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109** (see
-`plan.md §Phase 108`/`§Phase 109`, and the corrected root-cause chain in the
-`feedback_berr_hang_deferred` Claude Code memory note): (1) an interrupt could land on
-the exact cycle a newly-ready instruction launches into EX right after an FSM retires,
-with the saved return PC pointing at that already-executing instruction, causing RTE to
-silently re-execute it — fixed by threading `int_pending` into `eu_seq.sv`'s own `stall`
-so the ready instruction is deliberately held in DECODE for the recognition window
-instead of racing it (Phase 108, fully closed); (2) a sustained bus error during almost
-any EU-initiated access hung the CPU forever instead of raising a Bus Error exception —
-fixed by giving `biu_cache_if.sv` a real abort path and wiring a proper EU-side
-`bus_err_req` into `m68030_exc.sv` (Phase 108), then extended from the initial 4 sources
-(ordinary reads/writes, TAS, MOVEM, CAS2) to 16 of ~19 `ex_mem_stall` sources — also
-MOVEP, MOVE16, ADDX/ABCD/SBCD/PACK predecrement forms, BFINS, CMP2/CHK2, MOVE mem-mem,
-RTR/RTE, PMOVE64, single CAS, and memory-indirect EA (Phase 109). **PFLUSH/PTEST
-investigated last** (Phase 113) — they route through a different ack/fault interface
-(`m68030_mmu.sv`/`biu_mmu_if.sv`), and turned out to already be correctly handled: PFLUSH
-never touches the bus at all (pure internal ATC-array comparison, nothing for a BERR to
-interrupt), and PTEST's table walker already had its own `mmu_berr` handling predating
-this session. A new BERR-mid-PTEST test confirms it end-to-end. Zero RTL changes needed
-— this closes the BERR-abort rollout completely, all ~19 `ex_mem_stall` sources
-confirmed correct.
+**Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
+was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,
+and the corrected root-cause chain in the `feedback_berr_hang_deferred` Claude Code
+memory note): (1) an interrupt could land on the exact cycle a newly-ready instruction
+launches into EX right after an FSM retires, with the saved return PC pointing at that
+already-executing instruction, causing RTE to silently re-execute it — fixed by
+threading `int_pending` into `eu_seq.sv`'s own `stall` so the ready instruction is
+deliberately held in DECODE for the recognition window instead of racing it (Phase 108,
+fully closed); (2) a sustained bus error during almost any EU-initiated access hung the
+CPU forever instead of raising a Bus Error exception — fixed by giving `biu_cache_if.sv`
+a real abort path and wiring a proper EU-side `bus_err_req` into `m68030_exc.sv`
+(Phase 108), then extended from the initial 4 sources (ordinary reads/writes, TAS,
+MOVEM, CAS2) to 16 of ~19 `ex_mem_stall` sources — also MOVEP, MOVE16, ADDX/ABCD/SBCD/
+PACK predecrement forms, BFINS, CMP2/CHK2, MOVE mem-mem, RTR/RTE, PMOVE64, single CAS,
+and memory-indirect EA (Phase 109). **PFLUSH/PTEST investigated next** (Phase 113) —
+they route through a different ack/fault interface (`m68030_mmu.sv`/`biu_mmu_if.sv`),
+and turned out to already be correctly handled: PFLUSH never touches the bus at all
+(pure internal ATC-array comparison, nothing for a BERR to interrupt), and PTEST's table
+walker already had its own `mmu_berr` handling predating this session. (3) **Building
+dedicated fault-injection tests for the 12 sources Phase 109 fixed via `mem_abort`**
+(Phase 114) — the first time this codebase ever chained more than one independent fault
+into a single simulation run — found that `exc_frame_valid`'s deliberately-sticky
+"latched until reset" design (needed so the exception frame's captured fault data stays
+stable through the whole push sequence) meant the edge-detector Phase 108 built on top
+of it to drive `bus_err_req` could structurally only ever fire once per session: once
+`exc_frame_valid` first goes high it never returns to 0, so every fault after the first
+was silently dropped, with the faulted instruction's own abort completing correctly but
+having no exception to land in. Fixed by latching `eu_bus_err_r` directly off `eu_berr`
+(`biu_cache_if.sv`'s `CI_BERR` state, which is a genuine one-cycle pulse per fault, not a
+sticky level) instead of an edge-detector on `exc_frame_valid`. Zero RTL changes were
+needed for PFLUSH/PTEST specifically — a new BERR-mid-PTEST test confirms it end-to-end
+— but Phase 114's own bug was real RTL, in the notification path shared by every source.
+This closes the BERR-abort rollout completely, all ~19 `ex_mem_stall` sources confirmed
+correct with dedicated test coverage (memory-indirect EA excepted, deferred to its own
+investigation below).
 
 ### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 

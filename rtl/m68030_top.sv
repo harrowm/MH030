@@ -260,27 +260,30 @@ module m68030_top #(
     // exc_frame_valid (biu_exc_capture, via m68030_biu) is deliberately
     // latched "until reset" (BIU-090) so the frame's captured fault data
     // stays stable through the whole EXC_PUSH sequence — it stays high
-    // forever after the very first fault, not just for one cycle. Setting
-    // eu_bus_err_r on its *level* would re-trigger every single cycle after
-    // that (exc_frame_valid is still 1 by the time pc_wr_en_common finally
-    // clears it, so a level-triggered set would immediately win the race
-    // back to 1 the same cycle) — must key off its rising edge instead, so
-    // eu_bus_err_r only latches once per genuine new fault. Mirrors
-    // m68030_ifu.sv's own bus_err_r, which already solves the same problem
-    // correctly by clearing on pc_wr_en — the same pulse the exception
-    // controller issues once it finally loads the handler PC.
+    // forever after the very first fault, not just for one cycle, and never
+    // returns to 0 for any later, independent fault (only reset clears it).
+    // An edge-detector keyed off exc_frame_valid therefore only ever fires
+    // ONCE, for the very first EU-side bus error the CPU ever takes in a
+    // session — every subsequent, genuinely independent fault is silently
+    // dropped (found via a test chaining many single-fault sources back to
+    // back in one simulation; every earlier BERR-mid-* test had only ever
+    // exercised exactly one fault per run, so this never surfaced before).
+    // eu_berr (m68030_biu's own top-level output, sourced from
+    // biu_cache_if's CI_BERR state) is the fix: unlike exc_frame_valid it's
+    // a genuine one-cycle-wide pulse per fault — CI_BERR unconditionally
+    // returns to CI_IDLE the very next cycle regardless of any other state,
+    // so it naturally re-arms for each new, independent access. Latch
+    // straight off its level (already exactly one cycle wide, so no
+    // separate edge-detect is needed); still cleared on pc_wr_en_common,
+    // the same pulse the exception controller issues once it finally loads
+    // the handler PC — mirrors m68030_ifu.sv's own bus_err_r, which solves
+    // the identical problem correctly via its own already-pulsed source.
     // ───────────────────────────────────────────────────────────────────────
-    logic exc_frame_valid_prev_r;
-    always_ff @(posedge clk_4x or negedge rst_n)
-        if (!rst_n) exc_frame_valid_prev_r <= 1'b0;
-        else        exc_frame_valid_prev_r <= exc_frame_valid;
-    wire exc_frame_valid_rise = exc_frame_valid && !exc_frame_valid_prev_r;
-
     logic eu_bus_err_r;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)                      eu_bus_err_r <= 1'b0;
         else if (pc_wr_en_common)        eu_bus_err_r <= 1'b0;
-        else if (exc_frame_valid_rise)   eu_bus_err_r <= 1'b1;
+        else if (eu_berr)                eu_bus_err_r <= 1'b1;
     end
 
     // ───────────────────────────────────────────────────────────────────────

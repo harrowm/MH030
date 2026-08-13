@@ -2862,6 +2862,126 @@ PTEST via mechanisms that were already correct before this session began.
 
 ---
 
+## Phase 114 — BERR-mid-`<X>` tests for the 12 newly-`mem_abort`-covered sources: found and
+## fixed a real RTL bug (only the *first* EU bus error a session ever took was ever
+## reported) plus three testbench-only bugs, all four masked by every prior BERR test
+## having exercised exactly one fault per simulation run
+
+**Goal**: extend `tb/stall_fsm_tb.sv`'s shared `run_berr_mid_test` task (built for
+BERR-mid-CAS2 in Phase 108) to the 12 sources Phase 109 gave `mem_abort` coverage to
+but never had a dedicated fault-injection test: single CAS, MOVEP, MOVE16, ADDX, ABCD,
+PACK, BFINS, CMP2, MOVE mem-mem, RTR, RTE, PMOVE64. Chaining 12 independent faults into
+one simulation run (on top of the pre-existing interrupt-mid-CAS2 and BERR-mid-CAS2/
+BERR-mid-PTEST tests ahead of them) turned out to be the first time this codebase had
+ever done that — and every one of the four bugs below was a "this only breaks the
+*second* time it happens" class of bug, invisible to every earlier single-fault test.
+
+**Bug 1 (testbench, severe): the shared vector-2 handler had no RTE, and its
+fall-through-into-NOPs "do nothing else" behavior silently re-executed the entire file
+from B-1 onward after every fault.** The handler (`rom[0x90]`: `CLR.L D5; ADDI.L
+#999,D5`) was written for BERR-mid-CAS2 alone, where "fall through to default-filled
+NOPs" was a deliberate, harmless choice (CAS2 has nothing sensible to retry, Phase 106's
+own reasoning). NOP fall-through, however, doesn't stop at the edge of unused memory —
+it keeps marching until it hits *real* code, which for this file means byte address
+0x100, where B-1's own test begins. Reusing the same handler for 12 more faults meant
+every one of them silently replayed the *entire* B-1..B-21 + interrupt-test + earlier
+BERR-test sequence from scratch in the background, corrupting shared register/SR/memory
+state (confirmed directly: traced `SR` reading `0x0000` — S bit clear — during what
+should have been a plain supervisor-mode CAS access, `ext_fc` showing `001` (user data)
+instead of `101`, and an RTE later reading back `0x00001914` — a stray *address*, not a
+real SR value — from a stack slot that had been silently overwritten by a second, replayed
+pass through the file). Fixed by parking the handler in a tight `BRA.B -2` self-loop
+(`BRA_SELF`) instead of falling through — see Bug 2 for why a plain fixed jump target
+wasn't enough either.
+
+**Bug 2 (RTL, the significant one): `exc_frame_valid`'s "latched until reset" design
+(BIU-090) means an edge-detector keyed off it can only ever fire once per session,
+silently dropping every EU-side bus error after the first.** `m68030_top.sv`'s Phase 108
+fix converted `exc_frame_valid`'s sticky level into a one-shot pulse for `bus_err_req`
+via a rising-edge detector (`exc_frame_valid_rise`) — correct for exactly one fault, but
+`exc_frame_valid` (and its root source, `biu_cycle_gen.sv`'s `fault_valid_r`) is
+deliberately never cleared except by reset, "so the frame's captured fault data stays
+stable through the whole EXC_PUSH sequence." That's fine for the *data* (re-copied
+harmlessly every cycle once latched — confirmed the address/FC/data capture itself was
+never wrong), but fatal for an edge-detector: once `exc_frame_valid` first goes high it
+never returns to 0, so `exc_frame_valid_rise` can structurally only ever fire on the
+very *first* fault the CPU takes in an entire simulation — every later, genuinely
+independent fault is silently swallowed, `bus_err_req` never re-asserts, and the faulted
+instruction's own abort (which *does* still work — `eu_seq.sv`'s `mem_abort` correctly
+unstalls on `mem_berr` alone) has no exception to land in. Confirmed directly: CAS's own
+fault showed `cg_eu_berr_raw` pulsing (BIU-level detection correct) but `exc_active`
+never asserting, immediately after BERR-mid-CAS2's own (first, and previously only-ever-
+tested) fault had already consumed the one-shot edge. **Fixed in `rtl/m68030_top.sv`**:
+replaced the `exc_frame_valid`-edge-detector with a direct latch off `eu_berr`
+(`m68030_biu.sv`'s own top-level output, sourced from `biu_cache_if.sv`'s `CI_BERR`
+state) — unlike `exc_frame_valid`, `CI_BERR` unconditionally returns to `CI_IDLE` the
+very next cycle regardless of any other state, making `eu_berr` a genuine one-cycle-wide
+pulse per fault that naturally re-arms for every new, independent access; no separate
+edge-detect needed since it's already pulse-shaped. Still cleared on `pc_wr_en_common`,
+unchanged from Phase 108. This is a real, previously-undiscovered limitation in the
+Stage 1 BERR-hang fix itself (Phase 108, tasks #40-41) — every test since then had
+verified exactly one fault per run, so it was structurally impossible to notice until
+this phase chained many.
+
+**Bug 3 (testbench): the watch loop's "handler completion" check (`D5===999`) could
+fire on a *stale* value left over from the previous test, before this test's own leading
+`CLR.L D5` had even retired.** `run_berr_mid_test`'s settle-wait only confirms
+`decode_pc` has reached this test's first byte — not that any instruction there has
+actually executed — so if the previous test's own handler left `D5=999`, the very next
+test's watch loop could see that stale value on its first sampled cycle and declare
+victory having watched nothing at all (silently no-op'ing 8 of the first 11 sequential
+tests once Bug 1+2 were fixed and the chain no longer diverged). Fixed by snapshotting
+`D5`'s value at watch-loop entry and only trusting a later *transition into* 999 (not a
+bare "currently reads 999") as this test's own genuine completion — robust regardless of
+what `D5` starts at.
+
+**Bug 4 (testbench, the subtlest): even correctly-addressed handler jumps executed too
+early relative to the next test's own watcher, letting hardware race ahead and run an
+entire short instruction sequence (MOVEP, MOVE16, etc. — a few hundred cycles) to normal,
+unfaulted completion before that test's `run_berr_mid_test` call had even started
+watching for it.** An initial fix (chaining the handler's exit straight to each next
+test's `code_start_addr`, set via the calling test) got every "reached own code" check
+passing but left "injected mid-sequence" failing for 8 of 12 — real hardware execution
+proceeds continuously regardless of SystemVerilog testbench program order, and the
+*previous* test's own trailing "EU pipeline recovered" wait (checking `decode_pc >
+0x96`, a *low*, fixed address near the shared handler) returns almost immediately once
+the handler's jump lands anywhere past it — including squarely inside the *next* test's
+own code, which then runs to completion in the gap before that next test's own
+`run_berr_mid_test` call is even reached. A second attempt (each test claiming the park
+for *itself*, i.e. `claim_park(code_start_addr)`, at its own task start) made things
+*worse*, not better — traced and found decode permanently stuck (`eu_busy=1` forever,
+1M+ cycles) because each test's own self-claim, made at task *start* — before its own
+fault has happened — is still what's sitting in the park when *that same test's* own
+fault reaches it later, causing it to jump back into itself forever instead of reaching
+whoever comes next. The correct fix needed two things at once: (a) a single fixed
+parking address (`PARK_ADDR = 0x00A0`, a `BRA_SELF` self-loop by default) that every
+faulting handler unconditionally jumps to, so hardware always has somewhere safe to wait
+regardless of who's about to claim it, and (b) the *release* — patching `PARK_ADDR`'s own
+jump target via a new `claim_park(next_addr)` task — must happen as the very *last* thing
+inside the *current* test's own `run_berr_mid_test` call (added a `next_addr` parameter
+for this), immediately before it returns, not from the calling test's own start or from
+the *next* test's own start. This is the one moment guaranteed correct by construction:
+hardware is provably still parked (it had nowhere else to go since its own fault), and
+the very next SystemVerilog statement in the caller's program order — with zero
+simulated time in between — is the next test's own `run_berr_mid_test` call, whose
+settle-wait is therefore already active before hardware can possibly act on the release.
+BERR-mid-CAS2 (not a `run_berr_mid_test` caller, since it predates the shared task)
+needed the identical fix applied by hand: `claim_park(0x1CFC)` moved from the top of its
+own block to the bottom, right before it ends.
+
+**Result**: all 4 bugs fixed. `tb/stall_fsm_tb.sv`'s full run: **157/157 checks pass, 0
+failures**, completing in 710176 simulated ns (previously hit a 4.5M-ns hard watchdog
+timeout mid-run before these fixes). `make test` 34/34, `make cosim_grp` 8/8, and a full
+121-suite Harte re-run (`scripts/run_harte_batch.py --backend verilator -j8`, needed
+since Bug 2's fix touches `m68030_top.sv`'s shared EU bus-error path, the highest-risk
+touch point of any Gap-2-adjacent change): **696590 PASS, 2 FAIL (both the already-
+documented ASL.b Tom Harte corpus anomaly from Phase 87, opcode `0xe502` — not a
+regression), 0 TIMEOUT** — identical to the pre-existing baseline. This completes the
+BERR-mid-`<X>` test coverage item from the post-Phase-109 follow-up list; the only
+remaining item is memory-indirect EA's Musashi-cosim investigation (deferred, next).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
