@@ -169,6 +169,13 @@ $(SIM)/cosim_dat:  $(TOP_SRCS) tb/cosim_dat_tb.sv | $(SIM)
 $(SIM)/harte_dat:  $(TOP_SRCS) tb/harte_tb.sv | $(SIM)
 	$(IVCOMP)
 
+# Batched Harte runner (many tests per vvp process) — drives
+# scripts/run_harte_batch.py. See plan.md's Harte-sweep-performance
+# investigation for the two testbench bugs found while building this and the
+# ADD.b/MOVEM.l validation against run_harte.py's per-process results.
+$(SIM)/harte_batch:  $(TOP_SRCS) tb/harte_batch_tb.sv | $(SIM)
+	$(IVCOMP)
+
 $(SIM)/mustest: $(TOP_SRCS) tb/mustest_tb.sv | $(SIM)
 	$(IVCOMP)
 

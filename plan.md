@@ -2530,6 +2530,89 @@ that remains open follow-up work, tracked separately.
 
 ---
 
+## Phase 110 — Batched Harte runner: `tb/harte_batch_tb.sv` + `scripts/run_harte_batch.py`
+
+**Why**: the full 124-suite Harte sweep takes ~6 hours. User asked whether that's because
+`vvp` is spawned once per test vector, and whether batching many tests into one process
+would help without affecting correctness. Profiling confirmed it: a single test takes
+~0.2s wall time but only ~11ns of that is simulated 68030 time — the rest is Icarus
+elaborating the compiled design and allocating/zeroing the testbench's 16MB memory array
+fresh on every process spawn.
+
+**Dead ends investigated first, before batching**: (1) per-test/per-suite tiered memory
+array sizes (256KB/1MB/full) — analysis of ADD.b's address distribution showed the
+Harte corpus's address registers are essentially uniformly random across the full 24-bit
+space (median max-address touched ~11MB, 90th percentile ~16MB), so a small tier would
+miss most tests and fall back to the full size anyway; (2) shrinking the array did give
+a real but modest ~15% speedup (measured directly: 16MB vs 256KB), confirming array size
+is a secondary factor; (3) SystemVerilog associative arrays (`mem[int]` / `mem[*]`) as a
+"right-sized, no fixed allocation" alternative — hard dead end, Icarus 13.0 doesn't
+support them at all (fails to elaborate either syntax); a hash/alias fallback into a
+smaller dense array was considered and rejected as unsafe — the corpus's ~20-30 distinct
+touched addresses per test are spread across ~4M possible word slots, so a hash small
+enough to be worth it has a non-trivial collision rate, meaning two different addresses
+could silently overwrite each other's data — exactly the class of bug this project exists
+to catch, not something to build into the harness itself.
+
+**The actual approach**: `tb/harte_batch_tb.sv` mirrors `tb/harte_tb.sv`'s DUT wiring and
+memory model exactly, but wraps the run in a loop over a manifest of hex files —
+`$readmemh` + a real `rst_n` pulse + run-to-STOP + print results, repeated per line,
+inside one `vvp` process instead of exiting after one test. An initial attempt at
+explicitly clearing the whole 16MB array between tests (for safety against stale-data
+leakage) was ~10x *slower* than per-process (an interpreted 4M-iteration blocking-assign
+loop is far more expensive than an OS process spawn) — abandoned. Not clearing turned out
+to be both correct and free: `gen_harte_hex.py`'s patches always fully re-specify
+everything a test depends on (its own init code, `ini['ram']`, VBR relocation, STOP+NOP
+runway), so a leftover byte from a prior test is harmless unless the DUT reads outside
+what's defined for the current one — which is exactly the failure mode a real bug should
+produce anyway (a loud mismatch, not a silently-passed test).
+
+**Two real testbench bugs found and fixed while building this** (both in the new
+testbench, not the RTL under test):
+1. **Reset race**: the monitor flip-flops (`stop_seen`, `any_addr_err`,
+   `sr_before_stop`) had no reset input — cleared via a procedural blocking assignment
+   between tests instead. That blocking assign raced against the nonblocking update from
+   the *previous* test's still-high `eu_stop_out` on the exact same clock edge (the one
+   where that test's `fork`/`join` completes), and the nonblocking update always wins the
+   time step — corrupting roughly every other test with a bogus "stuck at reset" result
+   (all-zero registers, SR=$2700, the literal post-reset default). Fixed by giving these
+   signals the same `negedge rst_n` async-reset discipline as every other register in the
+   design, removing the procedural clear entirely.
+2. **Log-ordering bug**: `MEMWRITE` lines print live, the instant a write happens, from
+   the memory model's own concurrent `always_ff` — chronologically *during* a test's
+   `fork`/`join`, before the testbench's own `initial` block resumes. The `=== TEST N
+   ===` marker was originally printed *after* the run finished, so a test's own writes
+   landed before its own header in the output stream and a line-based parser silently
+   attributed them to the wrong test (register state looked right; every memory-writing
+   test failed with "no write seen"). Fixed by printing the header before the run starts
+   instead of after.
+
+**Validation**: 300 ADD.b tests and 400 MOVEM.l tests (a genuine multi-beat FSM
+instruction — the harder case, since it stresses whether a mid-run reset really clears
+all internal pipeline/FSM state) both matched `run_harte.py`'s own `compare()` logic
+exactly, zero differences, after the two fixes above landed — MOVEM.l passed 400/400 on
+the first attempt, no new bugs, evidence the fix generalizes rather than being an ADD.b
+coincidence. `scripts/run_harte_batch.py` wraps this into a drop-in-shaped alternative to
+`run_harte.py` (same `can_run`/`gen_hex`/`compare` imports, same summary format): splits
+a suite into chunks, runs each chunk through one `vvp sim/harte_batch` process, and runs
+several chunks in parallel. Full ADD.b suite (2500/2500) matched exactly via this script.
+
+**Speedup is instruction-class-dependent, not a flat number**: ADD.b (cheap,
+single-bus-cycle instructions) sped up ~5.4x in the raw single-process prototype, since
+batching only amortizes the *fixed* per-process cost (~0.18-0.2s) which was ~99% of
+ADD.b's per-test time. MOVEM.l (many real bus cycles per test) only sped up ~1.1x, since
+the fixed cost is a much smaller slice of an already-larger total. The real aggregate
+speedup for a full sweep depends on the corpus's time distribution across cheap vs.
+expensive instruction classes — somewhere between those two figures, not uniformly 5x.
+
+**Not yet done**: replacing `run_harte.py` as the default sweep tool, tuning chunk
+size/parallelism, or re-running the full 124-suite corpus through the batched path (the
+Gap 1+2/Phase 109 RTL verification gate deliberately stayed on the proven per-process
+harness rather than the newly-built one). `run_harte_batch.py` exists as a validated,
+usable alternative, not yet the default.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
