@@ -3291,6 +3291,93 @@ remain deferred, sites already identified during this phase's own survey.
 
 ---
 
+## Phase 118 — Stage 3 of extending full-format mode=110 EA support beyond MOVE:
+## Scc, CHK, ADDQ/SUBQ, MOVE-to/from-CCR/SR, and LEA/JMP/JSR/PEA indexed
+
+**Goal**: continue the same rollout (user: "continue through the rest of the phases"),
+picking up the site list Phase 117's own survey already identified for Stage 3:
+LEA/CHK/MOVE-SR-CCR/Scc/ADDQ-SUBQ indexed, per
+`~/.claude/plans/compressed-hopping-cocoa.md`.
+
+**Site inventory**: re-grepped the remaining brief-only `dec_ea_offset =
+{{24{ext_data[7]}}, ext_data[7:0]};` sites after Phase 117's 17 fixes and confirmed
+each against the file's current line numbers (they'd shifted since the survey).
+Located and fixed 6 `dec_ea_offset` sites — LEA, CHK (reusing the `dyn_bit_get_Dn`
+deferred-register swap already proven for CHK's brief form in Phase 84/86, unchanged
+and orthogonal to this fix, same pattern as Stage 2's dynamic bit-ops), MOVE-to-CCR
+(read side), MOVE-SR (write side, the "RMW trick" case arm), Scc-to-memory, and
+ADDQ/SUBQ-to-memory. JMP/JSR/PEA don't use `dec_ea_offset` at all — they compute their
+target/push-address through a separate `dec_jump_offset` signal — so a second grep for
+`dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};` found and fixed those 3 more
+sites, for 9 total this phase. **CMP2/CHK2's indexed form was investigated and found to
+be a different, larger problem**: `eu_seq.sv`'s own CMP2/CHK2 decode block has no
+`f_mode==110` case *at all* — not brief-limited like every other family here, genuinely
+never implemented — so it's out of scope for the fi_bd template and deliberately
+deferred to its own future phase rather than attempted as part of this one.
+
+**`m68030_seq.sv`**: added `is_chk_mode110`, `is_scc_mode110`,
+`is_move_sr_ccr_mode110`, `is_addq_subq_mode110`, and `is_pea_mode110` (all new,
+narrowed straight to `f_mode==3'b110` from each family's own known-baseline-1
+condition), plus a new `is_jsr_idx` alongside the pre-existing `is_lea_idx`/
+`is_jmp_idx`, all folded into `mode110_ea_src`. Two more instances of the Icarus
+forward-reference limitation Phase 117 first hit: `is_addq_subq_ext` and `is_pea` are
+both declared later in the file than the new block, so both conditions were inlined
+(narrowed to mode=110) rather than referenced — and a *third*, self-inflicted instance
+this phase introduced and then fixed: the newly-added `is_lea_idx`/`is_jmp_idx`/
+`is_jsr_idx` references inside `mode110_ea_src` initially sat *before* those signals'
+own (pre-existing, for `is_lea_idx`/`is_jmp_idx`) declarations further down — moved all
+three declarations up above `mode110_ea_src` to fix, rather than inlining them a second
+time, since they're plain field-equality conditions with no downstream forward-ref
+chain of their own.
+
+**Found and fixed a genuine pre-existing gap while adding `is_jsr_idx`**: JSR
+`(d8,An,Xn)` had *no* `ext_count` classifier at all — `is_jmp_idx` only ever matched
+`f_ss==2'b11` (JMP), never `f_ss==2'b10` (JSR), and no separate JSR-indexed flag
+existed anywhere in the file, so JSR indexed silently fell to the `default: ext_count =
+0` catch-all. This turns out to be harmless for *drain* (JSR's own PC redirect flushes
+and refills the IFU queue at the new target regardless of what the fallthrough
+instruction's ext_count would have drained), which is presumably why it was never
+caught by Harte's own 100%-passing JSR suite (Phase 95) — but it **does** matter for
+`eu_ext_valid` gating in the full-format case, where the extra bd/od extension words
+must actually be present before decode reads them. Fixed by adding `is_jsr_idx`
+(mirroring `is_jmp_idx`'s shape with `f_ss==2'b10`) to both `mode110_ea_src` and the
+existing `ext_count=1` bucket alongside `is_jmp_idx`.
+
+**Musashi-cosim tests**: `tests/memind9.s` (LEA + CHK.L + ADDQ.L + MOVE-to-CCR, all
+word/long-sized) and `tests/memind10.s` (PEA + JSR, the latter directly exercising the
+newly-fixed `is_jsr_idx` classifier via a landing-pad instruction placed at the
+computed target). memind10 compares cleanly via `buscmp.py` and is wired into `make
+cosim_memind`. memind9 hits the same benign prefetch-interleave reordering already
+documented for `memind.s`/`memind4.s`/`memind6.s` (every value in both bus logs
+matches exactly, just one fetch reordered relative to Musashi's own interpretive
+re-fetch quirk) — hand-verified, not wired into the automated target, same precedent.
+
+**Found and deliberately left unresolved**: while building memind9, MOVE SR,`(ea)`
+(the write-side "RMW trick" site) showed the DUT performing an extra bus READ at the
+destination before the write that Musashi's reference does not. Isolated with two
+standalone throwaway repros (not committed): present for `(d8,An,Xn)`/indexed EA
+regardless of brief-vs-full format, absent for `(d16,An)` — so it's keyed on
+`f_mode==110` specifically, pre-existing (the site's `dec_is_mem_rd`/`dec_is_mem_rmw`
+flags predate this phase; this phase only touched `dec_ea_offset`), and unrelated to
+the fi_bd fix itself. Doesn't affect functional correctness — `MOVEfromSR`'s own Harte
+suite (which does cover indexed EA) is 100%, since Harte diffs final register/memory
+state rather than bus-cycle-by-cycle timing — just an extra bus cycle real silicon (or
+Musashi) doesn't take. Removed the MOVE SR,EA line from memind9.s rather than leave it
+failing the automated comparison; documented in the test's own header for a future
+phase to pick up.
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, `make cosim_memind` now 4/4
+(added `buscmp-memind10`), and a full 124-suite Harte re-run (Verilator batch backend)
+— **PASS 702142, FAIL 2 (the same pre-existing documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0**, matching the Phase 112 baseline exactly, zero regressions — a
+particularly meaningful gate here since Scc/CHK/ADDQ-SUBQ/LEA/JMP/JSR/PEA/MOVEtoSR are
+all heavily Harte-exercised instruction families. Stage 4 (MOVEM's own extended form,
+MOVE mem-to-mem's dst-side full-format support, long 32-bit bd/od displacements for any
+family) and CMP2/CHK2's indexed form (newly identified as a separate, larger gap this
+phase, not simply deferred by choice like the others) remain open.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

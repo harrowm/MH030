@@ -241,17 +241,50 @@ module m68030_seq (
          f_group == 4'hc || f_group == 4'hd) && (f_mode == 3'b110);
     assign is_dyn_bit_mode110 = (f_group == 4'h0) && f_dir && (f_mode == 3'b110);
 
-    logic mode110_ea_src;
-    assign mode110_ea_src = is_move_idx_src || is_tas_mode110 || is_nbcd_mode110 ||
-                            is_negx_clr_neg_not_tst_mode110 || is_shift_mode110 ||
-                            is_alu_mem_src_mode110 || is_dyn_bit_mode110;
-    logic is_memind_full;
-    assign is_memind_full = mode110_ea_src && peek_fi_full;
+    // Stage 3 (plan.md Phase 118): Scc, CHK, ADDQ/SUBQ, MOVE-to/from-SR/CCR,
+    // and LEA/JMP/JSR/PEA indexed. All six eu_seq.sv sites share the same
+    // An+Xn-only shape as Stage 1's unary-memory-operand family (CHK's own
+    // dyn_bit_get_Dn deferred-register swap for the tested Dn is orthogonal,
+    // same as it was for Stage 2's dynamic bit-ops) -- no new decode
+    // machinery needed, only the fi_is_full/fi_bd template plus feeding
+    // is_memind_full's gate. CMP2/CHK2's own indexed form is a genuine
+    // missing-decode gap (no f_mode==110 case exists in eu_seq.sv at all,
+    // brief or full -- unlike every other family here, it was never
+    // implemented, not just brief-limited), so it's deliberately excluded
+    // and left for its own future phase, not this one.
+    // is_addq_subq_ext and is_pea are both declared later in this file;
+    // Icarus's forward-reference limitation (see Stage 2's own comment on
+    // is_alu_mem_src above) applies here too, so both conditions are
+    // inlined rather than referenced, narrowed to mode=110 directly.
+    logic is_chk_mode110, is_scc_mode110, is_move_sr_ccr_mode110, is_addq_subq_mode110;
+    logic is_pea_mode110;
+    assign is_chk_mode110 = (f_group == 4'h4) && f_dir &&
+                            (f_ss == 2'b10 || f_ss == 2'b00) && (f_mode == 3'b110);
+    assign is_scc_mode110 = (f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b110);
+    assign is_move_sr_ccr_mode110 = (f_group == 4'h4) && !f_dir && (f_ss == 2'b11) &&
+                            (f_dn == 3'b000 || f_dn == 3'b011 || f_dn == 3'b010) &&
+                            (f_mode == 3'b110);
+    assign is_addq_subq_mode110 = (f_group == 4'h5) && (f_ss != 2'b11) && (f_mode == 3'b110);
+    assign is_pea_mode110 = (f_group == 4'h4) && !f_dir && (f_dn == 3'b100) &&
+                            (f_ss == 2'b01) && (f_mode == 3'b110);
     logic is_lea_idx;        // LEA (d8,An,Xn)
     assign is_lea_idx = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b110);
     logic is_jmp_idx;        // JMP (d8,An,Xn)
     assign is_jmp_idx = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
                         (f_ss == 2'b11) && (f_mode == 3'b110);
+    logic is_jsr_idx;        // JSR (d8,An,Xn) -- same shape as is_jmp_idx, f_ss=10 not 11
+    assign is_jsr_idx = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
+                        (f_ss == 2'b10) && (f_mode == 3'b110);
+
+    logic mode110_ea_src;
+    assign mode110_ea_src = is_move_idx_src || is_tas_mode110 || is_nbcd_mode110 ||
+                            is_negx_clr_neg_not_tst_mode110 || is_shift_mode110 ||
+                            is_alu_mem_src_mode110 || is_dyn_bit_mode110 ||
+                            is_chk_mode110 || is_scc_mode110 || is_move_sr_ccr_mode110 ||
+                            is_addq_subq_mode110 || is_lea_idx || is_jmp_idx || is_jsr_idx ||
+                            is_pea_mode110;
+    logic is_memind_full;
+    assign is_memind_full = mode110_ea_src && peek_fi_full;
 
     // absolute EA (xxx).W/(xxx).L
     // PC-relative (d16,PC) and (d8,PC,Xn) also use f_mode=111
@@ -580,7 +613,7 @@ module m68030_seq (
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
-                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_movem || is_movep ||
+                 is_move_idx_src || is_lea_idx || is_jmp_idx || is_jsr_idx || is_movem || is_movep ||
                  is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
                  is_rtd || is_stop_opcode || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||

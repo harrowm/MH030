@@ -302,13 +302,41 @@ this rollout given how heavily ADD/SUB/CMP/AND/OR/EOR/BTST-family/MUL/DIV are
 exercised by the corpus — zero regressions. See `plan.md §Phase 117` for the full
 writeup.
 
-**Deliberately out of scope, staged as Stages 3-4** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown, sites already
-located during Phase 117's survey): Scc/CHK/CMP2-CHK2/ADDQ-SUBQ/LEA-JMP-JSR indexed,
-MOVE-to/from-SR/CCR; MOVEM's own extended form (different base ext_count) and MOVE
-mem-to-mem's dst-side full-format support; and long (32-bit) bd/od displacements for
-any family (needs a genuine 4th/5th extension-word data path this project doesn't
-have wired up).
+**Phase 118 (Stage 3)** covered Scc, CHK (reusing CHK's own pre-existing
+`dyn_bit_get_Dn` deferred-register swap unchanged), ADDQ/SUBQ, MOVE-to/from-CCR/SR,
+and LEA/JMP/JSR/PEA indexed — 9 `eu_seq.sv` sites in total, 6 via `dec_ea_offset`
+and 3 via a second signal (`dec_jump_offset`) that JMP/JSR/PEA use instead for their
+target/push-address computation. **CMP2/CHK2's own indexed form turned out to be a
+different, larger gap**: `eu_seq.sv` has no `f_mode==110` decode for CMP2/CHK2 at
+all — never implemented, unlike every other family here which was merely
+brief-limited — so it's out of scope for this template and deferred to its own
+future phase. **Found a genuine pre-existing bug while adding JSR's own new
+`is_jsr_idx` classifier**: JSR `(d8,An,Xn)` had no `ext_count` entry at all
+(`is_jmp_idx` only ever matched JMP's own `f_ss` encoding, never JSR's) — harmless
+for post-execution IFU drain (JSR's PC redirect flushes/refills the queue
+regardless, explaining why Harte's own 100%-passing JSR suite never caught it) but
+real for gating the extra bd/od extension words a full-format target needs before
+decode reads them; fixed and verified via a dedicated cosim test with a landing pad
+at the computed jump target. Also found, and deliberately left unresolved: MOVE
+SR,(ea)'s write-side site performs an extra bus read before the write that Musashi
+doesn't, for indexed EA specifically (both brief and full) — pre-existing, doesn't
+affect correctness (`MOVEfromSR`'s own Harte suite is 100%, since Harte diffs final
+state rather than bus-cycle timing), documented in `tests/memind9.s` rather than
+investigated. Verified via `tests/memind9.s` (LEA+CHK.L+ADDQ.L+MOVE-to-CCR,
+hand-verified — hits the same prefetch-interleave reordering as `memind.s`/
+`memind4.s`/`memind6.s`) and `tests/memind10.s` (PEA+JSR, cleanly automated) plus a
+full 124-suite Harte re-run — PASS 702142, FAIL 2 (same documented ASL.b anomaly),
+0 TIMEOUT, matching the Phase 112 baseline exactly, zero regressions across
+Scc/CHK/ADDQ-SUBQ/LEA/JMP/JSR/PEA/MOVEtoSR. See `plan.md §Phase 118` for the full
+writeup.
+
+**Deliberately out of scope, remaining as Stage 4** (see
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): MOVEM's own
+extended form (different base ext_count) and MOVE mem-to-mem's dst-side full-format
+support; long (32-bit) bd/od displacements for any family (needs a genuine 4th/5th
+extension-word data path this project doesn't have wired up); and, newly identified
+in Phase 118, CMP2/CHK2's indexed form (needs its own investigation, not just the
+fi_bd template, since the decode doesn't exist at all today).
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,

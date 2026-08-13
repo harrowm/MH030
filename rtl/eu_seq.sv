@@ -2800,7 +2800,7 @@ module eu_seq (
                                 default: ;
                             endcase
                         end else if (f_mode == 3'b110) begin
-                            // LEA (d8,An,Xn), An — brief indexed EA
+                            // LEA (d8,An,Xn) brief, or full (bd,An,Xn) -- An
                             dec_valid      = 1'b1;
                             dec_is_lea     = 1'b1;
                             dec_src_reg    = {1'b1, f_reg};                    // An (base) → rd_a
@@ -2813,7 +2813,10 @@ module eu_seq (
                             dec_is_idx     = 1'b1;
                             dec_xn_wl      = ext_data[11];
                             dec_xn_scale   = ext_data[10:9];
-                            dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd extension,
+                            // same template as Stage 1/2.
+                            dec_ea_offset  = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext  = 1'b1;
                         end
                     end else if (f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
@@ -2878,7 +2881,11 @@ module eu_seq (
                             dec_is_idx         = 1'b1;
                             dec_xn_wl          = ext_data[11];
                             dec_xn_scale       = ext_data[10:9];
-                            dec_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd extension,
+                            // same template as Stage 1/2. dyn_bit_get_Dn's own
+                            // register-swap mechanism is orthogonal, unchanged.
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext      = 1'b1;
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;   // Dn (tested value) → rd_b after swap
@@ -3000,7 +3007,9 @@ module eu_seq (
                             dec_is_idx      = 1'b1;
                             dec_xn_wl       = ext_data[11];
                             dec_xn_scale    = ext_data[10:9];
-                            dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                            dec_jump_offset = fi_is_full ? fi_bd
+                                            : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_return_pc   = decode_pc + 32'd4;
                             dec_an_upd_en   = 1'b1;
                             dec_an_upd_reg  = 3'b111;
@@ -3043,7 +3052,7 @@ module eu_seq (
                                 default: ;
                             endcase
                         end else if (f_mode == 3'b110) begin
-                            // JMP (d8,An,Xn) — brief indexed target
+                            // JMP (d8,An,Xn) brief, or full (bd,An,Xn) — indexed target
                             dec_valid       = 1'b1;
                             dec_is_jmp      = 1'b1;
                             dec_src_reg     = {1'b1, f_reg};                    // An (base) → rd_a
@@ -3054,7 +3063,9 @@ module eu_seq (
                             dec_is_idx      = 1'b1;
                             dec_xn_wl       = ext_data[11];
                             dec_xn_scale    = ext_data[10:9];
-                            dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                            dec_jump_offset = fi_is_full ? fi_bd
+                                            : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext   = 1'b1;
                         end
                     // ── MOVE.W EA, SR/CCR (memory src) and MOVE.W SR/CCR, (EA) ──
@@ -3111,7 +3122,7 @@ module eu_seq (
                                         dec_needs_ext = 1'b1;
                                         dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                     end
-                                    3'b110: begin  // (d8,An,Xn) — RMW trick: rd_a=An, rd_b=Xn
+                                    3'b110: begin  // (d8,An,Xn)/(bd,An,Xn) — RMW trick: rd_a=An, rd_b=Xn
                                         dec_is_mem_rd  = 1'b1;
                                         dec_is_mem_rmw = 1'b1;
                                         dec_src_reg    = {1'b1, f_reg};
@@ -3121,7 +3132,9 @@ module eu_seq (
                                         dec_is_idx     = 1'b1;
                                         dec_xn_wl      = ext_data[11];
                                         dec_xn_scale   = ext_data[10:9];
-                                        dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                                        // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                                        dec_ea_offset  = fi_is_full ? fi_bd
+                                                       : {{24{ext_data[7]}}, ext_data[7:0]};
                                         dec_needs_ext  = 1'b1;
                                     end
                                     3'b111: begin
@@ -3188,7 +3201,7 @@ module eu_seq (
                                         dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                         dec_needs_ext = 1'b1;
                                     end
-                                    3'b110: begin  // (d8,An,Xn)
+                                    3'b110: begin  // (d8,An,Xn)/(bd,An,Xn)
                                         dec_src_reg    = {1'b1, f_reg};
                                         dec_reads_src  = 1'b1;
                                         dec_dst_reg    = {ext_data[15], ext_data[14:12]};
@@ -3196,7 +3209,9 @@ module eu_seq (
                                         dec_is_idx     = 1'b1;
                                         dec_xn_wl      = ext_data[11];
                                         dec_xn_scale   = ext_data[10:9];
-                                        dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                                        // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                                        dec_ea_offset  = fi_is_full ? fi_bd
+                                                       : {{24{ext_data[7]}}, ext_data[7:0]};
                                         dec_needs_ext  = 1'b1;
                                     end
                                     3'b111: begin
@@ -3549,8 +3564,8 @@ module eu_seq (
                             dec_jump_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                             dec_needs_ext   = 1'b1;
                         end else if (f_mode == 3'b110) begin
-                            // PEA (d8,An,Xn): EA = An + d8 + Xn*scale, push to [A7-4]
-                            // rd_a=An (base), rd_b=Xn (index); A7 obtained via ex_cur_sp
+                            // PEA (d8,An,Xn) brief, or full (bd,An,Xn): EA = An + d + Xn*scale,
+                            // push to [A7-4]. rd_a=An (base), rd_b=Xn (index); A7 via ex_cur_sp
                             dec_valid       = 1'b1;
                             dec_src_reg     = {1'b1, f_reg};                   // An → rd_a
                             dec_dst_reg     = {ext_data[15], ext_data[14:12]}; // Xn → rd_b
@@ -3559,7 +3574,9 @@ module eu_seq (
                             dec_is_idx      = 1'b1;
                             dec_xn_wl       = ext_data[11];
                             dec_xn_scale    = ext_data[10:9];
-                            dec_jump_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                            dec_jump_offset = fi_is_full ? fi_bd
+                                            : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext   = 1'b1;
                         end else if (f_mode == 3'b111) begin
                             // PEA (xxx).W/.L / (d16,PC): EA = absolute value
@@ -3744,14 +3761,16 @@ module eu_seq (
                                     dec_needs_ext  = 1'b1;
                                     dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
                                 end
-                                3'b110: begin  // (d8,An,Xn): 1 ext word
+                                3'b110: begin  // (d8,An,Xn)/(bd,An,Xn): 1+ ext word
                                     dec_needs_ext  = 1'b1;
                                     dec_dst_reg    = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
                                     dec_reads_dst  = 1'b1;
                                     dec_is_idx     = 1'b1;
                                     dec_xn_wl      = ext_data[11];
                                     dec_xn_scale   = ext_data[10:9];
-                                    dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                                    // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                                    dec_ea_offset  = fi_is_full ? fi_bd
+                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
                                 end
                                 3'b111: begin
                                     dec_needs_ext  = 1'b1;
@@ -3807,14 +3826,16 @@ module eu_seq (
                                 dec_needs_ext  = 1'b1;
                                 dec_ea_offset  = {{16{ext_data[15]}}, ext_data[15:0]};
                             end
-                            3'b110: begin
+                            3'b110: begin  // (d8,An,Xn)/(bd,An,Xn)
                                 dec_needs_ext  = 1'b1;
                                 dec_dst_reg    = {ext_data[15], ext_data[14:12]};
                                 dec_reads_dst  = 1'b1;
                                 dec_is_idx     = 1'b1;
                                 dec_xn_wl      = ext_data[11];
                                 dec_xn_scale   = ext_data[10:9];
-                                dec_ea_offset  = {{24{ext_data[7]}}, ext_data[7:0]};
+                                // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                                dec_ea_offset  = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                             end
                             3'b111: begin
                                 dec_needs_ext  = 1'b1;
