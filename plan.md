@@ -2701,6 +2701,97 @@ change's verification gate.
 
 ---
 
+## Phase 112 — Fixed the SKIP breakdown's "Group B" (12,431 tests): MSP never initialized
+
+**Why**: with the full sweep now fast (Phase 111), user asked to review why ~1/3 of the
+983k-test corpus is SKIP and check whether any of it is actually fixable rather than a
+genuine 68000-vs-68030 divergence. Tallied every `can_run()` skip reason across the full
+corpus and grouped by cause: **95.7%** (281,075 tests) are permanent, correct, documented
+68000-vs-68030 architectural divergences (misaligned-EA Address-Error semantics the 68030
+doesn't replicate, RTS/RTE/RTR frame-width divergence, LEA/PEA/JMP/JSR scale-field
+divergence, etc.) — genuinely not fixable without building the wrong chip. **0.03%** (88
+tests) are negligible harness address-collision artifacts, already well-understood, not
+worth any effort. But **4.3%** (12,489 tests: `ANDI/EORI to SR` clearing S, `MOVE <ea>,SR`
+clearing S, `RTE` clearing S) turned out to be a genuine, fixable harness limitation:
+every test terminates via `STOP #$2700`, itself supervisor-only, so if the tested
+instruction switches the CPU to user mode, that final STOP faults with a privilege
+violation instead of completing, and the harness had no way to capture/verify state.
+
+**First attempt, wrong premise**: built a vector-8 (Privilege Violation) handler
+(`STOP #$2700` at a fixed, VBR-relocated address — exception entry always forces S=1
+regardless of the pre-fault mode, so it should complete cleanly from there) plus an
+A7 compensation in `run_harte.compare()` for the extra exception-frame push. A 200-test
+sample of `EORItoSR` passed 100% with *zero* A7 compensation needed, which read at the
+time as "STOP doesn't even fault — some SR-forwarding pipeline hazard masks it, matching
+the `MOVE.W #imm,SR` + explicit-NOP precedent already in this file's own init code" — so
+the vector-8 machinery was stripped out as apparently-dead code. **This was wrong.**
+Re-running the exact same 200-test sample against a *full*-suite run of the same file
+showed ~50% TIMEOUT, exactly matching the "clears S" population size — the 200-test
+sample had simply been too small/unlucky to expose it; removing the "dead" code broke
+everything the code had actually been masking.
+
+**Root cause, found via direct signal trace** (`m68030_top.sv`'s
+`exc_ssp_in = eu_master_mode ? eu_msp_out : eu_isp_out` instrumented with a temporary
+`$display`): the 68030 has three real stack-pointer banks — USP, ISP, and MSP, selected
+by S and M (bit 12 of SR) together — not the simple SSP/USP pair a 68000 has. Harte's
+corpus is captured on real 68000 hardware, which has **no M/ISP/MSP concept at all**
+(that's a 68020+ feature) — so a test's own random SR/immediate value can carry an M-bit
+setting the reference chip never exercised. `EORI #imm,SR` XORs the *entire* SR,
+immediate bit 12 included; our correctly-68030-accurate RTL genuinely toggles M as a
+result, while the reference 68000 simply has no bit there to toggle. The harness's own
+init code only ever seeded ISP (via `MOVEA.L #ssp,A7` at the M=0 reset default) and USP
+(via an explicit `MOVE A7,USP`) — MSP was left at its power-on-reset value of zero.
+Direct trace confirmed it: `master_mode=1` (M flipped, exactly as EORI's own immediate
+bit 12 dictated) at the moment the Privilege Violation fires, `isp_out=0x00000800`
+(correctly seeded), `msp_out=0x00000000` (never touched), `exc_ssp_in=0x00000000` — the
+CPU correctly selected MSP per its own architecture, and MSP held garbage, so the
+exception frame got pushed to address `0x000000-4 & 0xFFFFFF = 0xFFFFFC`, corrupting
+unrelated memory and hanging the simulation reading garbage as instructions afterward.
+**Not an RTL bug** — the 68030 did exactly what a real 68030 should do; the test harness
+just never anticipated a 68000-captured test accidentally exercising a 68020+-only
+feature.
+
+**Fix**: added `_movec_a7_msp()` and an *unconditional* `MOVEC A7,MSP` right after ISP's
+own seed in `build_patches()`'s init code — every test now leaves both ISP and MSP
+holding the same sane initial value, regardless of whether that specific test's own
+opcode was ever expected to touch M. Deliberately unconditional (not gated on `priv_drop`
+alone): an M-bit flip that leaves S=1 throughout (supervisor mode never lost) would
+silently corrupt ordinary `A7`/register reads the same way, not just crash the privilege-
+violation-handler path — this is a strictly more general fix than the original narrow
+motivation. With MSP correctly seeded, the vector-8 handler machinery (re-added after the
+mistaken removal) works as originally designed, and the A7 comparison needs **zero**
+compensation after all: the handler's own `STOP #$2700` operand sets M=0 as part of its
+normal execution, switching the `A7` alias straight back to ISP (never touched by the
+exception, since M was 1 at fault time) or leaving it on the already-correct ISP path (if
+M had stayed 0) — either way, by the time final state is captured, `A7` reads the
+untouched, correct value, matching the reference exactly. Confirmed via the same direct
+trace technique before committing to this — no more guessing from register outputs alone.
+
+**Verification**: all 4 affected suites at *full* scale (not a small sample this time,
+after being burned once): `EORItoSR` 8065/8065, `ANDItoSR` 8065/8065, `MOVEtoSR`
+4814/4814 (of 8065 — remainder is unrelated Group-A skips), `RTE` 4011/4011 (of 8065 —
+remainder is the separate, still-correctly-skipped odd-restored-PC frame-width
+divergence) — all **100%**, zero fails, zero timeouts. Spot-checked `ORItoSR` (can never
+trigger this path, since ORI always sets S) and `MOVE.b` (a large, unrelated suite,
+to confirm the now-*unconditional* extra init instruction doesn't regress anything else)
+at 500-test samples, both 100%. Full 124-suite corpus re-run (Verilator batch backend,
+Phase 111's tooling): `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — PASS up by exactly
++12,431 (Group B, modulo a small accounting difference from the `.json.bin` ADD files'
+own count), SKIP down by the same amount, the 2 remaining FAILs are the unchanged,
+already-documented `ASL.b` corpus anomaly, zero new timeouts anywhere in the corpus.
+`make test` 34/34, `make cosim_grp` 8/8 (both expected unaffected — zero RTL touched this
+phase, only `scripts/gen_harte_hex.py`/`scripts/run_harte.py`).
+
+**Updated SKIP accounting**: of the corpus's ~294k original skips, only the ~88
+harness-collision-artifact tests and the ~281k genuine 68000-vs-68030 architectural
+divergence tests remain skipped — both categories confirmed correct and (for the
+divergence category) provably unfixable without deliberately building a 68000 instead of
+a 68030. No further "is this actually fixable" investigation is expected to find anything
+else — Group B was the only harness-limitation category in the breakdown, and it's now
+closed.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

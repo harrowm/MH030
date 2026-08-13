@@ -112,6 +112,16 @@ def compare(test, regs, writes, verbose):
         chk(f'A{n}', regs[f'A{n}'], final[f'a{n}'])
 
     # A7: compare to ssp (we always run supervisor) or usp if initial was user
+    #
+    # No compensation needed for causes_priv_mode_drop() tests even though
+    # our runway's own STOP faults (Privilege Violation) and gets redirected
+    # to a vector-8 handler (see gen_harte_hex.py): that handler's own
+    # STOP #$2700 forces M=0 as part of its normal operand, switching A7's
+    # alias straight back to ISP -- which the exception entry never touched
+    # (it pushed onto MSP, if M had been 1) or which already held the
+    # untouched value (if M was 0 all along, so the exception used ISP
+    # directly and this same STOP's own M=0 write is a no-op for the alias).
+    # Confirmed via direct trace (regfile a7_current mux) before landing.
     exp_a7 = final['ssp'] if (ini['sr'] & 0x2000) else final['usp']
     chk('A7', regs['A7'], exp_a7)
 

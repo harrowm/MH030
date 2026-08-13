@@ -68,10 +68,48 @@ def _movec_a7_vbr():
     return _word(0x4E7B) + _word(0xF801)
 
 
-# Relocated VBR base for RTS/RTE/RTR tests (see is_ret_taken in build_patches()).
+def _movec_a7_msp():
+    """MOVEC A7, MSP (opcode 0x4E7B + ext word: A/D=1,reg=111,Rc=0x803)"""
+    return _word(0x4E7B) + _word(0xF803)
+
+
+# Relocated VBR base for RTS/RTE/RTR tests (see is_ret_taken in build_patches())
+# and for causes_priv_mode_drop() tests (vector 8, Privilege Violation).
 # Sits safely between our init code (< INIT_CODE_END) and the typical test
 # instruction address (~0xC00 across the whole Harte corpus).
 RELOC_VBR = 0x000100
+
+PRIV_VEC_OFFSET   = 32            # vector 8 * 4 bytes
+PRIV_HANDLER_ADDR = RELOC_VBR + 0x40
+
+
+def causes_priv_mode_drop(test):
+    """True if the *tested instruction itself* writes a new SR with S=0,
+    ending OUR harness (which always force-starts supervisor regardless of
+    ini['sr']) in user mode. See build_patches()'s vector-8 handler install
+    and run_harte.compare()'s A7 compensation."""
+    ini    = test['initial']
+    final  = test['final']
+    opcode = ini['prefetch'][0]
+
+    if opcode in (0x027C, 0x007C, 0x0A7C):   # ANDI/ORI/EORI to SR
+        ini_sr = ini['sr'] & 0xFFFF
+        pf1    = ini['prefetch'][1]
+        if opcode == 0x027C:
+            result_s = (ini_sr >> 13 & 1) and (pf1 >> 13 & 1)
+        elif opcode == 0x007C:
+            result_s = 1
+        else:
+            result_s = ((ini_sr >> 13) ^ (pf1 >> 13)) & 1
+        return bool((ini_sr >> 13 & 1) and not result_s)
+
+    if (opcode & 0xFFC0) == 0x46C0:          # MOVE EA,SR family
+        return not (final['sr'] & 0x2000)
+
+    if opcode == 0x4E73:                      # RTE
+        return not (final['sr'] & 0x2000)
+
+    return False
 
 
 def build_patches(test):
@@ -126,6 +164,8 @@ def build_patches(test):
     # entry can be placed somewhere real, harmless when no address error fires.
     is_ret_taken = ini['prefetch'][0] in (0x4E73, 0x4E75, 0x4E77)
 
+    priv_drop = causes_priv_mode_drop(test)
+
     # ── Reset vectors ────────────────────────────────────────────────────────
     patch(0x000000, _long(a7_init_val))
     patch(0x000004, _long(RESET_PC))
@@ -137,6 +177,22 @@ def build_patches(test):
     for n in range(7):
         code += _movea_l_imm_an(n, ini[f'a{n}'])
     code += _movea_l_imm_a7(a7_init_val)
+    # Also seed MSP with the same value as ISP (which the line above just set,
+    # since M=0 is the reset default and stays 0 until our own SR force
+    # below). The Harte corpus is captured on 68000 hardware, which has no
+    # M/ISP/MSP concept at all (a real 68020+ feature) -- so a test's own
+    # immediate/SR value can carry an M-bit setting the reference never
+    # exercised (e.g. EORI #imm,SR with the immediate's bit 12 set). Our
+    # correctly-68030-accurate RTL DOES toggle M in that case, and without
+    # this, MSP would be left at its power-on-reset value of 0 -- garbage
+    # that corrupts any subsequent exception's frame push (confirmed via
+    # direct trace: master_mode read 1 mid-test though M was never meant to
+    # change, exc_ssp_in read msp_out=0, and the pushed frame landed at
+    # 0xFFFFFC, wrapping down from address 0). Unconditional, not just for
+    # priv_drop cases below -- an M-bit flip that leaves S=1 (supervisor
+    # mode throughout) would corrupt ordinary A7 reads the same way, not
+    # just crash a Privilege Violation handler.
+    code += _movec_a7_msp()
     # SR: force supervisor, clear trace bits (T1/T0) so STOP can execute.
     # XNZVC and interrupt mask are kept from the test's initial SR.
     sr = (ini['sr'] | 0x2000) & ~0xC000
@@ -147,7 +203,7 @@ def build_patches(test):
     usp_val = ini['usp'] if (ini['sr'] & 0x2000) else ini['usp']
     code += _movea_l_imm_a7(usp_val)   # A7 = usp (temp borrow)
     code += _word(0x4E67)               # MOVE A7, USP  (supervisor-only)
-    if is_ret_taken:
+    if is_ret_taken or priv_drop:
         code += _movea_l_imm_a7(RELOC_VBR)  # A7 = new VBR (temp borrow)
         code += _movec_a7_vbr()             # MOVEC A7, VBR
     code += _movea_l_imm_a7(a7_init_val)  # restore A7 = ssp / original value
@@ -164,6 +220,11 @@ def build_patches(test):
     # passing control-transfer test already expects execution to stop.
     if is_ret_taken:
         patch(RELOC_VBR + 12, _long(instr_src + instr_len))
+
+    # ── Vector-8 (Privilege Violation) table entry + handler ──────────────────
+    if priv_drop:
+        patch(RELOC_VBR + PRIV_VEC_OFFSET, _long(PRIV_HANDLER_ADDR))
+        patch(PRIV_HANDLER_ADDR, _word(0x4E72) + _word(0x2700))  # STOP #$2700
 
     patch(RESET_PC, bytes(code))
 
@@ -777,32 +838,16 @@ def can_run(test):
     if ((opcode >> 12) == 0b0110) and ((opcode & 0xFF) == 0xFF):
         return False, 'Bcc 0xFF byte disp (68000/68030 incompatibility)'
 
-    # ANDI/ORI/EORI to SR where the result clears S (bit 13): after the instruction
-    # the CPU enters user mode, then STOP #$2700 triggers a privilege violation →
-    # the testbench loops. Skip when initial S=1 and operation clears it.
-    if opcode in (0x027C, 0x007C, 0x0A7C):   # ANDItoSR, ORItoSR, EORItoSR
-        ini_sr    = ini['sr'] & 0xFFFF
-        pf1       = ini['prefetch'][1]         # immediate word
-        if opcode == 0x027C:    # ANDI: clears if mask bit 13 = 0
-            result_s = (ini_sr >> 13 & 1) and (pf1 >> 13 & 1)
-        elif opcode == 0x007C:  # ORI: always sets S
-            result_s = 1
-        else:                   # EORI: flips S bit
-            result_s = ((ini_sr >> 13) ^ (pf1 >> 13)) & 1
-        if (ini_sr >> 13 & 1) and not result_s:
-            return False, 'xRItoSR clears S bit (privilege mode change causes STOP privilege violation)'
-
-    # MOVE EA, SR (0x46C0–0x46FE) and MOVE #imm, SR (0x46FC) that switch to user
-    # mode (final S bit = 0): after the instruction STOP #$2700 is a privilege
-    # violation → testbench loops.  Skip these.
-    if (opcode & 0xFFC0) == 0x46C0:          # MOVE EA, SR family
-        if not (final['sr'] & 0x2000):
-            return False, 'MOVE EA,SR clears S bit (user mode, STOP privilege violation)'
-
-    # RTE (0x4E73) restores SR from the stack frame and can switch back to user
-    # mode — same STOP-privilege-violation problem as MOVE EA,SR above. Skip.
-    if opcode == 0x4E73 and not (final['sr'] & 0x2000):
-        return False, 'RTE clears S bit (user mode, STOP privilege violation)'
+    # ANDI/ORI/EORI to SR, MOVE <ea>,SR, and RTE that drop S to 0 (switch OUR
+    # execution to user mode) used to be skipped here, since our runway's own
+    # STOP -- itself supervisor-only -- faults instead of completing once the
+    # tested instruction drops S to 0. Fixed via a vector-8 (Privilege
+    # Violation) handler installed by build_patches() when
+    # causes_priv_mode_drop() is true -- see that function and the vector-8
+    # block in build_patches() for the mechanism (also needs MSP seeded,
+    # see the "Also seed MSP" comment in build_patches()'s init code -- the
+    # real root cause here turned out to be a missing register-bank seed,
+    # not just a missing exception handler).
 
     # Misaligned EA: word or longword access to an odd address causes a 68000/68030
     # address error.  The reference sim then runs the exception handler, landing
