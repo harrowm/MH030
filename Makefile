@@ -341,6 +341,41 @@ $(foreach n,0 1 2 3 4 5 6 7,$(eval $(call GRP_RULE,$(n))))
 cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
            buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7
 
+# Phase 107/115: memory-indirect EA ([bd,An],Xn,od) bus comparison tests.
+# Harte's corpus is 68000-captured and has zero coverage of this
+# 68020+-only addressing mode, so this is the only regression coverage for
+# it. memind2=word bd, post; memind3=word bd+word od (post) and null
+# bd+word od (pre).
+#
+# tests/memind.s and tests/memind4.s (the very first, minimal reproduction
+# of the pre/post decode bug, and the IS=1/index-suppressed case) are
+# deliberately *not* wired in here: each has only 1-2 short setup
+# instructions before the memory-indirect one under test, giving the IFU
+# less gap to prefetch ahead in than memind2/3's own longer setup
+# sequences -- their bus traces legitimately interleave an instruction
+# fetch differently than Musashi's non-pipelined interpreter does
+# (confirmed harmless by hand -- every actual address/data pair matches,
+# just reordered by one slot -- buscmp.py has no tolerance for mid-stream
+# reordering, only trailing cycles via --dut-may-continue). Both kept in
+# tests/ as standalone, still-useful hand-run reproductions (see their own
+# header comments) rather than wired into an automated target that would
+# need to special-case them.
+winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
+	./tools/m68ksim tests/memind$*.hex 300 > $@
+
+buscmp-memind2: $(SIM)/cosim_grp winuae/tests/memind2_ref.log tests/memind2.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind2.hex +grp=memind2 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind2.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind2.log winuae/tests/memind2_ref.log \
+	    --reads-only --dut-may-continue
+buscmp-memind3: $(SIM)/cosim_grp winuae/tests/memind3_ref.log tests/memind3.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind3.hex +grp=memind3 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind3.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind3.log winuae/tests/memind3_ref.log \
+	    --reads-only --dut-may-continue
+
+cosim_memind: buscmp-memind2 buscmp-memind3
+
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py
 	python3 tools/make_kickrom.py $< $@

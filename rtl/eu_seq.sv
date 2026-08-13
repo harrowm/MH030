@@ -435,9 +435,27 @@ module eu_seq (
     logic [2:0]  fi_iis;      assign fi_iis     = ext_data[2:0];     // I/IS: 000=none, 001-011=indirect
     // base displacement: word in ext_data[31:16] when fi_bdsz==10; else 0
     logic [31:0] fi_bd;       assign fi_bd      = (fi_bdsz == 2'b10) ? {{16{ext_data[31]}}, ext_data[31:16]} : 32'h0;
-    // outer displacement: word in ext_data[31:16] only when fi_bdsz==01 (null bd) and fi_iis==010
-    logic [31:0] fi_od;       assign fi_od      = (fi_iis == 3'b010 && fi_bdsz == 2'b01)
-                                                   ? {{16{ext_data[31]}}, ext_data[31:16]} : 32'h0;
+    // outer displacement: word-size od, for both pre- (fi_iis=010) and
+    // post-indexed (fi_iis=110) -- fi_iis[1:0]==10 already implies genuine
+    // indirect action (000/100 both have iis[1:0]==00), so checking just
+    // that low pair (not the full 3-bit fi_iis) covers both pre/post
+    // uniformly. Position depends on whether a bd word already occupies the
+    // slot right after the descriptor (ext_data[31:16], via m68030_seq.sv's
+    // memind-specific q1/q2 swap): if bd is word-size, od's own word is one
+    // further out, at q3_word (m68030_seq.sv's ifu_q3_word, passed through
+    // unconditionally); otherwise (bd null) od is the very next word, same
+    // position a word bd would have used. Originally missing the
+    // post-indexed case (and the word-bd-and-word-od combination) entirely
+    // -- found via tests/memind2.s's own Musashi-cosim run, part of the
+    // memory-indirect EA investigation (plan.md Phase 107/115). Long bd/od
+    // (2-word displacements) remain unsupported -- undocumented in practice
+    // (word displacements suffice for the address ranges real code uses),
+    // and would need a 4th/5th extension-word data path this project
+    // doesn't have wired up yet.
+    logic [31:0] fi_od;       assign fi_od      = (fi_iis[1:0] != 2'b10) ? 32'h0
+                                                   : (fi_bdsz == 2'b10)
+                                                     ? {{16{q3_word[15]}}, q3_word}
+                                                     : {{16{ext_data[31]}}, ext_data[31:16]};
 
     // -----------------------------------------------------------------------
     // DECODE stage — purely combinational
@@ -1606,9 +1624,25 @@ module eu_seq (
                                 dec_writes_reg     = 1'b0;
                                 dec_unit           = UNIT_MOVE;
                                 dec_is_memind      = 1'b1;
-                                dec_memind_is_post = fi_is_s;
+                                // Pre- vs post-indexed selection comes from the I/IS
+                                // field's bit 2 (ext_data[2]), not the unrelated IS
+                                // (Index Suppress, ext_data[6]) bit fi_is_s -- these
+                                // are two independent 68020 EA concepts that happened
+                                // to agree for every pre-indexed case tried so far
+                                // (both 0), masking this until a dedicated post-indexed
+                                // Musashi-cosim test (tests/memind.s) caught the DUT
+                                // reading the inner pointer from An+Xn instead of An
+                                // alone for a genuine post-indexed access. See plan.md
+                                // Phase 107/115.
+                                dec_memind_is_post = fi_iis[2];
                                 dec_memind_od      = fi_od;
-                                dec_is_idx         = !fi_is_s; // Xn in inner for pre-indexed
+                                // Xn belongs in the *inner* (pointer-read) address only
+                                // when it's present at all (!fi_is_s) AND this is
+                                // pre-indexed -- for post-indexed, Xn is added to the
+                                // *outer* address instead (memind_post_xn_r, gated on
+                                // ex_memind_is_post independently of dec_is_idx), so
+                                // including it here too would double-count it.
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
                                 dec_ea_offset      = fi_bd;
                             end
                         end
@@ -1735,9 +1769,13 @@ module eu_seq (
                                 dec_writes_reg     = 1'b0;
                                 dec_unit           = UNIT_MOVE;
                                 dec_is_memind      = 1'b1;
-                                dec_memind_is_post = fi_is_s;
+                                // Same fix and reasoning as the other memory-indirect
+                                // decode block above (dec_memind_is_post must come from
+                                // fi_iis[2], not the unrelated IS bit fi_is_s -- see its
+                                // comment for the full writeup).
+                                dec_memind_is_post = fi_iis[2];
                                 dec_memind_od      = fi_od;
-                                dec_is_idx         = !fi_is_s;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
                                 dec_ea_offset      = fi_bd;
                             end
                         end

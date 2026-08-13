@@ -713,21 +713,36 @@ module ea_modes_tb;
             chk("mem-ind P2 D2",           `DR(2), 32'hABCD_1234);
         end
 
-        // P53-3: post-indexed (IS=1), null bd, null od
-        // A0=0x100, D1=0x40; inner: MEM[A0]=ptr; outer: MEM[ptr+D1]
+        // P53-3: pre-indexed, IS=1 (index register suppressed entirely),
+        // null bd, null od. A0=0x100, D1=0x40; inner: MEM[A0]=ptr; outer: ptr
+        // (unmodified -- IS=1 means no index register anywhere in the EA,
+        // independent of pre/post-indexed selection; D1 is never added).
+        //
+        // This test's own comment/expected values used to read "post-indexed
+        // (IS=1)" with outer = MEM[ptr+D1] = 0x540, conflating IS (Index
+        // Suppress, ext bit 6 -- "is there an index register at all") with
+        // the *separate* pre/post-indexed selector (I/IS bits[2:0], ext bits
+        // 2:0 here = 001 = genuinely pre-indexed) -- the exact same bug
+        // found and fixed in eu_seq.sv's dec_memind_is_post/dec_is_idx via a
+        // dedicated Musashi-cosim investigation (plan.md Phase 107/115,
+        // tests/memind4.s reproduces this exact opcode/ext encoding and
+        // confirms Musashi reads the final value from the *pointer itself*,
+        // 0x500 -- not 0x540 -- for IS=1). The DUT's old (buggy) decode
+        // happened to match this test's old (also wrong) expectation, which
+        // is why both agreed before; fixed together here.
         begin
             logic found;
             `AR(0) = 32'h0000_0100;
             `DR(1) = 32'h0000_0040;
             `DR(2) = 32'h0;
             ram[32'h100 >> 2] = 32'h0000_0500;
-            ram[32'h540 >> 2] = 32'h1234_5678;
+            ram[32'h500 >> 2] = 32'h1234_5678;
             // IS=1 → [6]=1; ext0 = 0001_1001_0101_0001 = 16'h1951
             run_instr(16'h2430, 1'b1, {16'h0, 16'h1951});
             wait_mem_at(32'h0000_0100, 20, found);
             chk1("mem-ind P3 inner@A0",    found, 1'b1);
-            wait_mem_at(32'h0000_0540, 20, found);
-            chk1("mem-ind P3 outer@0x540", found, 1'b1);
+            wait_mem_at(32'h0000_0500, 20, found);
+            chk1("mem-ind P3 outer@0x500", found, 1'b1);
             drain;
             chk("mem-ind P3 D2",           `DR(2), 32'h1234_5678);
         end

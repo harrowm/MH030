@@ -153,6 +153,47 @@ module m68030_seq (
     logic is_move_idx_src;   // groups 1/2/3, src mode=110 (indexed)
     assign is_move_idx_src = (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
                              (f_mode == 3'b110);
+
+    // Full-format extension word for mode=110 (peeked from ifu_ext_data[31:16],
+    // the word right after the opcode -- q1 -- which ifu_ext_valid (q_cnt>=3)
+    // already guarantees is stable by the time any ext_count value derived
+    // from it can actually be dispatched on, via eu_ext_valid's own gating
+    // below; see the comment on memind_ext_count for the full reasoning).
+    // Bit positions match eu_seq.sv's fi_* extraction of the same word, just
+    // offset by +16 since this file's ifu_ext_data has word1 in the high half
+    // (opposite convention from eu_seq.sv's own ext_data — see this file's
+    // header comment).
+    logic        peek_fi_full;  assign peek_fi_full = ifu_ext_data[24];    // bit8
+    logic [1:0]  peek_fi_bdsz;  assign peek_fi_bdsz = ifu_ext_data[21:20]; // bits5:4
+    logic [2:0]  peek_fi_iis;   assign peek_fi_iis  = ifu_ext_data[18:16]; // bits2:0
+
+    // MOVE <ea>,dst with a mode=110 full-format source EA (memory-indirect,
+    // or plain (bd,An,Xn) with a non-null bd) needs more than the 1
+    // extension word every other mode=110 form (brief (d8,An,Xn), or a full
+    // word with null bd/od) gets away with — one word per non-null
+    // displacement (bd and, when genuinely indirect, od), on top of the
+    // extension word itself. Previously hardcoded to 1 unconditionally
+    // (is_move_idx_src's own bucket below), which silently dropped any bd/od
+    // extension words for a non-null displacement, desyncing the IFU stream
+    // into decoding whatever memory happened to follow as the next
+    // instruction — found via a dedicated Musashi-cosim test
+    // (tests/memind2.s) built for the memory-indirect EA investigation (see
+    // plan.md Phase 107/115), not previously caught since Harte's corpus is
+    // 68000-captured and has zero coverage of this 68020+-only mode.
+    logic [2:0] memind_bd_words, memind_od_words, memind_ext_count;
+    always_comb begin
+        memind_bd_words = (peek_fi_bdsz == 2'b10) ? 3'd1 :
+                           (peek_fi_bdsz == 2'b11) ? 3'd2 : 3'd0;
+        // od words only apply once genuine indirect action is selected
+        // (iis != 000); iis[1:0] then gives the od size the same way bdsz
+        // gives the bd size (01=null, 10=word, 11=long).
+        memind_od_words = (peek_fi_iis == 3'b000) ? 3'd0 :
+                           (peek_fi_iis[1:0] == 2'b10) ? 3'd1 :
+                           (peek_fi_iis[1:0] == 2'b11) ? 3'd2 : 3'd0;
+        memind_ext_count = 3'd1 + memind_bd_words + memind_od_words;
+    end
+    logic is_memind_full;
+    assign is_memind_full = is_move_idx_src && peek_fi_full;
     logic is_lea_idx;        // LEA (d8,An,Xn)
     assign is_lea_idx = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b110);
     logic is_jmp_idx;        // JMP (d8,An,Xn)
@@ -468,6 +509,15 @@ module m68030_seq (
                  (f_mode == 3'b101 || f_mode == 3'b110 ||
                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011))))
             ext_count = 3'd1;
+        // MOVE <ea>,dst full-format mode=110 source with a non-null bd/od
+        // (memory-indirect or plain (bd,An,Xn)) — see memind_ext_count's own
+        // comment above. Checked ahead of is_move_idx_src's own bucket
+        // below (which would otherwise always give 1) so it wins priority.
+        // The plain brief-(d8,An,Xn)/null-bd-and-od case still correctly
+        // computes to 1 here, so this subsumes is_move_idx_src's bucket
+        // entirely rather than needing to special-case around it.
+        else if (is_memind_full)
+            ext_count = memind_ext_count;
         else if (is_movem_3ext)
             ext_count = 3'd3;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
@@ -518,8 +568,22 @@ module m68030_seq (
     //   1-ext-word (byte/word imm, bit#, BRA.W, DBcc d16): first ext word in [15:0]
     // EU reads: byte/word imm → ext_data[15:0]; long imm/BRA.L → ext_data[31:0]
     // For ext_count≥3 (MOVE.L #imm,abs.W/abs.L): ifu_ext_data = {q[1],q[2]} = 32-bit imm
+    //
+    // Full-format mode=110 EA (memind_full) is a *different* consumer of the
+    // same >=2-ext-word case and needs a different layout: eu_seq.sv's own
+    // fi_* extraction (fi_is_full/fi_bs/fi_is_s/fi_bdsz/fi_iis/fi_bd) always
+    // reads the descriptor word from ext_data[15:0] and, when present, a
+    // word-size bd from ext_data[31:16] — a convention that already matches
+    // the plain (unswapped) 1-ext-word case above but is backwards for the
+    // 2-ext-word case's default {q1,q2} layout (q1, the descriptor, would
+    // land in the *high* half instead). Swapping q1/q2 here for this one
+    // family keeps eu_seq.sv's existing extraction working unchanged rather
+    // than needing a second, ext_count-aware copy of it there. Immediate
+    // values (the other >=2-ext-word consumer) are unaffected since a given
+    // instruction is never both.
     // -----------------------------------------------------------------------
-    assign eu_ext_data = (ext_count >= 3'd2) ? ifu_ext_data
+    assign eu_ext_data = is_memind_full     ? {ifu_ext_data[15:0], ifu_ext_data[31:16]}
+                        : (ext_count >= 3'd2) ? ifu_ext_data
                                               : {16'h0, ifu_ext_data[31:16]};
 
     // -----------------------------------------------------------------------

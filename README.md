@@ -244,12 +244,23 @@ instructions. This suite covers what that structurally leaves out:
 | BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-instruction: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct; dedicated fault-injection tests added for all 12 remaining `mem_abort` sources, finding and fixing a real RTL bug along the way — only the first-ever fault in a session was reported (Phase 114) — see below |
 | Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
 
-Memory-indirect EA (`([bd,An],Xn,od)`) remains deferred — Phase 107 narrowed the
-original "genuine encoding ambiguity" to a specific, falsifiable hypothesis (a
-suspected wrong-bit decode for pre- vs. post-indexed selection in `eu_seq.sv`), but
-the Harte corpus is 68000-captured and has zero coverage of this 68020+-only
-addressing mode, so there's no empirical oracle to verify a fix against without a
-dedicated Musashi-cosim investigation.
+Memory-indirect EA (`([bd,An],Xn,od)`) — Phase 107 narrowed the original "genuine
+encoding ambiguity" to a specific, falsifiable hypothesis (a suspected wrong-bit
+decode for pre- vs. post-indexed selection in `eu_seq.sv`); **Phase 115 confirmed and
+fixed it** via a dedicated Musashi cosim (`tools/m68ksim` + `tools/buscmp.py`, since
+Harte is 68000-captured and has zero coverage of this 68020+-only mode). Confirmed
+exactly as hypothesized: `dec_memind_is_post` read the wrong extension-word bit (Index
+Suppress instead of the real I/IS pre/post selector), causing post-indexed accesses to
+silently execute as pre-indexed. Building a second test then found a deeper, separate
+bug: a non-null base displacement wasn't fetched as an extension word at all, desyncing
+the whole instruction stream — fixed in `m68030_seq.sv`'s `ext_count` classifier and
+`eu_seq.sv`'s extension-word routing. See `plan.md §Phase 115` for the full writeup,
+including a regression this same investigation caught and fixed in `tb/ea_modes_tb.sv`'s
+own pre-existing memory-indirect unit test (it had the identical bit-conflation baked
+into its expected values). Deliberately out of scope: long (32-bit) bd/od
+displacements, and the identical `ext_count` gap in every other `f_mode==110`
+instruction family (this phase's fix covers `MOVE <ea>,dst` only) — both documented
+follow-up, not attempted.
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,
@@ -284,8 +295,9 @@ sticky level) instead of an edge-detector on `exc_frame_valid`. Zero RTL changes
 needed for PFLUSH/PTEST specifically — a new BERR-mid-PTEST test confirms it end-to-end
 — but Phase 114's own bug was real RTL, in the notification path shared by every source.
 This closes the BERR-abort rollout completely, all ~19 `ex_mem_stall` sources confirmed
-correct with dedicated test coverage (memory-indirect EA excepted, deferred to its own
-investigation below).
+correct with dedicated test coverage (memory-indirect EA's own BERR-mid-`<X>` fault-
+injection test excepted, still deferred — separate from its EA-decode-correctness
+investigation, covered next and now complete as of Phase 115).
 
 ### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
 

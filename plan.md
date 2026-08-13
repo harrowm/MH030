@@ -2982,6 +2982,144 @@ remaining item is memory-indirect EA's Musashi-cosim investigation (deferred, ne
 
 ---
 
+## Phase 115 — Memory-indirect EA (`([bd,An],Xn,od)`) Musashi-cosim investigation:
+## confirmed and fixed the Phase 107 pre/post-indexed decode-bit hypothesis, then found
+## and fixed a second, deeper bug (missing extension words for non-null bd/od) the
+## same investigation surfaced
+
+**Goal**: settle Phase 107's specific, falsifiable hypothesis — that `eu_seq.sv`'s
+`dec_memind_is_post` reads the wrong extension-word bit (`fi_is_s`, ext bit 6, "Index
+Suppress" — an unrelated 68020 EA concept) instead of the real pre/post-indexed
+selector (`fi_iis[2]`, the I/IS field's own bit 2) — via a dedicated Musashi cosim,
+since the Harte corpus is 68000-captured and has zero coverage of this 68020+-only
+addressing mode.
+
+**Built the reference infrastructure**: `tools/m68ksim` (Musashi, already configured
+for `M68K_CPU_TYPE_68030`) generates a ground-truth bus-cycle log for a hand-assembled
+(`vasmm68k_mot -m68030`) test program; `tools/buscmp.py` diffs it against the DUT's own
+bus log from `sim/cosim_grp`. `tests/memind.s`: `A0=$100, D1=$100`; `M32[$100]=$200`,
+`M32[$200]=$300`, `M32[$300]=$DEAD0001` — deliberately chosen so post-indexed
+(`([A0],D1.L)`: pointer = `M32[A0]`, EA = pointer+D1) and pre-indexed (`([A0,D1.L])`:
+pointer = `M32[A0+D1]`, EA = pointer) land on the *same final EA* ($300) despite reading
+the pointer from two *different* addresses ($100 vs $200) — a register-value-only check
+(the only kind Harte-style oracles could ever offer for this mode) would have missed
+the bug entirely; only the bus trace's own intermediate pointer-read address reveals it.
+
+**Bug 1 confirmed exactly as hypothesized.** Musashi: post-indexed reads the pointer
+from `$100` (base alone); DUT (pre-fix): reads it from `$200` (base+index) — silently
+executing the post-indexed instruction as if it were pre-indexed, because `fi_is_s`
+(IS=0 for both test instructions, since both genuinely use an index register) happened
+to equal the *correct* pre/post answer for the pre-indexed case (0=pre) by coincidence,
+masking the bug for every pre-indexed instance this codebase had ever tried, while
+being wrong for every post-indexed one. **Fixed in `rtl/eu_seq.sv`** (both of the two
+identical memory-indirect decode blocks): `dec_memind_is_post = fi_iis[2]` (was
+`fi_is_s`). A second, related bug in the same blocks: `dec_is_idx` (gates whether Xn
+feeds the *inner*, pre-indirection address) was also `!fi_is_s` alone — correct only
+for pre-indexed; for post-indexed, Xn belongs in the *outer* address only (already
+handled by the separate, always-correctly-gated `memind_post_xn_r` mechanism), so
+including it in the inner address too would double-count it. Fixed to
+`dec_is_idx = !fi_is_s && !fi_iis[2]`. `tests/memind.s` confirms both directions
+correct post-fix (post-indexed pointer read moved from `$200` to `$100`, matching
+Musashi exactly; pre-indexed was — and remains — correct).
+
+**Bug 2, found while building a second test for the next-simplest case (a non-null
+base displacement): the RTL never fetches the extra extension word a non-null bd/od
+needs at all, desyncing the entire instruction stream.** `tests/memind2.s`
+(`([$10,A0],D1.L)`, word bd, post-indexed — needs 2 total extension words: the
+full-format descriptor plus the bd word) showed the DUT reading the pointer from `$100`
+(ignoring the bd entirely) and then decoding garbage as the next instruction, crashing
+into a bogus exception a few cycles later. Root cause: `m68030_seq.sv`'s
+`is_move_idx_src` (the ext_count classifier for `MOVE <ea>,dst` with a mode=110 source)
+hardcoded `ext_count=1` unconditionally for *every* mode=110 form — brief `(d8,An,Xn)`,
+full-format-but-null-bd/od, and genuine memory-indirect with a real bd/od all alike —
+correct only for the first two. Never previously caught since Harte has zero coverage
+of this mode and no prior test in this codebase had ever exercised a non-null bd/od
+memory-indirect EA through the real IFU/prefetch-queue path (`tb/ea_modes_tb.sv`'s own
+P1-P6 memory-indirect suite injects `ext_data` directly at the EU boundary, bypassing
+`m68030_seq.sv`'s `ext_count`/drain mechanism entirely — a different, narrower kind of
+coverage that could never have caught this).
+
+**Fixed in two files, using infrastructure that turned out to already exist end-to-end**
+(`ifu_q3_word`/`ifu_ext34_data`, a third and fourth extension-word data path, plus
+`ifu_ext4_valid`/`ifu_ext5_valid` timing gates — built for other multi-extension-word
+instructions, never previously used for this one):
+- `rtl/m68030_seq.sv`: added a peek at the extension word's own `fi_is_full`/`fi_bdsz`/
+  `fi_iis` fields (`ifu_ext_data[31:16]`, i.e. q1, already guaranteed stable whenever
+  `ifu_ext_valid` — q_cnt≥3 — is true, the same gate `eu_ext_valid` itself already
+  depends on for any ext_count this produces, so the peek is safe by construction, not
+  just in practice) to compute `memind_ext_count = 1 + bd_words + od_words` (0/1/2 words
+  each, from `fi_bdsz`/`fi_iis[1:0]`), given priority over `is_move_idx_src`'s old
+  blanket bucket. Also had to fix `eu_ext_data`'s own construction for this specific
+  family: the existing ≥2-ext-word convention puts q1 in the *high* half (correct for
+  its other consumer, 32-bit immediate reconstruction, but backwards for
+  `eu_seq.sv`'s own `fi_*` extraction, which always reads the descriptor from
+  `ext_data[15:0]`) — added a `is_memind_full`-gated swap so q1 lands low (matching the
+  existing, already-correct 1-ext-word convention) and q2 (bd or od data) lands high.
+- `rtl/eu_seq.sv`: `fi_od`'s own extraction had a *third*, independent bug, also found
+  via this investigation — it only ever handled the pre-indexed, null-bd, word-od case
+  (`fi_iis==3'b010` exactly), silently returning 0 for the post-indexed equivalent
+  (`3'b110`) and for the word-bd-*and*-word-od combination (od's own word shifts to a
+  *different* extension-word slot, `q3_word`, once bd has already claimed the slot
+  `fi_od`'s old code assumed od would be in). Fixed to check `fi_iis[1:0]==2'b10`
+  (covers both pre/post uniformly) and select `q3_word` vs `ext_data[31:16]` based on
+  whether `fi_bdsz` already consumed that slot.
+
+**Deliberately out of scope, documented not guessed at**: long (32-bit) bd/od
+displacements — would need a 4th/5th extension-word data path this project doesn't
+have wired up (Musashi's own `ifu_ext5_valid` timing gate exists, but there's no
+corresponding *data* port beyond `ifu_ext34_data`), and are rare enough in practice
+(word displacements suffice for realistic address ranges) that building that plumbing
+speculatively wasn't judged worth the risk this pass. Every *other* `f_mode==110`
+instruction family sharing the same `ext_count` gap (ALU ops, CMP, Scc, TAS, NBCD,
+shifts, CHK, CMP2/CHK2, BTST family, LEA/PEA, JMP/JSR, etc. — dozens of `f_mode==3'b110`
+branches throughout `m68030_seq.sv`) almost certainly has the identical non-null-bd/od
+gap, but this phase's fix is scoped to `is_move_idx_src` (`MOVE <ea>,dst`) alone,
+exactly the family the two Musashi-cosim tests exercise — extending to the rest is
+follow-up work, not attempted here, mirroring this project's own staged-rollout
+convention (Category B's FSM coverage, the BERR-abort rollout) rather than a
+single risky sweep across dozens of unverified branches.
+
+**A third test (`tests/memind3.s`) confirmed the harder combined case**: word bd
+*and* word od together (post-indexed, exercising the new `q3_word` routing) plus
+null bd + word od (pre-indexed, the other still-untested branch of `fi_od`'s fix) —
+both clean via `buscmp.py`.
+
+**A pre-existing unit test turned out to have the identical IS-vs-pre/post
+conflation baked into its own expected values, only passing before because the old
+(buggy) RTL made the same mistake.** `tb/ea_modes_tb.sv`'s memory-indirect P1-P6 suite
+(direct EU-boundary injection, bypassing `m68030_seq.sv` — unrelated to Bug 2 above)
+regressed on P3 after the Bug 1 fix: `2430 1951` (IS=1, "index suppressed"; I/IS=001,
+genuinely pre-indexed, null od). The test's own comment labeled this "post-indexed
+(IS=1)" and expected the outer EA to be `pointer+D1` — conflating IS (bit 6, "is there
+an index register in this EA at all") with the *separate* pre/post-indexed selector
+(I/IS bits[2:0]) exactly like the RTL bug this phase fixed. Built `tests/memind4.s` to
+reproduce the exact same opcode/extension-word encoding through Musashi directly:
+confirmed real 68020 semantics are that IS=1 suppresses the index register *everywhere*
+in the EA computation, independent of pre/post — the correct outer EA is the pointer
+itself (`$500`), unmodified, not `pointer+D1` (`$540`). Fixed the test's own data setup
+and expected values to match (`tb/ea_modes_tb.sv`), with a comment explaining the
+conflation for future reference. The DUT's old and the test's old expectations agreed
+only because both shared the identical misunderstanding — a textbook case for why this
+project's own "verify against a real, independent oracle" discipline exists.
+
+**Results**: `make test` 34/34 (after the `ea_modes_tb.sv` P3 fix — 1 regression along
+the way, root-caused and fixed as above, not reverted), `make cosim_grp` 8/8, a new
+`make cosim_memind` target (`tests/memind2.s`/`memind3.s`, wired into the Makefile
+following the existing `buscmp-grpN` pattern) both clean, and a full 121-suite Harte
+re-run (Verilator batch backend, needed since Bug 2 touches `m68030_seq.sv`'s shared
+`ext_count`/`eu_ext_data` path) — **696590 PASS, 2 FAIL (the same pre-existing
+documented ASL.b corpus anomaly), 0 TIMEOUT**, identical to baseline, zero regressions.
+`tests/memind.s` and `tests/memind4.s` are deliberately *not* wired into the automated
+`cosim_memind` target — their own short setup sequences give the IFU less time to
+prefetch ahead than memind2/3's longer ones, so their bus traces legitimately interleave
+an instruction-fetch cycle differently than Musashi's non-pipelined interpreter does (a
+benign, expected DUT-vs-interpreter timing difference, confirmed by hand: every actual
+address/data pair matches, just reordered by one slot — `buscmp.py` has no tolerance for
+mid-stream reordering, only trailing cycles via `--dut-may-continue`); both remain in
+`tests/` as standalone, still-useful hand-run reproductions.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
