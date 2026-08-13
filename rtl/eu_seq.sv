@@ -2653,13 +2653,17 @@ module eu_seq (
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                 dec_needs_ext = 1'b1;
                             end
-                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                            3'b110: begin  // (d8,An,Xn) brief, or full (bd,An,Xn)
                                 dec_dst_reg   = {ext_data[15], ext_data[14:12]};
                                 dec_reads_dst = 1'b1;
                                 dec_is_idx    = 1'b1;
                                 dec_xn_wl     = ext_data[11];
                                 dec_xn_scale  = ext_data[10:9];
-                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                                // Same fi_is_full/fi_bd extension as TAS/NBCD's
+                                // own mode=110 cases -- see TAS's comment for the
+                                // full reasoning.
+                                dec_ea_offset = fi_is_full ? fi_bd
+                                              : {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext = 1'b1;
                             end
                             3'b111: begin
@@ -2727,13 +2731,18 @@ module eu_seq (
                             3'b101: begin  // (d16,An)
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                             end
-                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                            3'b110: begin  // (d8,An,Xn) brief, or full (bd,An,Xn)
                                 dec_dst_reg   = {ext_data[15], ext_data[14:12]};
                                 dec_reads_dst = 1'b1;
                                 dec_is_idx    = 1'b1;
                                 dec_xn_wl     = ext_data[11];
                                 dec_xn_scale  = ext_data[10:9];
-                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                                // Same fi_is_full/fi_bd extension as TAS's own
+                                // mode=110 case above -- see its comment for the
+                                // full reasoning (full-format non-indirect only;
+                                // genuine memory-indirect deferred).
+                                dec_ea_offset = fi_is_full ? fi_bd
+                                              : {{24{ext_data[7]}}, ext_data[7:0]};
                             end
                             3'b111: begin  // abs.W or abs.L
                                 dec_abs_ea_en  = 1'b1;
@@ -3462,13 +3471,29 @@ module eu_seq (
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                 dec_needs_ext = 1'b1;
                             end
-                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                            3'b110: begin  // (d8,An,Xn) brief, or full (bd,An,Xn)
                                 dec_dst_reg   = {ext_data[15], ext_data[14:12]};
                                 dec_reads_dst = 1'b1;
                                 dec_is_idx    = 1'b1;
                                 dec_xn_wl     = ext_data[11];
                                 dec_xn_scale  = ext_data[10:9];
-                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                                // Full-format, non-indirect (fi_iis==000) reuses
+                                // MOVE's own "FULL, no indirection" template --
+                                // fi_bd instead of the brief 8-bit signed offset,
+                                // no FSM changes needed since the bus access
+                                // shape (single read via ex_is_mem_rd, TAS's own
+                                // tas_run_r doing the write) is unaffected either
+                                // way. Genuine memory-indirect (fi_iis!=000) for
+                                // TAS/NBCD-class RMW ops needs tas_run_r itself
+                                // taught an extra pointer-read phase ahead of its
+                                // existing read+write sequence -- deliberately
+                                // not attempted this pass (plan.md Phase 116);
+                                // fi_bd is used here regardless of fi_iis as the
+                                // least-wrong fallback (matches brief's own
+                                // pre-existing behavior of not distinguishing
+                                // indirection at all).
+                                dec_ea_offset = fi_is_full ? fi_bd
+                                              : {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext = 1'b1;
                             end
                             3'b111: begin  // (xxx).W / (xxx).L
@@ -5316,13 +5341,17 @@ module eu_seq (
                                 dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                 dec_needs_ext = 1'b1;
                             end
-                            3'b110: begin  // (d8,An,Xn): rd_a=An, rd_b=Xn
+                            3'b110: begin  // (d8,An,Xn) brief, or full (bd,An,Xn)
                                 dec_dst_reg   = {ext_data[15], ext_data[14:12]};
                                 dec_reads_dst = 1'b1;
                                 dec_is_idx    = 1'b1;
                                 dec_xn_wl     = ext_data[11];
                                 dec_xn_scale  = ext_data[10:9];
-                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};
+                                // Same fi_is_full/fi_bd extension as TAS/NBCD/
+                                // NEGX-etc's own mode=110 cases -- see TAS's
+                                // comment for the full reasoning.
+                                dec_ea_offset = fi_is_full ? fi_bd
+                                              : {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext = 1'b1;
                             end
                             3'b111: begin  // (xxx).W / (xxx).L

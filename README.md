@@ -257,10 +257,37 @@ the whole instruction stream — fixed in `m68030_seq.sv`'s `ext_count` classifi
 `eu_seq.sv`'s extension-word routing. See `plan.md §Phase 115` for the full writeup,
 including a regression this same investigation caught and fixed in `tb/ea_modes_tb.sv`'s
 own pre-existing memory-indirect unit test (it had the identical bit-conflation baked
-into its expected values). Deliberately out of scope: long (32-bit) bd/od
-displacements, and the identical `ext_count` gap in every other `f_mode==110`
-instruction family (this phase's fix covers `MOVE <ea>,dst` only) — both documented
-follow-up, not attempted.
+into its expected values).
+
+**Phase 116 (Stage 1 of extending this beyond MOVE)** picked up the identical
+`ext_count`/decode gap for the "unary memory operand" family — TAS, NBCD, NEGX/CLR/
+NEG/NOT/TST, memory shift/rotate (the same `An`+`Xn`-only shape Phase 81's own "Bucket
+A" grouped for indexed EA). Found the real gap is bigger than "generalize
+`ext_count`": each family's own EA-decode block in `eu_seq.sv` also hardcodes the
+brief-only 8-bit-displacement interpretation, a pattern repeating at ~57 sites
+project-wide — extending every family is out of scope for one session, so this staged
+the rollout the same way Category B's FSM coverage (4→21) and the BERR-abort rollout
+(4→16→19) were staged. Generalized `is_memind_full`'s gate to cover all five families
+(`m68030_seq.sv`) and taught each family's own mode=110 decode arm to use `fi_bd`
+instead of the brief 8-bit offset when the extension word is full-format
+(`eu_seq.sv`) — brief format (the vast majority of real usage) is unaffected. Scoped
+down during implementation to the "full-format, non-indirect" case only: TAS/NBCD are
+RMW ops, and genuine memory-indirect would need their own multi-phase FSMs taught an
+extra pointer-read phase, qualitatively different work not attempted this pass.
+Verified via two new hand-run Musashi-cosim tests (`tests/memind5.s`, `memind6.s`) and
+a full Harte re-run — these are all Harte-covered instructions today, unlike Phase
+115's MOVE work, making this the highest-value regression gate available. See
+`plan.md §Phase 116` for the full writeup, including why neither new test cleanly
+passes automated `buscmp.py` comparison (two different, both pre-existing and
+unrelated causes) despite being hand-verified correct.
+
+**Deliberately out of scope, staged as Stages 2-4** (see
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): ALU-mem-src and
+dynamic BTST-family (needs the `dyn_bit_get_Dn` deferred-register trick extended to
+the full-format case); Scc/CHK/CMP2-CHK2/ADDQ-SUBQ/LEA-JMP-JSR indexed; MOVEM's own
+extended form (different base ext_count) and MOVE mem-to-mem's dst-side full-format
+support; and long (32-bit) bd/od displacements for any family (needs a genuine
+4th/5th extension-word data path this project doesn't have wired up).
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,

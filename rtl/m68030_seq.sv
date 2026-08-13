@@ -192,8 +192,33 @@ module m68030_seq (
                            (peek_fi_iis[1:0] == 2'b11) ? 3'd2 : 3'd0;
         memind_ext_count = 3'd1 + memind_bd_words + memind_od_words;
     end
+    // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
+    // fixed for MOVE also exists in every other f_mode==110 family's own
+    // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
+    // interpretation and never checks fi_is_full. This session's rollout
+    // covers the "unary memory operand" group (An+Xn only, no third
+    // register) mirroring Phase 81's own "Bucket A" grouping: TAS, NBCD,
+    // NEGX/CLR/NEG/NOT/TST, and memory shift/rotate. Each family's own
+    // baseline ext_count for mode=110 is exactly 1 (verified against each
+    // of their own branches below), matching is_move_idx_src's own
+    // baseline -- so extending is_memind_full's gate to include them lets
+    // the existing override (ext_count = memind_ext_count) apply
+    // correctly to all five with no other change needed here.
+    logic is_tas_mode110, is_nbcd_mode110, is_negx_clr_neg_not_tst_mode110, is_shift_mode110;
+    assign is_nbcd_mode110 = (f_group == 4'h4) && !f_dir && (f_dn == 3'b100) &&
+                             (f_ss == 2'b00) && (f_mode == 3'b110);
+    assign is_tas_mode110  = (f_group == 4'h4) && !f_dir && (f_dn == 3'b101) &&
+                             (f_ss == 2'b11) && (f_mode == 3'b110);
+    assign is_negx_clr_neg_not_tst_mode110 = (f_group == 4'h4) && !f_dir && (f_ss != 2'b11) &&
+                             (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
+                              f_dn == 3'b011 || f_dn == 3'b101) && (f_mode == 3'b110);
+    assign is_shift_mode110 = (f_group == 4'he) && (f_ss == 2'b11) && !f_dn[2] && (f_mode == 3'b110);
+
+    logic mode110_ea_src;
+    assign mode110_ea_src = is_move_idx_src || is_tas_mode110 || is_nbcd_mode110 ||
+                            is_negx_clr_neg_not_tst_mode110 || is_shift_mode110;
     logic is_memind_full;
-    assign is_memind_full = is_move_idx_src && peek_fi_full;
+    assign is_memind_full = mode110_ea_src && peek_fi_full;
     logic is_lea_idx;        // LEA (d8,An,Xn)
     assign is_lea_idx = (f_group == 4'h4) && f_dir && (f_ss == 2'b11) && (f_mode == 3'b110);
     logic is_jmp_idx;        // JMP (d8,An,Xn)
@@ -362,7 +387,17 @@ module m68030_seq (
 
     logic [2:0] ext_count;
     always_comb begin
-        if (is_imm_g0)
+        // Checked first, ahead of every family's own baseline branch below
+        // (several of which -- NBCD/TAS/NEGX-etc/shift-rotate -- would
+        // otherwise resolve ext_count on their own, earlier match, before
+        // ever reaching is_memind_full's old position near the end of this
+        // chain). See is_memind_full's own declaration above for why every
+        // covered family's baseline is safely 1 word, matching what
+        // memind_ext_count degrades to when the extension word turns out to
+        // be brief or full-with-null-bd/od.
+        if (is_memind_full)
+            ext_count = memind_ext_count;
+        else if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 3'd2 : 3'd1;
         else if (is_imm_g0_absl)
             ext_count = (f_ss == 2'b10) ? 3'd4 : 3'd3;  // long: 2 imm + 2 addr; byte/word: 1 imm + 2 addr
@@ -509,15 +544,6 @@ module m68030_seq (
                  (f_mode == 3'b101 || f_mode == 3'b110 ||
                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011))))
             ext_count = 3'd1;
-        // MOVE <ea>,dst full-format mode=110 source with a non-null bd/od
-        // (memory-indirect or plain (bd,An,Xn)) — see memind_ext_count's own
-        // comment above. Checked ahead of is_move_idx_src's own bucket
-        // below (which would otherwise always give 1) so it wins priority.
-        // The plain brief-(d8,An,Xn)/null-bd-and-od case still correctly
-        // computes to 1 here, so this subsumes is_move_idx_src's bucket
-        // entirely rather than needing to special-case around it.
-        else if (is_memind_full)
-            ext_count = memind_ext_count;
         else if (is_movem_3ext)
             ext_count = 3'd3;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||

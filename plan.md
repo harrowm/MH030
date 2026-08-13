@@ -3120,6 +3120,107 @@ mid-stream reordering, only trailing cycles via `--dut-may-continue`); both rema
 
 ---
 
+## Phase 116 — Stage 1 of extending full-format mode=110 EA support beyond MOVE: the
+## "unary memory operand" family (TAS, NBCD, NEGX/CLR/NEG/NOT/TST, memory shift/rotate)
+
+**Goal**: Phase 115 fixed `MOVE <ea>,dst`'s own `ext_count`/decode gap for a non-null
+base displacement, explicitly scoped to that one instruction family and documented
+every other `f_mode==110` family as sharing the identical gap. Planned via
+`EnterPlanMode` (approved plan: `~/.claude/plans/compressed-hopping-cocoa.md`) as a
+staged rollout, mirroring Category B's own FSM-coverage staging (4 sources then 21)
+and the BERR-abort rollout (4 then 16 then 19) — pick the most mechanically uniform,
+useful group first, prove the generalized template, leave the rest as documented
+follow-up rather than attempt every family in one pass.
+
+**Scope correction found during planning, before any code was written**: the real gap
+is bigger than "generalize `ext_count`" — each instruction family's own EA-decode
+block in `eu_seq.sv` *also* hardcodes the brief-only interpretation of the extension
+word (reads `ext_data[7:0]` as a signed 8-bit displacement unconditionally, never
+checks `fi_is_full`). Confirmed directly in TAS's own indexed block
+(`eu_seq.sv:3465` at the time) — this pattern repeats at roughly 57 `dec_is_idx=1'b1`
+sites across the file (one per family × EA-mode combination), so extending every
+family is genuinely out of scope for one or even a few sessions.
+
+**Family grouping**: TAS, NBCD, NEGX/CLR/NEG/NOT/TST, and memory shift/rotate share
+one shape — `An` in `rd_a`, `Xn` in `rd_b`, no third register operand — the exact
+grouping Phase 81's own "Bucket A" swept for indexed-EA support originally, so there
+was a proven in-project precedent to mirror. Verified this by reading each family's
+own mode=110 block directly (`eu_seq.sv`) before committing to the grouping, not
+assumed from the ext_count table alone.
+
+**Generalizing `is_memind_full` (`rtl/m68030_seq.sv`)**: added `is_tas_mode110`/
+`is_nbcd_mode110`/`is_negx_clr_neg_not_tst_mode110`/`is_shift_mode110` (each mirroring
+that family's own existing `f_mode==110` condition already present in the ext_count
+if-else chain, isolated to just the mode=110 case) into a new `mode110_ea_src` OR-list
+(seeded with `is_move_idx_src`), and widened `is_memind_full`'s own gate from
+`is_move_idx_src && peek_fi_full` to `mode110_ea_src && peek_fi_full`. Verified each of
+the five families' own *baseline* ext_count for mode=110 is exactly 1 word before
+relying on this — all five are (checked directly in the if-else chain) — so the
+existing override (`ext_count = memind_ext_count`, unchanged from Phase 115) applies
+correctly to all of them without needing per-family arithmetic. **Had to move the
+`is_memind_full` branch to be the very first check in the whole `ext_count` chain**
+(previously positioned to only intercept `is_move_idx_src`, which is checked
+relatively late) — TAS/NBCD/NEGX-etc/shift-rotate all have their own baseline-1
+branches *earlier* in the chain, which would otherwise resolve `ext_count` before ever
+reaching `is_memind_full`'s old position, silently keeping the old bug for the four
+new families despite the gate being technically "correct."
+
+**Per-family decode fix (`rtl/eu_seq.sv`)**: each family's own mode=110 `case` arm
+gained `dec_ea_offset = fi_is_full ? fi_bd : {{24{ext_data[7]}}, ext_data[7:0]};`
+(previously always the brief 8-bit form) — brief format (the overwhelming majority of
+real-world usage) is completely unchanged, zero regression risk there; full-format
+now correctly consumes the (already-fixed-in-Phase-115) `fi_bd` extraction instead of
+misreading the bd word's own bits as if they were a tiny brief displacement.
+
+**Scope correction found while implementing, before any test was run**: TAS/NBCD are
+RMW-style ops, and *genuine* memory-indirect (`fi_iis != 000`, an extra pointer-fetch
+bus phase before the RMW's own read+write) would need each family's own multi-phase
+FSM (`tas_run_r` etc.) taught an additional read phase — qualitatively different work
+from a decode-level fix, and not attempted this pass. Scoped this phase down to the
+"full-format, non-indirect" case only (`(bd,An,Xn)` with a real bd, no memory
+indirection) — `fi_bd` is used unconditionally whenever `fi_is_full` is set, regardless
+of `fi_iis`, as the least-wrong fallback for the (deliberately unhandled) genuine-
+indirect sub-case — no worse than today's pre-existing behavior for that narrow case,
+and `ext_count` still correctly fetches however many words a genuine-indirect encoding
+would need even though the *decode* doesn't yet interpret them fully, so an IFU
+desync can no longer happen even for the not-yet-fully-handled case.
+
+**Tests**: `tests/memind5.s` (TAS + NBCD, word bd) and `tests/memind6.s` (CLR + ASL,
+word bd), following the exact `tools/m68ksim`/`tools/buscmp.py` recipe from Phase 115.
+Neither cleanly passes automated `buscmp.py` comparison, for two different, both
+pre-existing and unrelated reasons found while building them: (1) TAS is a genuinely
+bus-locked RMW cycle (AS stays asserted across read+write, no release between phases),
+and this testbench's own bus logger doesn't emit a separate `BUS R` line for that
+locked cycle's read phase — confirmed by testing a plain, totally unmodified baseline
+`TAS (A0)` and finding the identical gap, proving it predates this phase's own change
+entirely; (2) CLR/ASL's own read latency happens to give the IFU exactly one extra
+opcode-fetch's worth of prefetch headroom relative to Musashi's non-pipelined
+interpreter (tried adding filler NOPs to shift the timing — same reordering recurred
+at a shifted offset, confirming it's inherent to the instruction's own shape, not
+fixable by nudging). Both hand-verified instead by direct log inspection: TAS's own
+final write ($304=$D5=$55|$80) and NBCD's ($404=$88, correct BCD-negate of $12) match
+Musashi exactly; CLR's ($304 $12345678→0) and ASL's ($404 $4001→$8002, correct
+left-shift) too — and every instruction's own opcode+extension-word fetch sequence
+(the actual thing under test — that the bd word gets fetched at all, not lost to an
+IFU desync) matches Musashi's cycle-for-cycle once the reordering is accounted for.
+Kept in `tests/` as standalone, hand-run reproductions rather than wired into
+`make cosim_memind`, matching the precedent `memind.s`/`memind4.s` already established.
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, `make cosim_memind` still 2/2
+(unchanged — this phase's own new tests aren't wired in, per above), and a full
+121-suite Harte re-run (Verilator batch backend, the highest-value regression gate for
+this phase specifically since TAS/NBCD/NEGX/CLR/NEG/NOT/TST/shift-rotate are *all*
+Harte-covered instructions today, unlike Phase 115's MOVE work where Harte had zero
+coverage of the mode at all) — **696590 PASS, 2 FAIL (the same pre-existing documented
+ASL.b corpus anomaly, opcode `0xe502`, not a regression), 0 TIMEOUT**, identical to
+baseline. Stages 2-4 (ALU-mem-src + dynamic BTST family; Scc/CHK/CMP2-CHK2/ADDQ-SUBQ/
+LEA-JMP-JSR indexed; MOVEM's own extended form + MOVE mem-to-mem's dst-side support +
+long 32-bit bd/od displacements) remain deliberately deferred, per the approved plan —
+each is its own multi-session investigation-plus-verification effort at this
+project's established pace.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

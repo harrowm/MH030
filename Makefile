@@ -341,25 +341,26 @@ $(foreach n,0 1 2 3 4 5 6 7,$(eval $(call GRP_RULE,$(n))))
 cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
            buscmp-grp4 buscmp-grp5 buscmp-grp6 buscmp-grp7
 
-# Phase 107/115: memory-indirect EA ([bd,An],Xn,od) bus comparison tests.
-# Harte's corpus is 68000-captured and has zero coverage of this
-# 68020+-only addressing mode, so this is the only regression coverage for
-# it. memind2=word bd, post; memind3=word bd+word od (post) and null
-# bd+word od (pre).
+# Phase 107/115/116: memory-indirect / full-format mode=110 EA bus
+# comparison tests. Harte's corpus is 68000-captured and has zero coverage
+# of this 68020+-only mode, so this is the only regression coverage for it.
+# memind2=word bd, post (MOVE); memind3=word bd+word od (post) and null
+# bd+word od (pre) (MOVE).
 #
-# tests/memind.s and tests/memind4.s (the very first, minimal reproduction
-# of the pre/post decode bug, and the IS=1/index-suppressed case) are
-# deliberately *not* wired in here: each has only 1-2 short setup
-# instructions before the memory-indirect one under test, giving the IFU
-# less gap to prefetch ahead in than memind2/3's own longer setup
-# sequences -- their bus traces legitimately interleave an instruction
-# fetch differently than Musashi's non-pipelined interpreter does
-# (confirmed harmless by hand -- every actual address/data pair matches,
-# just reordered by one slot -- buscmp.py has no tolerance for mid-stream
-# reordering, only trailing cycles via --dut-may-continue). Both kept in
-# tests/ as standalone, still-useful hand-run reproductions (see their own
-# header comments) rather than wired into an automated target that would
-# need to special-case them.
+# tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
+# reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
+# TAS+NBCD), and memind6.s (Phase 116: CLR+ASL) are deliberately *not*
+# wired in here -- each hits its own flavor of a benign, pre-existing
+# DUT-vs-Musashi bus-trace difference unrelated to correctness (see each
+# file's own header comment: memind/memind4 and memind6 have a prefetch-
+# interleave timing difference depending on the tested instruction's own
+# shape; memind5's TAS half hits a *different*, also pre-existing gap --
+# the testbench's bus logger doesn't emit a separate read line for TAS's
+# genuinely bus-locked RMW cycle, confirmed via a plain baseline `TAS (A0)`
+# test showing the identical gap even with zero of this phase's changes
+# involved). All four kept in tests/ as standalone, still-useful hand-run
+# reproductions rather than wired into an automated target that would need
+# to special-case each one's own reason.
 winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
 	./tools/m68ksim tests/memind$*.hex 300 > $@
 
