@@ -433,8 +433,26 @@ module eu_seq (
     logic        fi_is_s;     assign fi_is_s    = ext_data[6];       // index suppress
     logic [1:0]  fi_bdsz;     assign fi_bdsz    = ext_data[5:4];     // bd size: 01=null,10=word,11=long
     logic [2:0]  fi_iis;      assign fi_iis     = ext_data[2:0];     // I/IS: 000=none, 001-011=indirect
-    // base displacement: word in ext_data[31:16] when fi_bdsz==10; else 0
-    logic [31:0] fi_bd;       assign fi_bd      = (fi_bdsz == 2'b10) ? {{16{ext_data[31]}}, ext_data[31:16]} : 32'h0;
+    // base displacement: word in ext_data[31:16] when fi_bdsz==10 (word);
+    // long (fi_bdsz==11) needs a second word -- ext_data[31:16] is already
+    // the high half (m68030_seq.sv's memind-specific q1/q2 swap puts the
+    // descriptor in the low half and the word right after it in the high
+    // half), so the low half of a long bd is one word further out, at
+    // q3_word (Phase 121, plan.md) -- the same word MOVEM's own bd
+    // (Phase 119) and abs.L reconstruction already reuse for an analogous
+    // "one word further out" need. Only the *non-indirect* case
+    // (fi_iis==000) is correctly served this way for every family that
+    // already reads fi_bd via the `fi_is_full ? fi_bd : ...` template
+    // (Stages 1-3) -- this single definition change propagates to all of
+    // them automatically, no per-site changes needed. Genuine indirect
+    // combined with a long bd would need q3 for bd's own low half *and*
+    // another word for od, i.e. a real q4 -- fi_od below doesn't attempt
+    // this combination (see its own comment), so it remains unsupported,
+    // same "least-wrong fallback" boundary already drawn around plain
+    // memory-indirect for every family in this rollout.
+    logic [31:0] fi_bd;       assign fi_bd      = (fi_bdsz == 2'b10) ? {{16{ext_data[31]}}, ext_data[31:16]}
+                                                 : (fi_bdsz == 2'b11) ? {ext_data[31:16], q3_word}
+                                                 : 32'h0;
     // outer displacement: word-size od, for both pre- (fi_iis=010) and
     // post-indexed (fi_iis=110) -- fi_iis[1:0]==10 already implies genuine
     // indirect action (000/100 both have iis[1:0]==00), so checking just
@@ -447,11 +465,10 @@ module eu_seq (
     // position a word bd would have used. Originally missing the
     // post-indexed case (and the word-bd-and-word-od combination) entirely
     // -- found via tests/memind2.s's own Musashi-cosim run, part of the
-    // memory-indirect EA investigation (plan.md Phase 107/115). Long bd/od
-    // (2-word displacements) remain unsupported -- undocumented in practice
-    // (word displacements suffice for the address ranges real code uses),
-    // and would need a 4th/5th extension-word data path this project
-    // doesn't have wired up yet.
+    // memory-indirect EA investigation (plan.md Phase 107/115). Long bd
+    // combined with genuine indirect (needing od at q4, since q3 is now
+    // long bd's own low half) remains unsupported -- see fi_bd's own
+    // comment above; this od formula intentionally doesn't attempt it.
     logic [31:0] fi_od;       assign fi_od      = (fi_iis[1:0] != 2'b10) ? 32'h0
                                                    : (fi_bdsz == 2'b10)
                                                      ? {{16{q3_word[15]}}, q3_word}

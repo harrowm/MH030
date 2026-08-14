@@ -365,13 +365,29 @@ confirmed zero effect on every other `dyn_bit_get_Dn` consumer (CHK, ALU-mem-src
 dynamic bit-ops, MOVE mem-to-mem indexed-dst). See `plan.md §Phase 120` for the full
 writeup, including the debugging trail.
 
-**Deliberately out of scope, remaining as the follow-up plan's Items 2-3** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): long (32-bit)
-bd/od displacements for the families already converted in Stages 1-3 (smaller than it
-sounds — the non-indirect case needs only a one-line `fi_bd` extension reusing the
-already-wired `q3_word`, no new hardware); and MOVE mem-to-mem's dst-side full-format
-support (needs two independent full-format EA states simultaneously) — the largest
-remaining piece.
+**Phase 121** delivered long (32-bit) bd support for every family already converted in
+Stages 1-3, confirming the Phase 120 plan's own hunch that this was smaller than the
+original Stage 4 framing suggested. `fi_bd` only ever returned a non-zero value for
+word-size bd, silently returning 0 for long bd — but since every Stage 1-3 site
+already reads `fi_bd` unconditionally, fixing its own definition (one ternary branch,
+reusing the already-wired `q3_word` — no new extension-word plumbing needed for the
+non-indirect case) fixed all ~25 sites simultaneously. `memind_ext_count` already
+correctly counted the extra words for long bd; it just never had a value to go with
+it. Verified via `tests/memind13.s` (ADD.L memory-source + OR.L memory-dest RMW, both
+long-bd) — CLR.L was tried first for the memory-dest half but hit an unrelated,
+pre-existing quirk (an extra bus read before indexed-EA writes, present even for
+brief-form CLR.L, matching the same shape as Phase 118's MOVE SR,(ea) finding) — no
+correctness impact, documented rather than investigated, switched to OR.L instead.
+Genuine memory-indirect combined with long bd/od remains unsupported (same
+"least-wrong fallback" boundary drawn around plain indirect everywhere else in this
+rollout); MOVEM's own long-bd would need a real fourth extension word, also
+out of scope. Full Harte re-run at the Phase 112 baseline, zero regressions. See
+`plan.md §Phase 121` for the full writeup.
+
+**Deliberately out of scope, remaining as the follow-up plan's Item 3** (see
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): MOVE
+mem-to-mem's dst-side full-format support (needs two independent full-format EA
+states simultaneously) — the last, largest, and most novel piece in this rollout.
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,

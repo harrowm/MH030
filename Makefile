@@ -355,7 +355,9 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # (CMP2.L/CHK2.L indexed -- Phase 120, the first *unimplemented* family in
 # this rollout rather than merely brief-limited; also fixed a genuine
 # dyn_bit_get_Dn timing conflict this new form exposed, see plan.md
-# Phase 120).
+# Phase 120); memind13=long (32-bit) bd (ADD memory-source, OR memory-dest
+# RMW -- Phase 121, the fi_bd fix that benefits every already-converted
+# Stage 1-3 site "for free").
 #
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
@@ -406,9 +408,14 @@ buscmp-memind12: $(SIM)/cosim_grp winuae/tests/memind12_ref.log tests/memind12.h
 	    | grep "^BUS" > /tmp/_dut_memind12.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind12.log winuae/tests/memind12_ref.log \
 	    --reads-only --dut-may-continue
+buscmp-memind13: $(SIM)/cosim_grp winuae/tests/memind13_ref.log tests/memind13.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind13.hex +grp=memind13 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind13.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind13.log winuae/tests/memind13_ref.log \
+	    --reads-only --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
-              buscmp-memind12
+              buscmp-memind12 buscmp-memind13
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

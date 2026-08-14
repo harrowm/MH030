@@ -3547,6 +3547,71 @@ mem-to-mem dst-side) of the follow-up plan remain open.
 
 ---
 
+## Phase 121 — Long (32-bit) bd for the families already converted in Stages 1-3 (Item 2)
+
+**Goal**: second item of the user-approved 3-item follow-up plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`). Turned out much smaller than the
+original Stage 4 framing suggested ("needs a genuine 4th/5th extension-word data path
+this project doesn't have wired up") — that framing was written before this
+investigation actually looked at what a *non-indirect* long bd needs.
+
+**Why it's smaller than expected**: `fi_bd` (`eu_seq.sv`) only ever returned a
+non-zero value for word-size bd (`fi_bdsz==2'b10`); long bd (`2'b11`) silently
+returned 0. Every family converted in Stages 1-3 already reads `fi_bd`
+unconditionally via the `dec_ea_offset = fi_is_full ? fi_bd : <brief>` template — so
+fixing `fi_bd`'s own definition fixes every one of those ~25 sites simultaneously,
+with zero per-site changes. For the *non-indirect* case specifically
+(`fi_iis==000`), a long bd only needs two 16-bit words total: the descriptor's own
+second word (already available at `ext_data[31:16]`, thanks to `is_memind_full`'s own
+q1/q2 swap) as the high half, plus one more word as the low half — and `q3_word`
+(the `ifu_q3_word`/`eu_q3_word` pass-through) was already wired end-to-end and unused
+for every Stage 1-3 family (only MOVE/MOVEM abs.L and MOVEM's own Phase 119 bd use it
+today). No new extension-word plumbing needed at all for this sub-case. Confirmed
+`memind_ext_count` (`m68030_seq.sv`) already correctly counts 2 words for
+`fi_bdsz==2'b11` before touching anything — it was already right, just never had a
+value to go with it.
+
+**Change**: one definition, `eu_seq.sv`:
+```systemverilog
+assign fi_bd = (fi_bdsz == 2'b10) ? {{16{ext_data[31]}}, ext_data[31:16]}
+             : (fi_bdsz == 2'b11) ? {ext_data[31:16], q3_word}
+             : 32'h0;
+```
+No sign extension needed for the long case (already a full 32 bits).
+
+**Scope boundary** (documented, not attempted): genuine memory-indirect combined with
+long bd or long od still needs more words than `q1`(descriptor)+`q2`(bd hi)+
+`q3`(bd lo) provides — `fi_od`'s own formula doesn't attempt this combination either
+(its `fi_bdsz==10 ? q3_word : ext_data[31:16]` ternary silently mis-reads
+`ext_data[31:16]` as od when bd is actually long, since that slot is really bd's own
+high half in that case) — same "least-wrong fallback to brief" boundary every family
+already draws around plain memory-indirect, not a new regression since this
+combination was never correctly handled either way. MOVEM's own bd extraction is
+separate, dedicated inline code (Phase 119) that already commits `q3_word` to its own
+*word*-bd case — MOVEM's own long-bd would need a genuine fourth word (`q4`, not yet
+wired anywhere) and remains out of scope here too.
+
+**Test**: `tests/memind13.s` — `ADD.L (-$10000,A0,D1.L),D2` (memory source) and
+`OR.L D3,(-$10000,A1,D1.L)` (memory-dest RMW), both forcing full-format long-bd
+encoding (`|$10000|` exceeds vasm's ±32768 brief-displacement range). Base registers
+are set above the project's 4KB cosim memory-model window with a large *negative* bd
+bringing the actual computed EA back into range, so every byte the bus touches stays
+backed while the encoding genuinely exercises the long-bd path. CLR.L was tried first
+for the memory-dest half but hit an unrelated, pre-existing quirk (confirmed present
+even for plain brief-form CLR.L via a standalone throwaway repro, not kept): this
+testbench's CLR-to-indexed-EA performs an extra bus read before the write that
+Musashi doesn't — switched to OR.L, which Stage 2's own `memind7.s` already proved
+compares cleanly. Wired into `make cosim_memind`.
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, `make cosim_memind` 7/7 (added
+`buscmp-memind13`), and a full 124-suite Harte re-run (Verilator batch backend) —
+**PASS 702142, FAIL 2 (the same pre-existing documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0**, matching the Phase 112 baseline exactly, zero regressions. Item 3 (MOVE
+mem-to-mem dst-side full-format support) of the follow-up plan remains open — the
+largest and most novel piece.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
