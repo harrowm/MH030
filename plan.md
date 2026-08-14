@@ -4020,6 +4020,78 @@ full 8-step plan.
 
 ---
 
+## Phase 128 (Step 3, first test) — I-1 miss-then-hit tight loop, and a real RTL hang found + fixed
+
+**Goal**: Step 3 of the cache plan — build `tb/cache_tb.sv`, a new dedicated
+full-chip-harness testbench (mirroring `stall_fsm_tb.sv`'s/`cosim_grp_tb.sv`'s proven
+wiring), and write the first real I-cache correctness+timing test: a tight `DBF D0,-2`
+self-loop, which re-fetches the exact same instruction address on every one of D0+1
+passes — the first genuine multi-pass, taken-backward-branch test in this project
+(every other `tb/*_tb.sv` file deliberately avoids backward branches; re-executing the
+same code to observe a cache hit is the entire point here, so this file breaks that
+convention on purpose).
+
+**A real, reproducible RTL bug was found and fixed while building this test** — the
+first actual bug this plan's Step 1 wiring turned up, previously masked because Step
+2's own regression gate only ever exercised the *disabled*-cache bypass path.
+`biu_icache_if.sv`'s `cg_req`/`cg_addr` outputs, driven purely combinationally from
+`case(state)` (mirroring `biu_cache_if.sv`'s own D-cache-side style, which drives
+`biu_sizing_fsm` the same way), hung the entire simulation on the very first real
+linefill miss — `biu_cycle_gen`'s S-state machine reached `ST_READ_S6` and then
+never progressed to `ST_READ_S7`, with `cg_ack` never firing, `vvp` spinning at ~100%
+CPU with zero further `$time` advancement (confirmed genuinely stuck, not just slow, by
+running the identical 190-line trace unchanged across 20s/90s/180s timeouts).
+
+Root-caused via a deliberate bisection: an equivalent D-cache-enabled read
+(`CACR.DCE=1`, `MOVE.L (A0),D0`) through the **untouched, pre-existing**
+`biu_cache_if.sv` → `biu_sizing_fsm` → `biu_cycle_gen` path completed cleanly in the
+same harness — ruling out a generic `biu_cycle_gen` S6→S7 bug (the mechanism plainly
+works) and narrowing it specifically to *my* module's direct connection to
+`biu_cycle_gen`'s raw `ifu_*` port, bypassing `biu_sizing_fsm` entirely (per the Step 1
+design). Reading `biu_sizing_fsm.sv`'s own header comment supplied the actual
+explanation: it exists specifically to add "one cycle of latency (registered to break
+combinatorial loops with cycle_gen)" for the EU port. The pre-existing direct
+`ifu_*`-port wiring never needed this because the raw IFU always drove it from an
+already-registered signal (`fetch_pend_r`); my module's freshly-computed combinational
+`case(state)` output reintroduced exactly the class of hazard `biu_sizing_fsm` was
+built to prevent, just on the port that happened to never need it before. **Fix**:
+register `cg_req_r`/`cg_addr_r` in the same `always_ff` as `state` itself (set the
+cycle a miss is recognized, held through each `IC_FILL_N`, cleared on `IC_DONE`/BERR),
+and drive the module's `cg_req`/`cg_addr` outputs from these registers instead of
+computing them combinationally — eliminating the same class of combinational-loop risk
+`biu_sizing_fsm` already solves for the EU port, one clock edge later, exactly matching
+that module's own documented pattern.
+
+Two secondary findings from the same investigation, both already folded into Step 1's
+own commit message but worth restating since this phase is what surfaced them
+empirically: (1) `biu_arbiter`'s own `ifu_req` input needed to observe the *downstream*
+request (`ic_cg_req`, only asserted on a genuine miss) rather than the *raw* pre-cache
+`ifu_req` (which stays asserted through a cache hit that never reaches the bus) — fixed
+alongside the main bug, confirmed harmless for the disabled-cache case since the two
+signals are identical there. (2) the IFU's own prefetch queue touches *more than one*
+cache line per loop pass in general — `DBF`'s own opcode and its extension word can
+straddle a 16-byte line boundary — so the test's original naive expectation ("exactly 1
+bus cycle total") was wrong; redesigned around the actually-correct claim instead: bus
+activity during warm-up, then *zero* additional activity for the remainder of the
+loop once every touched line is cached.
+
+**I-1's final checks** (all passing): the dependent instruction after a 20-pass loop
+runs correctly; `D0` wraps through all 20 passes correctly (proving cached re-fetches
+return correct, uncorrupted opcode/extension-word content every time, not just "some
+data"); a warm-up checkpoint (`D0==5`, 14 passes in) needed real bus activity; the
+remaining 6 passes to loop exit needed *zero* further bus activity — the actual
+cache-hit claim, proven, not assumed.
+
+**Results**: `make test` 35/35 (new `cache` target added), `make cosim_grp` 8/8, full
+124-suite Harte sweep — PASS 702142 / FAIL 2 (same documented `ASL.b` anomaly) / SKIP
+281221 / TIMEOUT 0, bit-identical to the Phase 127 baseline. `tb/stall_fsm_tb.sv`'s own
+`$finish` timestamp (829616) stayed byte-for-byte identical too, reconfirming the
+disabled-cache bypass path is untouched by this fix. Steps 3's remaining tests (I-2
+aliasing/eviction, I-3 CACR flush, I-4 self-modifying code, I-5 BERR-mid-linefill) and
+Steps 4-7 remain. See `~/.claude/plans/compressed-hopping-cocoa.md`.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

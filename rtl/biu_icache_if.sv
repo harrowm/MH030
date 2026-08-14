@@ -86,6 +86,20 @@ module biu_icache_if (
     logic [1:0]  woff_r;
     logic [23:0] vtag_r;
 
+    // cg_req/cg_addr are registered (not driven combinationally from
+    // `state`), mirroring biu_sizing_fsm.sv's own documented reason for
+    // existing: "one cycle of latency (registered to break combinatorial
+    // loops with cycle_gen)". The raw IFU->cycle_gen wiring this module
+    // replaces always drove biu_cycle_gen's ifu_* port from an
+    // already-registered source (fetch_pend_r); a purely combinational
+    // case(state)-driven cg_req here reproducibly hung biu_cycle_gen's
+    // S6->S7 transition on the very first real linefill miss (found via
+    // this project's own bisection-against-a-known-working-path
+    // technique: an equivalent D-cache-enabled read via biu_cache_if.sv,
+    // which *does* register through biu_sizing_fsm, completed cleanly).
+    logic        cg_req_r;
+    logic [31:0] cg_addr_r;
+
     wire [3:0]  idx  = ifu_addr[7:4];
     wire [1:0]  woff = ifu_addr[3:2];
     wire [23:0] vtag = ifu_addr[31:8];
@@ -95,8 +109,10 @@ module biu_icache_if (
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            state   <= IC_IDLE;
-            berr_r  <= 1'b0;
+            state     <= IC_IDLE;
+            berr_r    <= 1'b0;
+            cg_req_r  <= 1'b0;
+            cg_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) valid_i[k] <= 1'b0;
         end else begin
             // CACR cache-clear operations (level-sensitive while asserted,
@@ -115,8 +131,13 @@ module biu_icache_if (
                         woff_r      <= woff;
                         vtag_r      <= vtag;
                         fill_base_r <= {ifu_addr[31:4], 4'h0};
-                        if (ihit) state <= IC_HIT;
-                        else      state <= IC_FILL_0;
+                        if (ihit) begin
+                            state <= IC_HIT;
+                        end else begin
+                            state     <= IC_FILL_0;
+                            cg_req_r  <= 1'b1;
+                            cg_addr_r <= {ifu_addr[31:4], 4'h0};
+                        end
                     end
                 end
 
@@ -126,30 +147,36 @@ module biu_icache_if (
                     if (cg_ack_rise) begin
                         data_i[idx_r][0] <= cg_rdata;
                         if (woff_r == 2'd0) fill_rdata_r <= cg_rdata;
-                        state <= IC_FILL_1;
+                        state     <= IC_FILL_1;
+                        cg_addr_r <= fill_base_r + 32'd4;
                     end else if (cg_berr) begin
-                        berr_r <= 1'b1;
-                        state  <= IC_DONE;
+                        berr_r   <= 1'b1;
+                        state    <= IC_DONE;
+                        cg_req_r <= 1'b0;
                     end
                 end
                 IC_FILL_1: begin
                     if (cg_ack_rise) begin
                         data_i[idx_r][1] <= cg_rdata;
                         if (woff_r == 2'd1) fill_rdata_r <= cg_rdata;
-                        state <= IC_FILL_2;
+                        state     <= IC_FILL_2;
+                        cg_addr_r <= fill_base_r + 32'd8;
                     end else if (cg_berr) begin
-                        berr_r <= 1'b1;
-                        state  <= IC_DONE;
+                        berr_r   <= 1'b1;
+                        state    <= IC_DONE;
+                        cg_req_r <= 1'b0;
                     end
                 end
                 IC_FILL_2: begin
                     if (cg_ack_rise) begin
                         data_i[idx_r][2] <= cg_rdata;
                         if (woff_r == 2'd2) fill_rdata_r <= cg_rdata;
-                        state <= IC_FILL_3;
+                        state     <= IC_FILL_3;
+                        cg_addr_r <= fill_base_r + 32'd12;
                     end else if (cg_berr) begin
-                        berr_r <= 1'b1;
-                        state  <= IC_DONE;
+                        berr_r   <= 1'b1;
+                        state    <= IC_DONE;
+                        cg_req_r <= 1'b0;
                     end
                 end
                 IC_FILL_3: begin
@@ -158,10 +185,12 @@ module biu_icache_if (
                         if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
                         tag_i[idx_r]   <= vtag_r;
                         valid_i[idx_r] <= 1'b1;
-                        state <= IC_DONE;
+                        state    <= IC_DONE;
+                        cg_req_r <= 1'b0;
                     end else if (cg_berr) begin
-                        berr_r <= 1'b1;
-                        state  <= IC_DONE;
+                        berr_r   <= 1'b1;
+                        state    <= IC_DONE;
+                        cg_req_r <= 1'b0;
                     end
                 end
 
@@ -177,7 +206,9 @@ module biu_icache_if (
 
     // Output logic — disabled path is a pure combinational bypass (zero
     // added latency vs. the pre-existing direct ifu->cycle_gen wiring);
-    // enabled path is driven by the state machine above.
+    // enabled path's cg_req/cg_addr come from the registers driven above
+    // (see their own declaration comment for why), everything else is
+    // still simple combinational state decode.
     always_comb begin
         if (!icache_en) begin
             cg_addr   = ifu_addr;
@@ -186,8 +217,8 @@ module biu_icache_if (
             ifu_ack   = cg_ack;
             ifu_berr  = cg_berr;
         end else begin
-            cg_addr   = fill_base_r;
-            cg_req    = 1'b0;
+            cg_addr   = cg_addr_r;
+            cg_req    = cg_req_r;
             ifu_rdata = 32'h0;
             ifu_ack   = 1'b0;
             ifu_berr  = 1'b0;
@@ -197,10 +228,6 @@ module biu_icache_if (
                     ifu_rdata = data_i[idx_r][woff_r];
                     ifu_ack   = 1'b1;
                 end
-                IC_FILL_0: begin cg_addr = fill_base_r;          cg_req = !cg_ack; end
-                IC_FILL_1: begin cg_addr = fill_base_r + 32'd4;  cg_req = !cg_ack; end
-                IC_FILL_2: begin cg_addr = fill_base_r + 32'd8;  cg_req = !cg_ack; end
-                IC_FILL_3: begin cg_addr = fill_base_r + 32'd12; cg_req = !cg_ack; end
                 IC_DONE: begin
                     if (berr_r) ifu_berr = 1'b1;
                     else begin
@@ -208,7 +235,7 @@ module biu_icache_if (
                         ifu_ack   = 1'b1;
                     end
                 end
-                default: ; // IC_IDLE
+                default: ; // IC_IDLE, IC_FILL_0..3 (cg_req/cg_addr already set above)
             endcase
         end
     end

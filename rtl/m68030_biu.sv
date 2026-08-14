@@ -365,7 +365,7 @@ module m68030_biu #(
         .rst_n     (rst_n),
         .mmu_req   (mmu_walk_req),
         .eu_req    (sf_cyc_req),
-        .ifu_req   (ifu_req),
+        .ifu_req   (ic_cg_req),  // downstream request from biu_icache_if, not the raw IFU-side ifu_req (which stays asserted on a cache hit that never reaches the bus)
         .bus_idle  (bus_idle),
         .bus_lock  (bus_lock),
         .grant_mmu (grant_mmu),
