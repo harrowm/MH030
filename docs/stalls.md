@@ -6,7 +6,7 @@ exists because the Tom Harte SingleStepTests corpus (the project's primary corre
 oracle) is structurally single-instruction — it resets state, executes exactly one
 instruction, and checks the result — so it can never exercise anything that spans two
 instructions or an asynchronous event arriving mid-instruction. Everything in this
-document is tested by the `tb/stall_*_tb.sv` suite instead (Phases 103–125; see
+document is tested by the `tb/stall_*_tb.sv` suite instead (Phases 103–126; see
 `plan.md` for the full phase-by-phase history).
 
 ## Signal hierarchy
@@ -188,13 +188,16 @@ and `plan.md §Phase 105` for the original discovery.
 `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` sequence in `m68030_exc.sv`, clearing naturally once
 the IFU flush on `pc_wr_en` changes `dec_valid` out from under it.
 
-**Coverage depth**: fixed and tested against 3 FSM sources so far — CAS2 (Phase 105,
-the original discovery), MOVEM, and genuine memory-indirect EA (both added Phase 125
-via a new shared `run_int_mid_test` task). The mechanism is decode-content-agnostic
-(it gates purely on `int_pending`/`dec_valid`/`stall_base`, none of which vary by which
-FSM is running), so there's no structural reason to expect a per-source bug, but the
-remaining ~20 `ex_mem_stall` sources haven't been individually spot-checked the way
-BERR-abort (Category I) was.
+**Coverage depth**: fixed and tested against 7 FSM sources so far — CAS2 (Phase 105,
+the original discovery), MOVEM and genuine memory-indirect EA (Phase 125), and TAS,
+MOVEP, single CAS, and ADDX predecrement (Phase 126), via the shared `run_int_mid_test`
+task, chosen to span the RMW-lock, byte-interleaved, and dual-address-predecrement FSM
+shapes. The mechanism is decode-content-agnostic (it gates purely on
+`int_pending`/`dec_valid`/`stall_base`, none of which vary by which FSM is running), so
+there's no structural reason to expect a per-source bug, but the remaining ~12-16
+`ex_mem_stall` sources (MOVE16, ABCD/SBCD/PACK, BFINS, CMP2/CHK2, MOVE mem-mem, RTR/RTE,
+PFLUSH/PTEST/PMOVE64) haven't been individually spot-checked the way BERR-abort
+(Category I) was.
 
 ## Category G — bus arbitration contention
 
@@ -237,7 +240,14 @@ whether it's applied — not a bug, just less slack available for TAS than for M
 `wait_states=10` reliably exceeds the absorption threshold for MOVEM. When adding a new
 wait-state test for a different FSM, don't assume a value proven for one instruction
 transfers to another — verify the effect is actually visible (via cycle-completion
-tracing if the first attempt shows no difference) before trusting the check.
+tracing if the first attempt shows no difference) before trusting the check. Phase 126
+reused `wait_states=10` directly for CAS2 and genuine memory-indirect EA and both
+showed a clearly measurable delta on the first attempt (no repeat of the absorption
+surprise) — but this was *verified*, not assumed, per the guidance above; a future
+source could still land back in the absorbed regime.
+
+**Coverage depth**: 4 FSM sources — TAS (`wait_states=3`), MOVEM, CAS2, and genuine
+memory-indirect EA (all three added `wait_states=10`, Phases 125-126).
 
 ## Category I — bus error abort (`mem_abort`)
 
@@ -340,14 +350,14 @@ No known gap remains in BERR-abort coverage.
 | C. Missing ext word | *(folded into A's harness where reachable; see file header for scope note)* | |
 | D. Multi-cycle FSM | `tb/stall_fsm_tb.sv` | All 23 of ~23 sources (closed Phase 124), decode-holdoff + a real dependent instruction after; exact bus-cycle counts for TAS/MOVEM/CMPM/CAS2/MOVEP/ADDX.L/memory-indirect EA; the memory-indirect EA check (B-22) also verifies the loaded register's actual value, not just "did it unstick" |
 | E. Control-transfer | `tb/stall_hazard_tb.sv` | BRA/JMP(register-indirect+abs)/DBF-taken/JSR+RTS round trip through real memory |
-| F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 3 sources (CAS2/MOVEM/memory-indirect EA); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
+| F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 7 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX, Phases 105/125/126); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
 | G. Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU 3-way priority; IFU starvation+recovery under a real multi-beat burst; DMA held off by `bus_lock` |
-| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 2 sources (TAS at wait_states=3, MOVEM at wait_states=10; see Category H's own absorption-effect note for why the values differ) |
+| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 4 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA at wait_states=10, Phases 125/126; see Category H's own absorption-effect note for why the values differ) |
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
-| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM, no instruction between — one FSM's decode-holdoff handing directly to another's. Still a single data point; not extended further as of Phase 125 |
+| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 3 pairs (Phases 107/126): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, each a genuinely different FSM-shape handoff, no instruction between them |
 
 Run everything with `make test` (34/34, includes all of the above). See `plan.md`
-Phases 103–125 for the full session-by-session narrative, including two dead ends that
+Phases 103–126 for the full session-by-session narrative, including dead ends that
 are worth knowing about before extending this suite:
 
 - **Direct `eu_seq` instruction injection** (mirroring `eu_seq_tb.sv`'s own low-level
@@ -360,25 +370,39 @@ are worth knowing about before extending this suite:
   a numerically lower ROM address than whatever runs after it, or PC can never walk
   backward to reach it — this bit Phase 108 directly when back-to-back-FSM tests were
   reordered without renumbering their addresses.
+- **A test that starts measuring/watching immediately (no `decode_pc` pre-wait), placed
+  right after an interrupt-mid-FSM or BERR-mid-FSM test, can catch that prior test's own
+  trailing bus activity** (RTE's stack reads, a handler's tail) instead of its own —
+  `decode_pc` crossing a threshold doesn't guarantee the instruction at that address has
+  actually finished retiring in EX. This bit both `WS-MOVEM` (Phase 125) and `T4c`
+  (Phase 126) the identical way; the fix both times was an explicit `decode_pc`-gating
+  loop before the measurement window starts, not just before the test's own code region.
+  Any *new* test placed immediately after an async-event test should default to this
+  gating rather than assuming `run_and_check`'s own bare poll is enough.
 
 ## What's left, if anything
 
-As of Phase 125, no known *correctness* gap remains anywhere in this document — every
+As of Phase 126, no known *correctness* gap remains anywhere in this document — every
 stall category has RTL and at least one passing test, every `ex_mem_stall` FSM source
 has both decode-holdoff and BERR-abort coverage, and the two mechanisms layered on top
-(interrupt dispatch, DSACK wait states) are proven correct in principle. What remains
-is purely *breadth*, not depth:
+(interrupt dispatch, DSACK wait states) are proven correct in principle across several
+FSM shapes each. What remains is purely *breadth*, not depth:
 
-- **Back-to-back FSM composition** (Category D→D handoff) is still exactly one data
-  point (TAS→MOVEM). Nothing suggests a second pairing would behave differently, but
-  it hasn't been checked.
-- **Interrupt-mid-FSM** (Category F) has 3 of ~19-23 possible FSM sources checked
-  individually. Same reasoning as above — the mechanism is decode-agnostic by
-  construction, but only spot-checked, not exhaustively swept the way Category I was.
-- **DSACK wait-states-on-FSM-beats** (Category H) has 2 sources checked (TAS, MOVEM).
-  Given Phase 125's own absorption-effect finding, a new source needs its own
-  wait-state-value sanity check (don't assume `wait_states=3` or `=10` transfers
-  automatically) rather than a purely mechanical extension.
+- **Back-to-back FSM composition** (Category D→D handoff) has 3 pairs (TAS→MOVEM,
+  MOVEP→CAS, memory-indirect-EA→TAS, Phases 107/126) out of the many possible
+  combinations. Nothing suggests a further pairing would behave differently, but only
+  these three have been checked.
+- **Interrupt-mid-FSM** (Category F) has 7 of ~19-23 possible FSM sources checked
+  individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX). Same reasoning as
+  above — the mechanism is decode-agnostic by construction, but only spot-checked, not
+  exhaustively swept the way Category I was. Remaining: MOVE16, ABCD/SBCD/PACK, BFINS,
+  CMP2/CHK2, MOVE mem-mem, RTR/RTE, PFLUSH/PTEST/PMOVE64.
+- **DSACK wait-states-on-FSM-beats** (Category H) has 4 sources checked (TAS, MOVEM,
+  CAS2, memory-indirect EA). Given Phase 125's own absorption-effect finding, a new
+  source needs its own wait-state-value sanity check (don't assume `wait_states=3` or
+  `=10` transfers automatically) rather than a purely mechanical extension — Phase 126's
+  two additions both happened to work at `wait_states=10` on the first try, but that was
+  verified, not assumed.
 
 None of these block using the CPU today; they're the natural next increment if more
 confidence is wanted in the generic mechanisms specifically.

@@ -2018,6 +2018,249 @@ module stall_fsm_tb;
                   elapsed10 > elapsed0);
         end
 
+        // ===================================================================
+        // Phase 126: breadth extensions for the three mechanisms docs/stalls.md
+        // flagged as "proven correct in principle, only spot-checked" --
+        // interrupt-mid-FSM (3->7 sources), DSACK wait-states-on-FSM-beats
+        // (2->4 sources), and back-to-back FSM composition (1->3 pairs). None
+        // of these are expected to surface a new RTL bug (the mechanisms are
+        // all decode-content-agnostic by construction, already argued in
+        // docs/stalls.md), so this batch is pure breadth, not depth -- but
+        // per this file's own established discipline, "should be fine" gets
+        // an actual test, not just an argument.
+        // ===================================================================
+
+        // -------------------------------------------------------------
+        // INT-mid-TAS: interrupt arrival mid-TAS (indivisible RMW lock,
+        // the simplest ex_mem_stall shape -- 2 bus cycles, read then write).
+        // -------------------------------------------------------------
+        rom[16'h3600/4] = 32'h0000_0000;
+        rom[16'h2C00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2C04/4] = {16'h3600, TAS_A0};
+        rom[16'h2C08/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2C0C/4] = {16'h0000, 16'd5501};
+        run_int_mid_test("INT-mid-TAS", 32'h0000_2C00, 2, 5, 32'd5501, 32'h0000_008A);
+
+        // -------------------------------------------------------------
+        // INT-mid-MOVEP: interrupt arrival mid-MOVEP.L (byte-interleaved
+        // store, 4 individual byte bus cycles -- a genuinely different FSM
+        // shape from TAS/MOVEM/memory-indirect EA's own already-covered
+        // 2-phase patterns).
+        // -------------------------------------------------------------
+        rom[16'h2C10/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2C14/4] = {16'h0000, 16'h3610};
+        rom[16'h2C18/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h2C1C/4] = {16'hAABB, 16'hCCDD};
+        rom[16'h2C20/4] = {MOVEP_L_D1_A0, 16'h0010};
+        rom[16'h2C24/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2C28/4] = {16'd5502, NOP_OP};
+        run_int_mid_test("INT-mid-MOVEP", 32'h0000_2C10, 4, 5, 32'd5502, 32'h0000_008A);
+
+        // -------------------------------------------------------------
+        // INT-mid-CAS: interrupt arrival mid-single-address CAS.L (an
+        // indivisible RMW lock like TAS, but a distinct decode path).
+        // D1 is set to match the memory operand exactly so the compare
+        // always succeeds, guaranteeing the deterministic 2-cycle
+        // read-then-write shape (a mismatch would still stall correctly,
+        // but wouldn't write, and this test isn't verifying CAS's own
+        // compare/write semantics -- Harte already covers that).
+        // -------------------------------------------------------------
+        rom[16'h3630/4] = 32'h1234_5678;
+        rom[16'h2C30/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2C34/4] = {16'h0000, 16'h3630};
+        rom[16'h2C38/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h2C3C/4] = {16'h1234, 16'h5678};
+        rom[16'h2C40/4] = {CAS_L_D1D2_A0, CAS_EXT};
+        rom[16'h2C44/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2C48/4] = {16'd5503, NOP_OP};
+        run_int_mid_test("INT-mid-CAS", 32'h0000_2C30, 2, 5, 32'd5503, 32'h0000_008A);
+
+        // -------------------------------------------------------------
+        // INT-mid-ADDX: interrupt arrival mid-ADDX.L -(A1),-(A0) -- the
+        // dual-address predecrement shape (read src, read dst, write dst
+        // -- 3 bus cycles), shared by ABCD/SBCD/PACK's own mem_abort
+        // handling (Phase 109) but not yet exercised for interrupt-mid.
+        // Not checking the actual sum (X-flag state going in is whatever
+        // prior tests left it, same as BERR-mid-ADDX's own precedent) --
+        // only that decode correctly defers the interrupt for the FSM's
+        // full 3-cycle duration and resumes cleanly afterward.
+        // -------------------------------------------------------------
+        rom[16'h3660/4] = 32'h0000_0005;  // dst initial value ((A0)-4)
+        rom[16'h3670/4] = 32'h0000_0003;  // src value ((A1)-4)
+        rom[16'h2C50/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2C54/4] = {16'h0000, 16'h3664};
+        rom[16'h2C58/4] = {MOVEA_L_IMM_A1, 16'h0000};
+        rom[16'h2C5C/4] = {16'h3674, ADDX_L_A1_A0};
+        rom[16'h2C60/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2C64/4] = {16'd5504, NOP_OP};
+        run_int_mid_test("INT-mid-ADDX", 32'h0000_2C50, 3, 5, 32'd5504, 32'h0000_008A);
+
+        // -------------------------------------------------------------
+        // T4c: back-to-back FSM composition, pair #2 -- MOVEP.L D1,(A0)
+        // immediately followed by CAS.L D1,D2,(A0), no instruction between
+        // them. A genuinely different pairing shape from T4a's TAS->MOVEM
+        // (RMW->register-list): byte-interleaved-write handing directly to
+        // a single-address atomic lock. Memory at A0 is pre-loaded to match
+        // D1 exactly, so CAS's own compare always succeeds (deterministic
+        // 2-cycle read+write, same reasoning as INT-mid-CAS above).
+        // -------------------------------------------------------------
+        rom[16'h3680/4] = 32'hAABB_CCDD;
+        rom[16'h2C70/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2C74/4] = {16'h3680, CLR_L_D1};
+        rom[16'h2C78/4] = {ADDI_L_D1, 16'hAABB};
+        rom[16'h2C7C/4] = {16'hCCDD, MOVEP_L_D1_A0};
+        rom[16'h2C80/4] = {16'h0010, CAS_L_D1D2_A0};
+        rom[16'h2C84/4] = {CAS_EXT, CLR_L_D5};
+        rom[16'h2C88/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2C8C/4] = {16'd4001, NOP_OP};
+        begin
+            int c0, c1, t;
+            // Unlike T4a (which ran directly after B-21 with nothing async
+            // in between), T4c follows the interrupt-mid-FSM tests above,
+            // whose own settle-wait can return with decode_pc having only
+            // *just* crossed the handler's own RTE address (Phase 125's own
+            // "decode_pc can be ahead of what's actually retiring in EX"
+            // lesson applies here too) -- confirmed via a first attempt
+            // that measured 11 data-space bus cycles instead of the
+            // expected 6, cycle-completion tracing showing the extra
+            // activity was the *previous* interrupt handler's own trailing
+            // RTE stack reads still landing. Explicitly waiting for
+            // decode_pc to reach this test's own code before measuring
+            // (the same pattern WS-MOVEM's own Phase 125 fix established)
+            // avoids it.
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2C70; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4c: back-to-back MOVEP->CAS dependent instr ran (D5=4001)", 5, 32'd4001, 4000);
+            c1 = data_ds_count;
+            check32("T4c: MOVEP(4)+CAS(2)=6 data-space bus cycles", c1 - c0, 32'd6);
+            check8("T4c: MOVEP byte0 (D1[31:24]) at A0+16", rom[16'h3690/4][31:24], 8'hAA);
+            check8("T4c: MOVEP byte1 (D1[23:16]) at A0+18", rom[16'h3690/4][15:8],  8'hBB);
+            check8("T4c: MOVEP byte2 (D1[15:8]) at A0+20",  rom[16'h3694/4][31:24], 8'hCC);
+            check8("T4c: MOVEP byte3 (D1[7:0]) at A0+22",   rom[16'h3694/4][15:8],  8'hDD);
+        end
+
+        // -------------------------------------------------------------
+        // T4d: back-to-back FSM composition, pair #3 -- genuine
+        // memory-indirect EA (MOVE.L ([$10,A0],D1.L),D2) immediately
+        // followed by TAS (A0), no instruction between them. A third
+        // distinct pairing shape: a 2-phase read-chain FSM handing
+        // directly to an RMW lock FSM, both anchored on the same base
+        // register A0 (memory-indirect never modifies An, so TAS (A0)
+        // right afterward is a legal, meaningful adjacency, not an
+        // arbitrary unrelated pairing). Uses its own fresh pointer chain
+        // (not B-22/BERR-mid-Memind/INT-mid-Memind's $3900 chain), since
+        // TAS here actually mutates the byte at A0, and this pair runs
+        // last so nothing downstream depends on that byte staying pristine.
+        // -------------------------------------------------------------
+        rom[16'h36A0/4] = 32'h0011_2233;  // TAS target (A0 itself); top byte 0 -> TAS sets bit7 -> 0x80
+        rom[16'h36B0/4] = 32'h0000_3730;  // pointer stored at outer read addr (A0+bd)
+        rom[16'h3830/4] = 32'hDEAD_F00D;  // final value (pointer + D1)
+        rom[16'h2C90/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2C94/4] = {16'h0000, 16'h36A0};
+        rom[16'h2C98/4] = {16'h223C, 16'h0000};  // MOVE.L #$100,D1 opcode ; imm hi
+        rom[16'h2C9C/4] = {16'h0100, 16'h2430};  // imm lo=$100 ; MOVE.L (memind),D2 opcode
+        rom[16'h2CA0/4] = {16'h1925, 16'h0010};  // ext1 ; bd
+        rom[16'h2CA4/4] = {TAS_A0, ADDI_L_D5};
+        rom[16'h2CA8/4] = {16'h0000, 16'd4002};
+        begin
+            int c0, c1, t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2C90; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4d: back-to-back Memind->TAS dependent instr ran (D5=4002)", 5, 32'd4002, 4000);
+            c1 = data_ds_count;
+            check32("T4d: Memind(2)+TAS(2)=4 data-space bus cycles", c1 - c0, 32'd4);
+            check32("T4d: memory-indirect EA loaded D2 correctly through both indirection levels",
+                    u_top.u_eu.u_rf.d_reg[2], 32'hDEAD_F00D);
+            check32("T4d: TAS set bit7 on A0's own byte (top byte 0x80, not stale 0x00)",
+                    rom[16'h36A0/4], 32'h8011_2233);
+        end
+
+        // -------------------------------------------------------------
+        // WS-CAS2: DSACK wait-states composing with CAS2's own bus beats
+        // (the single most complex ex_mem_stall FSM -- 4 phases without
+        // releasing the bus, though a compare mismatch, guaranteed here by
+        // clearing Dc1/Dc2 and pointing at nonzero memory, short-circuits
+        // to just the 2 read phases, same as B-6's own reasoning). Two
+        // fresh instances, own data each, following WS-MOVEM's exact
+        // structure (explicit decode_pc gating before each instance,
+        // wait_states set *before* the gating loop).
+        // -------------------------------------------------------------
+        rom[16'h36D0/4] = 32'h1111_1111;
+        rom[16'h36E0/4] = 32'h2222_2222;
+        rom[16'h2CC0/4] = {CLR_L_D1, CLR_L_D3};
+        rom[16'h2CC4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2CC8/4] = {16'h36D0, MOVEA_L_IMM_A1};
+        rom[16'h2CCC/4] = {16'h0000, 16'h36E0};
+        rom[16'h2CD0/4] = {CAS2_L, CAS2_EXT1};
+        rom[16'h2CD4/4] = {CAS2_EXT2, CLR_L_D5};
+        rom[16'h2CD8/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2CDC/4] = {16'd6001, NOP_OP};
+        rom[16'h36F0/4] = 32'h3333_3333;
+        rom[16'h3700/4] = 32'h4444_4444;
+        rom[16'h2D00/4] = {CLR_L_D1, CLR_L_D3};
+        rom[16'h2D04/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2D08/4] = {16'h36F0, MOVEA_L_IMM_A1};
+        rom[16'h2D0C/4] = {16'h0000, 16'h3700};
+        rom[16'h2D10/4] = {CAS2_L, CAS2_EXT1};
+        rom[16'h2D14/4] = {CAS2_EXT2, CLR_L_D5};
+        rom[16'h2D18/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2D1C/4] = {16'd6002, NOP_OP};
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2CC0; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-CAS2-1: wait_states=0, D5=6001", 5, 32'd6001, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2D00; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-CAS2-2: wait_states=10, D5=6002", 5, 32'd6002, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-CAS2: wait states measurably lengthen CAS2's own bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // -------------------------------------------------------------
+        // WS-Memind: DSACK wait-states composing with genuine
+        // memory-indirect EA's own 2-phase read chain (pointer read, then
+        // final read) -- its own fresh pointer chains, distinct from every
+        // other memind test in this file.
+        // -------------------------------------------------------------
+        rom[16'h3750/4] = 32'h0000_3770;
+        rom[16'h3870/4] = 32'hBEEF_0001;
+        rom[16'h2D40/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2D44/4] = {16'h3740, 16'h223C};
+        rom[16'h2D48/4] = {16'h0000, 16'h0100};
+        rom[16'h2D4C/4] = {16'h2430, 16'h1925};
+        rom[16'h2D50/4] = {16'h0010, CLR_L_D5};
+        rom[16'h2D54/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2D58/4] = {16'd7001, NOP_OP};
+        rom[16'h3790/4] = 32'h0000_37A0;
+        rom[16'h38A0/4] = 32'hBEEF_0002;
+        rom[16'h2D80/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2D84/4] = {16'h3780, 16'h223C};
+        rom[16'h2D88/4] = {16'h0000, 16'h0100};
+        rom[16'h2D8C/4] = {16'h2430, 16'h1925};
+        rom[16'h2D90/4] = {16'h0010, CLR_L_D5};
+        rom[16'h2D94/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2D98/4] = {16'd7002, NOP_OP};
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2D40; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-Memind-1: wait_states=0, D5=7001", 5, 32'd7001, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2D80; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-Memind-2: wait_states=10, D5=7002", 5, 32'd7002, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-Memind: wait states measurably lengthen memory-indirect EA's own bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);

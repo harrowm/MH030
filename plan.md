@@ -3875,6 +3875,67 @@ phase, lowest priority of the three per the original follow-up list.
 
 ---
 
+## Phase 126 — Closing the breadth gaps: more interrupt-mid-FSM, wait-state, and back-to-back sources
+
+**Goal**: user follow-up after refreshing `docs/stalls.md`, asking to add test cases
+covering the three "breadth, not depth" items that document's own closing section
+flagged: interrupt-mid-FSM (3 sources), DSACK wait-states-on-FSM-beats (2 sources),
+and back-to-back FSM composition (1 pair).
+
+**Interrupt-mid-FSM: 3 → 7 sources.** Added `INT-mid-TAS`, `INT-mid-MOVEP`,
+`INT-mid-CAS` (single-address), and `INT-mid-ADDX` (predecrement dual-address),
+reusing `run_int_mid_test` (Phase 125) with fresh scratch data for each so no test
+depends on another's leftover register/memory state. Chosen to cover distinct FSM
+shapes not yet exercised by this mechanism: TAS/CAS are indivisible RMW locks (2
+cycles), MOVEP is byte-interleaved (4 cycles), ADDX is the dual-address predecrement
+shape shared with ABCD/SBCD/PACK (3 cycles: read src, read dst, write dst). All 4
+passed cleanly with the exact expected bus-cycle count recognized before the interrupt
+was taken, confirming `int_defer`'s decode-agnosticism empirically for these shapes too.
+
+**Wait-states-on-FSM-beats: 2 → 4 sources.** Added `WS-CAS2` and `WS-Memind`, mirroring
+`WS-MOVEM`'s exact structure (explicit `decode_pc` gating before each of two fresh
+instances, `wait_states` set before the gating loop). CAS2 uses a guaranteed compare
+mismatch (Dc1/Dc2 cleared, memory pre-loaded nonzero) for a deterministic 2-cycle
+read-only execution, matching B-6's own reasoning. Both used `wait_states=10` directly
+(MOVEM's own Phase 125 value) rather than re-deriving from scratch, and both showed a
+clearly measurable delta on the first attempt (CAS2: 319→399 ticks; Memind: 287→359
+ticks) — no absorption-effect surprise this time, though per `docs/stalls.md`'s own
+warning this was verified, not assumed.
+
+**Back-to-back FSM composition: 1 → 3 pairs.** Added `T4c` (MOVEP→CAS, byte-interleaved
+write handing directly to a single-address RMW lock) and `T4d` (genuine memory-indirect
+EA → TAS, a 2-phase read chain handing directly to an RMW lock, both anchored on the
+same A0 since memory-indirect never modifies address registers). `T4d` also verifies
+D2 receives the correct value through both indirection levels and that TAS's own write
+lands correctly on the shared base register's byte — real cross-boundary data-flow
+checks, not just "did it unstick," mirroring B-22's own rigor (Phase 124).
+
+**One real bug found, in the test, not the RTL**: `T4c`'s first attempt used the bare
+`run_and_check` task (no `decode_pc` pre-wait) directly after `INT-mid-ADDX`, and
+measured 11 data-space bus cycles instead of the expected 6. Root-caused via temporary
+cycle-completion tracing (bracketed to the test's own window via a debug-enable flag):
+the extra activity was the *previous* interrupt handler's own trailing RTE stack reads
+still landing — `run_int_mid_test`'s own settle-wait (`decode_pc > handler_ret_pc &&
+!eu_busy`) can apparently return with `decode_pc` having only just crossed the
+threshold while the handler's RTE is still retiring, the same "`decode_pc` can be ahead
+of what's actually completing in EX" lesson Phase 125 hit for `WS-MOVEM`. Fixed by
+adding the identical explicit `decode_pc`-gating loop before `T4c`'s (and, defensively,
+`T4d`'s) own bus-cycle measurement window — T4a itself never needed this since it runs
+directly after an ordinary instruction with no async event in between, but anything
+following an interrupt-mid-FSM test does.
+
+**Results**: `make test` 34/34 (`stall_fsm` now 245 checks total, was 205), `make
+cosim_grp` 8/8. No RTL changed this phase (`tb/stall_fsm_tb.sv` only, all temporary
+debug tracing removed before commit) — no Harte re-run needed. Interrupt-mid-FSM: 7
+sources now (CAS2/MOVEM/Memind/TAS/MOVEP/CAS/ADDX). Wait-states-on-FSM-beats: 4 sources
+now (TAS/MOVEM/CAS2/Memind). Back-to-back FSM composition: 3 pairs now
+(TAS→MOVEM/MOVEP→CAS/Memind→TAS). None of these are exhaustive sweeps of the full
+~19-23 `ex_mem_stall` source list (unlike Category I's own BERR-abort rollout) — see
+`docs/stalls.md`'s own updated "What's left" section for what remains if more depth is
+wanted later.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
