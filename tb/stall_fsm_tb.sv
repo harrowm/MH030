@@ -1685,7 +1685,63 @@ module stall_fsm_tb;
         rom[16'h20C4/4] = {MOVEA_L_IMM_A0, 16'h0000};
         rom[16'h20C8/4] = {16'h3600, PMOVE_A0_OP};
         rom[16'h20CC/4] = {PMOVE_CRP_EXT, NOP_OP};
-        run_berr_mid_test("BERR-mid-PMOVE64", 32'h0000_20C0);
+        run_berr_mid_test("BERR-mid-PMOVE64", 32'h0000_20C0, .next_addr(32'h0000_2100));
+
+        // -----------------------------------------------------------------
+        // BERR-mid-<X> for the full-format mode=110 (memory-indirect EA)
+        // decode paths added by the Phase 115-122 rollout. None of these
+        // change mem_abort itself (still just mem_berr||exc_active,
+        // decode-content-agnostic), so recovery is expected to work
+        // identically to the brief-form cases already covered above -- the
+        // point of these three is to actually exercise that empirically for
+        // the two genuinely new/modified mechanisms this rollout built,
+        // rather than assume it from mem_abort's own decode-agnosticism.
+        //
+        // BERR-mid-CMP2-full: full-format CMP2.L (bd,A0,D1.L),D2 (Phase 120
+        // -- CMP2/CHK2 had no indexed-EA decode at all before this rollout).
+        // Same skip_cycles=0 shape as the existing brief-form BERR-mid-CMP2
+        // above: CMP2 is inherently 2-phase (lower bound read, then upper
+        // bound read), so injecting as soon as the *first* read's own
+        // completion is observed faults the *second* -- exactly the phase
+        // Phase 120's dyn_bit_get_Dn gating fix (deferring the Xn->Rn swap
+        // to that second read's own ack) actually touches. A0=$3000
+        // (reused, unpopulated -- same as B-13/the brief CMP2 test above;
+        // only recovery is checked, not the compared value).
+        // -----------------------------------------------------------------
+        rom[16'h2100/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2104/4] = {MOVEA_L_IMM_A0, 16'h3000};
+        rom[16'h2108/4] = {16'h7200, 16'h04F0};  // MOVEQ #0,D1 ; CMP2.L opcode (indexed)
+        rom[16'h210C/4] = {16'h2000, 16'h1920};  // ext1: Rn=D2 ; ext2: full, Xn=D1
+        rom[16'h2110/4] = {16'h0100, NOP_OP};    // ext3: bd=$100
+        run_berr_mid_test("BERR-mid-CMP2-full", 32'h0000_2100, .next_addr(32'h0000_2140));
+
+        // BERR-mid-MOVEmm-idx-absw-full: MOVE.L ($3000).W,($100,A0,D1.L)
+        // (Phase 122 -- abs.W-src, indexed dst, full-format bd via the new
+        // q3_word-based extraction, is_move_mm_idx_dst mechanism). This is
+        // a read-then-write sequence (src read, then the write to the
+        // full-format-computed dst); skip_cycles=0 injects right after the
+        // read completes, faulting the write -- the phase whose own
+        // address depends on the new q3_word bd value.
+        rom[16'h2140/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2144/4] = {MOVEA_L_IMM_A0, 16'h0200};
+        rom[16'h2148/4] = {16'h7200, 16'h21B8};  // MOVEQ #0,D1 ; MOVE.L opcode
+        rom[16'h214C/4] = {16'h3000, 16'h1920};  // src abs.W=$3000 ; ext2: full, Xn=D1
+        rom[16'h2150/4] = {16'h0100, NOP_OP};    // bd=$100
+        run_berr_mid_test("BERR-mid-MOVEmm-idx-absw-full", 32'h0000_2140, .next_addr(32'h0000_2180));
+
+        // BERR-mid-MOVEmm-idx-reg-full: MOVE.L D2,($100,A0,D1.L) (Phase 122
+        // -- register-src, indexed dst, full-format bd via the ordinary
+        // fi_bd/is_memind_full machinery, dec_is_mem_rmw mechanism). This
+        // arm's RMW read-modify-write shape means skip_cycles=0 injects
+        // after the (pre-existing, documented in tests/memind15.s) extra
+        // read that precedes the real write, so the fault still lands on
+        // the write itself -- the phase that depends on the new full-format
+        // dst address.
+        rom[16'h2180/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2184/4] = {MOVEA_L_IMM_A0, 16'h0200};
+        rom[16'h2188/4] = {16'h7200, 16'h2182};  // MOVEQ #0,D1 ; MOVE.L opcode
+        rom[16'h218C/4] = {16'h1920, 16'h0100};  // ext2: full, Xn=D1 ; bd=$100
+        run_berr_mid_test("BERR-mid-MOVEmm-idx-reg-full", 32'h0000_2180);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

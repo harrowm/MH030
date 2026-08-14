@@ -3682,6 +3682,55 @@ extra-read quirks (pre-existing, don't affect correctness).
 
 ---
 
+## Phase 123 — BERR-mid-\<X\> test coverage for the new full-format EA paths
+
+**Goal**: user follow-up after Phase 122 — asked whether the pipeline-stall/BERR-abort
+rollout (Phases 103-114, confirmed closed for all ~19 `ex_mem_stall` sources as of
+Phase 113/114) had any gaps opened by this session's own new full-format decode work
+(Phases 115-122). Answer given at the time: `mem_abort` (`eu_seq.sv`) is defined as
+`mem_berr || exc_active` — a purely bus/exception-level signal, completely independent
+of which addressing mode or EA-offset value is in play — and none of Phases 115-122
+touched `mem_abort`, `mem_berr`, `ex_mem_stall`'s own abort branches, or any
+per-instruction abort-handling clause (e.g. CMP2's own `cmp2_run_r && mem_abort`
+branch was untouched throughout Phase 120's fix). So no *new* gap was expected, but it
+had not been empirically exercised with a dedicated test for the new paths
+specifically — this phase closes that gap in the test coverage itself (not the RTL,
+which needed no changes).
+
+**Added 3 new tests to `tb/stall_fsm_tb.sv`**, reusing the existing
+`run_berr_mid_test()` shared task (Phase 108/114) and `claim_park()`/`PARK_ADDR`
+mechanism unchanged:
+
+1. **BERR-mid-CMP2-full** — full-format `CMP2.L (bd,A0,D1.L),D2` (Phase 120's own new
+   decode). Same `skip_cycles=0` shape as the pre-existing brief-form BERR-mid-CMP2:
+   CMP2 is inherently 2-phase (lower bound read, then upper bound read), so injecting
+   as soon as the first read's own completion is observed faults the *second* —
+   exactly the phase Phase 120's `dyn_bit_get_Dn` gating fix (deferring the Xn→Rn swap
+   to that second read's own ack) actually touches.
+2. **BERR-mid-MOVEmm-idx-absw-full** — `MOVE.L ($3000).W,($100,A0,D1.L)` (Phase 122's
+   abs.W-src, indexed-dst, full-format bd via the new `q3_word`-based extraction).
+   `skip_cycles=0` faults the write phase, whose address depends on the new bd value.
+3. **BERR-mid-MOVEmm-idx-reg-full** — `MOVE.L D2,($100,A0,D1.L)` (Phase 122's
+   register-src, indexed-dst, full-format bd via the ordinary `fi_bd`/`is_memind_full`
+   machinery). Same shape; the pre-existing extra-read quirk (`tests/memind15.s`)
+   means the fault still lands on the real write, one bus cycle later than for a plain
+   write-only arm.
+
+All three reused the established minimal-setup convention (no data pre-population
+needed — `run_berr_mid_test`'s own checks only verify recovery, not the compared
+value, matching how the pre-existing B-13/BERR-mid-CMP2 tests already read from an
+unpopulated `$3000`).
+
+**Results**: all 3 new tests passed on the first run — every check (injected mid-
+sequence, BIU-layer fault detection, exception taken, correct vector, handler
+completion, EU recovery) succeeded for all three new full-format paths, confirming
+`mem_abort`'s decode-agnosticism empirically rather than just by inspection. `make
+test` 34/34 (including `stall_fsm`'s own suite, now 178 checks total), `make
+cosim_grp` 8/8. No RTL changed this phase (`tb/stall_fsm_tb.sv` only) — a full Harte
+re-run wasn't needed and wasn't run.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
