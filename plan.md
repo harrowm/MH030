@@ -3806,6 +3806,75 @@ or instruction form it claims to.
 
 ---
 
+## Phase 125 — Multi-source coverage for interrupt-mid-FSM and wait-states-on-FSM-beats
+
+**Goal**: user follow-up after Phase 124, asking a third time whether any stall gaps
+remained. This time verified via `grep` rather than memory and found three generic,
+architecture-level mechanisms each backed by exactly one data point: interrupt arrival
+mid-FSM tested only against CAS2 (Phase 105/108); DSACK wait-state composition on a
+real FSM's own beats tested only against TAS (Phase 107's T4b); back-to-back FSM-to-FSM
+composition tested only against the TAS→MOVEM pair (Phase 107's T4a). Lower priority
+than Phase 124's per-instruction RTL-coverage gap (these are generic mechanisms, not
+per-instruction decode paths), but the user asked to add more data points anyway.
+
+**Added a new shared task, `run_int_mid_test`**, factored out of the pre-existing
+inline interrupt-mid-CAS2 test the same way `run_berr_mid_test` was itself factored out
+in Phase 108/114. Unlike `run_berr_mid_test`, it doesn't use `claim_park`/`PARK_ADDR` —
+the shared vector-31 handler ends in a genuine `RTE`, returning control to the
+*original* instruction stream, so callers just continue via ordinary NOP fall-through
+afterward. Injects a level-7 NMI on the FSM's first `data_ds_count` change, deasserts
+once `exc_active` is observed, and requires both the caller's own dependent-instruction
+marker and the handler's own `D6==12345` completion marker to break the watch loop —
+also checking the exact bus-cycle count taken *before* the interrupt was recognized, to
+independently confirm the FSM's own atomicity for each new source.
+
+**`INT-mid-MOVEM`** (`MOVEM.L (A0)+,D0-D1`, interrupt injected on the first of its 2
+data reads) and **`INT-mid-Memind`** (`tests/memind2.s`'s own genuine memory-indirect
+`MOVE.L ([$10,A0],D1.L),D2` encoding, reused verbatim per Phase 124's own precedent)
+both passed cleanly on the first fully-correct attempt — applying the lessons already
+learned in Phase 124 (correct 2-word `MOVEA.L` immediate encoding, in-bounds `$3900`-
+region addresses, D5/D6 explicitly cleared before triggering so a transition is
+actually being checked, not a stale leftover value).
+
+**`Wait-states-on-MOVEM-beats` (WS-MOVEM)** needed real debugging. Two instances of
+`MOVEM.L (A0)+,D0-D1` (own fresh source data each), one at `wait_states=0`, one at a
+nonzero value, gated by an explicit "wait for `decode_pc` to reach this instance's own
+start" loop before timing (avoiding the walk-overhead confound documented below).
+First attempt used `wait_states=3` (T4b's own value) and came back with `elapsed0=223`,
+`elapsed3=223` — bit-for-bit identical, not just close. Two rounds of re-ordering
+`wait_states=3`'s assignment relative to the `decode_pc` wait loop (after it, then
+before it) produced no change at all, ruling out a sequencing/timing-order bug.
+
+Root-caused via temporary cycle-completion tracing on the testbench's own
+`ds_active_r`/`ws_cnt_r`/`wait_states` signals (added right after `dsack0_n`/
+`dsack1_n`'s declaration, printing on every `ds_active_r` low-to-high edge): confirmed
+`ws_cnt_r` genuinely counts up to 3 for both of instance 2's own MOVEM data reads (the
+DSACK-stretch mechanism itself fires correctly, contradicting the sequencing-bug
+hypothesis) — but a second layer of tracing (printing `$time` at "`decode_pc` reached
+start" and "`D5` observed" for both instances) showed the two instances' own
+start-to-finish durations were identical to the nanosecond (2241ns each), despite
+instance 2's reads independently measuring +30ns each via the per-cycle trace. The
+explanation: the S-state FSM doesn't sample DSACK until several `clk_4x` ticks into a
+bus cycle regardless of how early it's actually asserted, and MOVEM's own baseline
+per-beat latency has enough slack in that window to fully absorb 3 extra ticks with
+zero visible effect on total elapsed time — a genuine, instruction-shape-dependent
+absorption effect, not a bug in the DSACK-stretch mechanism, in the test's sequencing,
+or in MOVEM's own RTL. TAS's own (shorter) baseline in T4b apparently has less slack,
+which is why the identical `wait_states=3` value happens to work there.
+Empirically swept `wait_states=20` (`223`→`335`, clearly visible) then bisected down to
+`wait_states=10` (`223`→`279`, still comfortably visible) as the test's final value —
+enough margin above the absorption threshold without chasing its exact boundary.
+
+**Results**: `make test` 34/34 (`stall_fsm` now 205 checks total, was 187), `make
+cosim_grp` 8/8. No RTL changed this phase (`tb/stall_fsm_tb.sv` only, all temporary
+debug tracing removed before commit) — a full Harte re-run wasn't needed and wasn't
+run. Interrupt-mid-FSM coverage: CAS2, MOVEM, and genuine memory-indirect EA (3
+sources, was 1). Wait-states-on-FSM-beats coverage: TAS and MOVEM (2 sources, was 1).
+Back-to-back FSM composition remains single-source (TAS→MOVEM) — not picked up this
+phase, lowest priority of the three per the original follow-up list.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

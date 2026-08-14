@@ -436,6 +436,85 @@ module stall_fsm_tb;
         if (next_addr != 32'h0) claim_park(next_addr);
     endtask
 
+    // Shared interrupt-mid-<instruction> watch loop (plan.md Phase 125),
+    // factored out the same way run_berr_mid_test was (Phase 108/114) once
+    // a second and third instance of the original interrupt-mid-CAS2 test
+    // (Phase 105/108, still inline just below and deliberately left that
+    // way -- it also establishes the shared vector-31 handler, same
+    // reasoning BERR-mid-CAS2's own inline block has for the vector-2
+    // handler) needed the identical shape. Unlike run_berr_mid_test, this
+    // one does NOT use claim_park/PARK_ADDR: the handler here ends in a
+    // real RTE, returning control to the *original*, still-live instruction
+    // stream (not abandoning it), so the caller's own code simply
+    // continues via ordinary NOP fall-through afterward -- no redirect
+    // mechanism needed. Caller is responsible for: placing this test's own
+    // code at code_start_addr, leading with CLR.L D6 (so the shared
+    // handler's D6=12345 marker is a genuine 0->12345 transition, not a
+    // stale leftover from an earlier interrupt-mid-<X> test) then CLR.L D5
+    // (or whichever dep_reg_idx register) before the FSM instruction, and
+    // ending with a single non-idempotent dependent instruction (ADDI.L,
+    // not CLR+ADDI) targeting dep_reg_idx -- exactly the shape
+    // interrupt-mid-CAS2 itself established to catch the Phase 108 dispatch
+    // race, were it ever reintroduced.
+    task automatic run_int_mid_test(
+        input string        test_name,
+        input logic [31:0]  code_start_addr,
+        input int            expected_bus_cycles,
+        input int            dep_reg_idx,
+        input logic [31:0]  dep_exp_val,
+        input logic [31:0]  handler_ret_pc
+    );
+        int t, d0, ds_at_exc;
+        logic injected, exc_seen;
+
+        for (t = 0; t < 20000 && u_top.ifu_decode_pc < code_start_addr; t++)
+            @(posedge clk_4x);
+        check({test_name, ": reached own code"}, u_top.ifu_decode_pc >= code_start_addr);
+
+        d0 = data_ds_count;
+        injected  = 1'b0;
+        exc_seen  = 1'b0;
+        ds_at_exc = -1;
+        for (t = 0; t < 20000; t++) begin
+            @(posedge clk_4x); #1;
+            // Inject the moment this FSM's own first bus cycle is observed.
+            if (!injected && (data_ds_count != d0)) begin
+                injected = 1'b1;
+                ipl_n = 3'b000;   // level 7 (NMI)
+            end
+            // Drop back to idle the cycle after the controller first acts
+            // on it (real interrupt sources deassert once acknowledged;
+            // holding it forever would re-recognize at every subsequent
+            // instruction boundary).
+            if (injected && !exc_seen && u_top.exc_active) begin
+                exc_seen  = 1'b1;
+                ds_at_exc = data_ds_count;
+                ipl_n     = 3'b111;
+            end
+            if (u_top.u_eu.u_rf.d_reg[dep_reg_idx] === dep_exp_val &&
+                u_top.u_eu.u_rf.d_reg[6] === 32'd12345)
+                break;
+        end
+        ipl_n = 3'b111;   // deassert before any later test could see it
+        // Both markers reaching their expected values does not prove the
+        // handler's own trailing RTE has executed yet (see the original
+        // interrupt-mid-CAS2 test's own header comment for the full
+        // reasoning) -- wait for the unambiguous signal instead: decode_pc
+        // has moved past the handler's own RTE address AND eu_busy is
+        // clear.
+        for (t = 0; t < 4000 &&
+             !(u_top.ifu_decode_pc > handler_ret_pc && !u_top.eu_busy); t++)
+            @(posedge clk_4x);
+        check({test_name, ": injected mid-sequence"}, injected);
+        check({test_name, ": exception was recognized"}, exc_seen);
+        check32({test_name, ": FSM's full bus sequence completed before the interrupt was taken"},
+                ds_at_exc - d0, expected_bus_cycles);
+        check32({test_name, ": FSM itself completed (dependent marker reached)"},
+                u_top.u_eu.u_rf.d_reg[dep_reg_idx], dep_exp_val);
+        check({test_name, ": interrupt handler ran and RTE'd back (D6=12345)"},
+              u_top.u_eu.u_rf.d_reg[6] === 32'd12345);
+    endtask
+
     initial begin
         rst_n = 0;
         repeat(20) @(posedge clk_4x);
@@ -1827,7 +1906,117 @@ module stall_fsm_tb;
         rom[16'h228C/4] = {16'h0000, 16'h0100};
         rom[16'h2290/4] = {16'h2430, 16'h1925};
         rom[16'h2294/4] = {16'h0010, NOP_OP};
-        run_berr_mid_test("BERR-mid-Memind", 32'h0000_2280);
+        run_berr_mid_test("BERR-mid-Memind", 32'h0000_2280, .next_addr(32'h0000_2B00));
+
+        // -----------------------------------------------------------------
+        // INT-mid-MOVEM (plan.md Phase 125): interrupt-mid-FSM coverage
+        // (previously CAS2-only, Phase 105/108) extended to a genuinely
+        // different FSM shape -- a multi-*beat* register-list load, not a
+        // dual-address atomic lock. Reuses the vector-31 handler already
+        // installed by the original interrupt-mid-CAS2 test above (D6=12345
+        // marker, ends in RTE) via the new run_int_mid_test task. D6 is
+        // reset to 0 first so the shared handler's own marker is a genuine
+        // transition, not a stale leftover value from that earlier test.
+        // MOVEM.L (A0)+,D0-D1 (2 registers = 2 bus cycles, matching B-2's
+        // own precedent) should complete its full 2-cycle sequence before
+        // the interrupt is taken -- the *same* generic int_defer mechanism
+        // Phase 108 fixed for CAS2 gates dispatch uniformly regardless of
+        // which FSM is running, so this is expected to pass; the value is
+        // in actually exercising that rather than assuming it holds.
+        // -----------------------------------------------------------------
+        rom[16'h3D10/4] = 32'h1111_2222;
+        rom[16'h3D14/4] = 32'h3333_4444;
+        rom[16'h2B00/4] = {CLR_L_D6, CLR_L_D5};
+        rom[16'h2B04/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2B08/4] = {16'h3D10, MOVEM_L_A0P};
+        rom[16'h2B0C/4] = {16'h0003, ADDI_L_D5};
+        rom[16'h2B10/4] = {16'h0000, 16'd2222};
+        run_int_mid_test("INT-mid-MOVEM", 32'h0000_2B00, 2, 5, 32'd2222, 32'h0000_008A);
+        check32("INT-mid-MOVEM: D0 loaded correctly", u_top.u_eu.u_rf.d_reg[0], 32'h1111_2222);
+        check32("INT-mid-MOVEM: D1 loaded correctly", u_top.u_eu.u_rf.d_reg[1], 32'h3333_4444);
+
+        // INT-mid-Memind (plan.md Phase 125): same interrupt-mid-FSM
+        // coverage, now for genuine memory-indirect EA (`([bd,An],Xn,od)`,
+        // Phase 124's own new addition) -- the two-level-indirection shape,
+        // genuinely different again from both CAS2 and MOVEM. Reuses
+        // B-22/BERR-mid-Memind's own already-populated pointer chain at
+        // $3900/$3910/$3A00/$3B00 (read-only access, safe to reuse). The
+        // FSM's own 2 bus cycles (pointer read, then final read) should
+        // both complete before the interrupt lands, same reasoning as
+        // INT-mid-MOVEM above.
+        rom[16'h2B40/4] = {CLR_L_D6, CLR_L_D5};
+        rom[16'h2B44/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2B48/4] = {16'h3900, 16'h223C};  // A0 imm lo=$3900 ; MOVE.L #$100,D1 opcode
+        rom[16'h2B4C/4] = {16'h0000, 16'h0100};  // D1 imm hi ; D1 imm lo=$100
+        rom[16'h2B50/4] = {16'h2430, 16'h1925};  // MOVE.L (mem-indirect),D2 opcode ; ext1
+        rom[16'h2B54/4] = {16'h0010, ADDI_L_D5}; // bd=$10 ; ADDI.L opcode
+        rom[16'h2B58/4] = {16'h0000, 16'd3333};
+        run_int_mid_test("INT-mid-Memind", 32'h0000_2B40, 2, 5, 32'd3333, 32'h0000_008A);
+        check32("INT-mid-Memind: D2 loaded correctly through both indirection levels",
+                u_top.u_eu.u_rf.d_reg[2], 32'hCAFE_F00D);
+
+        // -----------------------------------------------------------------
+        // Wait-states-on-MOVEM-beats (plan.md Phase 125): DSACK wait-state
+        // composition on a real FSM's own multi-*beat* bus cycles
+        // (previously TAS-only, Phase 107's T4b -- a 2-phase RMW, not a
+        // multi-beat register-list transfer). Two separate MOVEM.L
+        // (A0)+,D0-D1 instances (own fresh source data each, same
+        // "separate instance per wait_states value" shape T4b itself
+        // established -- the global `wait_states` knob affects whichever
+        // access is in flight when it's changed, not a re-execution of the
+        // same instruction), one at wait_states=0, one at wait_states=10.
+        //
+        // wait_states=3 (T4b's own value, and this test's own first two
+        // attempts) measurably lengthens TAS's own bus beats but produces
+        // *zero* visible difference here (confirmed via temporary
+        // cycle-completion tracing: ws_cnt_r genuinely does count up to 3
+        // for both of MOVEM's own reads, so the DSACK-stretch mechanism
+        // itself is firing correctly) -- not a sequencing bug at all, but a
+        // genuine, instruction-shape-dependent absorption effect: the S-state
+        // FSM doesn't sample DSACK until several clk_4x ticks into a bus
+        // cycle regardless of how quickly it's actually asserted, and
+        // MOVEM's own baseline per-beat latency happens to have enough slack
+        // in that window to fully swallow 3 extra ticks with no visible
+        // effect on total elapsed time, while TAS's own (shorter) baseline
+        // does not. Swept wait_states=20 (elapsed 223->335, clearly visible)
+        // then bisected down to wait_states=10 (223->279, still comfortably
+        // visible) as a value with real margin above whatever the exact
+        // absorption threshold is, rather than chasing the precise boundary.
+        // Explicitly waiting for decode_pc to reach each instance's own
+        // start before timing (the same pattern run_berr_mid_test/
+        // run_int_mid_test already use) avoids an earlier, unrelated
+        // confound where the walk-to-reach-the-code overhead (this pair
+        // follows two interrupt-mid-FSM tests whose own settle-wait can
+        // return with decode_pc still some distance from instance 1's own
+        // code) swamped everything -- first raw attempt measured
+        // elapsed0=575 vs elapsed3=319 (backwards) before this fix.
+        // -----------------------------------------------------------------
+        rom[16'h3D20/4] = 32'h5555_6666;
+        rom[16'h3D24/4] = 32'h7777_8888;
+        rom[16'h2B80/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2B84/4] = {16'h3D10, MOVEM_L_A0P};
+        rom[16'h2B88/4] = {16'h0003, CLR_L_D5};
+        rom[16'h2B8C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2B90/4] = {16'd4444, NOP_OP};
+        rom[16'h2BA0/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2BA4/4] = {16'h3D20, MOVEM_L_A0P};
+        rom[16'h2BA8/4] = {16'h0003, CLR_L_D5};
+        rom[16'h2BAC/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2BB0/4] = {16'd4446, NOP_OP};
+        begin
+            int elapsed0, elapsed10, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2B80; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVEM-1: wait_states=0, D5=4444", 5, 32'd4444, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2BA0; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVEM-2: wait_states=10, D5=4446", 5, 32'd4446, 4000, elapsed10);
+            wait_states = 0;
+            check("WS-MOVEM: wait states measurably lengthen a multi-beat FSM's own bus cycles too",
+                  elapsed10 > elapsed0);
+        end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

@@ -239,8 +239,8 @@ instructions. This suite covers what that structurally leaves out:
 | RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences, plus exact hazard-stall cycle counts (2/1/0) verified via direct RTL signal reads |
 | Control-transfer stall depth | `tb/stall_hazard_tb.sv` | BRA (decode-resolved), JMP (register-indirect + absolute), taken DBF loop, JSR/RTS round trip through real memory |
 | Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | All 23 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE, and — closing the last gap, Phase 124 — genuine memory-indirect EA `([bd,An],Xn,od)`) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set; memory-indirect EA's own test goes further, verifying the loaded register actually receives the correct value read through both indirection levels |
-| DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM (TAS), rather than the consumer racing ahead |
-| Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM), then a second, deeper dispatch-race bug (Phase 108) |
+| DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM — TAS (wait_states=3) and, added Phase 125, MOVEM (needed wait_states=10: at 3, the S-state FSM's own DSACK-sampling slack fully absorbs the extra latency with zero visible effect — a genuine, instruction-shape-dependent absorption effect, not a bug, confirmed via cycle-completion tracing before bisecting to a value with real margin) |
+| Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM), then a second, deeper dispatch-race bug (Phase 108); extended to MOVEM and genuine memory-indirect EA (Phase 125) via a new shared `run_int_mid_test` task, both passing cleanly first try |
 | BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-instruction: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct; dedicated fault-injection tests added for all 12 remaining `mem_abort` sources, finding and fixing a real RTL bug along the way — only the first-ever fault in a session was reported (Phase 114); 3 more dedicated tests added (Phase 123) for the full-format mode=110 EA paths added by the Phases 115-122 rollout (full-format CMP2, and MOVE mem-to-mem indexed-dst full-format via both its abs.W-src and register-src mechanisms) — all passed on the first run, confirming empirically that `mem_abort`'s decode-content-agnosticism (`mem_berr \|\| exc_active`, untouched by any of that rollout's own changes) holds for the new paths too, not just by inspection; a final test added (Phase 124) for genuine memory-indirect EA — **every `ex_mem_stall` source of any kind now has its own dedicated BERR-mid test** — see below |
 | Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
 
@@ -424,6 +424,27 @@ testbench's own 16KB memory-model bound, silently returning garbage rather than
 erroring — caught by the new Category B test's own D2-correctness check (the first
 check in the file to verify actual data flow through a memory-indirect FSM, not just
 a marker register). See `plan.md §Phase 124` for the full debugging trail.
+
+**Phase 125 added multi-source depth** to two generic pipeline mechanisms that had
+each been backed by exactly one data point: interrupt-mid-FSM (CAS2 only) and DSACK
+wait-states composing with a real FSM's own multi-beat bus cycles (TAS only). Added a
+new shared task, `run_int_mid_test` (mirrors `run_berr_mid_test`'s own factoring, but
+ends via a genuine `RTE` back into the main instruction stream instead of
+`claim_park`), plus `INT-mid-MOVEM` and `INT-mid-Memind` (reusing `tests/memind2.s`'s
+own encoding) — both passed cleanly on the first attempt. The wait-state test needed
+real debugging: `wait_states=3` (T4b's own value) gave bit-identical elapsed counts for
+both instances across three different attempts, ruling out a sequencing bug. Temporary
+cycle-completion tracing confirmed the DSACK-stretch mechanism genuinely fires (3 extra
+ticks counted on both reads) — the real explanation is that the S-state FSM doesn't
+sample DSACK until several ticks into a bus cycle regardless of how early it's
+asserted, and MOVEM's own baseline per-beat latency has enough slack to fully absorb 3
+extra ticks with zero visible effect on total elapsed time (TAS's shorter baseline has
+less slack, which is why the same value works for T4b) — a genuine,
+instruction-shape-dependent absorption effect, not a bug anywhere. Settled on
+`wait_states=10` for comfortable margin above the absorption threshold. Interrupt-mid-
+FSM coverage: 3 sources now (CAS2/MOVEM/memory-indirect EA). Wait-states-on-FSM-beats:
+2 sources now (TAS/MOVEM). Back-to-back FSM composition remains single-source
+(TAS→MOVEM). No RTL changed. See `plan.md §Phase 125` for the full debugging trail.
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,
