@@ -247,6 +247,34 @@ module m68030_seq (
     logic [2:0] cmp2chk2_ext_count;
     assign cmp2chk2_ext_count = 3'd2 + movem_bd_words + movem_od_words;
 
+    // Phase 122 (Sub-scope A, plan.md): MOVE mem-to-mem indexed-dst, for the
+    // two source shapes with a *fixed* (not variable per sub-mode) 1-word
+    // baseline -- abs.W src and (d16,PC) src. Both already have baseline 2
+    // (src's own 1 word + dst's own brief descriptor), same MOVEM/CMP2CHK2
+    // "q1=other data, q2=EA descriptor" shape (dst's own descriptor is
+    // already naturally in ifu_ext_data's low half here, no swap needed,
+    // since is_move_mm never joins mode110_ea_src) -- reuses
+    // peek_fi_full_movem/movem_bd_words/movem_od_words directly. Register
+    // src (Sub-scope A's 3rd tractable case) has a genuinely different,
+    // 1-word baseline instead -- see is_move_reg_idx_dst_mode110 above,
+    // which folds into the ordinary is_memind_full/fi_bd machinery unchanged
+    // rather than needing this additive treatment. Imm/abs.L src (2-word
+    // baseline, dst brief already at q3_word) and plain-memory src (baseline
+    // varies 0-1 per sub-mode, entangling with this same q3 slot) are
+    // deliberately out of scope this phase -- both would need a genuine q4,
+    // matching the boundary Phase 121 already drew around long bd/od.
+    logic is_move_mm_absw_idxdst_full, is_move_mm_pcrel_idxdst_full;
+    assign is_move_mm_absw_idxdst_full =
+        (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_mode == 3'b111) && (f_reg == 3'b000) &&
+        (f_move_dst_mode_s == 3'b110) && peek_fi_full_movem;
+    assign is_move_mm_pcrel_idxdst_full =
+        (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_mode == 3'b111) && (f_reg == 3'b010) &&
+        (f_move_dst_mode_s == 3'b110) && peek_fi_full_movem;
+    logic [2:0] move_mm_idxdst_ext_count;
+    assign move_mm_idxdst_ext_count = 3'd2 + movem_bd_words + movem_od_words;
+
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
     // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
@@ -331,12 +359,29 @@ module m68030_seq (
     assign is_jsr_idx = (f_group == 4'h4) && !f_dir && (f_dn == 3'b111) &&
                         (f_ss == 2'b10) && (f_mode == 3'b110);
 
+    // Phase 122 (Sub-scope A, plan.md): MOVE Dn/An,(d8,An,Xn) -- register
+    // source, indexed dst. Unlike the other MOVE-mem-to-mem indexed-dst
+    // arms (abs.W/PC-rel/imm/abs.L src, which already need 2+ baseline ext
+    // words since the source itself occupies one), this arm's src is a
+    // plain register -- zero extra src words -- so its own baseline is
+    // exactly 1 (just the dst's own brief descriptor), identical in shape
+    // to every single-EA-word family from Stages 1-3. Folds straight into
+    // the existing mode110_ea_src/is_memind_full/fi_bd override machinery
+    // unchanged, unlike every other MOVE-mem-to-mem arm which would need
+    // MOVEM/CMP2CHK2-style additive q3_word arithmetic instead (deferred,
+    // not attempted this phase -- see plan.md's own scope boundary).
+    logic is_move_reg_idx_dst_mode110;
+    assign is_move_reg_idx_dst_mode110 =
+        (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_move_dst_mode_s == 3'b110) && (f_mode == 3'b000 || f_mode == 3'b001);
+
     logic mode110_ea_src;
     assign mode110_ea_src = is_move_idx_src || is_tas_mode110 || is_nbcd_mode110 ||
                             is_negx_clr_neg_not_tst_mode110 || is_shift_mode110 ||
                             is_alu_mem_src_mode110 || is_dyn_bit_mode110 ||
                             is_chk_mode110 || is_scc_mode110 || is_move_sr_ccr_mode110 ||
                             is_addq_subq_mode110 || is_lea_idx || is_jmp_idx || is_jsr_idx ||
+                            is_move_reg_idx_dst_mode110 ||
                             is_pea_mode110;
     logic is_memind_full;
     assign is_memind_full = mode110_ea_src && peek_fi_full;
@@ -521,6 +566,8 @@ module m68030_seq (
             ext_count = movem_ext_count;
         else if (is_cmp2chk2_idx_full)
             ext_count = cmp2chk2_ext_count;
+        else if (is_move_mm_absw_idxdst_full || is_move_mm_pcrel_idxdst_full)
+            ext_count = move_mm_idxdst_ext_count;
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)

@@ -362,19 +362,23 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
 # TAS+NBCD), memind6.s (Phase 116: CLR+ASL), memind8.s (Phase 117: dynamic
-# BSET), and memind9.s (Phase 118: LEA/CHK/ADDQ.L/MOVE-to-CCR) are
-# deliberately *not* wired in here -- each hits its own flavor of a benign,
-# pre-existing DUT-vs-Musashi bus-trace difference unrelated to correctness
-# (see each file's own header comment: memind/memind4/memind6/memind9 have
-# a prefetch-interleave timing difference depending on the tested
-# instruction's own shape; memind5's TAS half and memind8's BSET both hit
-# variants of the same *different*, also pre-existing gap -- the testbench's
-# bus logger shows the full 32-bit internal register for a byte-sized/
-# locked-RMW transfer instead of just the relevant byte, confirmed via a
-# plain baseline `TAS (A0)` test showing the identical gap even with zero of
-# any of these phases' own changes involved). All six kept in tests/ as
-# standalone, still-useful hand-run reproductions rather than wired into an
-# automated target that would need to special-case each one's own reason.
+# BSET), memind9.s (Phase 118: LEA/CHK/ADDQ.L/MOVE-to-CCR), memind14.s
+# (Phase 122: MOVE mem-to-mem indexed-dst full-format bd, abs.W-src and
+# (d16,PC)-src forms), and memind15.s (Phase 122: same, register-src form)
+# are deliberately *not* wired in here -- each hits its own flavor of a
+# benign, pre-existing DUT-vs-Musashi bus-trace difference unrelated to
+# correctness (see each file's own header comment: memind/memind4/memind6/
+# memind9/memind14 have a prefetch-interleave timing difference depending
+# on the tested instruction's own shape; memind5's TAS half, memind8's
+# BSET, and memind15's register-src MOVE mem-to-mem all hit variants of the
+# same *different*, also pre-existing gap -- an extra bus read (or, for
+# byte-sized transfers, the testbench's bus logger showing the full 32-bit
+# internal register instead of just the relevant byte) on indexed-EA
+# RMW/locked writes, confirmed via a plain baseline `TAS (A0)` test showing
+# the identical gap even with zero of any of these phases' own changes
+# involved). All eight kept in tests/ as standalone, still-useful hand-run
+# reproductions rather than wired into an automated target that would need
+# to special-case each one's own reason.
 winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
 	./tools/m68ksim tests/memind$*.hex 300 > $@
 

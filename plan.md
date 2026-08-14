@@ -3612,6 +3612,76 @@ largest and most novel piece.
 
 ---
 
+## Phase 122 — MOVE mem-to-mem dst-side full-format EA, Sub-scope A (Item 3, final item)
+
+**Goal**: third and final item of the user-approved 3-item follow-up plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`). `eu_seq.sv`'s `is_move_mm`
+(mem-to-mem MOVE) indexed-dst decode has ~6 case arms depending on the *source*
+operand's own shape (register, abs.W, PC-relative, immediate, abs.L, plain memory);
+the plan's own Sub-scope A targeted the "simple-src forms," deferring the
+combinatorial both-sides-indexed arm entirely.
+
+**Scope narrowed further during design**, before writing any code: each arm's own
+extension-word baseline turns out to matter more than the plan anticipated. Register
+src has a *fixed* 1-word baseline (zero extra src words) — the exact same shape as
+every single-EA-word family from Stages 1-3, folding straight into the existing
+`mode110_ea_src`/`is_memind_full`/`fi_bd` override machinery unchanged. Abs.W src and
+`(d16,PC)` src also have a *fixed* baseline, but 2 words (1 src + 1 dst descriptor) —
+matching Phase 119/120's MOVEM/CMP2CHK2 "q1=other data, q2=EA descriptor" shape
+exactly, needing the same additive `q3_word`-based extraction (dst's own descriptor is
+already naturally in the low half without any swap, since `is_move_mm` never joins
+`mode110_ea_src`). Immediate src and abs.L src both already consume 2 words *and*
+already use `q3_word` for their own brief dst descriptor — a full-format dst there
+would need a genuine fourth word (`q4`), the exact "needs new extension-word
+plumbing" boundary Phase 121 drew around long bd/od; out of scope. Plain-memory src
+(`(An)`/`(An)+`/`-(An)`/`(d16,An)`) has a *variable* 0-or-1-word baseline depending on
+its own sub-mode, entangling with the same q3 slot in a way that would need
+per-sub-mode-conditional wiring; deferred as meaningfully higher risk than the other
+three, not attempted this phase. **Delivered scope: register src, abs.W src, and
+`(d16,PC)` src — 3 of the original plan's ~5 targeted arms.**
+
+**`m68030_seq.sv`**: `is_move_reg_idx_dst_mode110` (register src; folds into the
+existing `mode110_ea_src` OR-list, baseline 1) and `is_move_mm_absw_idxdst_full` /
+`is_move_mm_pcrel_idxdst_full` (abs.W/PC-rel src; new additive gate reusing
+`peek_fi_full_movem`/`movem_bd_words`/`movem_od_words` from Phase 119/120 directly,
+`move_mm_idxdst_ext_count = 2 + movem_bd_words + movem_od_words`), wired into the
+`ext_count` priority chain ahead of `is_memind_full`.
+
+**`eu_seq.sv`**: register-src arm's `dec_ea_offset` uses the standard
+`fi_is_full ? fi_bd : <brief>` template unchanged (no new machinery — its baseline
+already matches what `fi_bd` expects). Abs.W-src and PC-rel-src arms' own
+`dec_dst_ea_offset` need the MOVEM/CMP2CHK2-style `q3_word` extraction instead (not
+the shared `fi_bd`, which would misread the abs.W/`d16` value at `ext_data[31:16]` as
+if it were a bd word).
+
+**Tests**: `tests/memind14.s` (abs.W-src and PC-rel-src, both full-format word-bd) —
+both writes (`W $304`/`W $404`) match Musashi exactly; hits the same benign
+prefetch-interleave reordering already documented for `memind.s`/`memind4.s`/
+`memind6.s`/`memind9.s`, hand-verified rather than automated. `tests/memind15.s`
+(register-src) — the write matches exactly too, but this arm's own RMW mechanism
+(needed to split `rd_a`=An/`rd_b`=Xn during the read) performs an extra bus read
+before the write, confirmed present even for this arm's *brief* form via a standalone
+throwaway repro — the same pre-existing quirk already documented for CLR.L (Phase
+121) and MOVE SR,(ea) (Phase 118); hand-verified, not automated.
+
+**Results**: `make test` 34/34, `make cosim_grp` 8/8, `make cosim_memind` still 7/7
+(no new sites cleanly automatable — both new tests hand-verified, same as their
+Stage 1-3 precedents), and a full 124-suite Harte re-run (Verilator batch backend) —
+**PASS 702142, FAIL 2 (the same pre-existing documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0**, matching the Phase 112 baseline exactly, zero regressions — a
+particularly meaningful gate here since MOVE.b/w/l/q are among the most heavily
+Harte-exercised instruction families in the corpus, even though the full-format-dst
+case itself has zero Harte coverage (68000-captured corpus).
+
+**This closes the user-approved 3-item follow-up plan.** Remaining open, deliberately
+out of scope (documented, not attempted): MOVE mem-to-mem's imm-src/abs.L-src arms and
+plain-memory-src arm (all needing either a genuine 4th extension word or
+per-sub-mode-conditional wiring); genuine memory-indirect combined with long bd/od for
+any family; MOVEM's own long-bd support; the MOVE SR,(ea) and CLR-to-indexed-EA
+extra-read quirks (pre-existing, don't affect correctness).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

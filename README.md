@@ -384,10 +384,31 @@ rollout); MOVEM's own long-bd would need a real fourth extension word, also
 out of scope. Full Harte re-run at the Phase 112 baseline, zero regressions. See
 `plan.md §Phase 121` for the full writeup.
 
-**Deliberately out of scope, remaining as the follow-up plan's Item 3** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): MOVE
-mem-to-mem's dst-side full-format support (needs two independent full-format EA
-states simultaneously) — the last, largest, and most novel piece in this rollout.
+**Phase 122** delivered MOVE mem-to-mem's dst-side full-format support — the third
+and final item of the follow-up plan, closing the entire memory-indirect/full-format
+mode=110 EA rollout (Phases 115-122). `is_move_mm`'s indexed-dst decode has ~6 case
+arms by source shape; scope narrowed further during design based on each arm's own
+extension-word baseline. Register src has a fixed 1-word baseline, folding straight
+into the existing `mode110_ea_src`/`fi_bd` machinery unchanged. Abs.W src and
+`(d16,PC)` src have a fixed 2-word baseline matching MOVEM/CMP2CHK2's own shape,
+reusing their `peek_fi_full_movem`/`movem_bd_words`/`movem_od_words` machinery
+directly. Imm src, abs.L src (already need `q3_word` for their own brief dst,
+leaving no free word for a full-format bd — would need a genuine 4th word) and
+plain-memory src (variable baseline per sub-mode) were deferred as needing either
+new hardware or materially higher wiring risk — **3 of the original ~5 targeted arms
+delivered**. Verified via `tests/memind14.s` (abs.W+PC-rel src) and `tests/memind15.s`
+(register src) — both hand-verified (the same benign prefetch-interleave and
+extra-read quirks already documented elsewhere in this rollout), with every actual
+write matching Musashi exactly. Full Harte re-run at the Phase 112 baseline, zero
+regressions — a meaningful gate given how heavily MOVE.b/w/l/q are exercised in the
+corpus. See `plan.md §Phase 122` for the full writeup.
+
+**Deliberately out of scope, documented and closed out** (see
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full history): MOVE
+mem-to-mem's imm-src/abs.L-src/plain-memory-src arms (need a genuine 4th extension
+word or per-sub-mode wiring); genuine memory-indirect combined with long bd/od for
+any family; MOVEM's own long-bd support; the MOVE SR,(ea) and CLR-to-indexed-EA
+extra-read quirks (pre-existing, no correctness impact).
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,

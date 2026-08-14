@@ -2105,10 +2105,16 @@ module eu_seq (
                         // CCR fires from WB at RMW cleanup cycle (ex_mem_rmw_ccr=0 for UNIT_MOVE).
                         // Exception: MOVE Dn/An→indexed dst uses mem_rmw CCR path (ex_is_move_reg_idx_dst).
                         if (f_mode == 3'b000 || f_mode == 3'b001) begin
-                            // MOVE Dn/An, (d8,An_dst,Xn): register source, indexed dst.
+                            // MOVE Dn/An, (d8,An_dst,Xn) brief, or (bd,An_dst,Xn) full
+                            // (Phase 122, Sub-scope A) -- register source, indexed dst.
                             // RMW "read" computes the indexed EA; after read_ack dyn_bit switches
                             // rd_b to the source register. mem_rmw_wdata_r = rd_b_data = src reg.
-                            // brief_ext in ext_data[15:0] (ext_count=1 → eu_ext_data={16'h0,q[1]}).
+                            // brief_ext in ext_data[15:0] (ext_count=1 -> eu_ext_data={16'h0,q[1]});
+                            // full-format bd via the standard fi_is_full/fi_bd template -- this
+                            // arm's own baseline is already 1 word (no extra src words), matching
+                            // every single-EA-word family from Stages 1-3, so it folds into the
+                            // existing is_memind_full/fi_bd machinery unchanged (see
+                            // is_move_reg_idx_dst_mode110 in m68030_seq.sv).
                             dec_valid               = 1'b1;
                             dec_is_mem_rd           = 1'b1;
                             dec_is_mem_rmw          = 1'b1;
@@ -2120,7 +2126,8 @@ module eu_seq (
                             dec_is_idx              = 1'b1;
                             dec_xn_wl               = ext_data[11];
                             dec_xn_scale            = ext_data[10:9];
-                            dec_ea_offset           = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_ea_offset           = fi_is_full ? fi_bd
+                                                    : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_writes_reg          = 1'b0;
                             dec_needs_ext           = 1'b1;
                             dec_siz                 = f_move_sz;
@@ -2130,8 +2137,16 @@ module eu_seq (
                             dec_is_move_reg_idx_dst = 1'b1;
                             // CCR via mem_rmw path (ex_mem_rmw_ccr overridden for move_reg_idx_dst)
                         end else if (f_mode == 3'b111 && f_reg == 3'b000) begin
-                            // MOVE (xxx).W, (d8,An_dst,Xn): abs.W src, indexed dst.
-                            // ext_data = {q1=(xxx).W, q2=brief_ext}: abs.W in hi, brief_ext in lo.
+                            // MOVE (xxx).W, (d8,An_dst,Xn) brief, or (bd,An_dst,Xn) full
+                            // (Phase 122, Sub-scope A): abs.W src, indexed dst.
+                            // ext_data = {q1=(xxx).W, q2=brief/full descriptor}: abs.W in
+                            // hi, dst's own descriptor in lo -- same "q1=other data,
+                            // q2=EA descriptor" shape as MOVEM/CMP2CHK2, so fi_is_full/
+                            // fi_bdsz/fi_iis (already reading ext_data's low half) apply
+                            // unchanged, but a full-format bd's own VALUE needs q3_word
+                            // (not the shared fi_bd, which reads ext_data[31:16] -- that
+                            // slot holds the abs.W value here, not a bd word) -- see
+                            // is_move_mm_absw_idxdst_full in m68030_seq.sv.
                             dec_valid               = 1'b1;
                             dec_is_move_mm          = 1'b1;
                             dec_is_move_mm_idx_dst  = 1'b1;
@@ -2147,11 +2162,15 @@ module eu_seq (
                             dec_reads_dst           = 1'b1;
                             dec_xn_wl               = ext_data[11];
                             dec_xn_scale            = ext_data[10:9];
-                            dec_dst_ea_offset       = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_dst_ea_offset       = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
+                                                    ? {{16{q3_word[15]}}, q3_word}
+                                                    : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_siz                 = f_move_sz;
                         end else if (f_mode == 3'b111 && f_reg == 3'b010) begin
-                            // MOVE (d16,PC), (d8,An_dst,Xn): PC-relative src, indexed dst.
-                            // ext_data = {q1=d16, q2=brief_ext}: d16 in hi, brief_ext in lo.
+                            // MOVE (d16,PC), (d8,An_dst,Xn) brief, or (bd,An_dst,Xn) full
+                            // (Phase 122, Sub-scope A): PC-relative src, indexed dst.
+                            // Same shape as the abs.W-src arm just above -- see its own
+                            // comment for the full reasoning.
                             dec_valid               = 1'b1;
                             dec_is_move_mm          = 1'b1;
                             dec_is_move_mm_idx_dst  = 1'b1;
@@ -2168,7 +2187,9 @@ module eu_seq (
                             dec_reads_dst           = 1'b1;
                             dec_xn_wl               = ext_data[11];
                             dec_xn_scale            = ext_data[10:9];
-                            dec_dst_ea_offset       = {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_dst_ea_offset       = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
+                                                    ? {{16{q3_word[15]}}, q3_word}
+                                                    : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_siz                 = f_move_sz;
                         end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
                             // MOVE #imm, (d8,An,Xn): MOVE.L has imm32 in ext_data, brief_ext
