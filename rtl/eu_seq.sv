@@ -1301,7 +1301,7 @@ module eu_seq (
                             default: dec_siz = 2'b00;
                         endcase
                     end else if (!f_dir && f_ss == 2'b11 && !f_dn[2] && f_dn != 3'b011 &&
-                                 (f_mode == 3'b010 || f_mode == 3'b101 ||
+                                 (f_mode == 3'b010 || f_mode == 3'b101 || f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010)))) begin
                         // CMP2/CHK2 <ea>,Rn — 0000 ss00 11 mmm rrr + ext
                         // f_dn: 000=CMP2.B, 001=CMP2.W, 010=CMP2.L  (all have !f_dn[2])
@@ -1345,6 +1345,41 @@ module eu_seq (
                                     dec_abs_ea_val = decode_pc + 32'd4
                                                    + {{16{ext_data[15]}}, ext_data[15:0]};
                                 end
+                            end
+                            // (d8,An,Xn) brief, or full (bd,An,Xn) — Phase 120.
+                            // Previously unimplemented (no case arm at all, not just
+                            // brief-limited like every other family in this rollout).
+                            // ext_data[31:16]=cmp2_ext_w (Rn/CHK2-flag, same as every
+                            // other 2-ext-word mode above), ext_data[15:0]=the EA
+                            // descriptor itself -- fi_is_full/fi_bdsz/fi_iis (module-
+                            // level, reading ext_data's low half) apply unchanged, but
+                            // fi_bd itself does NOT: it reads a word-bd value from
+                            // ext_data[31:16], which for every single-descriptor
+                            // family holds the real bd word (via is_memind_full's own
+                            // q1/q2 swap) but here holds cmp2_ext_w instead (this
+                            // family deliberately isn't in mode110_ea_src, same
+                            // reasoning as MOVEM in Phase 119 -- see
+                            // is_cmp2chk2_idx_full in m68030_seq.sv). Needs the exact
+                            // same q3_word-based extraction MOVEM's own bd uses
+                            // instead. Rn is only needed for the bound comparison
+                            // AFTER the read completes -- same deferred-register shape
+                            // dyn_bit_get_Dn already proved for CHK's own indexed form
+                            // (Phase 84/86); overrides the dec_dst_reg=Rn set above
+                            // (needed as-is for every other mode) with Xn for the read
+                            // phase, swapping back to Rn at the read-ack cycle.
+                            3'b110: begin
+                                dec_src_reg        = {1'b1, f_reg};                    // An (base) → rd_a
+                                dec_reads_src      = 1'b1;
+                                dec_dst_reg        = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
+                                dec_is_idx         = 1'b1;
+                                dec_xn_wl          = ext_data[11];
+                                dec_xn_scale       = ext_data[10:9];
+                                dec_ea_offset      = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
+                                                   ? {{16{q3_word[15]}}, q3_word}
+                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
+                                dec_is_dyn_bit_idx = 1'b1;
+                                dec_dyn_bit_reg    = cmp2_ext_w[14:12];  // Rn → rd_b after swap
+                                dec_dyn_bit_is_an  = cmp2_ext_w[15];
                             end
                             default: ;
                         endcase
@@ -6135,7 +6170,6 @@ module eu_seq (
     logic        cmp2_after_r;      // 1-cycle cooldown after second read ack
     logic [31:0] cmp2_lb_r;         // lower bound captured from first read
     logic [31:0] cmp2_addr2_r;      // address for second read (EA + size_step)
-    logic [31:0] cmp2_rn_r;         // Rn value captured at FSM start
     logic        cmp2_is_chk2_r;    // 1=CHK2 (trap on range fail), 0=CMP2
     logic        cmp2_is_an_r;      // 1=Rn is An (always 32-bit compare)
     logic [1:0]  cmp2_siz_r;        // instruction size for sign extension
@@ -6143,6 +6177,13 @@ module eu_seq (
     logic        cmp2_sr_wr_en;     // fire CCR update when second read acks
 
     // CMP2/CHK2 sign-extended comparison values (combinational from FSM state + mem_rdata)
+    // rd_b_data (not a registered cmp2_rn_r) feeds Rn directly: cmp2_sr_wr_en
+    // fires the exact same cycle dyn_bit_get_Dn's swap delivers Rn onto
+    // rd_b (Phase 120 -- see dyn_bit_get_Dn's own comment above), and a
+    // non-blocking-assignment register capture on that same cycle would
+    // read the *previous* cycle's stale value (classic same-edge
+    // read-before-write) -- consuming rd_b_data live sidesteps that
+    // entirely, since it's already valid combinationally this cycle.
     logic [31:0] cmp2_lb_sext_w, cmp2_ub_sext_w, cmp2_rn_sext_w;
     logic        cmp2_c_w, cmp2_z_w;
     always_comb begin
@@ -6150,17 +6191,17 @@ module eu_seq (
             2'b01: begin  // byte
                 cmp2_lb_sext_w = {{24{cmp2_lb_r[7]}},  cmp2_lb_r[7:0]};
                 cmp2_ub_sext_w = {{24{mem_rdata[7]}},   mem_rdata[7:0]};
-                cmp2_rn_sext_w = cmp2_is_an_r ? cmp2_rn_r : {{24{cmp2_rn_r[7]}},  cmp2_rn_r[7:0]};
+                cmp2_rn_sext_w = cmp2_is_an_r ? rd_b_data : {{24{rd_b_data[7]}},  rd_b_data[7:0]};
             end
             2'b10: begin  // word
                 cmp2_lb_sext_w = {{16{cmp2_lb_r[15]}}, cmp2_lb_r[15:0]};
                 cmp2_ub_sext_w = {{16{mem_rdata[15]}},  mem_rdata[15:0]};
-                cmp2_rn_sext_w = cmp2_is_an_r ? cmp2_rn_r : {{16{cmp2_rn_r[15]}}, cmp2_rn_r[15:0]};
+                cmp2_rn_sext_w = cmp2_is_an_r ? rd_b_data : {{16{rd_b_data[15]}}, rd_b_data[15:0]};
             end
             default: begin  // long
                 cmp2_lb_sext_w = cmp2_lb_r;
                 cmp2_ub_sext_w = mem_rdata;
-                cmp2_rn_sext_w = cmp2_rn_r;
+                cmp2_rn_sext_w = rd_b_data;
             end
         endcase
         cmp2_c_w = ($signed(cmp2_rn_sext_w) < $signed(cmp2_lb_sext_w)) ||
@@ -6778,11 +6819,24 @@ module eu_seq (
     // MOVE (d8,An_src,Xn),(d8,An_dst,Xn) (dec_dyn_bit_swap_both=1): both sides are
     // indexed, so rd_a AND rd_b both swap at read_ack — rd_a: src_An->dst_An (reg/
     // is_an, same as swap_a), rd_b: src_Xn->dst_Xn (reg2/is_an2, the 2nd target).
+    // CMP2/CHK2 (Phase 120): needs Xn (not yet swapped) at the FIRST read's
+    // own ack — that's exactly when cmp2_addr2_r derives the second read's
+    // address from ex_ea, which lives combinationally off rd_b_data — so
+    // swapping rd_b to Rn on that same cycle corrupts the captured address.
+    // Unlike every other dyn_bit_get_Dn consumer, CMP2/CHK2's own Rn isn't
+    // needed until the final comparison, which happens only after the
+    // *second* read completes — so excluding the first-read ack here and
+    // consuming rd_b_data live at the second-read ack instead (see
+    // cmp2_rn_sext_w's own comment) resolves the conflict with zero effect
+    // on every other instruction family already using this mechanism (CHK,
+    // ALU-mem-src, dynamic bit-ops, MOVE mem-to-mem indexed-dst) since none
+    // of them have a second read at all.
     logic dyn_bit_get_Dn;
     assign dyn_bit_get_Dn = ex_is_dyn_bit_idx && ex_is_mem_rd &&
                             (ex_is_mem_rmw ? mem_rmw_read_ack
                                            : (mem_ack && !mem_rmw_run_r && !mem_rmw_after_r
-                                              && !move_mm_run_r && !move_mm_after_r));
+                                              && !move_mm_run_r && !move_mm_after_r
+                                              && !(ex_is_cmp2chk2 && !cmp2_run_r && !cmp2_after_r)));
     assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel :
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
                       (dyn_bit_get_Dn && (ex_dyn_bit_swap_a || ex_dyn_bit_swap_both)) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
@@ -7131,7 +7185,6 @@ module eu_seq (
             cmp2_after_r   <= 1'b0;
             cmp2_lb_r      <= 32'h0;
             cmp2_addr2_r   <= 32'h0;
-            cmp2_rn_r      <= 32'h0;
             cmp2_is_chk2_r <= 1'b0;
             cmp2_is_an_r   <= 1'b0;
             cmp2_siz_r     <= 2'b00;
@@ -7139,10 +7192,14 @@ module eu_seq (
             cmp2_after_r <= cmp2_run_r && mem_ack;
             if (!cmp2_run_r && !cmp2_after_r &&
                 ex_valid && ex_is_cmp2chk2 && ex_is_mem_rd && mem_ack) begin
-                // First read ack: capture bounds and start second read
+                // First read ack: capture bounds and start second read. Rn
+                // is deliberately NOT captured into a register at all (see
+                // cmp2_rn_sext_w's own comment above) -- the swap is gated
+                // to not fire until the second read's own ack, so rd_b
+                // still correctly holds Xn at this instant, matching what
+                // ex_ea (used to derive cmp2_addr2_r) also needs it to hold.
                 cmp2_run_r     <= 1'b1;
                 cmp2_lb_r      <= mem_rdata;
-                cmp2_rn_r      <= rd_b_data;   // rd_b = Rn (read as 32-bit; see rd_b_siz)
                 cmp2_is_chk2_r <= ex_imm[11];  // ext_data[11] = CHK2 selector
                 cmp2_is_an_r   <= ex_imm[15];  // ext_data[15] = D/A flag
                 cmp2_siz_r     <= ex_siz;
@@ -7152,6 +7209,11 @@ module eu_seq (
                     default: cmp2_addr2_r <= ex_ea + 32'd4;
                 endcase
             end else if (cmp2_run_r && mem_ack) begin
+                // Second read ack: this is where dyn_bit_get_Dn's swap
+                // actually fires for CMP2/CHK2 (gated to exclude the first
+                // read above), so rd_b now correctly holds Rn -- consumed
+                // live via rd_b_data by cmp2_c_w/cmp2_z_w's own combinational
+                // logic this same cycle, not registered here.
                 cmp2_run_r <= 1'b0;
             end else if (cmp2_run_r && mem_abort) begin
                 // A fault on the second (bound) read aborts the whole

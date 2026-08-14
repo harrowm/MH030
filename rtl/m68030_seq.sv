@@ -233,6 +233,20 @@ module m68030_seq (
     logic is_movem_idx_full;
     assign is_movem_idx_full = is_movem_2ext && (f_mode == 3'b110) && peek_fi_full_movem;
 
+    // Phase 120: CMP2/CHK2's own indexed form shares MOVEM's exact "q1=other
+    // data, q2=EA descriptor" layout -- q1 here is the Rn/CHK2-flag word
+    // (cmp2_ext_w in eu_seq.sv), not a register mask, but the bit-position
+    // shape is identical (q2's own full/bdsz/iis bits, not q1's), so this
+    // reuses peek_fi_full_movem/movem_bd_words/movem_od_words directly
+    // rather than duplicating them -- baseline is additively 2 words (the
+    // Rn descriptor + the EA descriptor), same as MOVEM's mask+descriptor.
+    logic is_cmp2chk2_idx_full;
+    assign is_cmp2chk2_idx_full = (f_group == 4'h0) && !f_dir && (f_ss == 2'b11) &&
+                                  !f_dn[2] && (f_dn != 3'b011) && (f_mode == 3'b110) &&
+                                  peek_fi_full_movem;
+    logic [2:0] cmp2chk2_ext_count;
+    assign cmp2chk2_ext_count = 3'd2 + movem_bd_words + movem_od_words;
+
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
     // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
@@ -505,6 +519,8 @@ module m68030_seq (
         // this whole chain already follows.
         if (is_movem_idx_full)
             ext_count = movem_ext_count;
+        else if (is_cmp2chk2_idx_full)
+            ext_count = cmp2chk2_ext_count;
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)
@@ -633,9 +649,14 @@ module m68030_seq (
         else if ((f_group == 4'he) && (f_ss == 2'b11) && !f_dn[2] &&
                  (f_mode == 3'b111 && f_reg == 3'b001))
             ext_count = 3'd2;
-        // CMP2/CHK2 (d16,An)/(xxx).W/(d16,PC) — 2 ext words
+        // CMP2/CHK2 (d16,An)/(d8,An,Xn) brief/(xxx).W/(d16,PC) — 2 ext words.
+        // (d8,An,Xn) full-format is handled earlier in this chain by
+        // is_cmp2chk2_idx_full (Phase 120) -- this bucket is its brief-form
+        // fallback baseline, same relationship every other indexed family
+        // in this rollout has with its own full-format override.
         else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) && !f_dn[2] && (f_dn != 3'b011) &&
-                 (f_mode == 3'b101 || (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010))))
+                 (f_mode == 3'b101 || f_mode == 3'b110 ||
+                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010))))
             ext_count = 3'd2;
         // CMP2/CHK2 (An) — 1 ext word (register descriptor)
         else if ((f_group == 4'h0) && !f_dir && (f_ss == 2'b11) && !f_dn[2] && (f_dn != 3'b011) &&

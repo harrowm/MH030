@@ -3462,6 +3462,91 @@ only as a timing gate today), and are deliberately not attempted in this same ph
 
 ---
 
+## Phase 120 — CMP2/CHK2's own indexed EA (Item 1 of the post-Stage-4 follow-up list)
+
+**Goal**: per the user's approved 3-item follow-up plan (`~/.claude/plans/
+compressed-hopping-cocoa.md`), start with CMP2/CHK2's indexed form — unlike every
+other family in this rollout, `eu_seq.sv`'s CMP2/CHK2 decode block had **no**
+`f_mode==110` case arm at all (not simply brief-limited; genuinely unimplemented,
+silently hanging since `dec_valid` never asserted for that mode).
+
+**Decode**: added a new `3'b110` case arm reusing the `dyn_bit_get_Dn`
+deferred-register-swap mechanism already proven for CHK's own indexed form (Phase
+84/86) — `rd_a`=An, `rd_b`=Xn during the read, swapping to Rn (`cmp2_ext_w[14:12]`,
+D/A via `cmp2_ext_w[15]`) at the read-ack cycle, since Rn is only needed for the bound
+comparison after the read. `m68030_seq.sv`: found CMP2/CHK2's own indexed layout
+shares MOVEM's exact "q1=other data (here, the Rn/CHK2-flag word), q2=EA descriptor"
+shape (baseline 2 ext words, needing additive not override `ext_count` arithmetic) —
+reused `peek_fi_full_movem`/`movem_bd_words`/`movem_od_words` directly rather than
+duplicating them, adding only a new `is_cmp2chk2_idx_full` gate and
+`cmp2chk2_ext_count = 2 + movem_bd_words + movem_od_words`. `eu_seq.sv`'s own bd
+extraction needed the same MOVEM-style `q3_word`-based value (not the shared `fi_bd`,
+which reads `ext_data[31:16]` — correct only for families that get `is_memind_full`'s
+own q1/q2 swap, which CMP2/CHK2 deliberately doesn't).
+
+**Two real bugs found via cosim, both in the shared `dyn_bit_get_Dn` mechanism itself**
+(neither ever exercised before, since CMP2/CHK2 is the first `dyn_bit_get_Dn` consumer
+needing a *second* memory access after the swap):
+
+1. **Second-read address corruption.** `cmp2_addr2_r` (the second bound read's own
+   address) is derived from `ex_ea + size`, sampled at the *first* read's ack — the
+   exact same cycle `dyn_bit_get_Dn` fires (same trigger condition: `ex_is_dyn_bit_idx
+   && mem_ack`). Since `ex_ea` is purely combinational and its index term
+   (`ex_xn_scaled`) depends live on `rd_b_data`, sampling it at that instant already
+   reflects the just-swapped Rn value instead of Xn — corrupting the second address by
+   exactly the Rn-vs-Xn difference. Confirmed via a minimal repro
+   (`tests/memind12b.s`, throwaway, not kept): DUT's second read landed at `$21C`
+   instead of the expected `$210` (a `$C` = Rn(`$10`)-vs-Xn(`$4`) difference,
+   matching exactly). First fix attempt (a shadow-latch register continuously
+   refreshing `ex_ea` on every pending, pre-ack cycle) worked for the full BIU/S-state
+   cosim path but broke three pre-existing non-indexed CMP2/CHK2 unit tests
+   (`tb/exception_tb.sv`, `tb/ea_extended_tb.sv`) — traced via temporary `$display`
+   tracing and found those testbenches' own simplified direct-EU-injection memory
+   model acks on the *very first* cycle `ex_valid`/`mem_ack` are both true, giving the
+   shadow latch no earlier pending cycle to have captured a value from at all
+   (still holding its reset value of 0). **Real fix**: gate `dyn_bit_get_Dn` itself to
+   exclude CMP2/CHK2's own first-read ack (`&& !(ex_is_cmp2chk2 && !cmp2_run_r &&
+   !cmp2_after_r)`), deferring the swap to the *second* read's ack instead — Rn isn't
+   needed until the final comparison anyway (which only happens after both reads
+   complete), so this has zero effect on the address computation (which only needs
+   Xn, during the first read) while still delivering Rn correctly by the time it's
+   needed. Zero effect on every other `dyn_bit_get_Dn` consumer (CHK, ALU-mem-src,
+   dynamic bit-ops, MOVE mem-to-mem indexed-dst) since none of them have a second
+   memory access at all.
+2. **Same-edge read-before-write on the newly-freed capture.** Moving Rn's own
+   capture to the second read's ack initially kept the existing pattern of latching it
+   into a register (`cmp2_rn_r <= rd_b_data`) — but the CCR computation
+   (`cmp2_c_w`/`cmp2_z_w`) is combinational and fires the exact same cycle
+   (`cmp2_sr_wr_en = cmp2_run_r && mem_ack`), reading `cmp2_rn_r`'s *pre-update* value
+   (classic non-blocking-assignment same-edge race) — the newly-swapped Rn wouldn't be
+   visible to the comparison until one cycle too late. Root-caused by re-adding
+   `$display` tracing after the address fix alone didn't resolve the remaining
+   flag-mismatch failures — the traced values (`cmp2_lb_r`, `mem_rdata`, `rd_b_data`)
+   were all individually correct, which narrowed it to a timing/use-before-update
+   issue in the consumer rather than a capture issue. Fixed by removing the
+   `cmp2_rn_r` register entirely and feeding `rd_b_data` *live* into
+   `cmp2_rn_sext_w`'s combinational sign-extension logic instead — valid the instant
+   the swap delivers it, no register indirection needed since it's consumed on the
+   exact same cycle regardless.
+
+**Test**: `tests/memind12.s` (CMP2.L brief + CHK2.L full-format word-bd, both in
+range so CHK2 doesn't trap) — compares cleanly via `buscmp.py`, wired into `make
+cosim_memind`.
+
+**Results**: `make test` 34/34 (was 32/34 mid-investigation, both regressions
+self-inflicted and resolved before this count), `make cosim_grp` 8/8, `make
+cosim_memind` 6/6 (added `buscmp-memind12`), and a full 124-suite Harte re-run
+(Verilator batch backend) — **PASS 702142, FAIL 2 (the same pre-existing documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0**, matching the Phase 112 baseline exactly,
+zero regressions — a particularly important gate here since `dyn_bit_get_Dn`'s own
+gating condition (a shared mechanism) changed, touching CHK/ALU-mem-src/dynamic
+bit-ops/MOVE mem-to-mem indexed-dst as well as CMP2/CHK2 itself. CMP2/CHK2 has zero
+Harte coverage (not in the corpus), so `tests/memind12.s` is the only direct
+correctness verification of the new decode itself. Items 2 (long bd/od) and 3 (MOVE
+mem-to-mem dst-side) of the follow-up plan remain open.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

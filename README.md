@@ -347,14 +347,31 @@ store+load through full-format indexed EA, cleanly automated) and a full Harte r
 MOVEM.l's own 100%-passing Harte suite as the key gate proving the common brief-EA
 paths are undisturbed. See `plan.md §Phase 119` for the full writeup.
 
-**Deliberately out of scope, remaining as Stage 4** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): MOVE mem-to-mem's
-dst-side full-format support (needs two independent full-format EA states
-simultaneously); long (32-bit) bd/od displacements for any family (needs a genuine
-4th/5th extension-word data path this project doesn't have wired up) — both
-substantially larger than anything done in this rollout so far; and, identified in
-Phase 118, CMP2/CHK2's indexed form (needs its own investigation, not just the fi_bd
-template, since the decode doesn't exist at all today).
+**Phase 120** implemented CMP2/CHK2's own indexed EA, per the user-approved 3-item
+follow-up plan. Unlike every other family in this rollout, this one had **no**
+`f_mode==110` decode arm at all — genuinely unimplemented, not brief-limited. Added
+one, reusing the `dyn_bit_get_Dn` deferred-register swap already proven for CHK's own
+indexed form, and reused Phase 119's own MOVEM-shaped `peek_fi_full_movem`/
+`movem_bd_words`/`movem_od_words` machinery directly (CMP2/CHK2's layout shares
+MOVEM's exact "q1=other data, q2=EA descriptor" shape). **Found two real bugs in the
+shared `dyn_bit_get_Dn` mechanism itself** — CMP2/CHK2 is the first consumer needing a
+*second* memory access after the register swap, exposing a same-cycle address
+corruption (the second bound read's own address was derived from `ex_ea` sampled at
+the exact instant the swap fires) and a same-edge stale-read race in the flag
+computation once the first bug's fix moved the swap later. Both fixed at the shared
+mechanism level (gating the swap to the second read specifically, and consuming the
+swapped value live rather than through an extra register) — a full regression sweep
+confirmed zero effect on every other `dyn_bit_get_Dn` consumer (CHK, ALU-mem-src,
+dynamic bit-ops, MOVE mem-to-mem indexed-dst). See `plan.md §Phase 120` for the full
+writeup, including the debugging trail.
+
+**Deliberately out of scope, remaining as the follow-up plan's Items 2-3** (see
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full breakdown): long (32-bit)
+bd/od displacements for the families already converted in Stages 1-3 (smaller than it
+sounds — the non-indirect case needs only a one-line `fi_bd` extension reusing the
+already-wired `q3_word`, no new hardware); and MOVE mem-to-mem's dst-side full-format
+support (needs two independent full-format EA states simultaneously) — the largest
+remaining piece.
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,
