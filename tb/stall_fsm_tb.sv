@@ -1708,11 +1708,26 @@ module stall_fsm_tb;
         // (reused, unpopulated -- same as B-13/the brief CMP2 test above;
         // only recovery is checked, not the compared value).
         // -----------------------------------------------------------------
+        // NOTE: MOVEA.L #imm,An needs a full 32-bit (2-word) immediate --
+        // every rom[] pair below spells that out explicitly as its own
+        // {imm_hi, imm_lo} pair (matching the established convention already
+        // used throughout B-1..B-21 above, e.g. B-2's
+        // `rom[16'h0200/4] = {MOVEA_L_IMM_A0, 16'h0000}; rom[16'h0204/4] =
+        // {16'h2100, ...};`) -- an earlier draft of this block packed the
+        // opcode and the immediate's low word into a single rom[] entry as
+        // if the immediate were only one word, silently desyncing every
+        // following instruction by 2 bytes. Caught by B-22's own D2-value
+        // check below (D2 read back stray NOP-opcode bytes instead of the
+        // real loaded value) -- the three BERR-mid-<X> tests just above
+        // this comment don't check any data value, only recovery, so the
+        // same bug there produced passing-but-not-actually-testing-the-
+        // documented-instruction results; fixed here too.
         rom[16'h2100/4] = {NOP_OP, CLR_L_D5};
-        rom[16'h2104/4] = {MOVEA_L_IMM_A0, 16'h3000};
-        rom[16'h2108/4] = {16'h7200, 16'h04F0};  // MOVEQ #0,D1 ; CMP2.L opcode (indexed)
-        rom[16'h210C/4] = {16'h2000, 16'h1920};  // ext1: Rn=D2 ; ext2: full, Xn=D1
-        rom[16'h2110/4] = {16'h0100, NOP_OP};    // ext3: bd=$100
+        rom[16'h2104/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2108/4] = {16'h3000, 16'h7200};  // A0 imm lo=$3000 ; MOVEQ #0,D1
+        rom[16'h210C/4] = {16'h04F0, 16'h2000};  // CMP2.L opcode (indexed) ; ext1: Rn=D2
+        rom[16'h2110/4] = {16'h1920, 16'h0100};  // ext2: full, Xn=D1 ; ext3: bd=$100
+        rom[16'h2114/4] = {NOP_OP, NOP_OP};
         run_berr_mid_test("BERR-mid-CMP2-full", 32'h0000_2100, .next_addr(32'h0000_2140));
 
         // BERR-mid-MOVEmm-idx-absw-full: MOVE.L ($3000).W,($100,A0,D1.L)
@@ -1723,10 +1738,11 @@ module stall_fsm_tb;
         // read completes, faulting the write -- the phase whose own
         // address depends on the new q3_word bd value.
         rom[16'h2140/4] = {NOP_OP, CLR_L_D5};
-        rom[16'h2144/4] = {MOVEA_L_IMM_A0, 16'h0200};
-        rom[16'h2148/4] = {16'h7200, 16'h21B8};  // MOVEQ #0,D1 ; MOVE.L opcode
-        rom[16'h214C/4] = {16'h3000, 16'h1920};  // src abs.W=$3000 ; ext2: full, Xn=D1
-        rom[16'h2150/4] = {16'h0100, NOP_OP};    // bd=$100
+        rom[16'h2144/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2148/4] = {16'h0200, 16'h7200};  // A0 imm lo=$200 ; MOVEQ #0,D1
+        rom[16'h214C/4] = {16'h21B8, 16'h3000};  // MOVE.L opcode ; src abs.W=$3000
+        rom[16'h2150/4] = {16'h1920, 16'h0100};  // ext2: full, Xn=D1 ; bd=$100
+        rom[16'h2154/4] = {NOP_OP, NOP_OP};
         run_berr_mid_test("BERR-mid-MOVEmm-idx-absw-full", 32'h0000_2140, .next_addr(32'h0000_2180));
 
         // BERR-mid-MOVEmm-idx-reg-full: MOVE.L D2,($100,A0,D1.L) (Phase 122
@@ -1738,10 +1754,80 @@ module stall_fsm_tb;
         // the write itself -- the phase that depends on the new full-format
         // dst address.
         rom[16'h2180/4] = {NOP_OP, CLR_L_D5};
-        rom[16'h2184/4] = {MOVEA_L_IMM_A0, 16'h0200};
-        rom[16'h2188/4] = {16'h7200, 16'h2182};  // MOVEQ #0,D1 ; MOVE.L opcode
-        rom[16'h218C/4] = {16'h1920, 16'h0100};  // ext2: full, Xn=D1 ; bd=$100
-        run_berr_mid_test("BERR-mid-MOVEmm-idx-reg-full", 32'h0000_2180);
+        rom[16'h2184/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2188/4] = {16'h0200, 16'h7200};  // A0 imm lo=$200 ; MOVEQ #0,D1
+        rom[16'h218C/4] = {16'h2182, 16'h1920};  // MOVE.L opcode ; ext2: full, Xn=D1
+        rom[16'h2190/4] = {16'h0100, NOP_OP};    // bd=$100
+        run_berr_mid_test("BERR-mid-MOVEmm-idx-reg-full", 32'h0000_2180, .next_addr(32'h0000_2200));
+
+        // -----------------------------------------------------------------
+        // B-22 (Category B, plan.md Phase 124): MOVE.L ([$10,A0],D1.L),D2
+        // -- genuine memory-indirect EA (the two-level indirection mode
+        // using the extension word's I/IS field: read a pointer from
+        // A0+bd, then add Xn*scale + od to get the final address). This is
+        // the one `ex_mem_stall` source out of the ~23-item inventory that
+        // was left out of Category B's own original 21-source sweep
+        // (Phase 104) -- "genuine encoding ambiguity" at the time, later
+        // root-caused and fixed (Phase 115) but never revisited to add the
+        // decode-holdoff test once the underlying decode was actually
+        // correct. Opcode/ext-word layout reused verbatim from
+        // tests/memind2.s (already Musashi-verified): post-indexed, word
+        // bd=$10, null od -- pointer at A0+bd holds the intermediate
+        // address, final EA = pointer + D1 (no outer displacement).
+        // Chained here (not inserted into the original B-1..B-21 setup
+        // block above) to avoid touching that already-dense, carefully
+        // addressed region -- reuses the same claim_park/next_addr
+        // mechanism the BERR-mid-<X> chain already established, appending
+        // past the highest address used anywhere else in this file.
+        // A0=$4000 (fresh, unused region): pointer at $4010=$4100, final
+        // value at $4200 -- both freshly populated here, not reused from
+        // any earlier test, since (unlike the BERR-mid tests, which only
+        // check recovery) this test needs genuinely correct data flow
+        // through both indirection levels.
+        //
+        // NOTE: addresses must stay within this testbench's own memory
+        // model bound (MEM_WORDS=4096 32-bit words = 16KB, valid word
+        // addresses 0x0000-0x3FFC) -- an earlier draft used A0=$4000 with
+        // pointer/final data at $4010/$4200, entirely *outside* that bound;
+        // the out-of-bounds rom[] index silently returned garbage (traced
+        // via temporary `$display` tracing of the FSM's own memind_inner_r/
+        // memind_outer_r/mem_rdata signals: the pointer read at $4010 came
+        // back as `4e714e71`, two NOP opcodes -- clearly not real data)
+        // rather than erroring at elaboration time, which is what made this
+        // one non-obvious. A0=$3900 (confirmed unused elsewhere in this
+        // file, well within bounds) fixes it.
+        // -----------------------------------------------------------------
+        rom[16'h3910/4] = 32'h0000_3A00;  // pointer (at A0+bd = $3900+$10)
+        rom[16'h3B00/4] = 32'hCAFE_F00D;  // final value (at pointer+D1 = $3A00+$100)
+        rom[16'h2200/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2204/4] = {16'h3900, 16'h223C};  // A0 imm lo=$3900 ; MOVE.L #$100,D1 opcode
+        rom[16'h2208/4] = {16'h0000, 16'h0100};  // D1 imm hi ; D1 imm lo=$100
+        rom[16'h220C/4] = {16'h2430, 16'h1925};  // MOVE.L (mem-indirect),D2 opcode ; ext1
+        rom[16'h2210/4] = {16'h0010, CLR_L_D5};  // bd=$10 ; CLR.L D5
+        rom[16'h2214/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2218/4] = {16'd914, JMP_ABS_L_OP};
+        rom[16'h221C/4] = {16'h0000, 16'h2280};  // JMP target hi ; JMP target lo ($2280, BERR-mid-Memind)
+        run_and_check("B-22: memory-indirect EA dependent instr ran (D5=914)", 5, 32'd914, 3000);
+        check32("B-22: memory-indirect EA loaded correct value into D2",
+                u_top.u_eu.u_rf.d_reg[2], 32'hCAFE_F00D);
+
+        // BERR-mid-Memind (plan.md Phase 124): same genuine memory-indirect
+        // instruction as B-22 above, fault injected mid-sequence. The FSM
+        // is inherently 2-phase (pointer read from A0+bd, then the final
+        // read from pointer+od/Xn) -- skip_cycles=0 injects as soon as the
+        // first read's own completion is observed, faulting the second
+        // (outer/indirect) read, the phase genuinely unique to this
+        // addressing mode. Reuses B-22's own already-populated pointer
+        // data at $3910 (this test runs immediately after B-22 in program
+        // order) rather than re-populating -- the first read must succeed
+        // normally for skip_cycles=0 to target the second as intended.
+        rom[16'h2280/4] = {NOP_OP, CLR_L_D5};
+        rom[16'h2284/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2288/4] = {16'h3900, 16'h223C};
+        rom[16'h228C/4] = {16'h0000, 16'h0100};
+        rom[16'h2290/4] = {16'h2430, 16'h1925};
+        rom[16'h2294/4] = {16'h0010, NOP_OP};
+        run_berr_mid_test("BERR-mid-Memind", 32'h0000_2280);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

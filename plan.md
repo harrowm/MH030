@@ -3731,6 +3731,81 @@ re-run wasn't needed and wasn't run.
 
 ---
 
+## Phase 124 — Closing the last stall-coverage gap: genuine memory-indirect EA
+
+**Goal**: user follow-up after Phase 123, asking whether anything else remained on
+stalls. Answer: yes — one well-documented, long-standing gap, open since Phase
+103/104 and never picked back up. **Category B (multi-cycle FSM decode-holdoff)**
+covers 21 of the ~23 originally-inventoried `ex_mem_stall` sources; genuine
+memory-indirect EA (`([bd,An],Xn,od)`, the two-level-indirection 68020+ addressing
+mode) was explicitly left out — Phase 104's own notes call it "genuine encoding
+ambiguity," later root-caused and fixed by Phase 115 (the `dec_memind_is_post` bug),
+but nobody went back to add the decode-holdoff test once the underlying decode was
+actually correct. Separately, the existing "BERR-mid-MOVE-mem-mem" test only exercises
+plain register-indirect `(A0),(A1)` — a different addressing mode entirely from
+`([bd,An],Xn,od)` despite the similar-sounding name — so there was no BERR-mid test
+for the real memory-indirect mode either.
+
+**Added two new tests to `tb/stall_fsm_tb.sv`**, reusing `tests/memind2.s`'s own
+already-Musashi-verified opcode/extension-word encoding (`MOVE.L ([$10,A0],D1.L),D2`
+— post-indexed, word bd=$10, null od):
+
+1. **B-22** (Category B): the genuine decode-holdoff test — verifies decode correctly
+   stalls for the instruction's full multi-phase duration (pointer read from A0+bd,
+   then the final read from pointer+Xn) and a dependent instruction afterward runs
+   correctly, *and* (going one step further than every other B-N check, which only
+   verifies a marker register) that D2 actually receives the correct value read
+   through both indirection levels — a genuine end-to-end data-flow check, not just a
+   "did it unstick" check.
+2. **BERR-mid-Memind**: same instruction, fault injected mid-sequence (`skip_cycles=0`
+   faults the second/outer read, the phase genuinely unique to this addressing mode),
+   using `run_berr_mid_test`'s established machinery.
+
+Chained after the Phase 123 tests via the same `claim_park`/`next_addr` mechanism
+(not inserted into the original dense B-1..B-21 setup block) to avoid touching
+already-carefully-addressed code.
+
+**Three real bugs found and fixed while building this, all in the test, not the
+RTL** — this instruction had never been exercised through this particular harness
+before, unlike every brief-form case already covered:
+
+1. **`MOVEA.L #imm,An` needs a full 32-bit (2-word) immediate.** An early draft
+   packed the opcode and the immediate's low word into a single `rom[]` entry as if
+   the immediate were only one word, silently desyncing every following instruction
+   by 2 bytes. This bug was present not just in the two new tests but in all three of
+   Phase 123's own BERR-mid-`<X>` tests too (`BERR-mid-CMP2-full`,
+   `BERR-mid-MOVEmm-idx-absw-full`, `BERR-mid-MOVEmm-idx-reg-full`) — those tests
+   "passed" anyway, since `run_berr_mid_test` only checks recovery, never a data
+   value, so the desynced instruction stream still produced enough valid bus activity
+   to satisfy every check without actually testing the documented instruction. Fixed
+   all five sites, matching the established `{opcode, imm_hi}` / `{imm_lo, next}`
+   convention already used throughout B-1..B-21 (confirmed via B-2's own known-good
+   usage).
+2. **Address bounds.** This testbench's own memory model is `MEM_WORDS=4096`
+   (16KB, valid word addresses `0x0000`-`0x3FFC`) — a first attempt at fresh,
+   collision-free data addresses picked `$4000`/`$4010`/`$4200`, entirely outside that
+   bound. The out-of-bounds `rom[]` index silently returned garbage instead of
+   erroring at elaboration time, which is what made this one non-obvious: B-22's own
+   new D2-correctness check (the first check in this whole file to verify actual data
+   flow through a memory-indirect FSM) caught it immediately, reading back
+   `4e714e71` (two NOP opcodes) instead of the intended pointer/value content.
+   Root-caused via temporary `$display` tracing of the memory-indirect FSM's own
+   internal state (`memind_inner_r`/`memind_outer_r`/`mem_ack`/`mem_rdata`), which
+   also incidentally confirmed the *decode-holdoff mechanism itself* was working
+   correctly the whole time (`need_ext`/`ext_valid`/`stall_base` correctly held
+   `stall=1` until `ifu_ext_valid` caught up, then cleanly released) — the bug was
+   purely in the data, not the stall logic. Fixed by moving to `$3900` (confirmed
+   unused elsewhere in this file, well within bounds).
+
+**Results**: `make test` 34/34 (`stall_fsm` now 187 checks total), `make cosim_grp`
+8/8. No RTL changed this phase (`tb/stall_fsm_tb.sv` only) — a full Harte re-run
+wasn't needed and wasn't run. **This closes the last known gap in the project's
+pipeline stall/hazard coverage** — every Category B source, and every source with a
+BERR-abort RTL fix, now has its own dedicated test exercising the real addressing mode
+or instruction form it claims to.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

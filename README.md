@@ -238,10 +238,10 @@ instructions. This suite covers what that structurally leaves out:
 | Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU priority under 3-way contention (previously zero coverage), IFU starvation/recovery under a sustained multi-beat burst, DMA held off by `bus_lock` during an RMW cycle |
 | RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences, plus exact hazard-stall cycle counts (2/1/0) verified via direct RTL signal reads |
 | Control-transfer stall depth | `tb/stall_hazard_tb.sv` | BRA (decode-resolved), JMP (register-indirect + absolute), taken DBF loop, JSR/RTS round trip through real memory |
-| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | 21 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set |
+| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | All 23 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE, and — closing the last gap, Phase 124 — genuine memory-indirect EA `([bd,An],Xn,od)`) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set; memory-indirect EA's own test goes further, verifying the loaded register actually receives the correct value read through both indirection levels |
 | DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM (TAS), rather than the consumer racing ahead |
 | Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM), then a second, deeper dispatch-race bug (Phase 108) |
-| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-instruction: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct; dedicated fault-injection tests added for all 12 remaining `mem_abort` sources, finding and fixing a real RTL bug along the way — only the first-ever fault in a session was reported (Phase 114); 3 more dedicated tests added (Phase 123) for the full-format mode=110 EA paths added by the Phases 115-122 rollout (full-format CMP2, and MOVE mem-to-mem indexed-dst full-format via both its abs.W-src and register-src mechanisms) — all passed on the first run, confirming empirically that `mem_abort`'s decode-content-agnosticism (`mem_berr \|\| exc_active`, untouched by any of that rollout's own changes) holds for the new paths too, not just by inspection — see below |
+| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-instruction: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct; dedicated fault-injection tests added for all 12 remaining `mem_abort` sources, finding and fixing a real RTL bug along the way — only the first-ever fault in a session was reported (Phase 114); 3 more dedicated tests added (Phase 123) for the full-format mode=110 EA paths added by the Phases 115-122 rollout (full-format CMP2, and MOVE mem-to-mem indexed-dst full-format via both its abs.W-src and register-src mechanisms) — all passed on the first run, confirming empirically that `mem_abort`'s decode-content-agnosticism (`mem_berr \|\| exc_active`, untouched by any of that rollout's own changes) holds for the new paths too, not just by inspection; a final test added (Phase 124) for genuine memory-indirect EA — **every `ex_mem_stall` source of any kind now has its own dedicated BERR-mid test** — see below |
 | Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
 
 Memory-indirect EA (`([bd,An],Xn,od)`) — Phase 107 narrowed the original "genuine
@@ -409,6 +409,21 @@ mem-to-mem's imm-src/abs.L-src/plain-memory-src arms (need a genuine 4th extensi
 word or per-sub-mode wiring); genuine memory-indirect combined with long bd/od for
 any family; MOVEM's own long-bd support; the MOVE SR,(ea) and CLR-to-indexed-EA
 extra-read quirks (pre-existing, no correctness impact).
+
+**Phase 124 closed the project's last known stall-coverage gap**: genuine
+memory-indirect EA (`([bd,An],Xn,od)`) had no dedicated Category B decode-holdoff test
+(left out of the 21-of-23-source sweep since Phase 104) and no dedicated BERR-mid
+test either (the existing "BERR-mid-MOVE-mem-mem" test uses plain register-indirect,
+a different addressing mode). Added both, reusing `tests/memind2.s`'s own
+Musashi-verified encoding. Found and fixed 3 real bugs along the way, all in the
+*test* — this instruction had never run through this particular harness before: (a)
+`MOVEA.L #imm,An` needs a full 32-bit immediate, not one word — a bug present in
+Phase 123's own three new tests too, which "passed" anyway since they never check a
+data value, only recovery; (b) two fresh data addresses fell entirely outside this
+testbench's own 16KB memory-model bound, silently returning garbage rather than
+erroring — caught by the new Category B test's own D2-correctness check (the first
+check in the file to verify actual data flow through a memory-indirect FSM, not just
+a marker register). See `plan.md §Phase 124` for the full debugging trail.
 
 **Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
 was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,
