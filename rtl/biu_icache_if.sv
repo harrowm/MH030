@@ -80,8 +80,24 @@ module biu_icache_if (
     // state space; see the output block below.
     ic_state_t state;
     logic      berr_r;
+    // Set when the in-flight transaction's own bus/fill cycle completes
+    // (cg_ack_rise or cg_berr) but the IFU has, in the meantime, moved on
+    // to a different fetch (dropped ifu_req, or changed ifu_addr to a
+    // different line/word — e.g. a JSR/RTS/branch flush arriving mid-miss).
+    // Real 68030 hardware can't abort an S-state bus cycle already in
+    // progress either, so the fill itself is still allowed to complete and
+    // update the cache array (harmless, and a legitimate future-use cache
+    // fill) — but IC_DONE must NOT hand a now-meaningless ifu_ack/ifu_berr
+    // to a requester who no longer wants it, since m68030_ifu.sv's own
+    // fetch_pend_r may have already re-armed for the NEW address by then,
+    // causing it to misattribute this stale ack as the delivery for its
+    // *new* request (confirmed via direct trace: q[0] ended up holding an
+    // unrelated, already-consumed opcode word instead of the freshly
+    // requested one — found building the I-2 aliasing/eviction test,
+    // plan.md Phase 128).
+    logic      abandoned_r;
 
-    logic [31:0] addr_r, fill_base_r, fill_rdata_r;
+    logic [31:0] fill_base_r, fill_rdata_r;
     logic [3:0]  idx_r;
     logic [1:0]  woff_r;
     logic [23:0] vtag_r;
@@ -105,14 +121,20 @@ module biu_icache_if (
     wire [23:0] vtag = ifu_addr[31:8];
     wire        ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag);
 
+    // Is the IFU, right now, still asking for the exact longword this
+    // in-flight transaction (idx_r/woff_r/vtag_r, latched at dispatch) is
+    // servicing? False means the requester has moved on — see abandoned_r.
+    wire same_req = ifu_req && (idx == idx_r) && (woff == woff_r) && (vtag == vtag_r);
+
     integer k;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            state     <= IC_IDLE;
-            berr_r    <= 1'b0;
-            cg_req_r  <= 1'b0;
-            cg_addr_r <= 32'h0;
+            state       <= IC_IDLE;
+            berr_r      <= 1'b0;
+            abandoned_r <= 1'b0;
+            cg_req_r    <= 1'b0;
+            cg_addr_r   <= 32'h0;
             for (k = 0; k < 16; k++) valid_i[k] <= 1'b0;
         end else begin
             // CACR cache-clear operations (level-sensitive while asserted,
@@ -126,11 +148,11 @@ module biu_icache_if (
                     // through IC_IDLE; the disabled path is a pure
                     // combinational bypass below and never touches `state`.
                     if (ifu_req && icache_en) begin
-                        addr_r      <= ifu_addr;
                         idx_r       <= idx;
                         woff_r      <= woff;
                         vtag_r      <= vtag;
                         fill_base_r <= {ifu_addr[31:4], 4'h0};
+                        abandoned_r <= 1'b0;
                         if (ihit) begin
                             state <= IC_HIT;
                         end else begin
@@ -144,6 +166,14 @@ module biu_icache_if (
                 IC_HIT: state <= IC_IDLE; // eu-style: ack fires combinationally, one-shot
 
                 IC_FILL_0: begin
+                    // Latch "abandoned" the moment the requester moves on,
+                    // not just at completion — same_req reflects the *live*
+                    // ifu_req/ifu_addr every cycle, and a mid-fill flush can
+                    // arrive, then get overwritten by yet another dispatch,
+                    // several cycles before this fill finishes; once
+                    // abandoned it must stay abandoned (sticky) regardless
+                    // of what ifu_req/ifu_addr happen to show later.
+                    if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
                         data_i[idx_r][0] <= cg_rdata;
                         if (woff_r == 2'd0) fill_rdata_r <= cg_rdata;
@@ -156,6 +186,7 @@ module biu_icache_if (
                     end
                 end
                 IC_FILL_1: begin
+                    if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
                         data_i[idx_r][1] <= cg_rdata;
                         if (woff_r == 2'd1) fill_rdata_r <= cg_rdata;
@@ -168,6 +199,7 @@ module biu_icache_if (
                     end
                 end
                 IC_FILL_2: begin
+                    if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
                         data_i[idx_r][2] <= cg_rdata;
                         if (woff_r == 2'd2) fill_rdata_r <= cg_rdata;
@@ -180,6 +212,7 @@ module biu_icache_if (
                     end
                 end
                 IC_FILL_3: begin
+                    if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
                         data_i[idx_r][3] <= cg_rdata;
                         if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
@@ -195,8 +228,9 @@ module biu_icache_if (
                 end
 
                 IC_DONE: begin
-                    berr_r <= 1'b0;
-                    state  <= IC_IDLE;
+                    berr_r      <= 1'b0;
+                    abandoned_r <= 1'b0;
+                    state       <= IC_IDLE;
                 end
 
                 default: state <= IC_IDLE;
@@ -225,11 +259,23 @@ module biu_icache_if (
 
             case (state)
                 IC_HIT: begin
-                    ifu_rdata = data_i[idx_r][woff_r];
-                    ifu_ack   = 1'b1;
+                    // Single-cycle transaction: check same_req live rather
+                    // than via abandoned_r (which only ever gets set from
+                    // the multi-cycle FILL states) — if the requester moved
+                    // on in the one cycle between dispatch and this HIT
+                    // resolving, don't hand back a now-stale ack either.
+                    if (same_req) begin
+                        ifu_rdata = data_i[idx_r][woff_r];
+                        ifu_ack   = 1'b1;
+                    end
                 end
                 IC_DONE: begin
-                    if (berr_r) ifu_berr = 1'b1;
+                    if (abandoned_r) begin
+                        // Requester moved on mid-fill/mid-berr — the array
+                        // update (if any) already happened; silently drop
+                        // this stale ack/berr instead of misattributing it
+                        // to whatever the IFU has since re-armed for.
+                    end else if (berr_r) ifu_berr = 1'b1;
                     else begin
                         ifu_rdata = fill_rdata_r;
                         ifu_ack   = 1'b1;

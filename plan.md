@@ -4092,6 +4092,101 @@ Steps 4-7 remain. See `~/.claude/plans/compressed-hopping-cocoa.md`.
 
 ---
 
+## Phase 129 (Step 3, I-2) — direct-mapped aliasing/eviction test, and a real flush-mid-miss RTL bug found + fixed
+
+**Goal**: continue Step 3 with I-2 — two lines sharing the same cache index (A=0x1080,
+B=0x1180, both `idx=8`, differing only in tag) visited in a JSR/RTS pattern designed to
+force eviction both directions (A cold, A hit, B cold-evicts-A, A cold-evicts-B, B
+cold-evicts-A-again, B hit), proving the direct-mapped cache's one-way-per-index
+behavior and that every hit/miss transition still loads the architecturally correct
+value.
+
+**A second real, reproducible RTL bug was found and fixed** — more significant than
+Phase 128's own hang, since this one produces *wrong results silently* rather than
+stopping outright. Symptom: A's subroutine (`CLR.L D5; ADDI.L #601,D5; RTS`) never
+appeared to execute — `D5` stayed 0 forever, while B's identically-shaped subroutine
+worked perfectly every time. Direct tracing (`u_ifu`'s own internal `q[]`/`q_cnt`/
+`fill_at`/`fetch_pend_r`, correlated cycle-by-cycle against `biu_icache_if`'s own
+`state`) showed `m68030_ifu.sv`'s prefetch queue receiving `q[0]=0x207c` — the *opcode
+of an entirely different, already-consumed controller instruction* (`MOVEA.L
+#imm,A0`) — instead of `0x4285` (`CLR.L D5`, the correct word for address 0x1080).
+Independently confirmed the I-cache module's own fill logic was NOT at fault: a
+dedicated trace of `data_i[idx_r][0..3]` at the exact moment of `FILL_3`'s commit
+showed all four words correctly stored (`0x42850685`, `0x00000259`, `0x4E754E71`,
+matching `CLR.L D5`/`ADDI.L #601,D5`/`RTS` exactly) — the corruption happened strictly
+downstream, in how that correct data got *handed off* to the IFU.
+
+**Root cause**: `biu_icache_if.sv` has no awareness of `pc_wr_en` (the IFU's own PC
+redirect/flush signal) at all. `m68030_ifu.sv`'s own protocol *explicitly* abandons an
+in-flight fetch on a flush (`fetch_pend_r<=0`, documented in its own header: "any
+in-flight fetch is abandoned; ifu_ack guarded by fetch_pend_r, so stale data is
+ignored") — a real, load-bearing requirement for every JSR/RTS/branch, since a flush
+can arrive at any point during a multi-cycle miss the IFU issued moments earlier for
+what is now stale, pre-redirect code. In the **old, pre-Phase-127 direct wiring**
+(`m68030_ifu` → `biu_cycle_gen` with no intermediate module), this "ignore stale ack"
+guard was airtight — `biu_cycle_gen`'s own bus cycle for the abandoned fetch would
+eventually complete and pulse `ifu_ack`, but by construction `fetch_pend_r` could only
+ever be re-armed for a *new* request *after* that same stale `ifu_ack` had already
+fired and dropped (the IFU's own re-arm condition explicitly checks `!ifu_ack`), so
+there was no possible window where a stale ack could be mistaken for a fresh one.
+**Phase 127's new intermediate module breaks this invariant**: `biu_icache_if.sv`
+keeps chasing whatever address it latched at dispatch time (`idx_r`/`woff_r`/
+`vtag_r`, frozen in `IC_FILL_0..3`) all the way to completion, *completely oblivious*
+to `ifu_req` dropping mid-fill — and because its own `ifu_ack` output sits at 0 for the
+*entire* duration of that stale fill (not just around a brief S7 window the way
+`biu_cycle_gen`'s native ack behaves), the IFU's own `!fetch_pend_r && !ifu_ack`
+re-arm condition becomes true *immediately* after the flush — years before (relatively
+speaking) the stale fill has any chance of finishing. By the time that stale fill
+*does* finally complete and pulse `ifu_ack`, `fetch_pend_r` has *already* been
+re-armed for the genuinely new address — so the IFU consumes the stale ack as if it
+were the delivery for its *current* request, corrupting `q[0]` with leftover data from
+an unrelated, already-retired fetch. Confirmed byte-for-byte: `0x207c` is exactly
+`ifu_rdata[31:16]` for the controller's own earlier `MOVEA.L #0x1180,A0` fetch
+(`rom[0x310/4] = {MOVEA_L_IMM_A0, 16'h0000}`), the specific stale transaction still
+in flight through `biu_icache_if.sv` at the moment A's own JSR redirect fired and
+immediately re-armed.
+
+**Fix**: added `same_req` (a combinational check that the *live* `ifu_addr` still maps
+to the exact `idx_r`/`woff_r`/`vtag_r` this in-flight transaction is servicing) and a
+new sticky `abandoned_r` flag, set the moment `same_req` goes false during any
+`IC_FILL_0..3` state (checked every cycle, since the requester can move on to a
+*third* address before the stale fill even finishes, several cycles after the
+original abandonment). Real 68030 hardware can't abort an S-state bus cycle already in
+progress either, so the fill is deliberately still allowed to run to completion and
+update the cache array (harmless — a legitimate future-use fill for whatever address
+it was) — but `IC_DONE` now checks `abandoned_r` and silently drops the ack/berr
+instead of handing it to a requester who has already moved on, exactly matching what
+`fetch_pend_r`'s own guard achieved for free in the old direct-wired design.
+`IC_HIT` (a single-cycle transaction, no multi-cycle exposure) gets the equivalent
+protection by checking `same_req` live rather than via the latch. Along the way, also
+found and removed `addr_r`, a write-only, functionally dead register left over from
+Step 1 whose own (cosmetically wrong, but functionally irrelevant) value had been an
+early red herring during this investigation.
+
+**I-2's test-design note**: the "hit ⇒ zero bus activity" claim, rigorously provable
+for I-1's own tight single-cache-line loop, could **not** be cleanly re-asserted for
+I-2's own A#2/B#3 hit visits — I-2's controller code spans *multiple* cache lines, and
+the IFU's own legitimate speculative readahead (prefetching not-yet-executed future
+controller words while decode sits busy inside A's or B's subroutine call) can touch a
+previously-untouched line, adding real, correct bus activity unrelated to A/B's own
+hit/miss behavior. Removed those two specific assertions rather than chase a
+false-failure workaround; the underlying claim they'd have tested is already covered
+rigorously by I-1, and I-2's own data-correctness checks (all 6, including A#2/B#3
+themselves) independently confirm every hit/miss transition loaded the architecturally
+correct value regardless.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, full 124-suite Harte sweep — PASS
+702142 / FAIL 2 (same documented `ASL.b` anomaly) / SKIP 281221 / TIMEOUT 0,
+bit-identical to the Phase 127/128 baseline. `tb/stall_fsm_tb.sv`'s own `$finish`
+timestamp (829616) stayed byte-for-byte identical, confirming the disabled-cache
+bypass path (and every steady-state I$/D$-disabled behavior this whole project has
+run under until now) is completely untouched by this fix — the bug and its fix are
+both scoped entirely to the flush-mid-miss interaction this phase's own test is the
+first to exercise. Remaining: I-3 (CACR flush), I-4 (self-modifying code), I-5
+(BERR-mid-linefill), and Steps 4-7 of the cache verification plan.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
