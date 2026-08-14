@@ -3936,6 +3936,90 @@ wanted later.
 
 ---
 
+## Phase 127 (Step 1-2) — Wiring the I-cache into the real IFU path
+
+**Goal**: the user asked for a comprehensive correctness+timing test plan for the
+instruction and data caches. Investigating the actual RTL (not just CLAUDE.md's own
+module-hierarchy comment, which turned out to be stale) found a real architectural
+gap, not just a testing gap: `rtl/biu_cache_if.sv` is a genuine, working 16-line
+direct-mapped I$+D$ controller (CACR-driven enable, hit/miss, linefill,
+write-through), but the I-cache side is architecturally unreachable — `m68030_biu.sv`'s
+own header comment said it outright, IFU's bus port is "direct to cycle_gen — no
+cache." The D-cache side is reachable (every EU access goes through it) but has never
+once been exercised with caching enabled in 126 phases of testing — CACR resets to 0
+and no test ever writes it to a nonzero value except `system_tb.sv`'s own
+register-plumbing-only MOVEC-05 check. The dedicated pin-level burst datapath
+(`biu_burst_ctrl.sv`) is also dead code (`eu_burst_req` hardwired 0 in
+`m68030_top.sv`, the same pattern Phase 108 already found for CAS2/multiop). User
+chose, via an explicit scoping decision, to wire the I-cache into the real IFU path
+first, then build comprehensive tests for both caches — approved via `EnterPlanMode`
+(plan: `~/.claude/plans/compressed-hopping-cocoa.md`, an 8-step plan).
+
+**Step 1 — RTL**: new `rtl/biu_icache_if.sv`, interposed between `m68030_ifu.sv`'s
+existing `ifu_addr/ifu_req/ifu_rdata/ifu_ack/ifu_berr` port and `biu_cycle_gen`'s
+existing `ifu_*` port inside `m68030_biu.sv` — the same architectural pattern
+`biu_cache_if.sv` already uses for the EU/D-cache side, chosen over sharing one
+combined instance between EU and IFU (would need new internal 2-source arbitration
+the existing module doesn't have) or rewriting `biu_cache_if.sv` in place (touches the
+only working, already-proven cache code for no benefit). Reuses `biu_cache_if.sv`'s
+own proven state-machine shape (`IC_IDLE/IC_HIT/IC_FILL_0..3/IC_DONE`, BERR folded
+into `IC_DONE` via a flag rather than a 9th state) but read-only, no `CI_WRITE`
+equivalent needed. Two deliberate design choices beyond a straight port:
+- **A pure combinational bypass when `icache_en=0`** (`cg_addr=ifu_addr;
+  cg_req=ifu_req; ifu_rdata=cg_rdata; ifu_ack=cg_ack; ifu_berr=cg_berr;` — the state
+  machine is never entered at all) rather than routing disabled accesses through
+  `IC_IDLE`→some-miss-state→`IC_DONE` the way `biu_cache_if.sv`'s own D-cache side
+  does. The state-machine route would add a genuine extra cycle of round-trip latency
+  even when disabled (acceptable for D-cache, since that's been the status quo there
+  for the whole project, but NOT acceptable for I-cache, which had zero such overhead
+  before this phase) — the bypass keeps disabled-cache timing byte-for-byte identical
+  to the pre-existing direct wiring, confirmed empirically below.
+- **Any miss while enabled always does a full 4-word fill and marks the line valid,
+  regardless of CACR's IBE (burst-enable) bit** — deliberately not reproducing a
+  subtle bug noticed in `biu_cache_if.sv`'s own D-cache-side logic while reading it as
+  a template: there, an I-cache miss with `icache_en=1` but `iburst_en=0` falls
+  through to the D-cache's own single-word-fetch state, which never updates the I$
+  array at all (harmless there since that whole path is dead code today, but would
+  have been a real bug if copied verbatim). IBE only ever meant "use burst *pin
+  protocol*" — not "whether the cache fills." Genuine SIZ=11 pin-level bursts remain
+  deferred to Step 8 (`biu_burst_ctrl.sv` revival); Step 1 fills via 4 separate
+  ordinary read cycles, matching `biu_cache_if.sv`'s own existing linefill shape.
+- MMU cache-inhibit tied to `1'b0` (IFU fetches aren't MMU-translated at all today —
+  a separate, pre-existing, out-of-scope gap) and no new D-write-snoops-I-cache
+  coherency logic (real 68030 has none either; software must flush via CACR
+  `CI`/`CEI`, already implemented).
+
+Wiring required adding `rtl/biu_icache_if.sv` to `Makefile`'s `BIU_SRCS` (picked up
+automatically by every downstream target via `$(TOP_SRCS)`) and rewiring
+`m68030_biu.sv`'s internal `biu_cycle_gen` instantiation's `ifu_*` port connections
+from the top-level `ifu_addr`/`ifu_req`/etc. ports directly to new `ic_cg_*`
+intermediate wires, with the new `biu_icache_if` instance sitting between them. One
+compile error along the way: Icarus rejected a ternary between two enum values
+(`state <= ihit ? IC_HIT : IC_FILL_0;`) as needing an explicit cast — rewritten as a
+plain `if`/`else`, matching `biu_cache_if.sv`'s own established style anyway.
+
+**Step 2 — regression safety net**: `make test` 34/34, `make cosim_grp` 8/8 (identical
+per-suite cycle counts to before), and the full 124-suite Harte sweep via
+`scripts/run_harte_batch.py --backend verilator` — **PASS 702142 FAIL 2 SKIP 281221
+TIMEOUT 0**, bit-identical to the documented pre-change baseline, the 2 fails
+confirmed to still be the same documented `ASL.b` corpus anomaly (Phase 87), zero new
+failures anywhere. The strongest single piece of evidence: `tb/stall_fsm_tb.sv` — the
+most instruction-fetch-heavy, exact-`$time`-dependent testbench in the project — 
+produced the *exact same* `$finish` timestamp (829616) before and after this change,
+across 245 checks spanning dozens of real multi-instruction sequences. This confirms
+the combinational-bypass design genuinely adds zero latency when the cache is
+disabled, not just "close enough to pass loose checks."
+
+**Results**: I-cache is now real, live RTL reachable from actual instruction fetches
+for the first time in the project's history, with CACR still defaulting to fully
+disabled (so every existing test's behavior is provably unchanged). Steps 3-7 (I-cache
+correctness/timing tests, first-ever D-cache-enabled testing, combined regression
+sweep, pipeline-stall interaction re-check) remain; Step 8 (genuine SIZ=11 pin bursts)
+is deliberately deferred. See `~/.claude/plans/compressed-hopping-cocoa.md` for the
+full 8-step plan.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

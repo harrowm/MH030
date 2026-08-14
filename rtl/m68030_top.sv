@@ -5,7 +5,9 @@
 //
 // Integrates: m68030_biu, m68030_ifu, m68030_seq, m68030_eu, m68030_exc,
 // m68030_mmu. All EU control registers (TC/TT0/TT1/CACR/CAAR) are wired
-// to both the BIU and the MMU. m68030_cache remains a stub (cacr disables it).
+// to both the BIU and the MMU. I-cache (biu_icache_if, inside m68030_biu,
+// Phase 127) and D-cache (biu_cache_if) are both real and reachable;
+// CACR's icache_en/dcache_en bits reset to 0, so both come up disabled.
 //
 // Boot sequence:
 //   BIU fetches SSP@0 and PC@4 (init_done pulse).  On the rising edge of

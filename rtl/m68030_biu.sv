@@ -16,8 +16,10 @@
 // Special EU operations (IACK, RMW, CAS2, burst, MOVE16, coproc, RST)
 //   go directly to biu_cycle_gen, bypassing sizing and cache layers.
 //
-// IFU instruction prefetch:
-//   EU (ifu_*) → biu_cycle_gen ifu port (direct, arbiter grant_ifu priority)
+// IFU instruction prefetch (Phase 127 — was direct-to-cycle_gen, no cache):
+//   IFU → biu_icache_if → biu_cycle_gen ifu port (arbiter grant_ifu priority
+//   unchanged; a hit never reaches biu_cycle_gen at all, a miss/disabled
+//   access uses the exact same protocol the IFU used to drive directly)
 //
 // Async input synchronisation: biu_config (2-stage FF) for all chip pins.
 // BERR timeout watchdog: biu_error_handler (combined with external BERR).
@@ -159,7 +161,9 @@ module m68030_biu #(
     output logic        eu_mo_berr,
 
     // -----------------------------------------------------------------------
-    // IFU instruction-prefetch interface (direct to cycle_gen — no cache)
+    // IFU instruction-prefetch interface (now behind biu_icache_if — see
+    // u_icache below; identical protocol to when this was wired direct to
+    // biu_cycle_gen)
     // -----------------------------------------------------------------------
     input  logic [31:0] ifu_addr,
     input  logic        ifu_req,
@@ -337,6 +341,10 @@ module m68030_biu #(
     logic        ca_sf_rw, ca_sf_is_op, ca_sf_req;
     logic [31:0] ca_eu_rdata;
     logic        ca_eu_ack, ca_eu_berr;
+    // Icache_if → cycle_gen (ifu_* port, same protocol the IFU used to
+    // drive directly)
+    logic [31:0] ic_cg_addr, ic_cg_rdata;
+    logic        ic_cg_req, ic_cg_ack, ic_cg_berr;
     // Sizing FSM input mux output
     logic [31:0] sf_in_addr, sf_in_wdata;
     logic [2:0]  sf_in_fc;
@@ -487,6 +495,30 @@ module m68030_biu #(
     assign eu_ack   = ca_eu_ack;     // cache_if fires eu_ack in CI_DONE
 
     // -----------------------------------------------------------------------
+    // I-cache interface — interposed between the IFU's existing longword
+    // fetch port and biu_cycle_gen's existing ifu_* port (Phase 127). Same
+    // protocol on both sides; a pure combinational bypass when icache_en=0
+    // keeps this byte-for-byte identical to the pre-existing direct wiring.
+    // -----------------------------------------------------------------------
+
+    biu_icache_if u_icache (
+        .clk_4x    (clk_4x),
+        .rst_n     (rst_n),
+        .ifu_addr  (ifu_addr),
+        .ifu_req   (ifu_req),
+        .ifu_rdata (ifu_rdata),
+        .ifu_ack   (ifu_ack),
+        .ifu_berr  (ifu_berr),
+        .cg_addr   (ic_cg_addr),
+        .cg_req    (ic_cg_req),
+        .cg_rdata  (ic_cg_rdata),
+        .cg_ack    (ic_cg_ack),
+        .cg_berr   (ic_cg_berr),
+        .cacr      (cacr),
+        .caar      (caar)
+    );
+
+    // -----------------------------------------------------------------------
     // Sizing FSM input mux: multiop takes priority over cache-if
     // -----------------------------------------------------------------------
 
@@ -582,12 +614,12 @@ module m68030_biu #(
         .eu_ack          (cg_eu_ack),
         .eu_berr         (cg_eu_berr_raw),
         .eu_retry        (eu_retry),
-        // IFU instruction prefetch
-        .ifu_addr        (ifu_addr),
-        .ifu_req         (ifu_req),
-        .ifu_rdata       (ifu_rdata),
-        .ifu_ack         (ifu_ack),
-        .ifu_berr        (ifu_berr),
+        // IFU instruction prefetch (now behind biu_icache_if, see u_icache above)
+        .ifu_addr        (ic_cg_addr),
+        .ifu_req         (ic_cg_req),
+        .ifu_rdata       (ic_cg_rdata),
+        .ifu_ack         (ic_cg_ack),
+        .ifu_berr        (ic_cg_berr),
         // MMU table walker
         .mmu_addr        (mmu_walk_addr),
         .mmu_fc          (mmu_walk_fc),
