@@ -127,6 +127,34 @@ module cache_tb;
         ext_ds_n_prev <= ext_ds_n;
     end
 
+    // idx-filtered code-space DS counter -- Step 4's own exact "one miss
+    // costs exactly 4 bus cycles" checks need to isolate ONE cache line's
+    // own linefill from the IFU's own prefetch-queue depth spilling ahead
+    // into whatever line follows it (empirically confirmed while building
+    // these tests: the queue reaches past a short, line-resident
+    // instruction sequence into the next 16-byte line while decode is
+    // still inside it, triggering that line's own real miss too -- the
+    // same class of readahead pollution I-1/I-2/I-3 already found and
+    // designed around, here affecting an exact-count claim instead of a
+    // zero-delta one). `idx_r` is latched for the whole duration of one
+    // linefill (IC_FILL_0 entry through IC_DONE), so filtering on it
+    // attributes each bus cycle to the cache line that actually owns it,
+    // immune to unrelated spillover into a different index.
+    int idx0_ds_count = 0;
+    always_ff @(posedge clk_4x) begin
+        if (!ext_ds_n && ext_ds_n_prev && ext_fc == 3'b110 &&
+            u_top.u_biu.u_icache.idx_r == 4'd0)
+            idx0_ds_count <= idx0_ds_count + 1;
+    end
+
+    // Free-running clk_4x tick counter -- Step 4's own macro timing
+    // comparison (T-3) needs a plain elapsed-cycle measurement, not just a
+    // bus-cycle count, since the whole point there is comparing total wall
+    // time for cache-disabled vs. cache-enabled execution of the same
+    // instruction sequence.
+    int sim_ticks = 0;
+    always_ff @(posedge clk_4x) sim_ticks <= sim_ticks + 1;
+
 
     // -------------------------------------------------------------------
     // Instruction encodings (reusing every already-proven opcode from
@@ -412,13 +440,31 @@ module cache_tb;
 
         // ===================================================================
         // I-3: CACR cache-clear operations. Two fresh lines, C=0x1290
-        // (idx=9) and D=0x1390 (idx=10) -- deliberately different indices
+        // (idx=9) and D=0x13A0 (idx=10) -- deliberately different indices
         // from each other (unlike I-2's A/B, which shared one index on
         // purpose) so CACR's CI (Clear I-cache, global) and CEI (Clear
         // Entry I, one index only, selected via CAAR[7:4]) bits can be
         // told apart: CI must force a miss on *both* C and D, CEI (aimed
         // at C's own index via CAAR) must force a miss on C alone while D
         // stays a hit.
+        //
+        // D was originally placed at 0x1390, which -- despite the comment's
+        // claim -- actually maps to the SAME real index as C (idx=addr[7:4]
+        // is 9 for both 0x1290 and 0x1390; only the tag differs). Found via
+        // direct idx/vtag tracing while designing Step 4's timing tests:
+        // the "D's own cache entry (idx 10) survived untouched" check below
+        // was unknowingly reading an *incidental* IFU-readahead line just
+        // past D's own 3-word subroutine (0x13A0, filler NOPs, which
+        // legitimately shares D's own tag since it's +0x10 within the same
+        // 256-byte region) -- not D's real code, which genuinely collided
+        // with C on idx 9 and got evicted by C's own post-CEI refill. The
+        // test's *data*-correctness checks (D6 loaded correctly every
+        // visit) never depended on hit-vs-miss and so never caught this;
+        // only the internal-state check's specific index was wrong.
+        // Real bug in the test, not the RTL -- moved D to 0x13A0 so its own
+        // subroutine code genuinely lives at idx 10, making the internal
+        // state check (and the "CEI selective, not global" claim it
+        // exists to prove) actually true of D's own real cache line.
         //   warm C, warm D (both now cached)
         //   -> CACR.CI pulse (icache_en|CI, then icache_en alone --
         //      cache-clear is level-sensitive while the bit is held, so a
@@ -430,9 +476,9 @@ module cache_tb;
         rom[16'h1290/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h1294/4] = {16'h0000, 16'd901};
         rom[16'h1298/4] = {RTS_OP, NOP_OP};
-        rom[16'h1390/4] = {CLR_L_D6, ADDI_L_D6};
-        rom[16'h1394/4] = {16'h0000, 16'd902};
-        rom[16'h1398/4] = {RTS_OP, NOP_OP};
+        rom[16'h13A0/4] = {CLR_L_D6, ADDI_L_D6};
+        rom[16'h13A4/4] = {16'h0000, 16'd902};
+        rom[16'h13A8/4] = {RTS_OP, NOP_OP};
 
         begin
             logic [31:0] a, a4, a8;
@@ -449,7 +495,7 @@ module cache_tb;
             rom[a8[31:2]] = {JSR_A0_IND, MOVEA_L_IMM_A0}; // C#1 -> reload A0=D
             a = a + 32'd12;
             a4 = a + 32'd4;
-            rom[a[31:2]]  = {16'h0000, 16'h1390};
+            rom[a[31:2]]  = {16'h0000, 16'h13A0};
             rom[a4[31:2]] = {CLR_L_D6, JSR_A0_IND};       // clear D6 ; D#1
             a = a + 32'd8;
 
@@ -474,7 +520,7 @@ module cache_tb;
             a = a + 32'd12;
             rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
             a4 = a + 32'd4;
-            rom[a4[31:2]] = {16'h1390, JSR_A0_IND};       // D#2
+            rom[a4[31:2]] = {16'h13A0, JSR_A0_IND};       // D#2
             a = a + 32'd8;
 
             wait_cleared_then_set(5, 32'd901, 20000, e);
@@ -500,7 +546,7 @@ module cache_tb;
             a = a + 32'd12;
             rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
             a4 = a + 32'd4; a8 = a + 32'd8;
-            rom[a4[31:2]] = {16'h1390, JSR_A0_IND};       // D#3
+            rom[a4[31:2]] = {16'h13A0, JSR_A0_IND};       // D#3
             rom[a8[31:2]] = {NOP_OP, NOP_OP};
             a = a + 32'd8;
 
@@ -597,7 +643,19 @@ module cache_tb;
             a = emit_set_cacr(a, 32'h0000_0001);
             rom[a[31:2]] = {CLR_L_D5, JSR_A0_IND};    // clear D5 ; E#4 (post-flush)
             a4 = a + 32'd4;
-            rom[a4[31:2]] = {NOP_OP, NOP_OP};
+            // JMP straight to Step 4's own controller (0x0800) instead of
+            // NOP-coasting there -- the gap between here and 0x0800 is
+            // otherwise a wide stretch of never-touched, default-NOP-filled
+            // memory, and letting the IFU's own readahead walk through it
+            // line-by-line would trigger a real cache miss on *every* one
+            // of those untouched lines along the way, hopelessly polluting
+            // Step 4's own exact-bus-cycle-count measurements. A JMP
+            // redirects the IFU straight to the target with no intervening
+            // fetches of any kind, keeping the region in between
+            // permanently untouched.
+            rom[a4[31:2]] = {JMP_ABS_L_OP, 16'h0000};
+            a8 = a + 32'd8;
+            rom[a8[31:2]] = {16'h0800, NOP_OP};
         end
 
         begin
@@ -640,6 +698,167 @@ module cache_tb;
             wait_cleared_then_set(5, 32'd702, 20000, e);
             check32("I-4: visit E#4 (post-flush) picked up the NEW self-modified value",
                     u_top.u_eu.u_rf.d_reg[5], 32'd702);
+        end
+
+        // ===================================================================
+        // Step 4: I-cache timing. Plan.md's own ask: "exact bus-cycle-count
+        // checks for hit (0 external bus cycles) vs. miss (4 separate read
+        // cycles)" plus "a tight-loop macro timing sanity check" showing a
+        // cached run measurably beats a disabled-cache run of the same
+        // sequence.
+        //
+        // T-1: G=0x0800 (16-byte aligned, entered via the JMP just added to
+        // I-4's own tail -- necessary, not just tidy: falling through the
+        // wide NOP desert between I-4's old end (~0x548) and 0x800 would
+        // let the IFU's own readahead trigger a real miss on *every*
+        // untouched 16-byte line along the way, burying the one miss this
+        // test actually cares about. The JMP keeps that whole region
+        // permanently untouched instead.) holds a self-contained 7-word
+        // sequence -- MOVEQ #1,D0 ; DBF D0,-2 (self-loop, 2 total passes:
+        // cold + hit) ; CLR.L D5 ; ADDI.L #601,D5 -- packed so the entire
+        // 16 bytes fits inside ONE cache line (G is 16-byte aligned; unlike
+        // I-1's own DBF loop, whose 2 words straddled a line boundary by
+        // construction and is why I-1 itself never asserted an exact
+        // count). Because the whole line loads on any single miss, the
+        // *total* code_ds_count delta across this entire 7-word sequence
+        // (MOVEQ's own first fetch through ADDI's own retirement) is
+        // provably exactly the cost of ONE linefill -- 4 -- regardless of
+        // how many of the 7 words actually get individually re-executed
+        // (DBF's own 2nd pass is a hit into bytes already resident from
+        // the very first fetch's own linefill, and CLR/ADDI were also
+        // already resident by then, same reason). No call/return boundary
+        // exists anywhere in this sequence, so there's no window for the
+        // IFU's own speculative readahead to sneak in unrelated bus
+        // activity the way JSR-based measurements in I-2/I-3/I-4 had to
+        // guard against.
+        //
+        // T-2: a small, separate, explicitly-called subroutine
+        // (G2=0x1800, in the same "subroutine region" as A-F) gives a
+        // *directly* isolated version of the same hit/miss split plan.md
+        // asks for: JSR it once (cold, must cost exactly 4), clear D6, JSR
+        // it again immediately (hit, must cost exactly 0) -- the classic
+        // warm-then-revisit shape already proven throughout I-1..I-4,
+        // reused here as a second, independent confirmation of T-1's own
+        // combined-total claim.
+        //
+        // T-3: macro timing sanity. Two identically-shaped 40-pass DBF
+        // loops (H1=0x1810, H2=0x1820, both in the subroutine region),
+        // called back-to-back with CACR toggled between them (disabled for
+        // H1, re-enabled for H2's own fresh, never-before-cached line) --
+        // elapsed clk_4x ticks (sim_ticks) for each call must show the
+        // enabled run measurably beating the disabled one.
+        // ===================================================================
+        rom[16'h0800/4] = {16'h7001, DBF_D0};          // MOVEQ #1,D0 ; DBF D0,-2
+        rom[16'h0804/4] = {16'hFFFE, CLR_L_D5};         // ext=-2 (self-loop) ; CLR.L D5
+        rom[16'h0808/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h080C/4] = {16'd601, NOP_OP};
+
+        rom[16'h1800/4] = {CLR_L_D6, ADDI_L_D6};        // G2: CLR.L D6 ; ADDI.L #611,D6 ; RTS
+        rom[16'h1804/4] = {16'h0000, 16'd611};
+        rom[16'h1808/4] = {RTS_OP, NOP_OP};
+
+        rom[16'h1810/4] = {16'h7027, DBF_D0};           // H1: MOVEQ #39,D0 ; DBF D0,-2
+        rom[16'h1814/4] = {16'hFFFE, CLR_L_D5};         // ext=-2 ; CLR.L D5
+        rom[16'h1818/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h181C/4] = {16'd612, RTS_OP};
+
+        rom[16'h1820/4] = {16'h7027, DBF_D0};           // H2: MOVEQ #39,D0 ; DBF D0,-2
+        rom[16'h1824/4] = {16'hFFFE, CLR_L_D6};         // ext=-2 ; CLR.L D6
+        rom[16'h1828/4] = {ADDI_L_D6, 16'h0000};
+        rom[16'h182C/4] = {16'd613, RTS_OP};
+
+        begin
+            logic [31:0] a, a4, a8;
+
+            a = 32'h0000_0810;
+
+            // T-2 glue: A0=G2 ; JSR (cold) ; clear D6 ; JSR again (hit).
+            rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h1800, JSR_A0_IND};
+            rom[a8[31:2]] = {CLR_L_D6, JSR_A0_IND};
+            a = a + 32'd12;
+
+            // T-3 glue: disable icache, clear D5, call H1 (disabled loop).
+            // MOVEA.L #imm,A0 needs a full 32-bit immediate (2 ext words,
+            // hi then lo) before JSR's own opcode -- 3 longwords total,
+            // the same shape used throughout I-2/I-3/I-4 (see e.g. I-3's
+            // own C#1 setup). An earlier draft skipped the imm-hi word
+            // (only 2 longwords), which fed JSR's own opcode word into
+            // MOVEA's immediate instead of executing it -- total decode
+            // desync, diagnosed via the hard-timeout budget exhausting
+            // with D5 never reaching H1's own marker.
+            a = emit_set_cacr(a, 32'h0000_0000);
+            rom[a[31:2]] = {CLR_L_D5, MOVEA_L_IMM_A0};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h0000, 16'h1810};
+            rom[a8[31:2]] = {JSR_A0_IND, NOP_OP};
+            a = a + 32'd12;
+
+            // Re-enable icache, clear D6, call H2 (fresh line, enabled).
+            a = emit_set_cacr(a, 32'h0000_0001);
+            rom[a[31:2]] = {CLR_L_D6, MOVEA_L_IMM_A0};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h0000, 16'h1820};
+            rom[a8[31:2]] = {JSR_A0_IND, NOP_OP};
+            a = a + 32'd12;
+
+            // Back to I-5's own controller start.
+            rom[a[31:2]] = {JMP_ABS_L_OP, 16'h0000};
+            a4 = a + 32'd4;
+            rom[a4[31:2]] = {16'h0600, NOP_OP};
+        end
+
+        begin
+            int c0, c1, c2, ticks0, ticks_dis, ticks_en, e, t;
+
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_0800; t++)
+                @(posedge clk_4x);
+            c0 = idx0_ds_count;
+            wait_cleared_then_set(5, 32'd601, 20000, e);
+            c1 = idx0_ds_count;
+            check32("T-1: G's own dependent instruction ran (D5=601)",
+                    u_top.u_eu.u_rf.d_reg[5], 32'd601);
+            // idx-filtered, not the plain external delta: the plain delta
+            // measures 8, not 4 -- confirmed via direct idx/vtag tracing
+            // that the IFU's own prefetch queue genuinely spills over into
+            // the very next 16-byte line (0x810, a fresh line of its own)
+            // while decode is still inside G's own short sequence,
+            // triggering a real second linefill that has nothing to do
+            // with G's own line. idx0_ds_count only counts bus cycles
+            // attributed (via the FSM's own latched idx_r) to cache index
+            // 0 -- G's real index -- making this assertion immune to that
+            // unrelated spillover.
+            check32("T-1: G's own line cost exactly 4 bus cycles for its one miss (idx-isolated)",
+                    c1 - c0, 32'd4);
+
+            c0 = idx0_ds_count;
+            wait_cleared_then_set(6, 32'd611, 20000, e);
+            c1 = idx0_ds_count;
+            check32("T-2: G2#1 (cold) loaded D6 correctly", u_top.u_eu.u_rf.d_reg[6], 32'd611);
+            check32("T-2: G2#1's own cold miss cost exactly 4 bus cycles (idx-isolated)", c1 - c0, 32'd4);
+            c0 = c1;
+            wait_cleared_then_set(6, 32'd611, 20000, e);
+            c1 = idx0_ds_count;
+            check32("T-2: G2#2 (hit, revisited immediately) loaded D6 correctly",
+                    u_top.u_eu.u_rf.d_reg[6], 32'd611);
+            check32("T-2: G2#2's own hit cost exactly 0 bus cycles (idx-isolated)", c1 - c0, 32'd0);
+
+            ticks0 = sim_ticks;
+            wait_cleared_then_set(5, 32'd612, 20000, e);
+            ticks_dis = sim_ticks - ticks0;
+            check32("T-3: H1 (cache disabled) loop completed correctly (D5=612)",
+                    u_top.u_eu.u_rf.d_reg[5], 32'd612);
+
+            ticks0 = sim_ticks;
+            wait_cleared_then_set(6, 32'd613, 20000, e);
+            ticks_en = sim_ticks - ticks0;
+            check32("T-3: H2 (cache enabled) loop completed correctly (D6=613)",
+                    u_top.u_eu.u_rf.d_reg[6], 32'd613);
+
+            $display("T-3: elapsed ticks -- disabled=%0d enabled=%0d", ticks_dis, ticks_en);
+            check("T-3: cache-enabled 40-pass loop is measurably faster than cache-disabled",
+                  ticks_en < ticks_dis);
         end
 
         // ===================================================================

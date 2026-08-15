@@ -4330,6 +4330,80 @@ Step 8 (genuine SIZ=11 pin-level bursts).
 
 ---
 
+## Phase 132 (Step 4) — I-cache timing tests, plus a real bug found in the already-committed I-3 test
+
+**Pre-work: a genuine bug found in Phase 130's own I-3 test while designing Step 4.**
+Before writing any new timing tests, needed to pick a fresh, uncached cache index for
+G's own line — which meant checking exactly which indices every prior test already
+used. Direct idx/vtag tracing (`u_top.u_biu.u_icache.idx`/`.vtag` on every real IFU
+request) showed I-3's own C (0x1290) and D (0x1390) — documented as "deliberately
+different indices... so CI vs CEI can be told apart" — actually **both map to real
+cache index 9** (`idx=addr[7:4]`; 0x1290 and 0x1390 share the same low byte's upper
+nibble, 0x90 vs low-byte-0x90, both 9), directly contradicting the comment. The test
+still passed, for a spurious reason: its own "D's own cache entry (idx 10) survived
+untouched" check was unknowingly reading an *incidental* IFU-readahead line one past
+D's own 3-word subroutine (0x13A0, filler NOPs that legitimately share D's own tag
+since they're +0x10 within the same 256-byte region) — not D's real code, which
+genuinely collided with C on idx 9 and got evicted by C's own post-CEI refill. The
+test's *data*-correctness checks (D6 loaded correctly every visit) never depended on
+hit-vs-miss and so never caught this; only the internal-state check's specific index
+was silently wrong. Real bug in the test, not the RTL. **Fixed** by moving D to
+0x13A0 (real idx 10, tag 0x13 — genuinely distinct from C's idx 9), so the internal
+state check (and the "CEI is selective, not global" claim it exists to prove) is now
+actually true of D's own real cache line, not an adjacent artifact. Re-ran I-3 clean
+(unchanged pass count, now for the right reason).
+
+**T-1/T-2 (exact bus-cycle-count checks, plan.md's own literal ask)**: `G=0x0800`
+(16-byte aligned, entered via a new JMP added to I-4's own tail — necessary, not
+cosmetic: falling through the wide NOP desert between I-4's old end (~0x548) and
+0x800 would let the IFU's own readahead trigger a real miss on *every* untouched
+16-byte line along the way, burying the one miss this test cares about; a JMP keeps
+that whole region permanently untouched) holds a self-contained 7-word sequence —
+`MOVEQ #1,D0 ; DBF D0,-2` (self-loop, 2 total passes) `; CLR.L D5 ; ADDI.L #601,D5` —
+packed so the entire 16 bytes fits inside one cache line (unlike I-1's own DBF loop,
+which straddled a line boundary by construction and is why I-1 never asserted an
+exact count). First attempt measured the *combined* `code_ds_count` delta across the
+whole sequence and got **8, not 4** — direct tracing confirmed the IFU's own
+prefetch queue genuinely spills over into the very next 16-byte line (0x810, a fresh
+line of its own, home to the controller glue written right after G) while decode is
+still inside G's own short sequence, triggering a real *second*, unrelated linefill —
+the same class of readahead pollution I-1/I-2/I-3 already catalogued, just showing up
+against an exact-count claim instead of a zero-delta one this time. Fixed the same
+way I-3 fixed its own equivalent problem: added `idx0_ds_count`, a second DS-edge
+counter filtered on `biu_icache_if`'s own latched `idx_r` (held stable for a whole
+linefill's duration), attributing each bus cycle to the cache line that actually owns
+it and making the assertion immune to spillover into a different index. With that,
+**T-1** (G's own combined miss+hit sequence) and **T-2** (a separate, explicitly
+`JSR`-called subroutine `G2=0x1800`, warmed then immediately revisited — the classic
+pattern from I-1..I-4, giving a second, independent confirmation) both now cleanly
+assert **exactly 4** for a cold miss and **exactly 0** for a hit.
+
+**T-3 (macro timing sanity)**: two identically-shaped 40-pass `DBF` loops
+(`H1=0x1810` disabled, `H2=0x1820` enabled/fresh, both in the subroutine region),
+called back-to-back via `JSR` with `CACR` toggled in between, comparing elapsed
+`clk_4x` ticks (a new free-running `sim_ticks` counter). First attempt hit the hard
+20000-cycle wait budget on both sides — a second real bug, this time in the new
+controller glue itself: `MOVEA.L #imm,A0`'s call sequence to H1/H2 only allocated 2
+longwords (missing the immediate's high word entirely), so JSR's own opcode word got
+silently consumed as part of MOVEA's own 32-bit immediate instead of executing —
+total decode desync. Fixed by using the established 3-longword `CLR;MOVEA(imm_hi,
+imm_lo);JSR` idiom already used correctly elsewhere in this same file (e.g. I-3's own
+C#1 setup) instead of the broken 2-longword shortcut. Results: disabled=3016 ticks,
+enabled=902 ticks (~3.3x faster) — a large, unambiguous margin, exactly the
+"measurably lower" claim plan.md asks for.
+
+**Results**: `make test` 35/35 (`cache` now 45 checks, up from 36), `make cosim_grp`
+8/8. No RTL changed (`tb/cache_tb.sv` only, including the I-3 fix) — no Harte re-run
+needed. Two real bugs found and fixed, both in the test, not the RTL: I-3's own
+C/D-index mislabeling (a latent bug from Phase 130, only surfaced now while designing
+a fresh address for G) and T-3's own broken `MOVEA` call shape. This closes Step 4 of
+the cache-verification plan. Remaining: Step 5 (D-cache first-ever enabled
+correctness+timing pass), Step 6 (combined 4-config regression+Harte sweep), Step 7
+(pipeline-stall interaction re-check), and the deliberately-deferred Step 8 (genuine
+SIZ=11 pin-level bursts).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
