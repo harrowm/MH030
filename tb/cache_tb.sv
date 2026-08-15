@@ -152,6 +152,8 @@ module cache_tb;
     // word = (da<<15)|(rn<<12)|rc. da=0 (Dn), rn=7 (D7), rc=0x002 (CACR).
     localparam MOVEC_OP       = 16'h4E7B;
     localparam MOVEC_D7_CACR  = 16'h7002;
+    // MOVEC D7,CAAR: same opcode, ext word rc=0x802 (da=0,rn=7,rc=0x802).
+    localparam MOVEC_D7_CAAR  = 16'h7802;
 
     // -------------------------------------------------------------------
     // Checks
@@ -223,6 +225,18 @@ module cache_tb;
         rom[a4[31:2]]   = {value[15:0], MOVEC_OP};
         rom[a8[31:2]]   = {MOVEC_D7_CACR, NOP_OP};
         emit_set_cacr = addr + 32'd12;
+    endfunction
+
+    // Same shape as emit_set_cacr but targets CAAR (rc=0x802) -- used to
+    // select which cache index CACR's own CEI (Clear Entry, I) bit acts on.
+    function automatic logic [31:0] emit_set_caar(input logic [31:0] addr, input logic [31:0] value);
+        logic [31:0] a4, a8;
+        a4 = addr + 32'd4;
+        a8 = addr + 32'd8;
+        rom[addr[31:2]] = {MOVE_L_IMM_D7, value[31:16]};
+        rom[a4[31:2]]   = {value[15:0], MOVEC_OP};
+        rom[a8[31:2]]   = {MOVEC_D7_CAAR, NOP_OP};
+        emit_set_caar = addr + 32'd12;
     endfunction
 
     initial begin
@@ -370,6 +384,120 @@ module cache_tb;
                   c4 - c3 > 0);
             check("I-2: visit B#2 needed real bus activity (A#3's own refetch evicted B right back)",
                   c5 - c4 > 0);
+        end
+
+        // ===================================================================
+        // I-3: CACR cache-clear operations. Two fresh lines, C=0x1290
+        // (idx=9) and D=0x1390 (idx=10) -- deliberately different indices
+        // from each other (unlike I-2's A/B, which shared one index on
+        // purpose) so CACR's CI (Clear I-cache, global) and CEI (Clear
+        // Entry I, one index only, selected via CAAR[7:4]) bits can be
+        // told apart: CI must force a miss on *both* C and D, CEI (aimed
+        // at C's own index via CAAR) must force a miss on C alone while D
+        // stays a hit.
+        //   warm C, warm D (both now cached)
+        //   -> CACR.CI pulse (icache_en|CI, then icache_en alone --
+        //      cache-clear is level-sensitive while the bit is held, so a
+        //      1-cycle pulse via two back-to-back MOVEC writes is enough)
+        //   -> revisit C (must miss), revisit D (must miss)      [CI: global]
+        //   -> CAAR=idx(C), CACR.CEI pulse (same two-write shape)
+        //   -> revisit C (must miss), revisit D (must HIT)     [CEI: selective]
+        // ===================================================================
+        rom[16'h1290/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1294/4] = {16'h0000, 16'd901};
+        rom[16'h1298/4] = {RTS_OP, NOP_OP};
+        rom[16'h1390/4] = {CLR_L_D6, ADDI_L_D6};
+        rom[16'h1394/4] = {16'h0000, 16'd902};
+        rom[16'h1398/4] = {RTS_OP, NOP_OP};
+
+        begin
+            logic [31:0] a, a4, a8;
+            int c0, c2, c3, c4, c5, c6, t, e;
+
+            a = 32'h0000_0400;
+
+            // Warm C, warm D (one cold-miss visit each -- I-1/I-2 already
+            // rigorously prove hit-after-miss data correctness and timing;
+            // I-3's own job starts once both lines are cached).
+            rom[a[31:2]] = {CLR_L_D5, MOVEA_L_IMM_A0};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h0000, 16'h1290};
+            rom[a8[31:2]] = {JSR_A0_IND, MOVEA_L_IMM_A0}; // C#1 -> reload A0=D
+            a = a + 32'd12;
+            a4 = a + 32'd4;
+            rom[a[31:2]]  = {16'h0000, 16'h1390};
+            rom[a4[31:2]] = {CLR_L_D6, JSR_A0_IND};       // clear D6 ; D#1
+            a = a + 32'd8;
+
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_0400; t++)
+                @(posedge clk_4x);
+            c0 = code_ds_count;
+            wait_cleared_then_set(5, 32'd901, 20000, e);
+            check32("I-3: visit C#1 (cold) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'd901);
+            wait_cleared_then_set(6, 32'd902, 20000, e);
+            c2 = code_ds_count;
+            check32("I-3: visit D#1 (cold) loaded D6 correctly", u_top.u_eu.u_rf.d_reg[6], 32'd902);
+
+            // CACR.CI pulse: icache_en|CI, then icache_en alone.
+            a = emit_set_cacr(a, 32'h0000_0009);
+            a = emit_set_cacr(a, 32'h0000_0001);
+
+            // revisit C (must miss), revisit D (must miss)
+            rom[a[31:2]] = {CLR_L_D5, MOVEA_L_IMM_A0};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h0000, 16'h1290};
+            rom[a8[31:2]] = {JSR_A0_IND, CLR_L_D6};       // C#2 -> clear D6 for D#2
+            a = a + 32'd12;
+            rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            a4 = a + 32'd4;
+            rom[a4[31:2]] = {16'h1390, JSR_A0_IND};       // D#2
+            a = a + 32'd8;
+
+            wait_cleared_then_set(5, 32'd901, 20000, e);
+            c3 = code_ds_count;
+            check32("I-3: visit C#2 (post-CI, must miss) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'd901);
+            wait_cleared_then_set(6, 32'd902, 20000, e);
+            c4 = code_ds_count;
+            check32("I-3: visit D#2 (post-CI, must miss) loaded D6 correctly", u_top.u_eu.u_rf.d_reg[6], 32'd902);
+            check("I-3: CACR.CI forced a real miss on C (global clear)", c3 - c2 > 0);
+            check("I-3: CACR.CI forced a real miss on D too (global clear)", c4 - c3 > 0);
+
+            // CAAR = idx(C)<<4 = 9<<4 = 0x90 ; CACR.CEI pulse.
+            a = emit_set_caar(a, 32'h0000_0090);
+            a = emit_set_cacr(a, 32'h0000_0005);
+            a = emit_set_cacr(a, 32'h0000_0001);
+
+            // revisit C (must miss -- CEI cleared idx 9), revisit D (must
+            // HIT -- CEI never touched idx 10).
+            rom[a[31:2]] = {CLR_L_D5, MOVEA_L_IMM_A0};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h0000, 16'h1290};
+            rom[a8[31:2]] = {JSR_A0_IND, CLR_L_D6};       // C#3 -> clear D6 for D#3
+            a = a + 32'd12;
+            rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h1390, JSR_A0_IND};       // D#3
+            rom[a8[31:2]] = {NOP_OP, NOP_OP};
+            a = a + 32'd8;
+
+            wait_cleared_then_set(5, 32'd901, 20000, e);
+            c5 = code_ds_count;
+            check32("I-3: visit C#3 (post-CEI, must miss) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'd901);
+            // Direct internal-state check, not a bus-activity proxy: by this
+            // point the CAAR/CACR CEI-pulse writes and C#3's own miss+refill
+            // have already retired (program order), so D's own line (idx
+            // 10, tag 0x13) either survived the CEI pulse or it didn't --
+            // settled fact, immune to whatever the IFU's own speculative
+            // readahead does *afterward* (which is exactly what made the
+            // equivalent bus-activity-delta check unreliable, same as I-2's
+            // own A#2/B#3 hit checks -- see that section's own comment).
+            check("I-3: CACR.CEI selectivity -- D's own cache entry (idx 10) survived untouched",
+                  u_top.u_biu.u_icache.valid_i[10] === 1'b1 &&
+                  u_top.u_biu.u_icache.tag_i[10]   === 24'h000013);
+            wait_cleared_then_set(6, 32'd902, 20000, e);
+            c6 = code_ds_count;
+            check32("I-3: visit D#3 (post-CEI, must HIT) loaded D6 correctly", u_top.u_eu.u_rf.d_reg[6], 32'd902);
+            check("I-3: CACR.CEI forced a real miss on C (its own index)", c5 - c4 > 0);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));

@@ -4187,6 +4187,57 @@ first to exercise. Remaining: I-3 (CACR flush), I-4 (self-modifying code), I-5
 
 ---
 
+## Phase 130 (Step 3, I-3) — CACR cache-clear operations (CI global, CEI selective)
+
+**Goal**: continue Step 3 with I-3 — verify `biu_icache_if.sv`'s CACR-driven cache-clear
+logic (shared code path with `biu_cache_if.sv`'s own D-cache side, but never previously
+exercised through the real IFU/decode pipeline, only via `tb/biu_tb.sv`'s isolated
+unit-level P6 tests) actually works when reached through real instruction execution.
+Two fresh lines at *different* indices — `C=0x1290` (idx 9) and `D=0x1390` (idx 10),
+deliberately unlike I-2's A/B which shared one index on purpose — let CACR's `CI`
+(Clear I-cache, bit 3, global) and `CEI` (Clear Entry I, bit 2, selects one index via
+`CAAR[7:4]`) be told apart: `CI` must force a miss on *both* C and D; `CEI` aimed at
+C's own index must force a miss on C alone while D stays a hit.
+
+CACR/CAAR writes are level-sensitive while the clear bit is held (`biu_icache_if.sv`'s
+own `if (cacr[3]) for (k...) valid_i[k]<=0;`, evaluated every cycle) — a single MOVEC
+write that includes the clear bit, immediately followed by a second MOVEC clearing it
+back to just `icache_en`, is enough to fully invalidate on the very next cycle without
+needing to hold the bit for any particular duration. Added `emit_set_caar` (mirrors the
+already-existing `emit_set_cacr` codegen helper from I-1) for the CAAR write CEI needs.
+
+**Sequence**: warm C, warm D (one cold-miss visit each — I-1/I-2 already prove
+hit-after-miss data correctness and timing rigorously, no need to re-derive it here) →
+`CACR.CI` pulse → revisit C (must miss), revisit D (must miss) → `CAAR=idx(C)`,
+`CACR.CEI` pulse → revisit C (must miss), revisit D (must HIT).
+
+**One test-design issue found and fixed, same shape as I-2's own A#2/B#3 finding**:
+the bus-activity-delta proxy for "D stayed a hit" (`c6-c5==0`) intermittently failed —
+not a new bug, the same documented I-2 phenomenon (I-2's controller spans multiple
+cache lines, and the IFU's own legitimate speculative readahead can touch a
+not-yet-visited line while decode sits busy inside C's own subroutine, adding real bus
+activity unrelated to D's own hit/miss state). Rather than drop the assertion the way
+I-2 did (acceptable there since I-2's own 6 data-correctness checks independently cover
+the same ground), this phase replaced it with something *more* rigorous instead: a
+**direct internal-state check** of `u_top.u_biu.u_icache.valid_i[10]`/`tag_i[10]`,
+read immediately after C's own post-CEI miss+refill has retired (program-order-after
+the CEI pulse, program-order-before any further readahead could matter) — settling the
+question of whether D's own cache entry survived, immune to whatever bus noise happens
+afterward. This is a strictly better check than I-2's own bus-activity proxy ever was,
+not just a workaround for this phase's own flakiness.
+
+**Results**: `make test` 35/35 (`cache` now 23 checks, up from 16), `make cosim_grp`
+8/8. No RTL changed this phase — `biu_icache_if.sv`'s own cache-clear logic (`if
+(cacr[3])`/`if (cacr[2])`) was already correctly implemented since Step 1; this phase
+is the first time it's ever been exercised through real instruction execution rather
+than `tb/biu_tb.sv`'s own isolated hand-driven unit tests, and it worked correctly on
+the first attempt (once the test's own bus-activity-proxy issue, unrelated to CACR
+logic itself, was fixed). No Harte re-run needed (testbench-only change; the RTL this
+phase exercises was already Harte-swept clean as part of Phase 129's own fix).
+Remaining: I-4 (self-modifying code), I-5 (BERR-mid-linefill), and Steps 4-7.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
