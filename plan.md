@@ -4404,6 +4404,106 @@ SIZ=11 pin-level bursts).
 
 ---
 
+## Phase 133 (Step 5) — D-cache first-ever enabled pass; a real, previously-undetectable RTL bug found and fixed
+
+**Goal**: the highest-value remaining item in the cache-verification plan.
+`biu_cache_if.sv`'s D-cache side is reachable through the EU's own ordinary
+data-access port (`m68030_top.sv` hardwires `eu_is_icache=0` there) and never needed
+a new module the way Phase 127's I-cache work did — but had literally never been
+exercised with CACR's `dcache_en` (bit 9) set anywhere in this project's 131 prior
+phases: CACR resets to 0, and the only place it's ever written nonzero before this
+phase is a MOVEC register-plumbing check with no memory access afterward. D-1..D-5
+mirror I-1..I-5's own shape (miss/hit, aliasing/eviction, CACR CD/CED flush,
+BERR-mid-access with the cache actually enabled), adapted for data accesses, plus two
+D-cache-specific properties the read-only I-cache has no equivalent of:
+write-through-on-hit and write-no-allocate-on-miss.
+
+**A real, significant RTL bug, found by design, not by accident**: D-1 was
+deliberately built to probe a specific question `biu_cache_if.sv`'s own structure
+raises — its D-cache read-miss state (`CI_D_MISS`) only ever fetches and writes ONE
+word slot (`data_d[idx][woff]`) per miss (matching real 68030 hardware's own
+documented single-longword D-cache fill, unlike the I-cache's 4-word burst linefill),
+yet marks the *entire 16-byte line* valid (`valid_d[idx]<=1`, a single bit per line).
+Reading a *different* word offset within that same line — one that line's own miss
+never actually touched — would therefore incorrectly report a cache HIT and return
+whatever garbage happens to sit in that unfilled array slot. Confirmed directly via
+internal-state tracing (`biu_cache_if.sv`'s own `state`/`idx_r`/`woff_r`/`data_d`):
+reading `P+4` (same line as `P`, different word) showed `state=1` (`CI_HIT`) with
+`rdata=xxxxxxxx` — a textbook silent-data-corruption bug, invisible to every one of
+the 132 prior phases' own testing (Harte never enables the D-cache; every other test
+in this project either never enabled it either or never touched two different words
+in the same freshly-cached line while it was enabled).
+
+**Fixed in `rtl/biu_cache_if.sv`**: `valid_d` changed from `logic [0:15]` (one bit per
+line) to `logic [0:15][0:3]` (one bit per word), with `dhit`/`dhit_r` now gated on
+`valid_d[idx][woff]` instead of just `valid_d[idx]`. `CI_D_MISS` now sets only the one
+word slot it actually filled (`valid_d[idx_r][woff_r]<=1`), and — a second correctness
+detail found while implementing, not by further testing — if the miss's own tag
+*differs* from what's currently in `tag_d[idx_r]` (a genuinely different address
+replacing this line, not just an unfilled offset within the same line), the other 3
+words' own valid bits are explicitly cleared too, since their data belongs to the old,
+now-replaced tag and must not be allowed to falsely hit later. CD/CED's own clear
+logic and the reset block were updated to the new per-word shape (nested loops over
+both line and word-within-line) to match. `dhit`/`dhit_r`'s own new `[woff]`/`[woff_r]`
+indexing is the *only* functional change visible outside the module — `biu_cache_if`'s
+external interface is unchanged.
+
+**Two real test bugs found and fixed while building D-1 through D-5, both address
+selection, both the exact same class of mistake Phase 132 already found once in I-3**:
+every D-cache test address (`0x2000`/`0x2600`/`0x2700`/`0x2800`/...) shared a zero low
+byte, so they *all* collided on real cache index 0 (`idx=addr[7:4]`) regardless of
+which "different index" a comment claimed — confirmed via the same internal `idx_r`
+tracing technique Phase 132 used. This silently broke D-3's own CD-vs-CED selectivity
+claim (R and S were never actually at different indices) — fixed by moving S from
+`0x2700` to `0x2710` (genuinely idx 1) and correcting the CAAR value to target R's own
+real index (0, not the originally-assumed 6). W1/W2/T1/T2 also collide with each other
+the same way, but harmlessly — none of D-4's or D-5's own checks compare two of those
+lines' hit/miss status against each other the way D-3 does, so no fix was needed
+there. A second, independent test bug: D-4a's own "write-through-on-hit re-read costs
+0 bus cycles" check measured the combined delta across *both* the mandatory
+write-through bus cycle *and* the re-read, rather than isolating the re-read alone —
+inflating the expected-zero delta to 1 every time regardless of whether the cache was
+actually updated correctly. Fixed by adding an explicit checkpoint (waiting for D6 to
+read 0, marking "the write has retired," mirroring `wait_cleared_then_set`'s own
+established two-phase discipline but exposing the intermediate timing this check
+specifically needed) before measuring the re-read's own isolated cost.
+
+**A third, more interesting non-RTL finding, deliberately not chased further**: D-5's
+first design used ONE shared vector-2 handler plus a register-indirect `JMP (A1)`,
+with the controller pointing `A1` at whichever continuation address was needed before
+each of the two chained fault injections — the same shape as `docs/stalls.md`'s own
+established chaining patterns, just via a register instead of `claim_park()`-style
+self-modifying code. This produced genuinely corrupted state: `A1` never actually
+updated away from its first-ever value across the *second* fault's own handler visit,
+and `D5` — untouched by any instruction anywhere in this path — read back `0xFFFF`
+partway through. This is a `JMP (An)` redirect immediately following exception
+dispatch, chained twice in the same run — a combination this project has never
+exercised before (`JMP (An)` itself is proven correct in isolation, e.g.
+`ctrl_flow_tb.sv`'s own `JMP (A0)` test, and single exception dispatch is proven
+correct hundreds of times over — just not this specific combination). Given the
+scope of Step 5 already, this was not root-caused; switched to two independent,
+fixed-target handlers using `JMP_ABS_L_OP` instead (already proven correct throughout
+this entire file), with the controller rewriting the vector-2 table entry before each
+fault rather than redirecting through a register. This works cleanly and is arguably
+a *more* representative test of real interrupt-handler code anyway (rewriting the
+vector table between handler installs is a completely ordinary, common pattern; a
+handler doing a live register-indirect self-redirect is not) — but the underlying
+`JMP (An)`-after-dispatch anomaly remains a genuine, undiagnosed question for a future
+session, noted here rather than guessed at.
+
+**Results**: `make test` 35/35 (`cache` now 68 checks, up from 45; `biu`'s own
+pre-existing P6-1..P6-5 D-cache unit tests, which exercise `biu_cache_if.sv` directly,
+also still pass — confirming the fix doesn't regress the already-covered single-word
+cases), `make cosim_grp` 8/8, full 124-suite Harte sweep (Verilator batch backend) —
+PASS 702142, FAIL 2 (the same documented ASL.b corpus anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to the pre-fix baseline (expected: Harte never enables the D-cache).
+This closes Step 5 of the cache-verification plan. Remaining: Step 6 (combined
+4-config regression+Harte sweep), Step 7 (pipeline-stall interaction re-check), and
+the deliberately-deferred Step 8 (genuine SIZ=11 pin-level bursts). Also open: the
+`JMP (An)`-after-exception-dispatch anomaly noted above.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

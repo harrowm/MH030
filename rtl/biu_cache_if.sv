@@ -54,7 +54,16 @@ module biu_cache_if (
     logic [23:0] tag_i   [0:15];
     logic [31:0] data_i  [0:15][0:3];
 
-    logic        valid_d [0:15];
+    // valid_d is per-WORD, not per-line, unlike valid_i -- a D-cache miss
+    // (CI_D_MISS, below) only ever fetches and fills the ONE word offset
+    // actually requested (matching real 68030 hardware's own documented
+    // single-longword D-cache fill, unlike the I-cache's 4-word burst
+    // linefill), so a single per-line valid bit would incorrectly mark
+    // the other 3, never-fetched word slots in that line as "valid" too --
+    // a real bug found empirically in Phase 133 (a same-line, different-
+    // offset D-cache read returned uninitialized garbage, reported as a
+    // cache HIT).
+    logic        valid_d [0:15][0:3];
     logic [23:0] tag_d   [0:15];
     logic [31:0] data_d  [0:15][0:3];
 
@@ -120,12 +129,12 @@ module biu_cache_if (
     wire [1:0]  woff = eu_addr[3:2];
     wire [23:0] vtag = eu_addr[31:8];
     wire ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag) && !mmu_ci;
-    wire dhit = dcache_en && valid_d[idx] && (tag_d[idx] == vtag) && !mmu_ci;
+    wire dhit = dcache_en && valid_d[idx][woff] && (tag_d[idx] == vtag) && !mmu_ci;
 
     // Also need dhit based on latched idx_r/vtag_r for write update in CI_WRITE
-    wire dhit_r = dcache_en && valid_d[idx_r] && (tag_d[idx_r] == vtag_r) && !mmu_ci;
+    wire dhit_r = dcache_en && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !mmu_ci;
 
-    integer k;
+    integer k, m;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -133,14 +142,14 @@ module biu_cache_if (
             fill_rdata_r <= 32'h0;
             for (k = 0; k < 16; k++) begin
                 valid_i[k] <= 1'b0;
-                valid_d[k] <= 1'b0;
+                for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0;
             end
         end else begin
             // CACR cache-clear operations (level-sensitive while bit asserted)
             if (cacr[3])  for (k = 0; k < 16; k++) valid_i[k] <= 1'b0; // CI
-            if (cacr[12]) for (k = 0; k < 16; k++) valid_d[k] <= 1'b0; // CD
+            if (cacr[12]) for (k = 0; k < 16; k++) for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0; // CD
             if (cacr[2])  valid_i[caar[7:4]] <= 1'b0;  // CEI
-            if (cacr[11]) valid_d[caar[7:4]] <= 1'b0;  // CED
+            if (cacr[11]) for (m = 0; m < 4; m++) valid_d[caar[7:4]][m] <= 1'b0;  // CED
 
             case (state)
                 CI_IDLE: begin
@@ -220,8 +229,18 @@ module biu_cache_if (
                         fill_rdata_r <= sf_rdata;
                         if (dcache_en && !mmu_ci) begin
                             data_d[idx_r][woff_r] <= sf_rdata; // cache stores full longword
-                            tag_d[idx_r]          <= vtag_r;
-                            valid_d[idx_r]        <= 1'b1;
+                            // A tag mismatch means this line's other 3
+                            // word slots belong to a completely different,
+                            // now-replaced address -- invalidate them too,
+                            // not just the one word this fill actually
+                            // populates. If the tag already matches (same
+                            // line, just a different word offset that was
+                            // never independently fetched before), leave
+                            // the other slots' own validity untouched.
+                            if (tag_d[idx_r] != vtag_r)
+                                for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b0;
+                            tag_d[idx_r]            <= vtag_r;
+                            valid_d[idx_r][woff_r]  <= 1'b1;
                         end
                         state <= CI_DONE;
                     end else if (sf_berr) begin
