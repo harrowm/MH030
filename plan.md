@@ -4238,6 +4238,98 @@ Remaining: I-4 (self-modifying code), I-5 (BERR-mid-linefill), and Steps 4-7.
 
 ---
 
+## Phase 131 (Step 3, I-4 + I-5) — self-modifying code and BERR-mid-linefill; Step 3 complete
+
+**Goal**: close out Step 3 with the last two correctness tests. I-4 proves real 68030
+hardware's own no-automatic-I/D-coherency contract end-to-end (a data write to
+already-cached code doesn't invalidate the I-cache line; software must explicitly
+flush before the CPU sees new bytes as instructions). I-5 proves a genuine Bus Error
+injected mid-linefill (`biu_icache_if.sv`'s own `IC_FILL_0..3` states) is recognized
+as a real exception rather than hanging — the last unverified `ex_mem_stall`-shaped
+source this rollout introduces, applying the same question Phases 108-114 already
+answered for every *EU*-side source, here for the I-cache's own linefill FSM for the
+first time.
+
+**I-4**: `E=0x14B0` (idx 11, fresh) — `CLR.L D5 ; ADDI.L #701,D5 ; RTS`. Warm E (one
+cold-miss visit, one hit — I-1/I-2/I-3 already prove hit-after-miss rigorously).
+Self-modify E's own immediate operand (701→702) via a *real* `MOVE.W #702,(A0)`
+executed by the CPU itself (not the testbench poking `rom[]` directly — the whole
+point is exercising what happens when the CPU is the one modifying its own cached
+code), then re-visit E *without* any CACR flush: must still read the stale, cached
+701. Then a `CACR.CI` flush, then re-visit: must now read the new 702. Added
+`MOVE_W_IMM_A0` (`0x30BC`, derived and cross-checked bit-by-bit against an existing
+known-good `MOVE.L (A0),D0` encoding already in this file, since this project has no
+prior `MOVE.W #imm,(An)` localparam to reuse).
+
+**A real, genuine test-timing bug found while building I-4** — the same *class* of
+bug Phase 129 already found and fixed once (`biu_icache_if.sv`'s own flush-mid-miss
+hazard), but this time entirely in the *test*, not the RTL: the first draft wrote the
+self-modify block's own `rom[]` content only when program order reached that point —
+*after* E#1/E#2's own `wait_cleared_then_set` calls had already let real simulated
+time (and the DUT's own straight-line fall-through past E#2's return) advance. By the
+time those later `rom[]` writes actually executed in the testbench's own simulation
+timeline, the DUT had *already* fetched that still-default-NOP-filled memory as real
+instructions, so the entire self-modify sequence silently decoded as NOPs. Confirmed
+via direct `decode_pc`/`instr_word` tracing showing `0x4e71` (NOP) at addresses this
+file's own code unambiguously wrote real opcodes to. **Fix**: restructured so *all* of
+I-4's `rom[]` content is written up front, in one pass, before any `@(posedge clk_4x)`
+wait — matching I-2/I-3's own (less visibly-tested-but-already-correct) convention,
+just never previously stressed by interleaving codegen-helper calls with
+execution-watching the way I-4 does.
+
+A companion "E#3 needed zero bus activity" delta check hit the same benign I-2/I-3
+readahead phenomenon and was removed — but unlike I-2/I-3's own equivalent checks,
+here the *data*-correctness check alone is already strictly more probative than any
+bus-activity proxy could be: had E's own line genuinely been re-fetched, it would have
+picked up the *new* value (702) from backing memory (independently confirmed already
+holding 702 at that point), not the stale 701 — so a stale read is unambiguous,
+direct proof no re-fetch occurred, with no need for a companion timing check at all.
+
+**I-5**: `F=0x15C0` (idx 12, fresh) — same subroutine shape. Vector 2 (Bus Error, at
+`VBR(=0)+2*4=0x08`) points to a small handler (`CLR.L D6 ; ADDI.L #999,D6 ; BRA.B -2`
+self-park) — no RTE, nothing sensible to retry after a genuine unrecovered fault,
+matching `stall_fsm_tb.sv`'s own established convention for every one of its own
+BERR-mid-`<X>` tests. `berr_n` (a plain register in this file, unlike some of its
+sibling constants) is driven low on the first `code_ds_count` change after the
+controller reaches its own JSR (the same `skip_cycles=0` convention
+`run_berr_mid_test` uses), then released the instant `exc_active` is observed
+(holding it longer would also fault the exception controller's own subsequent
+frame-push writes and hang dispatch itself — same reasoning already documented for
+`stall_fsm_tb.sv`'s own BERR-mid-CAS2 test).
+
+**Two bugs found building I-5, both in the test again, not the RTL** (`biu_icache_if.sv`'s
+own IC_FILL BERR handling worked correctly on the very first real attempt once these
+were fixed): (1) the *exact same* "ROM content written too late" class of bug I-4 had
+already found — I-5's own vector-table/handler/subroutine/controller `rom[]` writes
+were originally placed at their own point in program order, after I-1 through I-4 had
+already consumed real simulated time; moved them all to the very top of the `initial`
+block, alongside the boot vector, since nothing in this file's own straight-line
+NOP-fall-through convention could ever reach that address range before I-5's own
+explicit JSR does anyway, making early placement completely safe. (2) A *second*,
+different bug even after fixing (1): a raw `while (decode_pc < 0x0600)` wait to gate
+the injection-watch loop is the exact "`decode_pc` can be ahead of what's actually
+completing in EX" hazard `docs/stalls.md` already documents — direct tracing showed
+`decode_pc` reporting `0x0600` with **zero** wait iterations needed, while `CLR.L D5`
+(the very first instruction there) had genuinely not yet retired, corrupting the
+"F's own subroutine never spuriously completed" check with I-4's own leftover D5=702.
+Fixed by waiting for `D5===0` directly (CLR.L D5's own retirement) instead of trusting
+`decode_pc` alone — the same discipline `wait_cleared_then_set` already encodes for
+every other multi-visit check in this file, applied here as a raw single-phase wait
+since D5 has no prior "already 0" state to two-phase against (this *is* the clear).
+
+**Results**: `make test` 35/35 (`cache` now 36 checks, up from 23), `make cosim_grp`
+8/8. No RTL changed in this phase (`tb/cache_tb.sv` only) — `biu_icache_if.sv`'s own
+IC_FILL BERR-abort path (added as part of Phase 129's `abandoned_r` mechanism)
+correctly handled a real fault on the first attempt once the test's own two timing
+bugs were fixed; no Harte re-run needed. **This closes Step 3 of the cache
+verification plan** — all five I-cache correctness tests (miss/hit, aliasing/eviction,
+CACR flush, self-modifying code, BERR-mid-linefill) are green. Remaining: Steps 4-7
+(I-cache timing suite, D-cache first-enable correctness+timing, combined 4-config
+regression sweep, pipeline-stall interaction re-check) and the deliberately-deferred
+Step 8 (genuine SIZ=11 pin-level bursts).
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

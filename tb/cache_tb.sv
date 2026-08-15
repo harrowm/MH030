@@ -127,6 +127,7 @@ module cache_tb;
         ext_ds_n_prev <= ext_ds_n;
     end
 
+
     // -------------------------------------------------------------------
     // Instruction encodings (reusing every already-proven opcode from
     // stall_fsm_tb.sv/stall_hazard_tb.sv verbatim where the same
@@ -139,6 +140,7 @@ module cache_tb;
     localparam ADDI_L_D6      = 16'h0686;
     localparam NOP_OP         = 16'h4E71;
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
+    localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam RTE_OP         = 16'h4E73;
     localparam JSR_A0_IND     = 16'h4E90;  // JSR (A0)
     localparam RTS_OP         = 16'h4E75;
@@ -154,6 +156,11 @@ module cache_tb;
     localparam MOVEC_D7_CACR  = 16'h7002;
     // MOVEC D7,CAAR: same opcode, ext word rc=0x802 (da=0,rn=7,rc=0x802).
     localparam MOVEC_D7_CAAR  = 16'h7802;
+    // MOVE.W #imm,(A0): 00_11_ddd_mmm_MMM_rrr, size=11(word), dst
+    // reg=A0(000), dst mode=(An)=010, src mode=111(imm), src reg=100(word
+    // imm) -> 0011_000_010_111_100 = 0x30BC. One extension word (the
+    // 16-bit immediate value itself).
+    localparam MOVE_W_IMM_A0  = 16'h30BC;
 
     // -------------------------------------------------------------------
     // Checks
@@ -247,6 +254,23 @@ module cache_tb;
         // Boot vector: SSP=0x3F00 (clear of every code/data region below), PC=0x0100.
         rom[0] = 32'h0000_3F00;
         rom[1] = 32'h0000_0100;
+
+        // I-5's own ROM content (vector-2 handler, F's subroutine, and its
+        // own controller code) is written here, up front alongside the
+        // boot vector -- see I-5's own section further down for why this
+        // can't wait until program order reaches it.
+        rom[16'h0008/4] = 32'h0000_0700;          // vector 2 -> handler
+        rom[16'h0700/4] = {CLR_L_D6, ADDI_L_D6};
+        rom[16'h0704/4] = {16'h0000, 16'd999};
+        rom[16'h0708/4] = {BRA_SELF, NOP_OP};
+
+        rom[16'h15C0/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h15C4/4] = {16'h0000, 16'd801};
+        rom[16'h15C8/4] = {RTS_OP, NOP_OP};
+
+        rom[16'h0600/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h0604/4] = {16'h0000, 16'h15C0};
+        rom[16'h0608/4] = {JSR_A0_IND, NOP_OP};   // JSR F -- triggers the cold miss/linefill to fault
 
         // ===================================================================
         // I-1: miss-then-hit tight loop. A DBF D0,-2 self-loop re-fetches
@@ -498,6 +522,205 @@ module cache_tb;
             c6 = code_ds_count;
             check32("I-3: visit D#3 (post-CEI, must HIT) loaded D6 correctly", u_top.u_eu.u_rf.d_reg[6], 32'd902);
             check("I-3: CACR.CEI forced a real miss on C (its own index)", c5 - c4 > 0);
+        end
+
+        // ===================================================================
+        // I-4: self-modifying code. Real 68030 hardware has no automatic
+        // I/D cache coherency -- a data write to memory that's currently
+        // resident in the I-cache does NOT invalidate that cache line;
+        // software must explicitly flush (CACR CI/CEI) before the CPU will
+        // ever see the new bytes as instructions. This test proves BOTH
+        // halves of that contract: (a) without a flush, re-executing E
+        // after modifying its own immediate operand still runs the STALE,
+        // pre-modification value (documented, correct 68030 behavior, not
+        // a bug) -- and (b) after a CACR.CI flush, the CPU picks up the
+        // NEW value exactly as I-2/I-3 already proved a flush forces a
+        // real re-fetch.
+        //
+        // E = 0x14B0 (idx=11, fresh) -- CLR.L D5 ; ADDI.L #701,D5 ; RTS.
+        // The controller writes a fresh immediate (702) directly into E's
+        // own low imm word (0x14B6) via a real MOVE.W #imm,(A0) executed
+        // by the CPU itself -- not the testbench poking rom[] directly,
+        // since the whole point is exercising what happens when the *CPU*
+        // is the one modifying its own cached code.
+        // ===================================================================
+        rom[16'h14B0/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h14B4/4] = {16'h0000, 16'd701};
+        rom[16'h14B8/4] = {RTS_OP, NOP_OP};
+
+        // The entire controller flow's own ROM content is written here, up
+        // front, *before* any @(posedge clk_4x) wait -- unlike I-2/I-3
+        // (whose own controller code is likewise written up front, just
+        // less visibly since they don't interleave codegen-helper calls
+        // with execution-watching), an earlier draft of this block wrote
+        // the self-modify/post-flush portions *after* E#1/E#2's own
+        // wait_cleared_then_set calls had already advanced real simulated
+        // time -- by the time those later rom[] writes executed, the DUT's
+        // own straight-line fall-through past E#2's return had *already*
+        // fetched that still-default-filled (NOP) memory, so every
+        // instruction from the self-modify block onward silently decoded
+        // as NOPs instead of the intended opcodes. Genuine test-timing bug,
+        // not an RTL issue -- caught via direct decode_pc/instr_word
+        // tracing showing 0x4e71 (NOP) at addresses this file's own code
+        // unambiguously wrote real opcodes to.
+        begin
+            logic [31:0] a, a4, a8;
+
+            a = 32'h0000_0500;
+
+            // E#1 (cold miss), E#2 (hit, A0 unchanged) -- warm the line,
+            // same "prove hit-after-miss once, don't re-derive it" logic
+            // I-3 already used for C/D.
+            rom[a[31:2]] = {CLR_L_D5, MOVEA_L_IMM_A0};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h0000, 16'h14B0};
+            rom[a8[31:2]] = {JSR_A0_IND, CLR_L_D5};   // E#1 -> clear D5 for E#2
+            a = a + 32'd12;
+            rom[a[31:2]] = {JSR_A0_IND, NOP_OP};      // E#2 (hit, A0 still E)
+            a = a + 32'd4;
+
+            // Self-modify: A0=0x14B6 ; MOVE.W #702,(A0) -- overwrites E's
+            // own imm-lo word directly, then restore A0=E and re-visit
+            // *without* any CACR flush in between.
+            rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h14B6, MOVE_W_IMM_A0};
+            rom[a8[31:2]] = {16'd702, MOVEA_L_IMM_A0};
+            a = a + 32'd12;
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a[31:2]]  = {16'h0000, 16'h14B0};
+            rom[a4[31:2]] = {CLR_L_D5, JSR_A0_IND};   // clear D5 ; E#3 (pre-flush)
+            a = a + 32'd8;
+
+            // CACR.CI flush, then re-visit -- must now see the new value.
+            a = emit_set_cacr(a, 32'h0000_0009);
+            a = emit_set_cacr(a, 32'h0000_0001);
+            rom[a[31:2]] = {CLR_L_D5, JSR_A0_IND};    // clear D5 ; E#4 (post-flush)
+            a4 = a + 32'd4;
+            rom[a4[31:2]] = {NOP_OP, NOP_OP};
+        end
+
+        begin
+            int c0, c1, c2, e, t;
+
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_0500; t++)
+                @(posedge clk_4x);
+            c0 = code_ds_count;
+            wait_cleared_then_set(5, 32'd701, 20000, e);
+            check32("I-4: visit E#1 (cold) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'd701);
+            wait_cleared_then_set(5, 32'd701, 20000, e);
+            c1 = code_ds_count;
+            check32("I-4: visit E#2 (hit) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'd701);
+
+            wait_cleared_then_set(5, 32'd701, 20000, e);
+            c2 = code_ds_count;
+            // The data-correctness check below is, by itself, already
+            // unambiguous proof E's own cache line was never re-fetched --
+            // NOT just "served from *a* cache", specifically: had a real
+            // miss occurred here, biu_icache_if.sv would have re-read
+            // backing memory, which by this point already holds the NEW
+            // value (702, confirmed independently below) -- so a stale
+          // hit is the *only* way D5 can still show 701. A companion
+            // "zero bus activity" delta check was tried and dropped: same
+            // documented I-2/I-3 phenomenon (this self-modify block's own
+            // controller code is new territory the IFU's legitimate
+            // speculative readahead can touch while decode sits busy
+            // inside E's subroutine, adding real but unrelated bus
+            // activity) -- redundant here anyway, since this check is
+            // strictly more direct than a bus-activity proxy ever was.
+            check32("I-4: visit E#3 (self-modified, but NOT yet flushed) still reads the STALE cached value",
+                    u_top.u_eu.u_rf.d_reg[5], 32'd701);
+            // Direct confirmation the underlying memory really did change
+            // (the write itself succeeded; only the *cached* copy is
+            // stale) -- reads the backing rom[] array directly, not
+            // through the cache.
+            check32("I-4: the write itself landed correctly in backing memory (rom[0x14B6]=702)",
+                    rom[16'h14B4/4][15:0], 16'd702);
+
+            wait_cleared_then_set(5, 32'd702, 20000, e);
+            check32("I-4: visit E#4 (post-flush) picked up the NEW self-modified value",
+                    u_top.u_eu.u_rf.d_reg[5], 32'd702);
+        end
+
+        // ===================================================================
+        // I-5: BERR mid-linefill. A genuine bus error injected during the
+        // I-cache's own multi-beat miss-fill sequence (biu_icache_if.sv's
+        // IC_FILL_0..3) must be recognized as a real Bus Error exception
+        // (vector 2) rather than hanging the CPU -- the same "does BERR mid
+        // multi-cycle-FSM actually recover" question the Phase 108-114
+        // rollout answered for every EU-side ex_mem_stall source, applied
+        // here for the first time to the I-cache's own linefill FSM
+        // specifically (a source that didn't exist before Phase 127).
+        //
+        // F=0x15C0 (idx=12, fresh) -- CLR.L D5 ; ADDI.L #801,D5 ; RTS,
+        // same shape as every other subroutine in this file. Vector 2 (Bus
+        // Error, at VBR(=0)+2*4=0x08) points to a small handler that sets
+        // D6=999 then self-parks (BRA.B -2) -- there's nothing sensible to
+        // retry after a genuine, unrecovered fault, matching
+        // stall_fsm_tb.sv's own established convention for every one of
+        // its own BERR-mid-<X> tests.
+        //
+        // ROM content for this whole block is written up front (see the
+        // boot-vector section near the top of this initial block), NOT
+        // here -- an earlier draft wrote it at this point in program order
+        // instead and hit the exact same class of bug I-4 already found:
+        // by the time execution reaches here, I-1 through I-4 have already
+        // let real simulated time (and therefore decode_pc) advance well
+        // past this file's own default NOP-fall-through convention, so
+        // rom[] writes issued this late can lose the race against the CPU
+        // already having fetched (and executed, as a stale NOP) the very
+        // addresses this block means to populate.
+        // ===================================================================
+        begin
+            int t, d0, injected, exc_seen;
+
+            // Wait for D5 to genuinely clear (CLR.L D5 at 0x0600 actually
+            // retired), not just for decode_pc to *report* 0x0600 -- the
+            // same "decode_pc can be ahead of what's actually completing
+            // in EX" hazard this project has hit repeatedly (docs/stalls.md
+            // has its own note on it), here in a raw single-phase wait
+            // rather than the two-phase wait_cleared_then_set shape (D5
+            // has no prior "cleared" state to synchronize against the way
+            // that task's own callers rely on -- this IS the clear).
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd0; t++)
+                @(posedge clk_4x);
+            d0 = code_ds_count;
+            injected = 0;
+            exc_seen = 0;
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                // Inject on the very first beat of F's own linefill (the
+                // same skip_cycles=0 convention run_berr_mid_test uses in
+                // stall_fsm_tb.sv) -- code_ds_count only moves on a real
+                // fc=110 miss, so this can only fire once F's own JSR
+                // redirect has genuinely missed and started fetching.
+                if (!injected && code_ds_count != d0) begin
+                    injected = 1;
+                    berr_n = 1'b0;
+                end
+                // Release immediately once the exception is recognized --
+                // a chip-wide pin held low indefinitely would also fault
+                // the exception controller's own subsequent frame-push
+                // writes, hanging dispatch itself (same reasoning
+                // stall_fsm_tb.sv's own BERR-mid-CAS2 test documents).
+                if (injected && !exc_seen && u_top.exc_active) begin
+                    exc_seen = 1;
+                    berr_n = 1'b1;
+                end
+                if (u_top.u_eu.u_rf.d_reg[6] === 32'd999) break;
+            end
+            berr_n = 1'b1;
+
+            check("I-5: BERR was injected mid-linefill", injected);
+            check("I-5: a real Bus Error exception was recognized (exc_active seen)", exc_seen);
+            check32("I-5: the correct vector (2, Bus Error) was dispatched", u_top.u_eu.u_rf.d_reg[6], 32'd999);
+            check32("I-5: F's own subroutine never spuriously completed (D5 stayed 0, the fault won the race)",
+                  u_top.u_eu.u_rf.d_reg[5], 32'd0);
+            // Recovery: eu_busy must clear (no lingering hang from the
+            // aborted linefill) once the handler has parked.
+            for (t = 0; t < 4000 && u_top.eu_busy; t++)
+                @(posedge clk_4x);
+            check("I-5: EU pipeline recovered (eu_busy clear, no lingering hang)", !u_top.eu_busy);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
