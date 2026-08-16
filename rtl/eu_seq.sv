@@ -6361,6 +6361,103 @@ module eu_seq (
     // path (not ex_mem_stall) ensures EX is cleared, not frozen.
     logic stop_first_cycle;
     assign stop_first_cycle = ex_valid && ex_is_stop && !stop_r;
+    // stop_wb_hazard: STOP's own SR write (stop_sr_wr_en, below) fires
+    // directly from EX the instant STOP is decoded -- unlike an ordinary
+    // instruction's own CCR update, which commits one stage later, from
+    // WB. hazard_ccr (above) protects a decode that *reads* CCR from a
+    // still-in-flight EX/WB update, but STOP doesn't read CCR, it
+    // unconditionally *overwrites* the whole SR -- so nothing previously
+    // stopped it from entering EX on the exact same cycle a preceding
+    // instruction's own delayed WB commit (e.g. a memory-source ALU op,
+    // whose WB only fires once its own mem_ack finally arrives) is also
+    // trying to land. When that collision happens, sr_wr_data's own
+    // priority mux picks stop_sr_wr_en's branch over the ordinary
+    // CCR-commit branch, silently discarding the real instruction's own
+    // CCR result before it's ever visible in sr_r -- found via Phase 127's
+    // own cache plan Step 6 (an I-cache hit on STOP's own opcode fetch can
+    // close a timing gap the old, always-uncached fetch path guaranteed
+    // never closed), confirmed via direct wb_valid/wb_updates_ccr/
+    // stop_sr_wr_en/sr_r tracing, not guessed at.
+    //
+    // Checks both EX and WB stage, mirroring hazard_ccr's own two-stage
+    // shape: a wb-only check has no effect on a memory-source instruction
+    // whose own WB is delayed by mem_ack -- by the time wb_valid&&
+    // wb_updates_ccr finally goes true, STOP has *already* left decode
+    // (dec_is_stop already false), since it was free to advance the whole
+    // time that instruction sat waiting in EX with ex_updates_ccr already
+    // visible (a static per-opcode property, held for its whole EX
+    // residency). Checking ex_valid&&ex_updates_ccr too catches this one
+    // cycle earlier, while STOP is still in decode.
+    //
+    // Both terms use the SAME "insert a bubble into EX" stall_base
+    // treatment as every other hazard_* term below, not ex_mem_stall's own
+    // "keep EX completely unchanged" one -- a first attempt tried the
+    // latter for the ex_valid&&ex_updates_ccr case specifically, reasoning
+    // the preceding instruction was "still using" EX and shouldn't be
+    // bubbled out from under it. That reasoning doesn't hold: the WB latch
+    // (elsewhere in this file) is a *separate* always_ff, sampling
+    // ex_valid/ex_updates_ccr's own pre-edge value on the very same clock
+    // edge regardless of what the EX latch does to its own registers that
+    // same edge -- inserting a bubble into EX does NOT retroactively
+    // erase what the WB latch already captured from EX going INTO this
+    // edge. Confirmed by the failure mode: "keep unchanged" instead
+    // created a genuine deadlock (ex_updates_ccr's own condition can only
+    // ever clear via the normal EX-advances path, which "keep unchanged"
+    // permanently blocks) -- test #4 (ADD.b memory-source) hung forever,
+    // never retiring at all.
+    //
+    // sr_wr_en (used below instead of a bare wb_updates_ccr check) covers
+    // a dozen OTHER instruction families that ALSO write SR directly from
+    // EX, not through the ordinary wb_valid/wb_updates_ccr path
+    // (mem_rmw_sr_wr_en, tas_sr_wr_en, cmp2_sr_wr_en, bcds_sr_wr_en,
+    // cas_sr_wr_en, cas2_sr_wr_en, move_mm_sr_wr_en, addx_mem_sr_wr_en,
+    // bf_mem_sr_wr_en, memind_ccr_wr_en, rte_sr_wr_en, rtr_sr_wr_en) --
+    // reusing sr_wr_en itself, the same aggregate this whole hazard is
+    // about, is simpler and complete by construction than enumerating each
+    // one; its own stop_sr_wr_en term is guaranteed false here since
+    // dec_is_stop and ex_is_stop can never both be true the same cycle.
+    // Gated on !need_ext: STOP is itself a 2-word instruction (opcode +
+    // its own #imm operand), consumed via the SAME dec_needs_ext/ext_valid
+    // extension-word mechanism every multi-word opcode uses. A first
+    // version of this hazard had no such guard and holding STOP in decode
+    // for the extra cycle this hazard adds -- BEFORE STOP's own extension
+    // word had actually been fetched -- desynced that mechanism: STOP's
+    // own opcode word got treated as already consumed while STOP itself
+    // never actually reached EX, so decode silently moved on to STOP's
+    // own immediate operand (0x2700) and misdecoded IT as a fresh
+    // instruction (0x2700 = "MOVE.L (A0),-(A3)" under ordinary 68k
+    // decode) -- corrupting an unrelated address register by exactly -4
+    // (the predecrement side effect) on every MOVEtoSR/RTE test
+    // immediately followed by STOP. Confirmed via direct dec_is_stop/
+    // dec_an_upd_en/decode_pc tracing showing dec_is_stop flip from 1 to
+    // 0 at the *same* decode_pc between consecutive cycles once the extra
+    // stall cycle was in play. need_ext (already computed above) is
+    // exactly "this decode still needs an extension word it doesn't have
+    // yet" -- excluding that window lets the pre-existing need_ext stall
+    // (already part of stall_base's own bucket) finish fetching STOP's
+    // own operand normally, with stop_wb_hazard only taking over once
+    // STOP has that operand in hand and is genuinely ready to enter EX.
+    // ex_valid-side check must cover ALL THREE of sr_wr_en's own WB-delayed
+    // terms (wb_updates_ccr / wb_is_move_sr_w / wb_is_move_ccr_w), not just
+    // wb_updates_ccr's own EX-stage precursor (ex_updates_ccr) -- a first
+    // version of this fix only checked ex_updates_ccr, which is the ordinary
+    // ALU-CCR-commit flag. That missed MOVE Dn,SR/MOVE Dn,CCR immediately
+    // followed by STOP: MOVEtoSR's own SR write commits via wb_is_move_sr_w,
+    // a completely different WB flag ex_updates_ccr never reflects, so a
+    // MOVEtoSR sitting in EX with STOP right behind it in decode was
+    // invisible to this hazard -- STOP was free to advance into EX the very
+    // cycle MOVEtoSR's own WB (wb_is_move_sr_w) landed, recreating the exact
+    // same sr_wr_data priority-mux collision this hazard exists to prevent.
+    // Found via Step 6's full 4-config Harte sweep: every failure was a
+    // register-direct "MOVE Dn,SR" test (the shortest-EX-residency form,
+    // exactly the one most likely to still be in EX when STOP reaches
+    // decode) showing the same -4 A3 corruption signature as the original
+    // desync bug, on tests standalone-reproducible outside any batching
+    // context -- a real, independent gap, not a batching artifact.
+    logic stop_wb_hazard;
+    assign stop_wb_hazard = dec_is_stop && !need_ext && (
+                                sr_wr_en ||
+                                (ex_valid && (ex_updates_ccr || ex_is_move_sr_w || ex_is_move_ccr_w)));
     // Forward-declare EX-stage branch-taken signals (assigned later in file).
     // Icarus/iverilog requires declarations before use in concurrent assigns.
     logic [15:0] ex_alu_result_w;
@@ -6372,11 +6469,80 @@ module eu_seq (
     // will clear dec_valid on the next cycle, giving EX a clean bubble.
     // (ex_jmp_taken/ex_jsr_taken/etc. are assigned below; forward refs are fine
     // in concurrent assigns.)
+    // ex_exc_dispatch_hazard: blocks new decode->EX dispatch (plain
+    // dec_valid-style "insert bubble" semantics -- see below for why no
+    // freeze is needed) for as long as an internal exception is either
+    // about to be seen by m68030_exc for the first time, OR is still being
+    // dispatched by it (exc_active). Found via Step 6's cache plan:
+    // eu_priv_req/eu_trap_req/eu_illegal_req/etc are all bare "ex_valid &&
+    // ex_is_X" combinational pulses with NOTHING gating dec_valid's own
+    // advance behind them -- decode was completely free to keep dispatching
+    // (and committing register side effects for) whatever instruction
+    // stream happens to sit at the NEXT sequential address, for the ENTIRE
+    // multi-cycle EXC_PUSH/FETCH/LOAD dispatch sequence, since pc_wr_en
+    // (the actual IFU/decode flush, m68030_exc's new_pc_wr) doesn't fire
+    // until state_r reaches EXC_LOAD -- exc_active merely steals bus
+    // arbitration (m68030_top's biu_eu_req mux) in the meantime, which only
+    // blocks memory-*data*-dependent side effects, not e.g. an EA
+    // predecrement (dec_an_upd_en), which commits as part of ordinary
+    // dispatch regardless of whether the accompanying bus access ever
+    // completes. Root-caused via a MOVE Dn,SR (clearing S) immediately
+    // followed by the Harte runway's own STOP: STOP correctly takes a
+    // Privilege Violation (dec_is_priv, from the same-cycle SR-forwarding
+    // path, architecturally correct -- real 68030 sees the new SR
+    // immediately) -- but decode then continued straight through STOP's
+    // own leftover operand byte (0x2700), misdecoding it as
+    // "MOVE.L (A0),-(A3)" and committing that instruction's own -(A3)
+    // predecrement, a real, previously latent gap in ALL internal-exception
+    // dispatch (not the STOP/CCR hazard above, and not caused by it), only
+    // exposed now because I-cache timing shifted exactly when this specific
+    // race window opens.
+    //
+    // A first version gated this on "ex_will_except && !exc_active" alone,
+    // reasoning that stall could safely drop the instant exc_active first
+    // turns on. Traced and disproved: exc_active means only "state_r has
+    // LEFT EXC_IDLE" (asserted across the whole EXC_PUSH/FETCH/LOAD
+    // sequence) -- it does NOT mean the flush has landed. Dropping the
+    // hazard there freed decode one full dispatch sequence too early,
+    // reproducing the exact corruption one cycle later than before. The
+    // fix folds exc_active itself into the SAME OR term rather than gating
+    // on its absence, holding stall for the ENTIRE window through to the
+    // EXC_LOAD cycle new_pc_wr actually fires on (exc_active's last cycle
+    // asserted).
+    //
+    // No "keep EX frozen" (ex_mem_stall-style) treatment is needed despite
+    // that being the first instinct (a stop_wb_hazard-shaped concern about
+    // losing eu_priv_req after one bubbled cycle): m68030_exc's own
+    // EXC_IDLE case samples exc_pending/priv_req combinationally and
+    // transitions off EXC_IDLE on the very same edge it was ever visible --
+    // a single-cycle pulse is already sufficient, so bubbling ex_is_priv
+    // away immediately afterward loses nothing the FSM needed. What
+    // actually matters -- blocking new dispatch -- is unconditionally
+    // covered by the exc_active term for the rest of the window regardless
+    // of what EX itself holds, so plain bubble semantics (this term lives
+    // in stall_base's usual OR, not ex_mem_stall's own frozen branch) are
+    // both sufficient and simpler, with no deadlock risk to reason about.
+    //
+    // Every one of eu_seq.sv's own "_req" exception triggers shares the
+    // identical unprotected shape, so this aggregates all of them rather
+    // than special-casing priv alone. Excluded: eu_reset_req (RESET
+    // pulses RSTOUT directly, no exc_active-mediated frame dispatch to
+    // race against) and eu_trace_req (already separately gated on
+    // !ex_mem_stall and, being genuinely post-instruction-retirement by
+    // design, is a different hazard shape not reproduced here -- left for
+    // a dedicated follow-up rather than bundled in speculatively).
+    logic ex_will_except;
+    assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
+                                          ex_is_priv || ex_is_linea || ex_is_linef) ||
+                             chk_trap || div_trap || eu_fmt_err_req;
+    logic ex_exc_dispatch_hazard;
+    assign ex_exc_dispatch_hazard = ex_will_except || exc_active;
     logic stall_base;
     assign stall_base = ex_mem_stall
+                      || ex_exc_dispatch_hazard
                       || (ex_jmp_taken | ex_jsr_taken | ex_bsr_taken
                          | ex_rts_taken | ex_rtr_taken | ex_rte_taken | ex_dbcc_taken)
-                      || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext || stop_first_cycle));
+                      || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext || stop_first_cycle || stop_wb_hazard));
     // int_defer: a pending interrupt sees a clean instruction boundary this
     // cycle (dec_valid would otherwise dispatch with no other stall source).
     // Real 68030 silicon only samples IPL between instructions; freezing

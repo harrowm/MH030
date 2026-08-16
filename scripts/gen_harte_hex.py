@@ -19,12 +19,33 @@ compute correctly without any displacement adjustment.
   - Only the 24-bit portion of addresses is used (ext_a[23:2] in the testbench).
 """
 
+import os
 import struct
 import sys
 from pathlib import Path
 
 RESET_PC      = 0x000008   # init code start byte address
-INIT_CODE_END = 0x000090   # conservative upper bound on init code + JMP.L (~0x007a actual)
+
+# Cache-verification plan (plan.md, Phase 127) Step 6: an opt-in, env-var
+# controlled CACR value forced during init, for re-running the Harte corpus
+# under each of the plan's 4 cache configurations (disabled/I$-only/D$-only/
+# both) as a correctness cross-check -- caching must never change
+# architectural results, so any divergence from the disabled baseline under
+# a nonzero value here is a real DUT bug. Defaults to 0 (unset ==
+# no injection at all, byte-for-byte identical init code to every prior
+# phase) so this is fully inert unless a run deliberately opts in.
+HARTE_CACR_OVERRIDE = int(os.environ.get('HARTE_CACR', '0'), 0)
+
+# INIT_CODE_END gates can_run()'s own "does this test's EA/data conflict
+# with our own init code" checks -- widening it unconditionally (needed to
+# fit HARTE_CACR_OVERRIDE's extra 6-byte injection, ~0x009a worst case)
+# regressed 8 previously-passing tests to SKIP by reserving 16 more bytes
+# than necessary for every ordinary (non-override) run too. Keeping it
+# conditional preserves byte-for-byte identical can_run() behavior to
+# every prior phase whenever the override is inactive (the default).
+INIT_CODE_END = 0x0000A0 if HARTE_CACR_OVERRIDE else 0x000090
+# conservative upper bound on init code + JMP.L (~0x007a actual,
+# ~0x009a with HARTE_CACR_OVERRIDE's extra 6-byte injection)
 
 
 def _word(v):  return struct.pack('>H', v & 0xFFFF)
@@ -71,6 +92,11 @@ def _movec_a7_vbr():
 def _movec_a7_msp():
     """MOVEC A7, MSP (opcode 0x4E7B + ext word: A/D=1,reg=111,Rc=0x803)"""
     return _word(0x4E7B) + _word(0xF803)
+
+
+def _movec_d7_cacr():
+    """MOVEC D7, CACR (opcode 0x4E7B + ext word: A/D=0,reg=111,Rc=0x002)"""
+    return _word(0x4E7B) + _word(0x7002)
 
 
 # Relocated VBR base for RTS/RTE/RTR tests (see is_ret_taken in build_patches())
@@ -172,6 +198,12 @@ def build_patches(test):
 
     # ── Init code ────────────────────────────────────────────────────────────
     code = bytearray()
+    if HARTE_CACR_OVERRIDE:
+        # D7 is safe to scratch here -- the real ini['d7'] load happens
+        # immediately below and overwrites whatever this leaves behind
+        # before the tested instruction ever runs.
+        code += _move_l_imm_dn(7, HARTE_CACR_OVERRIDE)
+        code += _movec_d7_cacr()
     for n in range(8):
         code += _move_l_imm_dn(n, ini[f'd{n}'])
     for n in range(7):

@@ -182,11 +182,37 @@ module harte_tb;
     end
 
     // Capture SR just before STOP executes (STOP #$2700 overwrites CCR bits).
-    // eu_stop_out goes high one cycle AFTER sr_r is updated to 0x2700, so
-    // capturing while !eu_stop_out still gives the pre-STOP SR value.
+    // Originally gated on !eu_stop_out, on the (false) assumption that
+    // eu_stop_out always goes high exactly one cycle after the last real
+    // instruction's own sr_r commit -- true under every fetch-timing
+    // profile this project exercised before the I-cache existed (always a
+    // real bus cycle, never a same-cycle hit), but NOT a real invariant:
+    // an I-cache hit on STOP's own opcode fetch can let it reach EX fast
+    // enough to land eu_stop_out on the *exact same cycle* as the
+    // preceding instruction's own CCR commit, and gating on !eu_stop_out
+    // silently drops that cycle's update, capturing the *stale*,
+    // second-to-last value instead (found via Phase 127's own cache
+    // plan Step 6 -- confirmed via direct sr_r tracing, not guessed at).
+    // A second attempt gated on !stop_seen instead (the one-cycle-later
+    // registered version of eu_stop_out), reasoning "capture one more
+    // cycle" -- wrong in the *other* direction for RMW-style
+    // memory-dest instructions, where multiple cycles separate the real
+    // commit from eu_stop_out, and the extra cycle captured STOP's own
+    // "#$2700" operand landing in sr_r instead of the tested instruction's
+    // own result (also confirmed via direct tracing). A third attempt
+    // gated on !stop_sr_wr_en (eu_seq.sv's own combinational
+    // ex_valid && ex_is_stop && !stop_r, exactly the cycle STOP's own SR
+    // write is about to land) looked right but stop_sr_wr_en is a
+    // ONE-CYCLE PULSE, not a level: it drops back to 0 the very next
+    // cycle (once stop_r itself becomes 1), which re-opens the capture
+    // gate and immediately picks up STOP's now-already-landed "#$2700"
+    // value anyway. stop_r itself is the level that actually matters: it
+    // goes 1 on the same edge stop_sr_wr_en fires and *stays* 1
+    // thereafter, so gating on !stop_r permanently freezes capture from
+    // that edge on, correctly keeping whatever sr_r held the cycle before.
     logic [15:0] sr_before_stop;
     always_ff @(posedge clk_4x) begin
-        if (!eu_stop_out)
+        if (!u_top.u_eu.u_seq.stop_r)
             sr_before_stop <= u_top.u_eu.u_rf.sr_r;
     end
 

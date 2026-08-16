@@ -90,6 +90,45 @@ module biu_cache_if (
         endcase
     endfunction
 
+    // Merge a write into one cached longword slot, for the write-through
+    // cache-update path. wdata is TOP-justified (eu_seq.sv's own eu_lane()
+    // convention for mem_wdata: byte in [31:24], word in [31:16],
+    // regardless of the real target address) -- NOT the same LSB-justified
+    // convention extract_rd() returns to the EU on a read. Re-positions the
+    // meaningful bits into the correct byte lane of the raw (big-endian,
+    // byte0=[31:24]) longword the cache actually stores, merging with the
+    // slot's own existing bytes for a sub-longword write so the OTHER
+    // bytes -- genuinely unrelated to this write -- are preserved rather
+    // than clobbered. A prior version wrote wdata_r into the cache slot
+    // directly and unconditionally, which only ever happened to be correct
+    // when the write address was 4-byte aligned (addr_lo=00, where
+    // TOP-justified and raw-longword-byte0 positions coincide) --
+    // otherwise it silently corrupted the slot's other, unrelated bytes
+    // with garbage (found via code inspection alongside the CI_D_MISS read
+    // bug during Step 6's D-cache investigation; both bugs share the same
+    // root cause, this module's cache-array bookkeeping never accounting
+    // for its own callers' byte-lane conventions).
+    function automatic logic [31:0] merge_wr(
+        input logic [31:0] cur,
+        input logic [31:0] wdata,
+        input logic [1:0]  siz,
+        input logic [1:0]  addr_lo
+    );
+        case (siz)
+            2'b01: // byte
+                case (addr_lo)
+                    2'b00: merge_wr = {wdata[31:24], cur[23:0]};
+                    2'b01: merge_wr = {cur[31:24], wdata[31:24], cur[15:0]};
+                    2'b10: merge_wr = {cur[31:16], wdata[31:24], cur[7:0]};
+                    2'b11: merge_wr = {cur[31:8],  wdata[31:24]};
+                endcase
+            2'b10: // word
+                merge_wr = addr_lo[1] ? {cur[31:16], wdata[31:16]}
+                                      : {wdata[31:16], cur[15:0]};
+            default: merge_wr = wdata; // longword: full replace
+        endcase
+    endfunction
+
     // sf_ack is a 1-tick pulse — edge detect is same as raw, but kept for safety
     logic sf_ack_prev_r;
     always_ff @(posedge clk_4x or negedge rst_n)
@@ -129,10 +168,37 @@ module biu_cache_if (
     wire [1:0]  woff = eu_addr[3:2];
     wire [23:0] vtag = eu_addr[31:8];
     wire ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag) && !mmu_ci;
-    wire dhit = dcache_en && valid_d[idx][woff] && (tag_d[idx] == vtag) && !mmu_ci;
+
+    // d_size_ok: this single-slot cache model (one valid_d/data_d entry per
+    // 4-byte-aligned word) can only ever represent an access that fits
+    // entirely within ONE aligned slot -- true for any byte/word access
+    // (always <=2 bytes, and extract_rd()/merge_wr() handle sub-slot
+    // positioning) and for a naturally-aligned longword (siz=00,
+    // addr[1:0]=00, exactly one whole slot). A MISALIGNED longword access
+    // (siz=00, addr[1:0]!=00) genuinely spans TWO different slots (e.g.
+    // addr[1:0]=10 needs the top 2 bytes of this slot and the bottom 2
+    // bytes of the NEXT one) -- there is no single data_d[idx][woff] entry
+    // that can hold or serve that. A prior version had no such exclusion:
+    // dhit/CI_D_MISS's caching logic treated "the aligned slot containing
+    // the request" as if it fully answered ANY request touching that
+    // address, silently returning half-real-half-wrong data for the
+    // misaligned-longword case -- found via Step 6's D-cache sweep tracing
+    // RTR (CCR-word-pop then PC-longword-pop from SP+2, an inherently
+    // 2-byte-offset stack layout every RTR/RTE naturally produces) through
+    // to a wild PC value and a corrupted A7. Excluding this shape from
+    // ever hitting or being cached falls back to the same per-access
+    // passthrough fetch already proven correct for the disabled-cache
+    // case (sizing_fsm/cycle_gen already handle a misaligned longword
+    // bus transfer correctly on their own) -- a deliberate "don't try to
+    // cache this rare shape" scope boundary, not a full multi-slot
+    // cache-fetch implementation.
+    wire d_size_ok   = !(eu_siz   == 2'b00 && eu_addr[1:0]   != 2'b00);
+    wire d_size_ok_r = !(siz_r    == 2'b00 && addr_r[1:0]    != 2'b00);
+
+    wire dhit = dcache_en && d_size_ok && valid_d[idx][woff] && (tag_d[idx] == vtag) && !mmu_ci;
 
     // Also need dhit based on latched idx_r/vtag_r for write update in CI_WRITE
-    wire dhit_r = dcache_en && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !mmu_ci;
+    wire dhit_r = dcache_en && d_size_ok_r && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !mmu_ci;
 
     integer k, m;
 
@@ -224,11 +290,35 @@ module biu_cache_if (
 
                 CI_D_MISS: begin
                     if (sf_ack_rise) begin
-                        // sizing_fsm already normalizes byte/word for 32-bit port;
-                        // for IFU (sf_siz=00 LW), sf_rdata is a full longword passthrough.
-                        fill_rdata_r <= sf_rdata;
-                        if (dcache_en && !mmu_ci) begin
-                            data_d[idx_r][woff_r] <= sf_rdata; // cache stores full longword
+                        if (dcache_en && !mmu_ci && d_size_ok_r) begin
+                            // Cache-enabled miss: the combinational output
+                            // block below forces sf_siz=2'b00 (longword) and
+                            // sf_addr to the 4-byte-aligned slot address for
+                            // this case, so sf_rdata here genuinely holds
+                            // the FULL longword regardless of how small the
+                            // CPU's own request was -- extract its specific
+                            // sub-portion for the return value (same
+                            // extract_rd() CI_HIT already uses for a cache
+                            // hit) while caching the complete, correctly-
+                            // fetched longword. A prior version cached
+                            // sf_rdata directly-as-fetched at the CPU's own
+                            // (possibly sub-longword) size and still marked
+                            // the whole word-slot valid -- silently caching
+                            // only PART of the slot as if the rest were also
+                            // freshly fetched, when sizing_fsm's own
+                            // normalization for a byte/word request has no
+                            // obligation to reflect the other bytes' real
+                            // memory content at all. A later access to a
+                            // DIFFERENT byte range within that same 4-byte
+                            // slot (e.g. RTR's own back-to-back CCR-word +
+                            // PC-longword pop, both landing in one slot)
+                            // would then hit and be served that bogus
+                            // data -- root-caused via Step 6's D-cache-only
+                            // Harte sweep (RTR index 0: both reads returned
+                            // the identical raw CCR word, one of them
+                            // silently wrong) before this fix.
+                            fill_rdata_r <= extract_rd(sf_rdata, siz_r, addr_r[1:0]);
+                            data_d[idx_r][woff_r] <= sf_rdata; // full, genuinely-fetched longword
                             // A tag mismatch means this line's other 3
                             // word slots belong to a completely different,
                             // now-replaced address -- invalidate them too,
@@ -241,6 +331,13 @@ module biu_cache_if (
                                 for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b0;
                             tag_d[idx_r]            <= vtag_r;
                             valid_d[idx_r][woff_r]  <= 1'b1;
+                        end else begin
+                            // Cache disabled (or MMU-inhibited): unchanged
+                            // passthrough -- sizing_fsm already normalizes
+                            // byte/word for the 32-bit port at the CPU's own
+                            // requested size; for IFU (sf_siz=00 LW),
+                            // sf_rdata is a full longword passthrough.
+                            fill_rdata_r <= sf_rdata;
                         end
                         state <= CI_DONE;
                     end else if (sf_berr) begin
@@ -250,9 +347,14 @@ module biu_cache_if (
 
                 CI_WRITE: begin
                     if (sf_ack_rise) begin
-                        // Write-through: if D-cache hit, update cache line too
+                        // Write-through: if D-cache hit, update cache line
+                        // too -- merge_wr() (see its own comment above)
+                        // repositions wdata_r's TOP-justified bits into the
+                        // correct byte lane of the cached longword and
+                        // preserves the slot's other, unrelated bytes for a
+                        // sub-longword write.
                         if (dhit_r) begin
-                            data_d[idx_r][woff_r] <= wdata_r;
+                            data_d[idx_r][woff_r] <= merge_wr(data_d[idx_r][woff_r], wdata_r, siz_r, addr_r[1:0]);
                         end
                         state <= CI_DONE;
                     end else if (sf_berr) begin
@@ -329,7 +431,20 @@ module biu_cache_if (
             end
 
             CI_D_MISS: begin
-                sf_siz  = siz_r;  // pass actual size; sizing_fsm normalizes byte/word
+                if (dcache_en && !mmu_ci && d_size_ok_r) begin
+                    // Cache-enabled miss: always fill at longword
+                    // granularity from the bus (the D-cache's own per-word
+                    // valid_d tracking unit), regardless of the CPU's own
+                    // requested access size -- matches real 68030 D-cache
+                    // fill behavior and is required for correctness: see
+                    // the sequential CI_D_MISS block's own comment for the
+                    // bug this fixes (a sub-longword fetch silently cached
+                    // as if the whole 4-byte slot were freshly fetched).
+                    sf_addr = {addr_r[31:2], 2'b00};
+                    sf_siz  = 2'b00;
+                end else begin
+                    sf_siz  = siz_r;  // pass actual size; sizing_fsm normalizes byte/word
+                end
                 sf_rw   = 1'b1;
                 sf_req  = !sf_ack;
             end

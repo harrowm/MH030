@@ -172,10 +172,30 @@ module harte_batch_tb;
         else if (eu_stop_out) stop_seen <= 1'b1;
     end
 
+    // Originally gated on !eu_stop_out, on the false assumption that it
+    // always asserts exactly one cycle after the last real instruction's
+    // own sr_r commit (true for every fetch-timing profile this project
+    // exercised before the I-cache existed, not a real invariant -- an
+    // I-cache hit on STOP's own opcode fetch can land eu_stop_out the
+    // *same* cycle as that commit, silently dropping it). A second attempt
+    // gated on !stop_seen ("capture one more cycle") overcorrected the
+    // other way for RMW-style memory-dest instructions. A third attempt
+    // gated on !stop_sr_wr_en (eu_seq.sv's own combinational
+    // ex_valid && ex_is_stop && !stop_r, exactly the cycle STOP's own SR
+    // write is about to land) looked right but stop_sr_wr_en is a
+    // ONE-CYCLE PULSE, not a level: it drops back to 0 the very next
+    // cycle (once stop_r itself becomes 1), which re-opens the capture
+    // gate and immediately picks up STOP's now-already-landed "#$2700"
+    // value anyway (all three found via Phase 127's own cache plan Step
+    // 6, confirmed by direct sr_r/stop_r/stop_sr_wr_en tracing at each
+    // step). stop_r itself is the level that actually matters: it goes 1
+    // on the same edge stop_sr_wr_en fires and *stays* 1 thereafter, so
+    // gating on !stop_r permanently freezes capture from that edge on,
+    // correctly keeping whatever sr_r held the cycle before.
     logic [15:0] sr_before_stop;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) sr_before_stop <= 16'h0;
-        else if (!eu_stop_out)
+        else if (!u_top.u_eu.u_seq.stop_r)
             sr_before_stop <= u_top.u_eu.u_rf.sr_r;
     end
 

@@ -4504,6 +4504,264 @@ the deliberately-deferred Step 8 (genuine SIZ=11 pin-level bursts). Also open: t
 
 ---
 
+## Phase 134 (Step 6) — Combined 4-config Harte sweep: three real, independent RTL
+## pipeline/cache hazards found and fixed
+
+**Goal**: Step 6 of the cache-verification plan — full regression + Harte re-run under
+four CACR configurations (baseline-disabled, I$-only via `HARTE_CACR=0x1`, D$-only via
+`0x200`, both via `0x201`), using a new opt-in `HARTE_CACR` env-var override
+(`scripts/gen_harte_hex.py`) that injects `MOVE.L #imm,D7 ; MOVEC D7,CACR` into each
+test's own init code, plus a matching `INIT_CODE_END` widening (conditional on the
+override being set, so the unset/default baseline path stays byte-identical to every
+prior phase). The mission — "any divergence from the disabled-cache baseline is a real
+DUT bug" — worked exactly as designed: it found three genuine, independent,
+previously-undiscovered RTL bugs, none of them cache-*correctness* bugs in the sense
+Steps 3-5 tested (hit/miss/aliasing/flush all remained correct throughout) — all three
+are pipeline-*timing* hazards that the cache's altered fetch/access latency was simply
+the first thing in 133 prior phases to expose. This phase closes all three and
+confirms clean via the full 4-way sweep.
+
+### Hazard 1 — STOP-vs-CCR-write collision (a `sr_wr_data` priority-mux race)
+
+The very first `HARTE_CACR=0x1` (I$-only) sweep regressed catastrophically (77,752
+failures) on a repro traced to a single MOVEtoSR-then-STOP test: `stop_sr_wr_en =
+ex_valid && ex_is_stop && !stop_r` fires the instant STOP reaches EX, completely
+unconditionally — nothing had ever gated it against a *different*, still-in-flight
+instruction's own CCR commit landing the exact same cycle. Under the old,
+always-uncached fetch timing this pairing never collided (a guaranteed gap existed
+before STOP could reach EX); an I-cache hit on STOP's own opcode fetch closes that gap
+to zero for the first time. When the collision hits, `sr_wr_data`'s own priority mux
+picks STOP's branch over the real instruction's CCR result, silently discarding it.
+
+Fix, `rtl/eu_seq.sv`, `stop_wb_hazard` (added to `stall_base`'s `dec_valid && (...)`
+"insert bubble" bucket): `dec_is_stop && !need_ext && (sr_wr_en || (ex_valid &&
+(ex_updates_ccr || ex_is_move_sr_w || ex_is_move_ccr_w)))`. Three iterations to land
+here, each with a real, instructive dead end:
+
+1. **WB-only check insufficient.** A first version (`dec_is_stop && wb_valid &&
+   wb_updates_ccr`) had zero effect on the repro — by the time a memory-source
+   instruction's own delayed WB (waiting on `mem_ack`) finally fires, STOP has *already*
+   left decode. Fixed by also checking `ex_valid && ex_updates_ccr` — catches the
+   collision one cycle earlier, while the producer is still visibly in EX.
+2. **Comprehensiveness gap.** The `ex_updates_ccr`-only check left 1336 residual
+   failures — a dozen *other* families (MOVEtoSR/MOVEtoCCR, `mem_rmw_sr_wr_en`,
+   `tas_sr_wr_en`, `cmp2_sr_wr_en`, `bcds_sr_wr_en`, `cas_sr_wr_en`, `cas2_sr_wr_en`,
+   `move_mm_sr_wr_en`, `addx_mem_sr_wr_en`, `bf_mem_sr_wr_en`, `memind_ccr_wr_en`,
+   `rte_sr_wr_en`, `rtr_sr_wr_en`) *also* write SR directly from EX and share the exact
+   same race. Fixed by replacing the bare check with `sr_wr_en` itself (the module's
+   own comprehensive aggregate of all of these), safely forward-referenceable as a
+   port. The `ex_updates_ccr || ex_is_move_sr_w || ex_is_move_ccr_w` disjunction
+   remained necessary alongside it: `sr_wr_en`'s own WB-delayed terms
+   (`wb_updates_ccr`/`wb_is_move_sr_w`/`wb_is_move_ccr_w`) only fire once `wb_valid`
+   is true, one cycle later than the producer being visibly in EX — MOVEtoSR/MOVEtoCCR
+   specifically need the same one-cycle-earlier EX-stage check ordinary ALU CCR
+   updates do, via their own dedicated `ex_is_move_sr_w`/`ex_is_move_ccr_w` flags
+   (found on this exact pass, since register-direct MOVEtoSR-then-STOP — the
+   *shortest*-EX-residency form, most likely to still be in EX when STOP reaches
+   decode — was still failing after the `ex_updates_ccr`-only fix).
+3. **A wrong "fix" causing a real deadlock, fully reverted.** Reasoning that a
+   still-in-flight EX-stage instruction shouldn't be "clobbered" by the generic
+   stall's own bubble-insertion, a second attempt gave the hazard `ex_mem_stall`-style
+   "keep EX completely unchanged" treatment. This created a genuine deadlock:
+   `ex_updates_ccr`'s own condition can *only* ever clear via normal EX-advancement,
+   which "keep unchanged" permanently blocks — test #4 (ADD.b memory-source) hung
+   forever with X-poisoned registers. The "clobbering" worry was itself unfounded: the
+   WB-latch is a *separate* `always_ff`, sampling `ex_valid`/`ex_updates_ccr`'s own
+   pre-edge value on the same clock edge regardless of what the EX-latch does to its
+   own registers that same edge — inserting a bubble into EX does not retroactively
+   erase what WB already captured going into that edge. Fully reverted to the original
+   "insert bubble" bucket; confirmed the two known repros (ordinary ALU-CCR and
+   RMW-CCR collisions) both still pass after the revert.
+
+**A second, distinct bug found while fixing this one**: with the collision itself
+closed, a new symptom appeared — A3 corrupted by exactly -4 on MOVEtoSR/RTE tests
+immediately followed by STOP. Traced to an interaction between `stop_wb_hazard`'s own
+new stall cycle and the pre-existing `need_ext` mechanism: STOP is itself a 2-word
+instruction (opcode `0x4E72` + its own `#imm` operand), consumed via the ordinary
+`dec_needs_ext`/`ext_valid`/`need_ext` extension-word machinery every multi-word
+opcode uses. Holding STOP in decode for the hazard's extra cycle *before* its own
+extension word had actually arrived desynced that mechanism: STOP's own opcode word
+got marked "consumed" while STOP itself never reached EX, so decode silently advanced
+onto STOP's own 1-word operand (`0x2700` in the repro) and misdecoded *it* as a fresh
+instruction — `MOVE.L (A0),-(A3)` under ordinary 68k decode, exactly explaining the
+observed -4. Fixed with the `!need_ext` guard in `stop_wb_hazard`'s own condition
+(already shown above): lets the pre-existing `need_ext` stall (already part of
+`stall_base`'s bucket) finish fetching STOP's own operand normally before this hazard
+ever engages.
+
+### Hazard 2 — Internal-exception dispatch races against continued decode
+
+With Hazard 1 fixed, a small residual (595 FAIL, all register-direct "MOVEtoSR Dn"
+immediately followed by STOP) remained in the full `run_harte_batch.py`-driven sweep —
+reproducible standalone, not a batching artifact (ruled out via `decode_file()`'s own
++4 PC-normalization convention, which an earlier hand-rolled repro script had
+bypassed by loading `.json.gz` directly instead of through `decode_file()`, producing
+several rounds of misleading results before this was caught).
+
+Root cause, traced via direct `dec_is_priv`/`instr_ack`/`sr_live[13]` tracing: MOVEtoSR
+clearing the Supervisor bit correctly makes the immediately-following STOP take a
+Privilege Violation — `dec_is_priv`'s own decode branch reads `sr_live[13]`, which is
+*combinationally forwarded* from the just-committing MOVEtoSR write the same cycle (a
+real, correct 68030 behavior: the following instruction sees the fully-updated SR
+immediately, since MOVEtoSR has semantically already completed). But `eu_priv_req =
+ex_valid && ex_is_priv` (and every sibling `eu_trap_req`/`eu_trapv_req`/
+`eu_illegal_req`/`eu_linea_req`/`eu_linef_req`/`chk_trap`/`div_trap`/`eu_fmt_err_req`,
+all sharing the identical bare "`ex_valid && ex_is_X`" shape) had *nothing* gating
+`dec_valid`'s own continued advance behind it. `m68030_exc.sv`'s own `new_pc_wr =
+(state_r == EXC_LOAD)` — the actual IFU/decode flush — doesn't fire until the *end* of
+the full `EXC_PUSH`→`EXC_FETCH`→`EXC_LOAD` dispatch sequence; `exc_active` merely
+steals bus arbitration in the meantime (`m68030_top.sv`'s `biu_eu_req` mux), which only
+blocks *memory-data*-dependent side effects, not e.g. an EA predecrement
+(`dec_an_upd_en`), which commits as an ordinary part of dispatch regardless of whether
+its own accompanying bus access ever completes. Concretely: decode continued straight
+through STOP's own leftover operand byte (`0x2700`), misdecoding it as
+`MOVE.L (A0),-(A3)` (the *identical* symptom shape as Hazard 1's own second bug, but
+via a completely unrelated mechanism) and committing that instruction's own -(A3)
+predecrement before the real exception flush ever arrived to cancel it.
+
+Fix, `rtl/eu_seq.sv`: `ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv ||
+ex_is_illegal || ex_is_priv || ex_is_linea || ex_is_linef) || chk_trap || div_trap ||
+eu_fmt_err_req;` and `ex_exc_dispatch_hazard = ex_will_except || exc_active;`, added to
+`stall_base`'s unconditional top-level OR (alongside `ex_mem_stall`), using plain
+"insert bubble" semantics (the ordinary `stall` path, *not* `ex_mem_stall`'s own "keep
+EX frozen" branch — deliberately). `eu_reset_req` (no `exc_active`-mediated dispatch to
+race against) and `eu_trace_req` (already separately gated on `!ex_mem_stall`, a
+different, post-retirement hazard shape) are excluded, left for a dedicated follow-up
+rather than bundled in speculatively.
+
+Two design iterations here too:
+
+1. **First version gated on `ex_will_except && !exc_active`**, reasoning that stall
+   could safely drop the instant `exc_active` first turns on. Traced and disproved:
+   `exc_active` means only "`state_r` has left `EXC_IDLE`" — true across the *entire*
+   `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` sequence, not "the flush has landed." Dropping the
+   hazard there freed decode one full dispatch sequence too early, reproducing the
+   exact same corruption one cycle later than before (confirmed via trace: `ci_state`
+   — sorry, `ex_exc_dispatch_hazard` — dropped to 0 and `instr_ack` immediately fired
+   on the still-garbage decoded instruction the very cycle `exc_active` first asserted).
+   Fixed by folding `exc_active` itself into the same OR term (shown above) rather than
+   gating on its *absence* — holds `stall` for the entire window through to the
+   `EXC_LOAD` cycle `new_pc_wr` actually fires on (`exc_active`'s own last-asserted
+   cycle).
+2. **No "keep EX frozen" treatment needed**, despite that being the first instinct (a
+   Hazard-1-shaped worry about losing `eu_priv_req` after one bubbled cycle).
+   `m68030_exc.sv`'s own `EXC_IDLE` case samples `exc_pending`/`priv_req`
+   combinationally and transitions off `EXC_IDLE` on the very same edge the request was
+   ever visible — a single-cycle pulse is already sufficient, so bubbling `ex_is_priv`
+   away immediately afterward loses nothing the FSM needed. What actually matters —
+   blocking new dispatch — is unconditionally covered by the `exc_active` term for the
+   rest of the window regardless of what EX itself holds, so plain bubble semantics are
+   both sufficient and simpler, with no `stop_wb_hazard`-style deadlock risk to reason
+   about (`exc_active`'s own progress toward clearing this hazard never depends on EX
+   being allowed to advance — it's driven entirely by `m68030_exc`'s own independent
+   FSM, already committed to leaving `EXC_IDLE` before this hazard even engages).
+
+### Hazard 3 — Three independent D-cache byte-lane/alignment bugs (D$-only sweep: 14,216 FAIL, 1998 TIMEOUT)
+
+With Hazards 1-2 fixed, baseline and I$-only swept bit-clean, but D$-only turned up a
+much larger, structurally different problem: 14,216 FAIL + 1,998 TIMEOUT, concentrated
+entirely in RMW/multi-access instruction families (ABCD/SBCD, ADDX/SUBX, MOVEM.w,
+MOVEP.w/l, RTR, CMP.b/w) — every one of them either performs a byte/word-sized memory
+access to a *non-4-byte-aligned* address, or two back-to-back accesses whose addresses
+fall within or straddle the same 4-byte region. Isolated via `RTR.json.gz` test #0 (the
+worst-affected: 1 PASS / 4037 fails+timeouts) down to a single standalone repro, traced
+with direct `biu_cache_if`-internal `$display`s (`state`/`idx`/`woff`/`dhit`/`sf_req`/
+`sf_ack`) — this is `biu_cache_if.sv`'s own, previously-untouched-since-Phase-129 D-cache
+logic, not the I-cache work from Phases 127-132. All three bugs share one root cause:
+`biu_cache_if.sv`'s single-slot-per-word cache model (`data_d[idx][woff]`, one 32-bit
+slot per 4-byte-aligned region) was built and tested (Phase 133) only against
+same-address-repeated or same-slot-different-word accesses — never against an access
+whose own *size* or *alignment* doesn't cleanly fit "exactly one slot."
+
+**Bug 3a — sub-longword miss-fills cached as if fully valid.** `CI_D_MISS`'s original
+`sf_siz = siz_r` (the CPU's own requested size) meant a byte/word-sized miss only ever
+fetched *part* of a 4-byte slot from the real bus, yet the fill unconditionally
+"`data_d[idx_r][woff_r] <= sf_rdata; // cache stores full longword`" and marked the
+*entire* slot valid regardless. `sizing_fsm`'s own byte/word normalization has no
+obligation to reflect the *other*, non-requested bytes' real memory content at all — so
+a later access to a *different* byte range within that same slot (RTR's own back-to-back
+CCR-word-then-PC-longword pop, both landing in slot `idx=0,woff=0` for this repro) would
+then HIT and be served that bogus, half-real data. Confirmed directly: both of RTR's own
+reads returned the identical raw value (`0x00006ff6`), the CCR pop's own correct word
+value leaking into the PC pop's own (wrong) result. Fixed in `rtl/biu_cache_if.sv`: when
+`dcache_en && !mmu_ci` (i.e. this miss is actually going to populate the cache), force
+`sf_addr = {addr_r[31:2], 2'b00}` and `sf_siz = 2'b00` — always fetch the full,
+correctly-aligned longword from the bus regardless of the CPU's own requested size
+(matching real 68030 D-cache fill granularity) — then `extract_rd()` the CPU's own
+sub-portion for the return value (the same function `CI_HIT` already used for a cache
+hit), while caching the complete, genuinely-fetched longword. The disabled/MMU-inhibited
+passthrough path (`sf_siz = siz_r`) is unchanged.
+
+**Bug 3b — write-through cache-update ignoring its own write's byte-lane position.**
+`CI_WRITE`'s cache-update, `data_d[idx_r][woff_r] <= wdata_r`, wrote the CPU's own
+write data directly into the *entire* cached slot regardless of the write's own size —
+but `wdata_r` (from `eu_seq.sv`'s `mem_wdata`, positioned via its own `eu_lane()`
+helper) is *TOP-justified* (byte in bits `[31:24]`, word in `[31:16]`, unconditionally,
+regardless of the real target address's own low bits) — a completely different
+convention from the "raw longword" positioning `data_d`/`extract_rd()` actually use
+(byte0=`[31:24]`, byte1=`[23:16]`, etc., matching the *real bus address*, not a fixed
+justification). The two conventions only happen to coincide when the write address is
+itself 4-byte-aligned (`addr_lo==00`) — for any other alignment, the old code silently
+clobbered the cached slot's *other*, unrelated bytes with garbage. Found by code
+inspection (the same "byte-lane convention" root cause as 3a) rather than a distinct
+symptom of its own, since 3a's own fix already resolved every *observed* failure in
+this sweep by itself — fixed proactively as the same confirmed bug class, not
+speculatively. Fixed with a new `merge_wr()` function (mirroring `extract_rd()`'s own
+shape but inverted): re-positions `wdata_r`'s meaningful, TOP-justified bits into the
+correct raw-longword byte lane based on `addr_r[1:0]`, merging with the slot's own
+existing (unrelated) bytes for a sub-longword write.
+
+**Bug 3c — misaligned longword accesses genuinely span two cache slots; the single-slot
+model has no way to represent that.** Even after 3a's fix, RTR's own PC-pop (a
+4-byte read starting at `SP+2`, inherently unaligned — every RTR/RTE naturally
+produces exactly this layout, since the preceding CCR-word pop is only 2 bytes) still
+corrupted state: bytes 2-3 of one slot and bytes 0-1 of the *next* slot are needed, but
+`dhit`/`extract_rd()`'s single-slot model has no concept of "this request spans two
+array entries" — it silently served *one* slot's raw 4 bytes as if they were the
+correctly-addressed longword, producing a wild, garbage-derived "return PC" that then
+corrupted A7 (traced through three false leads before landing here: first suspecting
+`an_wr_en`, which showed only one, correct A7 write; then the S/M bank-routing mux,
+which was also unaffected; the actual culprit was `eu_regfile.sv`'s *separate*
+`wr_en && wr_sel==15` "main port," firing from garbage-decoded code executing at a
+completely wild PC derived from the corrupted read). Given the complexity of a full
+multi-slot cache fetch and the time already invested, the deliberate, documented scope
+boundary chosen: exclude this shape from the cache entirely rather than attempt to
+represent it. New `d_size_ok`/`d_size_ok_r` wires (`!(siz==2'b00 && addr[1:0]!=2'b00)`)
+gate `dhit`/`dhit_r` and both of 3a's/3b's own `dcache_en && !mmu_ci` conditions —
+falling back to the exact same per-access passthrough fetch already proven correct for
+the disabled-cache case (`sizing_fsm`/`cycle_gen` already handle a misaligned longword
+bus transfer correctly on their own, unrelated to caching).
+
+**Results after all three fixes**: the 13 previously-failing suites (ABCD, ADDX.b/w,
+ASL.b, CMP.b/w, MOVEM.w, MOVEP.w/l, RTR, SBCD, SUBX.b/w) re-swept individually at
+D$-only — all **100%** except ASL.b's own 2 pre-existing, documented corpus-anomaly
+fails (Phase 87, unrelated to any cache work, same 2 test indices as always). `make
+test` 35/35, `make cosim_grp` 8/8.
+
+### Final 4-config sweep (Step 6 closed)
+
+| Config | HARTE_CACR | PASS | FAIL | SKIP | TIMEOUT |
+|---|---|---|---|---|---|
+| baseline | (unset) | 702142 | 2 | 281221 | 0 |
+| I$-only | `0x1` | 702134 | 2 | 281229 | 0 |
+| D$-only | `0x200` | 702134 | 2 | 281229 | 0 |
+| both | `0x201` | 702134 | 2 | 281229 | 0 |
+
+FAIL=2 in every config is the same documented ASL.b corpus anomaly (Phase 87), not a
+regression. The 8-test PASS→SKIP delta between baseline and every CACR-enabled config
+is the already-understood, harness-only cost of `INIT_CODE_END`'s own conditional
+widening (more init-code room needed for the injected `MOVEC D7,CACR` sequence,
+correctly triggering `can_run()`'s pre-existing init-code/test-data conflict check for
+8 tests) — confirmed identical across all three enabled configs, not cache-specific.
+Zero TIMEOUT in any config. This closes Step 6 of the cache-verification plan in full.
+Remaining: Step 7 (pipeline-stall interaction re-check — confirm `tb/stall_fsm_tb.sv`/
+`tb/stall_hazard_tb.sv`'s own exact-cycle-count checks are unaffected, since they
+already assume CACR=0), and the deliberately-deferred Step 8 (genuine SIZ=11 pin-level
+burst timing). Also still open, unrelated to this phase: the `JMP (An)`-after-
+exception-dispatch anomaly noted in Phase 133.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
