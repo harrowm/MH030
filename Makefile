@@ -361,7 +361,9 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # dyn_bit_get_Dn timing conflict this new form exposed, see plan.md
 # Phase 120); memind13=long (32-bit) bd (ADD memory-source, OR memory-dest
 # RMW -- Phase 121, the fi_bd fix that benefits every already-converted
-# Stage 1-3 site "for free").
+# Stage 1-3 site "for free"); memind16=long (32-bit) bd for MOVEM.L itself
+# (Phase 138 -- MOVEM's own mode110 arm has a bespoke bd extraction, not
+# fi_bd, so needed its own dedicated fix and its own dedicated test).
 #
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
@@ -421,9 +423,14 @@ buscmp-memind13: $(SIM)/cosim_grp winuae/tests/memind13_ref.log tests/memind13.h
 	    | grep "^BUS" > /tmp/_dut_memind13.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind13.log winuae/tests/memind13_ref.log \
 	    --reads-only --dut-may-continue
+buscmp-memind16: $(SIM)/cosim_grp winuae/tests/memind16_ref.log tests/memind16.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind16.hex +grp=memind16 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind16.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind16.log winuae/tests/memind16_ref.log \
+	    --reads-only --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
-              buscmp-memind12 buscmp-memind13
+              buscmp-memind12 buscmp-memind13 buscmp-memind16
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

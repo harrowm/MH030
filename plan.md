@@ -5044,6 +5044,50 @@ permanent regression coverage rather than left as an open question.
 
 ---
 
+## Phase 138 (Stage 1 of 7) — MOVEM long-bd fix
+
+**Goal**: first stage of a 7-stage, user-approved plan (`~/.claude/plans/compressed-hopping-cocoa.md`)
+closing four previously-out-of-scope correctness edges flagged in Phase 137's own "Next
+phase" note: MOVE mem-to-mem's remaining full-format-EA arms, genuine memory-indirect +
+long bd/od, MOVEM's own long-bd support, and two harmless extra-read quirks. A dedicated
+investigation (via a research agent, this session) read the actual code for all four
+before planning and found one key fact grounding every stage: **the "4th extension word"
+several of these fixes need is not new hardware** — `m68030_ifu.sv`'s 6-word queue already
+exposes it via `ext34_data[15:0]` (already piped end-to-end, `m68030_seq.sv:806` →
+`eu_seq.sv:32`), currently consumed only by `MOVE.L #imm32,abs.L`. Every stage that needs
+"one more word than `q3_word` gives you" reuses this q4 signal — data-path reuse, not new
+plumbing. (A genuine hard limit — a 5th extension word, needed for long-bd+long-od
+memory-indirect and MOVEM's own genuine memory-indirect — does exist, since the IFU's
+drain-shift logic tops out at `dn==5`; deliberately out of scope for this whole series,
+documented in the plan file's own Stage 8/out-of-scope section.)
+
+**This stage**: `eu_seq.sv:3739-3741` (MOVEM's mode110 arm) only branched on
+`fi_bdsz==2'b10` (word bd), via `q3_word` — `fi_bdsz==2'b11` (long) fell through to the
+wrong 8-bit brief fallback. `movem_ext_count` (`m68030_seq.sv:220-227`) already computed
+the correct word count for long bd (`2 + movem_bd_words + movem_od_words` = 4 when
+`movem_bd_words=2`) — confirmed by reading the code before touching anything; only the
+eu_seq.sv value *extraction* was missing, exactly as the investigation predicted. **Fix**:
+extended the ternary to also handle `fi_bdsz==2'b11`, using `{q3_word,
+ext34_data[15:0]}` as the 32-bit bd (q3_word=high half, q4=low half) — the same
+"one word further out" pattern MOVEM's own word-bd (Phase 119) and abs.L reconstruction
+already use, just one word further via q4. Single site, no `m68030_seq.sv` change needed.
+
+**Test**: new `tests/memind16.s` (`MOVEM.L D0-D1,(-$10000,A0,D2.L)` store then
+`MOVEM.L (-$10000,A0,D2.L),D3-D4` load, same "base register above the 4KB cosim window,
+large negative bd brings the EA back in range, forcing full-format long-bd encoding"
+technique as `tests/memind13.s`), wired into `make cosim_memind` as `buscmp-memind16` —
+compared cleanly against Musashi/WinUAE on the first attempt (`OK 15 cycles match`).
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 8/8 (was 7/7).
+Full 124-suite Harte re-run (Verilator batch backend) — **PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to the pre-change
+baseline**, zero regressions — the meaningful gate here since MOVEM.l has its own
+100%-passing Harte suite and this change touches shared MOVEM decode. See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the full 7-stage plan; Stage 2 (CLR
+non-indexed extra-read fix) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

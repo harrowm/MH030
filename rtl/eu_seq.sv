@@ -3716,16 +3716,22 @@ module eu_seq (
                             dec_src_reg       = {1'b1, f_reg};  // An → rd_a for ex_ea
                             dec_reads_src     = 1'b1;
                             dec_ea_offset     = {{16{ext_data[15]}}, ext_data[15:0]};
-                        // (d8,An,Xn) brief, or full (bd,An,Xn): 2(+1) ext words —
-                        // mask=[31:16], descriptor=[15:0], word bd (full-format
-                        // only) in q3_word (mask already occupies the [31:16] slot
-                        // a single-EA family's own bd would use, so MOVEM's own bd
-                        // needs a third fetched word instead -- see
-                        // is_movem_idx_full/movem_ext_count in m68030_seq.sv).
-                        // Genuine memory-indirect (fi_iis!=000) and long bd
-                        // (fi_bdsz==11) are NOT decoded correctly here -- same
-                        // "least-wrong fallback to brief" boundary every other
-                        // family in this rollout draws around memory-indirect.
+                        // (d8,An,Xn) brief, or full (bd,An,Xn): 2(+1/+2) ext words —
+                        // mask=[31:16], descriptor=[15:0], word bd (full-format)
+                        // in q3_word, long bd's low half in ext34_data[15:0]=q4
+                        // (mask already occupies the [31:16] slot a single-EA
+                        // family's own bd would use, so MOVEM's own bd needs a
+                        // third/fourth fetched word instead -- see
+                        // is_movem_idx_full/movem_ext_count in m68030_seq.sv,
+                        // which already sizes movem_ext_count correctly for
+                        // long bd; only this value extraction was missing,
+                        // fixed Phase 138 -- see plan.md).
+                        // Genuine memory-indirect (fi_iis!=000) is still NOT
+                        // decoded correctly here -- same "least-wrong fallback
+                        // to brief" boundary every other family in this rollout
+                        // draws around memory-indirect; worst case (mask+
+                        // descriptor+long-bd+long-od) needs 6 ext words, beyond
+                        // what the IFU can drain today (plan.md Phase 138 §8).
                         end else if (f_mode == 3'b110) begin
                             dec_valid         = 1'b1;
                             dec_movem_mask_hi = 1'b1;
@@ -3738,6 +3744,8 @@ module eu_seq (
                             dec_xn_scale      = ext_data[10:9];
                             dec_ea_offset     = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
                                               ? {{16{q3_word[15]}}, q3_word}
+                                              : (fi_is_full && fi_bdsz == 2'b11 && fi_iis == 3'b000)
+                                              ? {q3_word, ext34_data[15:0]}
                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                         end else if (f_mode == 3'b111) begin
                             case (f_reg)
