@@ -2315,7 +2315,33 @@ module eu_seq (
                             dec_reads_dst          = 1'b1;
                             dec_xn_wl              = ext_data[11];
                             dec_xn_scale           = ext_data[10:9];
-                            dec_dst_ea_offset      = {{24{ext_data[7]}}, ext_data[7:0]};  // d8_dst
+                            // Full-format bd support (Phase 143, plan.md). The dst
+                            // descriptor always lands at ext_data[15:0] regardless of
+                            // which physical q-slot it came from -- m68030_seq.sv's own
+                            // ext_count-aware eu_ext_data formula already guarantees
+                            // this (same reason dst_reg/xn_wl/xn_scale just above never
+                            // needed a mode split). For src modes (An)/(An)+/-(An), the
+                            // baseline is 1 word (the descriptor alone, at q1) -- the
+                            // exact shape the shared fi_is_full/fi_bd template already
+                            // assumes (bd's own word at ext_data[31:16]), so directly
+                            // reusable unmodified. For (d16,An)-src, the baseline is 2
+                            // words (src's own d16 at q1 + descriptor at q2) -- one word
+                            // further than fi_bd assumes (that slot holds src's own d16
+                            // here, not bd), so needs a fresh q3_word-based extraction,
+                            // same shape MOVEM's own bespoke mode110 arm (Phase 138) and
+                            // MOVE.B/W's own imm-src arm (Phase 141) already use for an
+                            // analogous "one word further out" need. Long bd stays
+                            // unsupported for (d16,An)-src specifically (would need a
+                            // genuine q4 on top of its already-2-word baseline -- q4
+                            // itself exists but isn't wired for this sub-case, out of
+                            // scope this phase); word bd is the value this phase adds.
+                            dec_dst_ea_offset      = (f_mode == 3'b101)
+                                                   ? ((ext_data[8] && ext_data[5:4] == 2'b10 && ext_data[2:0] == 3'b000)
+                                                      ? {{16{q3_word[15]}}, q3_word}
+                                                      : {{24{ext_data[7]}}, ext_data[7:0]})
+                                                   : ((fi_is_full && fi_iis == 3'b000)
+                                                      ? fi_bd
+                                                      : {{24{ext_data[7]}}, ext_data[7:0]});
                             dec_needs_ext          = 1'b1;
                             dec_siz                = f_move_sz;
                             dec_is_dyn_bit_idx     = 1'b1;

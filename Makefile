@@ -389,6 +389,13 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # The actual write (EA + value) matches Musashi byte-for-byte; only the
 # fetch-vs-read cycle order differs by one slot.
 #
+# tests/memind20.s (Phase 143: MOVE (An)/(An)+/-(An)/(d16,An),(bd,An,Xn)
+# full-format indexed dst, the plain-memory-src arm -- the last and
+# hardest of the three MOVE mem-to-mem arms this rollout adds) is also
+# deliberately not wired in -- same benign prefetch-interleave quirk as
+# memind19 just above; all three writes were hand-verified to match
+# Musashi byte-for-byte.
+#
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
 # TAS+NBCD), memind6.s (Phase 116: CLR+ASL), memind8.s (Phase 117: dynamic

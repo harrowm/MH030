@@ -316,6 +316,33 @@ module m68030_seq (
         (f_move_dst_mode_s == 3'b110) &&
         peek_fi_full_q3 && (peek_fi_bdsz_q3 == 2'b10) && (peek_fi_iis_q3 == 3'b000);
 
+    // Phase 143 (plan.md): MOVE (An)/(An)+/-(An)/(d16,An), indexed dst --
+    // full-format bd, the plain-memory-src arm. Non-(d16,An) src modes
+    // have a 1-word baseline (the dst descriptor alone, at q1) -- the
+    // exact shape every single-EA-word family uses, so directly reuses
+    // peek_fi_full/peek_fi_bdsz/peek_fi_iis and memind_bd_words (without
+    // memind_od_words -- this arm doesn't support od). (d16,An)-src has
+    // a 2-word baseline instead (src's own d16 at q1, descriptor at q2) --
+    // same "q1=other data, q2=descriptor" shape as abs.W-src/PC-rel-src/
+    // MOVE.B/W's own imm-src, reusing peek_fi_full_movem/movem_bd_words
+    // directly; only WORD bd is achievable there (long bd would need a
+    // 4th word not wired for this specific sub-case, out of scope).
+    logic is_move_mm_plainsrc_idxdst_full;
+    assign is_move_mm_plainsrc_idxdst_full =
+        (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100) &&
+        (f_move_dst_mode_s == 3'b110) &&
+        peek_fi_full && (peek_fi_iis == 3'b000);
+    logic [2:0] move_mm_plainsrc_idxdst_ext_count;
+    assign move_mm_plainsrc_idxdst_ext_count = 3'd1 + memind_bd_words;
+
+    logic is_move_mm_d16src_idxdst_wordbd;
+    assign is_move_mm_d16src_idxdst_wordbd =
+        (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_mode == 3'b101) &&
+        (f_move_dst_mode_s == 3'b110) &&
+        peek_fi_full_movem && (peek_fi_bdsz_movem == 2'b10) && (peek_fi_iis_movem == 3'b000);
+
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
     // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
@@ -615,6 +642,10 @@ module m68030_seq (
             ext_count = 3'd4;  // imm32(2) + descriptor(1) + word-bd(1)
         else if (is_move_mm_absl_idxdst_wordbd)
             ext_count = 3'd4;  // abs.L(2) + descriptor(1) + word-bd(1)
+        else if (is_move_mm_plainsrc_idxdst_full)
+            ext_count = move_mm_plainsrc_idxdst_ext_count;
+        else if (is_move_mm_d16src_idxdst_wordbd)
+            ext_count = 3'd3;  // d16-src(1) + descriptor(1) + word-bd(1)
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)
@@ -832,8 +863,27 @@ module m68030_seq (
     // than needing a second, ext_count-aware copy of it there. Immediate
     // values (the other >=2-ext-word consumer) are unaffected since a given
     // instruction is never both.
+    //
+    // Phase 143 (plan.md): MOVE mem-to-mem's own plain-memory-src arm
+    // ((An)/(An)+/-(An) src, indexed dst) has the *exact same* problem for
+    // an entirely different reason -- its own 1-word baseline (dst
+    // descriptor alone, at q1) is what is_memind_full's swap was built for,
+    // but that swap is keyed on f_mode==110 (mode110_ea_src), which this
+    // arm's own f_mode (010/011/100, the SOURCE's addressing mode) never
+    // matches -- the descriptor here lives in a different field
+    // (f_move_dst_mode_s==110) that mode110_ea_src was never meant to see.
+    // Confirmed via a real hang: with the swap missing, decode read a
+    // stale/wrong ext_data half once a real bd pushed ext_count to 2+,
+    // corrupting the write address. Folding is_move_mm_plainsrc_idxdst_full
+    // into the same swap condition fixes it via the exact same mechanism,
+    // with zero new eu_seq.sv extraction code needed (dec_dst_ea_offset
+    // already used the standard fi_is_full/fi_bd template). (d16,An)-src
+    // is a *different* code shape (2-word baseline, q1=d16/q2=descriptor)
+    // that was never affected -- its own dedicated q3_word-based extraction
+    // in eu_seq.sv doesn't touch fi_is_full/fi_bd at all.
     // -----------------------------------------------------------------------
-    assign eu_ext_data = is_memind_full     ? {ifu_ext_data[15:0], ifu_ext_data[31:16]}
+    assign eu_ext_data = (is_memind_full || is_move_mm_plainsrc_idxdst_full)
+                        ? {ifu_ext_data[15:0], ifu_ext_data[31:16]}
                         : (ext_count >= 3'd2) ? ifu_ext_data
                                               : {16'h0, ifu_ext_data[31:16]};
 

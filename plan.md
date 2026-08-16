@@ -5295,6 +5295,70 @@ per-sub-mode dual peek position) is next.
 
 ---
 
+## Phase 143 (Stage 6 of 7) — MOVE mem-to-mem plain-memory-src full-format EA
+## (real hang found and fixed; a genuine, previously-latent packing-convention bug)
+
+**Goal**: sixth stage of the 7-stage correctness-edges plan — the hardest of the three
+MOVE mem-to-mem arms, `MOVE (An)/(An)+/-(An)/(d16,An),(d8,An,Xn)`
+(`eu_seq.sv:2295-2343`), deferred by Phase 122.
+
+**Design (confirmed before writing code)**: two genuinely different word-layout shapes.
+`(An)`/`(An)+`/`-(An)`-src has a **1-word baseline** (the dst descriptor alone, at q1) —
+the exact shape the shared `fi_is_full`/`fi_bd` template already assumes, so in principle
+directly reusable with no new extraction code. `(d16,An)`-src has a **2-word baseline**
+(its own d16 comes first, pushing the descriptor to q2) — the same "q1=other data,
+q2=descriptor" shape `peek_fi_full_movem` already reads, needing its own q3_word-based bd
+extraction (same "one word further out" pattern as Phase 138/141).
+
+**A real bug found via a genuine simulator hang, not a value mismatch.** The first
+attempt at `(An)+`-src with a word bd **hung the simulator outright** (`vvp` spinning,
+never reaching STOP). Root-caused by isolating the single instruction and tracing the
+actual write address it produced (once the hang was narrowed to a specific decode path,
+not a genuinely infinite loop): `dst_reg`/`ext_data`-derived fields ended up reading
+garbage. The underlying cause is a **previously-latent bug in `m68030_seq.sv`'s own
+`eu_ext_data` packing convention**, not anything specific to this arm's new code: for a
+1-word-baseline family, `eu_ext_data` packs the single extension word into `ext_data[15:0]`
+(`{16'h0, ifu_ext_data[31:16]}`) — but the instant a real bd is present, `ext_count` rises
+to 2+, and the formula's OTHER branch (`ext_count>=2 → ifu_ext_data` unswapped) kicks in,
+**flipping which half of `ext_data` holds q1** (now `ext_data[31:16]`, not `[15:0]`).
+`is_memind_full`'s own dedicated q1/q2 swap (added early in this rollout) already solves
+exactly this problem — but it's keyed on `f_mode==110` (`mode110_ea_src`), a condition this
+arm's own `f_mode` (010/011/100, the *source's* addressing mode) never satisfies, since the
+descriptor here lives in the separate `f_move_dst_mode_s` field. Every other "1-word
+single-EA-word" family converted in this rollout (TAS/NBCD/NEGX-CLR-NEG-NOT/shift/
+ALU-mem-src/dynamic-bitops/Scc/CHK/ADDQ-SUBQ/LEA-JMP-JSR/CMP2-CHK2) uses `f_mode==110`
+directly and was therefore always covered by the existing swap — this arm is the *first*
+one in 8 phases of this rollout whose own descriptor position depends on a *different*
+field (`f_move_dst_mode_s`) than the swap was ever keyed on, so the gap was invisible until
+now.
+
+**Fix**: folded a new `is_move_mm_plainsrc_idxdst_full` signal into the same swap condition
+(`eu_ext_data = (is_memind_full || is_move_mm_plainsrc_idxdst_full) ? {swap} : ...`) —
+**zero new eu_seq.sv extraction code needed** once the swap was correct; `dec_dst_ea_offset`
+already used the plain `fi_is_full ? fi_bd : brief` template, which just started working
+once its own input (`ext_data`) was correctly packed. `(d16,An)`-src's own dedicated
+q3_word-based extraction was never affected (it never reads `fi_is_full`/`fi_bd` at all).
+`m68030_seq.sv` also gained `is_move_mm_d16src_idxdst_wordbd` (reusing
+`peek_fi_full_movem`/`movem_bd_words` directly, fixed `ext_count=3`).
+
+**Test**: new `tests/memind20.s` — three instructions covering both code shapes
+((An)+-src word bd, (An)-src long bd, (d16,An)-src word bd). Isolated each instruction's
+own `BUS W` line directly before trusting a full trace compare (given the hang, verifying
+correctness *before* worrying about cosmetic quirks) — all three landed at the exact
+expected addresses with the exact expected values. The full trace then showed the same
+already-catalogued benign prefetch-interleave reordering as `memind19.s`, not a real
+mismatch. Not wired into `make cosim_memind`, same convention as that predecessor.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 9/9 (unchanged).
+Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline**, zero regressions — an especially meaningful
+gate here since the fix touches `eu_ext_data`'s own shared packing formula, a signal
+consumed by every memory-indirect-capable family in this entire rollout. Stage 7 (indexed-
+EA 2-register pure-write fix, MOVE SR,(ea) + CLR-mode110 — the highest-risk stage,
+deliberately last) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
