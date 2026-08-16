@@ -275,6 +275,35 @@ module m68030_seq (
     logic [2:0] move_mm_idxdst_ext_count;
     assign move_mm_idxdst_ext_count = 3'd2 + movem_bd_words + movem_od_words;
 
+    // Phase 141 (plan.md): MOVE #imm, indexed dst -- full-format bd.
+    // MOVE.B/W's own baseline is imm16@q1 + descriptor@q2 -- the exact
+    // same "q1=other data, q2=EA descriptor" shape as abs.W-src/(d16,PC)-
+    // src just above, so directly reuses peek_fi_full_movem/
+    // movem_bd_words/movem_od_words (both word AND long bd supported,
+    // same as those two arms). MOVE.L's own baseline is imm32@q1,q2 +
+    // descriptor@q3 -- one word further out, so needs its own peek at
+    // q3's own bits; only WORD bd is achievable there (its own value
+    // needs q4, the last word before this project's IFU hard limit) --
+    // long bd and any od would need a genuine q5, unsupported, same
+    // Stage 8 boundary as elsewhere in this rollout.
+    logic is_move_mm_immw_idxdst_full;
+    assign is_move_mm_immw_idxdst_full =
+        (f_group == 4'h1 || f_group == 4'h3) &&   // MOVE.B/W, not .L
+        (f_mode == 3'b111) && (f_reg == 3'b100) &&
+        (f_move_dst_mode_s == 3'b110) && peek_fi_full_movem;
+    logic [2:0] move_mm_immw_idxdst_ext_count;
+    assign move_mm_immw_idxdst_ext_count = 3'd2 + movem_bd_words + movem_od_words;
+
+    logic        peek_fi_full_q3;  assign peek_fi_full_q3 = ifu_q3_word[8];
+    logic [1:0]  peek_fi_bdsz_q3;  assign peek_fi_bdsz_q3 = ifu_q3_word[5:4];
+    logic [2:0]  peek_fi_iis_q3;   assign peek_fi_iis_q3  = ifu_q3_word[2:0];
+    logic is_move_mm_imml_idxdst_wordbd;
+    assign is_move_mm_imml_idxdst_wordbd =
+        (f_group == 4'h2) &&                       // MOVE.L
+        (f_mode == 3'b111) && (f_reg == 3'b100) &&
+        (f_move_dst_mode_s == 3'b110) &&
+        peek_fi_full_q3 && (peek_fi_bdsz_q3 == 2'b10) && (peek_fi_iis_q3 == 3'b000);
+
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
     // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
@@ -568,6 +597,10 @@ module m68030_seq (
             ext_count = cmp2chk2_ext_count;
         else if (is_move_mm_absw_idxdst_full || is_move_mm_pcrel_idxdst_full)
             ext_count = move_mm_idxdst_ext_count;
+        else if (is_move_mm_immw_idxdst_full)
+            ext_count = move_mm_immw_idxdst_ext_count;
+        else if (is_move_mm_imml_idxdst_wordbd)
+            ext_count = 3'd4;  // imm32(2) + descriptor(1) + word-bd(1)
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)

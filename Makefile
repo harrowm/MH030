@@ -369,6 +369,16 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # old code silently misread od's value from bd's own high half instead of
 # its real position one word further out).
 #
+# memind18 (Phase 141: MOVE #imm,(bd,An,Xn) full-format indexed dst) is
+# deliberately NOT wired in here, same reason as memind9/14/15: this arm's
+# pre-existing (unrelated to Phase 141's own change -- unmodified by it)
+# dec_is_mem_rmw "2-port trick" performs a real bus READ before the write
+# that Musashi doesn't, so a plain --reads-only compare still mismatches
+# (that flag only tolerates trailing spurious *writes*, not an interleaved
+# extra *read*). All three EA computations (word bd, long bd, MOVE.L's own
+# word-bd-only case) and every written value were hand-verified to match
+# Musashi exactly once the phantom reads are accounted for.
+#
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
 # TAS+NBCD), memind6.s (Phase 116: CLR+ASL), memind8.s (Phase 117: dynamic
@@ -437,7 +447,6 @@ buscmp-memind17: $(SIM)/cosim_grp winuae/tests/memind17_ref.log tests/memind17.h
 	    | grep "^BUS" > /tmp/_dut_memind17.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind17.log winuae/tests/memind17_ref.log \
 	    --reads-only --dut-may-continue
-
 cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17
 

@@ -2206,8 +2206,27 @@ module eu_seq (
                                                     : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_siz                 = f_move_sz;
                         end else if (f_mode == 3'b111 && f_reg == 3'b100) begin
-                            // MOVE #imm, (d8,An,Xn): MOVE.L has imm32 in ext_data, brief_ext
-                            // in q3_word; MOVE.B/W has imm in ext_data[31:16], brief_ext in ext_data[15:0].
+                            // MOVE #imm, (d8,An,Xn): MOVE.L has imm32 in ext_data, descriptor
+                            // in q3_word; MOVE.B/W has imm16 in ext_data[31:16], descriptor in
+                            // ext_data[15:0]. Full-format bd support added Phase 141 (plan.md):
+                            // deliberately NOT the shared fi_bd (that signal's own VALUE
+                            // extraction assumes bd's word lives at ext_data[31:16] -- for
+                            // BOTH size variants here that slot is occupied by the immediate,
+                            // not bd, same reasoning as MOVEM's own bespoke mode110
+                            // extraction just above). MOVE.B/W's descriptor sits at
+                            // ext_data[15:0] (unswapped, since is_move_mm never joins
+                            // mode110_ea_src) -- happens to be the exact bit positions
+                            // fi_is_full/fi_bdsz/fi_iis already read, so those three ARE
+                            // directly reusable for the *check* (not fi_bd's own value);
+                            // bd's own word lives one word later than a single-EA-word
+                            // family, at q3_word (word bd) or q3_word+ext34_data[15:0] (long
+                            // bd) -- matches m68030_seq.sv's own movem_bd_words-style
+                            // additive sizing for this arm. MOVE.L's descriptor is one word
+                            // later still, at q3_word itself, so its own full/bdsz/iis bits
+                            // come from q3_word directly; only WORD bd is achievable there
+                            // (value at ext34_data[15:0]=q4) -- long bd would need a genuine
+                            // q5, unsupported, same Stage 8 boundary as elsewhere in this
+                            // rollout.
                             dec_valid      = 1'b1;
                             dec_is_mem_rd  = 1'b1;
                             dec_is_mem_rmw = 1'b1;
@@ -2223,8 +2242,17 @@ module eu_seq (
                             dec_is_idx     = 1'b1;
                             dec_xn_wl      = (f_group == 4'h2) ? q3_word[11]   : ext_data[11];
                             dec_xn_scale   = (f_group == 4'h2) ? q3_word[10:9] : ext_data[10:9];
-                            dec_ea_offset  = {{24{(f_group == 4'h2) ? q3_word[7] : ext_data[7]}},
-                                              (f_group == 4'h2) ? q3_word[7:0] : ext_data[7:0]};
+                            if (f_group == 4'h2) begin
+                                dec_ea_offset = (q3_word[8] && q3_word[5:4] == 2'b10 && q3_word[2:0] == 3'b000)
+                                              ? {{16{ext34_data[15]}}, ext34_data[15:0]}
+                                              : {{24{q3_word[7]}}, q3_word[7:0]};
+                            end else begin
+                                dec_ea_offset = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
+                                              ? {{16{q3_word[15]}}, q3_word}
+                                              : (fi_is_full && fi_bdsz == 2'b11 && fi_iis == 3'b000)
+                                              ? {q3_word, ext34_data[15:0]}
+                                              : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                             dec_writes_reg = 1'b0;
                             dec_updates_ccr = 1'b1;
                             dec_needs_ext  = 1'b1;

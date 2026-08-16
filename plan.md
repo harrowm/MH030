@@ -5188,6 +5188,69 @@ is next.
 
 ---
 
+## Phase 141 (Stage 4 of 7) — MOVE mem-to-mem imm-src full-format EA
+
+**Goal**: fourth stage of the 7-stage correctness-edges plan — MOVE mem-to-mem's imm-src
+arm (`eu_seq.sv:2208-2231`, `MOVE #imm,(d8,An,Xn)`), deferred out of scope by Phase 122
+("Sub-scope A") because it needs the 4th extension word (q4) this rollout only wired up
+starting Phase 121.
+
+**Word-layout derivation (done before writing any code, per the plan's own risk note)**:
+this arm's baseline layout differs by size. MOVE.L consumes `ext_data` (2 words) for its
+own 32-bit immediate, pushing the EA descriptor out to `q3_word` — one word further than
+the "q1=other data, q2=descriptor" shape Phase 122's abs.W-src/PC-rel-src arms already use.
+MOVE.B/W consumes only `ext_data[31:16]` (1 word) for its 16-bit immediate, leaving the
+descriptor at `ext_data[15:0]` — the *exact same* q1/q2 shape those Phase 122 arms use
+(no swap needed here since `is_move_mm` never joins `mode110_ea_src`). This asymmetry means
+the two size variants need genuinely different fixes, not one shared template:
+
+- **MOVE.B/W**: descriptor at q2 (`ext_data[15:0]`) → `fi_is_full`/`fi_bdsz`/`fi_iis`
+  (which already read exactly these bit positions) are directly reusable for the *check*.
+  `fi_bd` itself is **not** reusable for the *value* (its own formula assumes bd's word
+  sits at `ext_data[31:16]`, which here holds the immediate, not bd) — needed a fresh
+  extraction reading `q3_word` (word bd) / `q3_word`+`ext34_data[15:0]` (long bd), one word
+  further out than a single-EA-word family, matching the same additive shape
+  `movem_bd_words`/`movem_od_words` already compute. Both word **and** long bd achievable.
+- **MOVE.L**: descriptor one word further still, at `q3_word` itself — needed its own new
+  peek (`peek_fi_full_q3`/`peek_fi_bdsz_q3`/`peek_fi_iis_q3`, reading `ifu_q3_word`'s bits
+  directly) since q3 is a genuinely new descriptor position no prior family in this rollout
+  used. Only **word** bd is achievable (value at `ext34_data[15:0]`=q4, the last word before
+  the IFU's hard limit) — long bd would need a real q5, out of scope (Stage 8).
+
+**Fix**: `eu_seq.sv`'s imm-src arm now branches on `f_group==4'h2` (MOVE.L) with its own
+`q3_word`-based full/word-bd-only check, vs. the B/W path reusing `fi_is_full`/`fi_bdsz`/
+`fi_iis` for the check but fresh `q3_word`/`ext34_data`-based extraction for the value —
+both branches fall back to the original 8-bit brief read unchanged when not full-format.
+`m68030_seq.sv` gained two new signals: `is_move_mm_immw_idxdst_full` (MOVE.B/W, reuses
+`peek_fi_full_movem`/`movem_bd_words`/`movem_od_words` directly — same shape as abs.W-src/
+PC-rel-src, `ext_count = 2 + bd_words + od_words`) and `is_move_mm_imml_idxdst_wordbd`
+(MOVE.L, gated specifically on word-bd-and-null-od via the new q3 peek, fixed
+`ext_count = 4`), both inserted into the `ext_count` priority chain ahead of the generic
+`is_move_mm` baseline checks, matching the established "most specific match wins"
+convention.
+
+**Test**: new `tests/memind18.s` — three instructions exercising all three achievable
+cases (MOVE.W word bd, MOVE.W long bd via the usual large-negative-displacement technique,
+MOVE.L word bd). **Not wired into `make cosim_memind`**: a first attempt at an automated
+compare failed — traced and confirmed this arm shares the *exact same*, entirely
+pre-existing `dec_is_mem_rmw` "2-port trick" phantom-read quirk already documented for
+`tests/memind9.s` (MOVE SR,(ea)) and `tests/memind15.s` (MOVE Dn,(d8,An,Xn) register-src) —
+this phase's own diff (`dec_ea_offset` only) never touched `dec_is_mem_rd`/`dec_is_mem_rmw`
+at all, so the extra read is unrelated to the fix under test. Confirmed by isolating the
+`BUS W` lines directly (bypassing the mismatching interleaved reads): all three EA
+computations and every written value/address matched Musashi exactly
+(`$304<-$1234`/`$204<-$5678`/`$504<-$9ABCDEF0`, byte-for-byte).
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 9/9 (unchanged —
+memind18 stays a standalone hand-verified reproduction, same convention as memind9/14/15).
+Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline**, zero regressions — the highest-value gate
+in this rollout so far since MOVE.b/w/l/q are among the most heavily Harte-exercised
+instruction families in the corpus. Stage 5 (MOVE mem-to-mem abs.L-src full-format EA,
+structurally identical to MOVE.L imm-src's own new q3-peek shape) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
