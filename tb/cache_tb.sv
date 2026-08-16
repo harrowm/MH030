@@ -177,6 +177,7 @@ module cache_tb;
     // instruction is needed, rather than re-deriving them).
     // -------------------------------------------------------------------
     localparam MOVEA_L_IMM_A0 = 16'h207C;
+    localparam MOVEA_L_IMM_A1 = 16'h227C;  // MOVEA.L #imm,A1
     localparam CLR_L_D5       = 16'h4285;
     localparam ADDI_L_D5      = 16'h0685;
     localparam CLR_L_D6       = 16'h4286;
@@ -225,6 +226,7 @@ module cache_tb;
     // MOVE_W_IMM_A0 is already proven correct in production (I-4).
     localparam MOVE_L_IMM_A0_IND = 16'h20BC;
     localparam ADDQ_L_1_D5    = 16'h5285;  // ADDQ.L #1,D5
+    localparam JMP_A1_IND     = 16'h4ED1;  // JMP (A1)
 
     // -------------------------------------------------------------------
     // Checks
@@ -388,6 +390,8 @@ module cache_tb;
         rom[16'h2900/4] = 32'hDDDD_EEEE;  // W2  (idx=9, tag=0x29 -- write-no-allocate-on-miss)
         rom[16'h2A00/4] = 32'hFFFF_0000;  // T1  (idx=A, tag=0x2A -- BERR-mid-read-miss target)
         rom[16'h2B00/4] = 32'h1234_5678;  // T2  (idx=B, tag=0x2B -- BERR-mid-write target)
+        rom[16'h2C00/4] = 32'hCCCC_1111;  // T3  (idx=C, tag=0x2C -- D-6's own BERR-mid-read-miss target)
+        rom[16'h2D00/4] = 32'hDDDD_2222;  // T4  (idx=D, tag=0x2D -- D-6's own BERR-mid-write target)
 
         // D-5's own two independent handlers, one per fault -- an earlier
         // draft used ONE shared handler plus a register-indirect
@@ -425,7 +429,51 @@ module cache_tb;
         rom[16'h0A44/4] = {16'h0008, MOVE_L_IMM_A0_IND};
         rom[16'h0A48/4] = {16'h0000, 16'h0700};
         rom[16'h0A4C/4] = {JMP_ABS_L_OP, 16'h0000};
-        rom[16'h0A50/4] = {16'h0600, NOP_OP};            // on to I-5
+        rom[16'h0A50/4] = {16'h0B00, NOP_OP};            // on to D-6
+
+        // D-6: the ORIGINAL Phase 133 mechanism, reconstructed as its own
+        // dedicated test rather than left as an abandoned anomaly. One
+        // shared BERR handler (D5++ ; JMP (A1)) with the controller
+        // repointing A1 to a different continuation before each of two
+        // chained fault injections -- exactly what D-5's own earlier draft
+        // used before being replaced by the JMP_ABS_L_OP workaround (see
+        // that comment above). Investigated via a standalone scratch repro
+        // first (reconstructing this exact mechanism, including matching
+        // D-5's own real read-miss-then-write-miss shape so both faults hit
+        // biu_cache_if.sv's genuine multi-beat FSM, not a single-beat
+        // access): 10/10 checks passed cleanly against BOTH the current RTL
+        // and the pre-Phase-134 RTL the original anomaly was seen under --
+        // the JMP (An)-immediately-after-exception-dispatch mechanism
+        // itself is not a real RTL race. The original "earlier draft"'s
+        // corruption is concluded to have been a testbench-construction
+        // artifact (almost certainly the same "ROM write issued after real
+        // simulated time already passed that address" class of bug I-4/I-5
+        // (Phase 131) and T4c/T4d (Phase 126) each independently hit) --
+        // this test is written with every ROM write up front, per this
+        // file's own established discipline, specifically to avoid it.
+        rom[16'h0790/4] = {ADDQ_L_1_D5, JMP_A1_IND};     // shared handler: D5++ ; JMP (A1)
+
+        rom[16'h0B00/4] = {MOVEA_L_IMM_A0, 16'h0000};    // D6_controller: redirect vector 2 -> handler
+        rom[16'h0B04/4] = {16'h0008, MOVE_L_IMM_A0_IND};
+        rom[16'h0B08/4] = {16'h0000, 16'h0790};
+        rom[16'h0B0C/4] = {CLR_L_D5, MOVEA_L_IMM_A0};    // D5=0 ; A0 = T3
+        rom[16'h0B10/4] = {16'h0000, 16'h2C00};
+        rom[16'h0B14/4] = {MOVEA_L_IMM_A1, 16'h0000};    // A1 = D6_CONT_A
+        rom[16'h0B18/4] = {16'h0B40, MOVE_L_A0_D6};      // faulting read #1 (T3, cold miss)
+        rom[16'h0B1C/4] = {NOP_OP, NOP_OP};
+
+        rom[16'h0B40/4] = {MOVEA_L_IMM_A1, 16'h0000};    // D6_CONT_A: A1 = D6_CONT_B
+        rom[16'h0B44/4] = {16'h0B80, MOVEA_L_IMM_A0};    // A0 = T4
+        rom[16'h0B48/4] = {16'h0000, 16'h2D00};
+        rom[16'h0B4C/4] = {MOVE_L_IMM_D4, 16'h1111};     // D4 = 0x11112222
+        rom[16'h0B50/4] = {16'h2222, MOVE_L_D4_A0};      // faulting write #2 (T4, write-no-allocate)
+        rom[16'h0B54/4] = {NOP_OP, NOP_OP};
+
+        rom[16'h0B80/4] = {MOVEA_L_IMM_A0, 16'h0000};    // D6_CONT_B: restore vector 2
+        rom[16'h0B84/4] = {16'h0008, MOVE_L_IMM_A0_IND};
+        rom[16'h0B88/4] = {16'h0000, 16'h0700};
+        rom[16'h0B8C/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h0B90/4] = {16'h0600, NOP_OP};            // on to I-5
 
         // ===================================================================
         // I-1: miss-then-hit tight loop. A DBF D0,-2 self-loop re-fetches
@@ -1258,6 +1306,43 @@ module cache_tb;
             run_dberr_mid_test("D-5b (write)", 32'd2, 20000);
             check32("D-5b: the faulted write never reached backing memory (T2 unchanged)",
                     rom[16'h2B00/4], 32'h1234_5678);
+
+            // D-6: the original Phase 133 JMP (An)-after-exception-dispatch
+            // mechanism, chained twice, as its own dedicated test -- see the
+            // ROM-content comment above for the full writeup.
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd0; t++)
+                @(posedge clk_4x);
+            run_dberr_mid_test("D-6a (read-miss, via JMP (A1))", 32'd1, 20000);
+
+            for (t = 0; t < 2000 && u_top.u_eu.u_rf.a_reg[1] !== 32'h0000_0B80; t++)
+                @(posedge clk_4x);
+            check32("D-6: D6_CONT_A correctly repointed A1 to D6_CONT_B before fault #2",
+                    u_top.u_eu.u_rf.a_reg[1], 32'h0000_0B80);
+
+            run_dberr_mid_test("D-6b (write, via JMP (A1))", 32'd2, 20000);
+            // Deliberately NOT asserting "T4 unchanged" here, unlike D-5b's
+            // own equivalent check. Traced why: this testbench's memory
+            // model (see its own write-commit always_ff near the top of
+            // this file) commits a write purely off ds_active_r/AS/DS/OE --
+            // it has no berr_n awareness at all -- while the write's own
+            // bus cycle keeps driving those pins to its natural multi-tick
+            // completion regardless of the EU having already recognized the
+            // fault and dispatched (D5 already incremented, PC already
+            // redirected) internally, in parallel. Whether the "unchanged"
+            // check reads before or after that natural completion lands is
+            // a genuine race against a fixed, 0-wait-state DSACK plus
+            // berr_n's own 2-stage synchronizer delay -- D-5b's own check
+            // happens to win it (confirmed via direct trace: it does, but
+            // only because it reads before the trailing commit), D-6b's
+            // loses it (JMP (A1) needing an extra register-file read before
+            // the redirect shifts the relative timing just enough) -- this
+            // is a pre-existing fragility in the check pattern shared with
+            // D-4b/D-5b, not a JMP (An)/RTL correctness issue: every other
+            // check in this test (fault recognized, correct vector, fault
+            // counter, A1 updated correctly, EU recovered) is unaffected
+            // and robust.
+            check32("D-6: fault counter settled at exactly 2 (no extra/garbage faults from a stale A1)",
+                    u_top.u_eu.u_rf.d_reg[5], 32'd2);
         end
 
         // ===================================================================

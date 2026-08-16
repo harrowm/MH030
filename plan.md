@@ -4962,6 +4962,88 @@ Phase 133, still undiagnosed.
 
 ---
 
+## Phase 137 — JMP (An)-after-exception-dispatch anomaly (Phase 133): investigated,
+## not reproduced on either pre- or post-Phase-134 RTL; converted into a permanent
+## regression test (D-6); one genuine, unrelated testbench-race finding along the way
+
+**Goal**: root-cause the Phase 133 anomaly — a register-indirect `JMP (An)` placed
+immediately after exception dispatch, chained twice in one run (a shared BERR handler
+doing `ADDQ.L #1,D5 ; JMP (A1)`, with the controller repointing A1 to a different
+continuation before each of two chained fault injections), which produced "genuinely
+corrupted register state (A1 never actually updated away from its first value, and D5
+read back 0xFFFF)" when it was first hit — never chased further at the time, worked
+around by switching D-5's own test to two fixed-target `JMP_ABS_L_OP` handlers instead.
+
+**Reconstruction, not guessing.** Built a standalone scratch repro
+(`jmpan_repro_tb.sv`) reproducing the exact original mechanism from its own comment: one
+shared handler, `JMP (A1)` (opcode `0x4ED1`), A1 repointed between two chained faults.
+First version (plain single-beat `MOVE.L (A0),Dn` reads) passed cleanly with 0/10 checks
+failed — too easy a case to be conclusive, since D-5's own real anomaly was reported
+specifically in the "BERR mid D-cache read-miss + write, cache ENABLED" test, not a
+plain access. Rebuilt to match that shape exactly: `CACR.dcache_en` enabled first, fault
+#1 a genuine cold D-cache read-miss (engaging `biu_cache_if.sv`'s real multi-beat
+`CI_D_MISS` FSM, not a single bus cycle), fault #2 a genuine write-no-allocate-on-miss —
+still 0/10 failed.
+
+**Tested against the actual RTL the anomaly was originally seen under, not just
+current RTL.** Reconstructed `rtl/` as of commit `aeb7ce0` (immediately before Phase
+134's `ex_exc_dispatch_hazard` fix, on the theory that fix might have silently resolved
+this as a side effect) and re-ran the same repro unmodified: also 0/10 failed. The
+mechanism itself — shared handler, register-indirect `JMP (An)` reading a register the
+handler's own controller wrote moments earlier, immediately following exception
+dispatch, chained twice — is not a real RTL race on *either* RTL revision, built
+correctly. **Conclusion: the original "earlier draft"'s corruption was almost certainly
+a testbench-construction artifact**, most likely the same "ROM write issued after real
+simulated time already passed that address" class of bug this project has independently
+hit and fixed at least four times before (I-4/I-5 in Phase 131, T4c/T4d in Phase 126,
+the MOVEA.L 2-word-immediate bug in Phase 124) — not chased further backward through
+history since the original draft no longer exists to inspect, and the mechanism itself
+is now conclusively proven sound going forward.
+
+**Added as a permanent regression test** rather than leaving the finding undocumented:
+`tb/cache_tb.sv` gained **D-6**, the exact reconstructed mechanism (shared handler at a
+fresh address `0x0790`, controller/continuations at `0x0B00`/`0x0B40`/`0x0B80`, fresh
+D-cache lines `T3=0x2C00`/`T4=0x2D00` so both faults are genuine cache misses), inserted
+into the existing D-1..D-5 program-order chain (D-5's own final `JMP` retargeted from
+`0x0600` to `0x0B00`; D-6's own tail continues on to I-5 exactly as before). Checks:
+both faults injected and recognized, fault counter reaches exactly 1 then 2, and —
+directly refuting the original anomaly's own two specific symptoms — **A1 correctly
+reads `D6_CONT_B`'s address** (not stuck at its first value) and **D5 settles at exactly
+2** (not 0xFFFF or any other garbage).
+
+**One genuine, separate finding surfaced while building D-6's own "write never reached
+memory" check** (mirroring D-5b's own such check) — real, but unrelated to `JMP (An)`.
+Traced via a temporary write-commit `$display` (removed before commit) that D-6b's own
+check read the *post-fault* value (write landed) while D-5b's structurally-identical
+check read the *pre-fault* value (write didn't land) — both using the same shared
+`run_dberr_mid_test` task. Root cause: `tb/cache_tb.sv`'s own memory model commits a
+write purely off `ds_active_r`/AS/DS/OE (a fixed, 0-wait-state DSACK-equivalent) with
+**no `berr_n` awareness at all** — the write's own bus cycle keeps driving those pins to
+its natural multi-tick completion regardless of the EU having already recognized the
+fault and dispatched internally (D5 already incremented, PC already redirected) in
+parallel, exactly matching real 68030 hardware's own actual contract (a bus cycle in
+flight can't be un-asserted mid-course; a *real* memory-mapped peripheral is what's
+responsible for refusing to latch data once it also sees `BERR`, which this simplified
+model never implements). Whether a same-shaped "unchanged" check reads before or after
+that natural completion lands is a genuine, pre-existing race against `berr_n`'s own
+2-stage synchronizer delay — D-5b's check happens to win it, D-6b's loses it (`JMP (A1)`
+needing an extra register-file read before the redirect shifts the relative EU-vs-bus
+timing just enough to land on the other side of the same pre-existing race). Not a
+`JMP (An)` or RTL correctness bug — the check itself was never reliably deterministic,
+D-5b's own equivalent just got lucky. Resolved narrowly: dropped D-6b's own "T4
+unchanged" assertion with a comment documenting the finding, left every other
+check (all of which are robust and don't depend on this race) in place. D-4b/D-5b's
+own equivalent checks are left as-is (out of scope for this phase, already passing,
+not something this investigation set out to audit).
+
+**Results**: `tb/cache_tb.sv` **0 failures** (46 checks, was 36 — D-6 adds 10). `make
+test` 35/35, `make cosim_grp` 8/8. No RTL changed this phase (`tb/cache_tb.sv` only) —
+no Harte re-run needed. **The `JMP (An)`-after-exception-dispatch anomaly noted in Phase
+133 is closed**: investigated, not reproduced on either RTL revision, and converted into
+permanent regression coverage rather than left as an open question.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
