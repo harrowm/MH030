@@ -304,6 +304,18 @@ module m68030_seq (
         (f_move_dst_mode_s == 3'b110) &&
         peek_fi_full_q3 && (peek_fi_bdsz_q3 == 2'b10) && (peek_fi_iis_q3 == 3'b000);
 
+    // Phase 142 (plan.md): MOVE (xxx).L, indexed dst -- abs.L src's own
+    // 2-word baseline (the address itself) pushes the dst descriptor to
+    // q3_word, the exact same position MOVE.L imm-src (Phase 141) already
+    // needed peek_fi_full_q3/peek_fi_bdsz_q3/peek_fi_iis_q3 for -- reused
+    // directly, same word-bd-only scope (long bd would need a genuine q5).
+    logic is_move_mm_absl_idxdst_wordbd;
+    assign is_move_mm_absl_idxdst_wordbd =
+        (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
+        (f_mode == 3'b111) && (f_reg == 3'b001) &&
+        (f_move_dst_mode_s == 3'b110) &&
+        peek_fi_full_q3 && (peek_fi_bdsz_q3 == 2'b10) && (peek_fi_iis_q3 == 3'b000);
+
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
     // decode block in eu_seq.sv -- each hardcodes the brief (d8,An,Xn)
@@ -601,6 +613,8 @@ module m68030_seq (
             ext_count = move_mm_immw_idxdst_ext_count;
         else if (is_move_mm_imml_idxdst_wordbd)
             ext_count = 3'd4;  // imm32(2) + descriptor(1) + word-bd(1)
+        else if (is_move_mm_absl_idxdst_wordbd)
+            ext_count = 3'd4;  // abs.L(2) + descriptor(1) + word-bd(1)
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)

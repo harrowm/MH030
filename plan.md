@@ -5251,6 +5251,50 @@ structurally identical to MOVE.L imm-src's own new q3-peek shape) is next.
 
 ---
 
+## Phase 142 (Stage 5 of 7) — MOVE mem-to-mem abs.L-src full-format EA
+
+**Goal**: fifth stage of the 7-stage correctness-edges plan — MOVE mem-to-mem's abs.L-src
+arm (`eu_seq.sv:2260-2283`, `MOVE (xxx).L,(d8,An,Xn)`), deferred by Phase 122 for the same
+reason as Phase 141's imm-src arm.
+
+**Word layout, confirmed by reading the code first**: abs.L-src's own baseline already
+consumes 2 words (`ext_data` = the 32-bit absolute address) before the dst descriptor,
+pushing it to `q3_word` — the *exact same* shape MOVE.L imm-src (Phase 141) already needed
+its own new peek for. Directly reused `peek_fi_full_q3`/`peek_fi_bdsz_q3`/`peek_fi_iis_q3`
+(the signals Phase 141 added) rather than duplicating them — same word-bd-only scope (long
+bd would need a genuine q5, out of scope).
+
+**A structurally significant difference from Phase 141, though**: this arm uses the real
+`move_mm` FSM (`dec_is_move_mm`/`dec_is_mem_rd`, a genuine src-read-then-dst-write, unlike
+the imm-src arm's RMW "2-port trick"), so it does **not** share that arm's phantom-read
+quirk — confirmed directly, not assumed.
+
+**Fix**: `eu_seq.sv`'s `dec_dst_ea_offset` (previously an unconditional 8-bit brief read of
+`q3_word[7:0]`) now checks `q3_word`'s own full/bdsz/iis bits directly, reading the word-bd
+value from `ext34_data[15:0]` (q4) when present. `m68030_seq.sv` gained
+`is_move_mm_absl_idxdst_wordbd` (reusing Phase 141's q3 peek), inserted into the `ext_count`
+chain alongside `is_move_mm_imml_idxdst_wordbd`.
+
+**Test**: new `tests/memind19.s` (`MOVE ($600),($100,A0,D1.L)`, word bd, forced via the
+usual out-of-brief-range displacement). A first automated-compare attempt failed —
+**but not from the phantom-read quirk this time** (confirmed by direct trace: `eu_berr`/
+read-count reasoning didn't apply here at all). Instead it hit the *other*, unrelated,
+already-catalogued benign quirk shared by `tests/memind.s`/`memind4.s`/`memind6.s`/
+`memind9.s`/`memind14.s`: the DUT's real pipelined IFU prefetch fetches the next
+instruction word one cycle earlier than Musashi's own interpretive re-fetch quirk expects.
+Confirmed by direct bus-log inspection: `BUS W 00000304 deadbeef` matches Musashi
+byte-for-byte in both address and value; only the fetch-vs-read cycle *order* at that one
+boundary differs. Not wired into `make cosim_memind`, same convention as those five
+predecessors.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 9/9 (unchanged).
+Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline**, zero regressions. Stage 6 (MOVE mem-to-mem
+plain-memory-src full-format EA — the hardest of the q4-reuse tier, needing a genuine
+per-sub-mode dual peek position) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

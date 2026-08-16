@@ -379,6 +379,16 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # word-bd-only case) and every written value were hand-verified to match
 # Musashi exactly once the phantom reads are accounted for.
 #
+# tests/memind19.s (Phase 142: MOVE (xxx).L,(bd,An,Xn) full-format indexed
+# dst, word bd -- the abs.L-src arm) is also deliberately not wired in:
+# unlike memind18 (RMW phantom-read quirk), this one uses the real move_mm
+# FSM and hits the *other*, unrelated benign quirk instead -- the same
+# prefetch-interleave reordering already documented for memind/memind4/
+# memind6/memind9/memind14 (the DUT's real pipelined IFU prefetch fetches
+# one word earlier than Musashi's own interpretive re-fetch quirk expects).
+# The actual write (EA + value) matches Musashi byte-for-byte; only the
+# fetch-vs-read cycle order differs by one slot.
+#
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
 # TAS+NBCD), memind6.s (Phase 116: CLR+ASL), memind8.s (Phase 117: dynamic

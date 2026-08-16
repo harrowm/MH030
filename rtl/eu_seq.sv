@@ -2263,6 +2263,15 @@ module eu_seq (
                             // rd_a=dst An (f_dn), rd_b=dst Xi (q3_word[15:12]).
                             // dec_is_idx NOT set (would corrupt abs read addr); instead
                             // ex_is_move_mm_idx_dst flags indexed dst EA at read_ack.
+                            // Full-format bd (Phase 142, plan.md): abs.L src's own 2-word
+                            // baseline pushes the dst descriptor to q3_word, the exact same
+                            // "one word further out" position MOVE.L imm-src (Phase 141)
+                            // already needed its own peek for -- only WORD bd is achievable
+                            // (value at ext34_data[15:0]=q4); long bd would need a genuine
+                            // q5, out of scope (Stage 8). Unlike the imm-src arm, this one
+                            // uses the move_mm FSM (a real src-then-dst read/write, not the
+                            // RMW "2-port trick"), so it doesn't share that arm's own
+                            // phantom-read quirk.
                             dec_valid              = 1'b1;
                             dec_is_move_mm         = 1'b1;
                             dec_is_move_mm_idx_dst = 1'b1;
@@ -2279,7 +2288,9 @@ module eu_seq (
                             // Xi scale/wl and d8 for indexed dst EA (no dec_is_idx)
                             dec_xn_wl              = q3_word[11];
                             dec_xn_scale           = q3_word[10:9];
-                            dec_dst_ea_offset      = {{24{q3_word[7]}}, q3_word[7:0]};
+                            dec_dst_ea_offset      = (q3_word[8] && q3_word[5:4] == 2'b10 && q3_word[2:0] == 3'b000)
+                                                   ? {{16{ext34_data[15]}}, ext34_data[15:0]}
+                                                   : {{24{q3_word[7]}}, q3_word[7:0]};
                             dec_siz                = f_move_sz;
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                      f_mode == 3'b101) begin
