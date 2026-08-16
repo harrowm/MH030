@@ -5359,6 +5359,78 @@ deliberately last) is next.
 
 ---
 
+## Phase 144 (Stage 7 of 7 — closes the correctness-edges plan) — Indexed-EA 2-register
+## pure-write fix: MOVE SR,(ea) + CLR-mode110
+
+**Goal**: seventh and final stage of the correctness-edges plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`) — the highest-risk stage, deliberately
+landed last. Root cause, shared by MOVE SR,(ea) (`eu_seq.sv`'s mode110 arm) and CLR's own
+indexed form (deferred by Phase 139): both used the RMW "2-port trick" — routing through
+`dec_is_mem_rd=1;dec_is_mem_rmw=1` purely to get 2 simultaneous register-file reads (An
+base via rd_a, Xn index via rd_b) — performing a real, architecturally-unnecessary bus
+read before every write. Neither instruction is semantically a read-modify-write (SR→ea is
+a pure data move; CLR is architecturally a pure write on real 68020/030 silicon); the RMW
+path was borrowed *only* because the plain-write datapath couldn't supply two distinct
+registers at once. **Scoped to these two 2-register cases only** — MOVE Dn,(d8,An,Xn)'s
+own phantom read is a structurally different 3-register problem (An+Xn+Dn simultaneously)
+that would need either reopening `port3.md`'s already-concluded 3rd-register-file-port
+question or a genuinely new 2-internal-phase FSM mechanism; left permanently out of scope,
+matching the plan's own scoping recommendation.
+
+**Root cause, confirmed by reading the datapath directly**: `ex_an_base = ex_is_mem_wr ?
+rd_b_data : rd_a_data` (the write-path EA-base mux) and `ex_xn_val` (the index-value mux)
+are **both unconditionally `rd_b_data`** — for any indexed write, they collide on the same
+port, since a plain write's own default rule puts An on rd_b (matching every ordinary
+`MOVE Dn/imm,ea` write, whose EA needs only one register). Reads don't have this problem
+(An already comes from rd_a, Xn from rd_b, cleanly split) — which is exactly why the RMW
+path (borrowing the read phase's own register layout) worked as a functional, if wasteful,
+workaround.
+
+**Fix**: decoupled `ex_an_base`'s mux from `ex_is_mem_wr` specifically for the indexed
+case: `ex_an_base = (ex_is_mem_wr && !ex_is_idx) ? rd_b_data : rd_a_data`. Every existing
+non-indexed write (the vast majority — MOVE Dn/imm/SR non-indexed forms, CLR non-indexed,
+every arm touched in Phases 121/139/141-143) has `ex_is_idx=0`, so this reduces to the
+original formula unchanged — zero behavioral change for anything not newly converted.
+Verified this doesn't collide with the one *other* existing `dec_is_mem_wr && dec_is_idx`
+co-occurrence in the whole file — JSR `(d8,An,Xn)` — by tracing its own 3 `ex_an_base`
+consumers (`ex_ea`, `ex_an_new`, `ex_jmp_target`): all three already bypass `ex_an_base`
+entirely for `ex_is_jsr_idx` (via `ex_cur_sp`- and `rd_a_data`-direct paths), confirmed the
+same for PEA's own `ex_is_pea_idx`, so the mux change is provably inert for both. With the
+mux fixed, MOVE SR,(ea)'s mode110 arm and CLR's own mode110 arm both converted from
+`dec_is_mem_rd/dec_is_mem_rmw` to `dec_is_mem_wr`, keeping the *exact same* `dec_src_reg`/
+`dec_dst_reg` (An→rd_a, Xn→rd_b) the old RMW code already used — write data for both
+always comes from `dec_use_imm`/`dec_imm` (never `rd_a_data`), so routing An through rd_a
+never collides with the value being written.
+
+**Test**: verified CLR.b/w/l and MOVEfromSR Harte suites directly first (100% each) before
+the full sweep. Added `Indexed-EA-no-extra-read` to `tb/stall_fsm_tb.sv` — the same
+bus-cycle-count-bracketed-on-a-marker-register technique Phase 139 established — proving
+both `CLR.L (d8,An,Xn)` and `MOVE.W SR,(d8,An,Xn)` now cost exactly 1 bus cycle (was 2).
+**A genuine test-authoring bug, not an RTL bug, was found and fixed while building this
+check**: the first attempt's own extension-word encoding had the L(long)-size bit placed
+in the wrong hex nibble, accidentally setting the full-format bit and zeroing the intended
+displacement — caught immediately by the bus-cycle-count checks passing (confirming the
+core fix) while the memory-content checks failed (wrong EA), isolating the bug to the
+*test's own encoding*, not the RTL, via a targeted `$display` trace of the actual write
+address. A second, unrelated finding along the way: the test's first EA target addresses
+($20C/$30C) collided with **live code** used by earlier tests in the same file — harmless
+in practice (this file's own pure-PC-only-increases execution model means that code was
+already retired and never revisited), but corrected to a fresh, clearly-unused address
+range anyway, matching this file's own established convention.
+
+**Results**: `make test` 35/35 (mandatory full regression given the shared `ex_an_base`
+mux change — the widest blast radius of any single-line change in this whole rollout),
+`make cosim_grp` 8/8, `make cosim_memind` 9/9 (unchanged). Full 124-suite Harte re-run —
+**PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline**, zero regressions despite touching the single mux formula
+consumed by every write-path EA computation in the machine. **This closes the 7-stage
+correctness-edges plan (Phases 138-144) in full.** MOVE Dn,(d8,An,Xn)'s own 3-register
+phantom read remains a documented, permanent, harmless quirk (Harte 100%, no bus-cycle-
+exact fidelity claimed) — the one item from the original 4-item request deliberately never
+attempted, per the plan's own explicit scoping.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

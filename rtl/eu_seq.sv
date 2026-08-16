@@ -2871,11 +2871,13 @@ module eu_seq (
                     // Split out of the shared NEGX/NEG/NOT/TST block above (Phase 139,
                     // plan.md): real 68020/030 CLR-to-memory is a pure write (no
                     // read of the old value, a documented improvement over the
-                    // 68000) for every EA mode except indexed (f_mode==110, still
-                    // needs the RMW "2-port trick" until Phase 144's structural
-                    // fix). Non-indexed modes route through dec_is_mem_wr with
-                    // dec_unit=UNIT_MOVE/dec_use_imm=1/dec_imm=0 -- deliberately
-                    // NOT dec_unit=UNIT_ALU/ALU_CLR, reusing MOVE #imm,mem's own
+                    // 68000). Indexed EA (f_mode==110) was RMW until Phase 144
+                    // (plan.md), which decoupled ex_an_base's own mux from
+                    // ex_is_mem_wr for the indexed case specifically, letting
+                    // this become a genuine single-phase write too -- every mode
+                    // routes through dec_is_mem_wr with dec_unit=UNIT_MOVE/
+                    // dec_use_imm=1/dec_imm=0 now, deliberately NOT dec_unit=
+                    // UNIT_ALU/ALU_CLR, reusing MOVE #imm,mem's own
                     // already-Harte-proven CCR path instead (move_result_w becomes
                     // ex_imm=0, giving exactly CLR's own flags: Z=1, N=V=C=0 --
                     // architecturally identical to "MOVE #0,ea").
@@ -2883,17 +2885,21 @@ module eu_seq (
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                   f_mode == 3'b101 || f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
-                        dec_valid  = 1'b1;
-                        dec_siz    = f_siz;
+                        dec_valid       = 1'b1;
+                        dec_siz         = f_siz;
+                        dec_unit        = UNIT_MOVE;
+                        dec_use_imm     = 1'b1;
+                        dec_imm         = 32'h0;
+                        dec_updates_ccr = 1'b1;
+                        dec_is_mem_wr   = 1'b1;
                         if (f_mode == 3'b110) begin
-                            // Indexed EA: unchanged RMW path (deferred to Phase 144).
-                            dec_unit       = UNIT_ALU;
-                            dec_alu_op     = ALU_CLR;
-                            dec_is_mem_rd  = 1'b1;
-                            dec_is_mem_rmw = 1'b1;
-                            dec_src_reg    = {1'b1, f_reg};  // An → rd_a (EA base)
+                            // Indexed EA (Phase 144): An -> rd_a, Xn -> rd_b, same
+                            // register layout the old RMW path already used --
+                            // write data always comes from dec_imm=0, never
+                            // rd_a_data, so no collision with An sitting on rd_a.
+                            dec_src_reg    = {1'b1, f_reg};  // An → rd_a
                             dec_reads_src  = 1'b1;
-                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
                             dec_reads_dst  = 1'b1;
                             dec_is_idx     = 1'b1;
                             dec_xn_wl      = ext_data[11];
@@ -2902,12 +2908,7 @@ module eu_seq (
                                            : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext  = 1'b1;
                         end else begin
-                            // Non-indexed: plain write, no RMW read.
-                            dec_unit        = UNIT_MOVE;
-                            dec_use_imm     = 1'b1;
-                            dec_imm         = 32'h0;
-                            dec_updates_ccr = 1'b1;
-                            dec_is_mem_wr   = 1'b1;
+                            // Non-indexed: unchanged from Phase 139.
                             if (f_mode != 3'b111) begin
                                 dec_dst_reg   = {1'b1, f_reg};  // An → rd_b (write path)
                                 dec_reads_dst = 1'b1;
@@ -3350,9 +3351,19 @@ module eu_seq (
                                         dec_needs_ext = 1'b1;
                                         dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                                     end
-                                    3'b110: begin  // (d8,An,Xn)/(bd,An,Xn) — RMW trick: rd_a=An, rd_b=Xn
-                                        dec_is_mem_rd  = 1'b1;
-                                        dec_is_mem_rmw = 1'b1;
+                                    3'b110: begin  // (d8,An,Xn)/(bd,An,Xn): plain write
+                                        // (Phase 144, plan.md). Was an RMW "2-port
+                                        // trick" (rd_a=An, rd_b=Xn) purely to get 2
+                                        // simultaneous register reads, performing a
+                                        // real, architecturally-unnecessary bus read
+                                        // before the write -- now a genuine
+                                        // single-phase write, safe because ex_an_base's
+                                        // own mux (eu_seq.sv) now routes An through
+                                        // rd_a specifically for indexed writes, and
+                                        // this instruction's own write data always
+                                        // comes from dec_use_imm/dec_imm (sr_live, set
+                                        // above), never from rd_a_data.
+                                        dec_is_mem_wr  = 1'b1;
                                         dec_src_reg    = {1'b1, f_reg};
                                         dec_reads_src  = 1'b1;
                                         dec_dst_reg    = {ext_data[15], ext_data[14:12]};
@@ -7222,9 +7233,21 @@ module eu_seq (
     // CMPM rd_b carries Ax address base — must be full 32-bit regardless of siz
     assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem || ex_is_bf || ex_is_move_mm || ex_is_cas || ex_is_abcd_sbcd_mem || ex_is_cas2) ? 2'b00 : ex_siz;
 
-    // EA computation: An base from rd_a (loads/LEA) or rd_b (stores).
+    // EA computation: An base from rd_a (loads/LEA) or rd_b (stores) --
+    // EXCEPT an indexed write (Phase 144, plan.md), which needs An on rd_a
+    // and Xn on rd_b simultaneously (ex_xn_val below is unconditionally
+    // rd_b_data, so a plain write's own default "An on rd_b" rule would
+    // collide with Xn for exactly this case). This is what let MOVE SR,(ea)
+    // and CLR's own indexed form become genuine single-phase plain writes
+    // instead of borrowing the RMW read-phase's own register layout purely
+    // to get 2 simultaneous ports -- their write DATA never depends on
+    // rd_a_data (always dec_use_imm), so routing An through rd_a here
+    // doesn't collide with anything. Every non-indexed plain write
+    // (MOVE Dn/imm/SR,ea non-indexed forms, CLR non-indexed, Phases 121/
+    // 139/141-143) is completely unaffected -- ex_is_idx is 0 for all of
+    // them, so this reduces to the original formula unchanged.
     logic [31:0] ex_an_base;
-    assign ex_an_base = ex_is_mem_wr ? rd_b_data : rd_a_data;
+    assign ex_an_base = (ex_is_mem_wr && !ex_is_idx) ? rd_b_data : rd_a_data;
 
     // brief indexed — scaled index register value added to EA and jump target
     logic [31:0] ex_xn_val;

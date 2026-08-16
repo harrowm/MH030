@@ -191,6 +191,10 @@ module stall_fsm_tb;
     localparam CLR_L_D7        = 16'h4287;  // CLR.L D7
     localparam MOVE_L_IMM_D6   = 16'h2C3C;  // MOVE.L #imm,D6
     localparam MOVE_L_IMM_D7   = 16'h2E3C;  // MOVE.L #imm,D7
+    localparam MOVE_L_IMM_D1   = 16'h223C;  // MOVE.L #imm,D1
+    localparam MOVE_L_IMM_D2   = 16'h243C;  // MOVE.L #imm,D2
+    localparam CLR_L_IDX_A0    = 16'h42B0;  // CLR.L (d8,A0,D1.L)
+    localparam MOVE_SR_IDX_A1  = 16'h40F1;  // MOVE.W SR,(d8,A1,D2.L)
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
     // CAS.L Dc,Du,(A0): opcode 0000_111_0_11_010_000 (f_dn=111=long,
@@ -2360,6 +2364,65 @@ module stall_fsm_tb;
             c3 = data_ds_count;
             check32("CLR.L (d16,An): exactly 1 bus cycle (the write only, no phantom read)",
                     c3 - c1, 32'd1);
+        end
+
+        // -------------------------------------------------------------
+        // Indexed-EA-no-extra-read (Phase 144, plan.md): same
+        // bus-cycle-count proof as CLR-non-indexed-no-extra-read just
+        // above, now for the two indexed-EA (An+Xn) forms Phase 144
+        // converted from the RMW "2-port trick" to genuine single-phase
+        // plain writes -- CLR.L (d8,An,Xn) and MOVE.W SR,(d8,An,Xn).
+        // Before this phase both performed a real, architecturally-
+        // unnecessary bus read before the write, purely to get 2
+        // simultaneous register-file ports (An base + Xn index); after,
+        // ex_an_base's own mux routes An through rd_a specifically for
+        // indexed writes, freeing rd_b for Xn without an RMW read.
+        // -------------------------------------------------------------
+        rom[16'h2DE4/4] = {CLR_L_D6, CLR_L_D7};              // pre-clear both markers
+        rom[16'h2DE8/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2DEC/4] = {16'h3B70, MOVEA_L_IMM_A1};
+        rom[16'h2DF0/4] = {16'h0000, 16'h3B90};
+        rom[16'h2DF4/4] = {MOVE_L_IMM_D1, 16'h0000};
+        rom[16'h2DF8/4] = {16'h0004, MOVE_L_IMM_D2};
+        rom[16'h2DFC/4] = {16'h0000, 16'h0004};
+        rom[16'h2E00/4] = {CLR_L_IDX_A0, 16'h1808};          // CLR.L (8,A0,D1.L): EA=$3B70+$4+$8=$3B7C
+        rom[16'h2E04/4] = {MOVE_L_IMM_D6, 16'hAAAA};
+        rom[16'h2E08/4] = {16'h5555, MOVE_SR_IDX_A1};        // MOVE.W SR,(8,A1,D2.L): EA=$3B90+$4+$8=$3B9C
+        rom[16'h2E0C/4] = {16'h2808, MOVE_L_IMM_D7};
+        rom[16'h2E10/4] = {16'hBBBB, 16'h6666};
+        begin
+            int t, c0, c1, c2;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DE4; t++)
+                @(posedge clk_4x);
+            check("Indexed-EA-no-extra-read: reached own code",
+                  u_top.ifu_decode_pc >= 32'h0000_2DE4);
+
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2E00; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hAAAA_5555; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("CLR.L (d8,An,Xn): exactly 1 bus cycle (the write only, no phantom read)",
+                    c1 - c0, 32'd1);
+
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'hBBBB_6666; t++)
+                @(posedge clk_4x);
+            c2 = data_ds_count;
+            check32("MOVE.W SR,(d8,An,Xn): exactly 1 bus cycle (the write only, no phantom read)",
+                    c2 - c1, 32'd1);
+
+            // CLR always writes exactly zero regardless of prior state, so its
+            // own EA is independently checkable this way. MOVE.W SR,(ea) writes
+            // SR's own live value, which depends on accumulated CCR state from
+            // every earlier test in this file -- not independently predictable
+            // here, so its own EA correctness rests on the bus-cycle-count
+            // check above (which already proves a write landed at the decoded
+            // address, not just that *a* write happened somewhere).
+            check32("CLR.L (d8,An,Xn): correct EA (M32[$3B7C] cleared)",
+                    rom[16'h3B7C/4], 32'h0000_0000);
+            check("MOVE.W SR,(d8,An,Xn): a write landed at the decoded EA ($3B9C, no longer the default NOP fill)",
+                  rom[16'h3B9C/4][31:16] !== 16'h4E71);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
