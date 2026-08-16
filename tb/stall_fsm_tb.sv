@@ -186,6 +186,11 @@ module stall_fsm_tb;
     localparam CLR_L_D5       = 16'h4285;
     localparam ADDI_L_D5      = 16'h0685;
     localparam NOP_OP         = 16'h4E71;
+    localparam CLR_L_PREDEC_A0 = 16'h42A0;  // CLR.L -(A0)
+    localparam CLR_L_D16_A1    = 16'h42A9;  // CLR.L (d16,A1)
+    localparam CLR_L_D7        = 16'h4287;  // CLR.L D7
+    localparam MOVE_L_IMM_D6   = 16'h2C3C;  // MOVE.L #imm,D6
+    localparam MOVE_L_IMM_D7   = 16'h2E3C;  // MOVE.L #imm,D7
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
     // CAS.L Dc,Du,(A0): opcode 0000_111_0_11_010_000 (f_dn=111=long,
@@ -2301,6 +2306,60 @@ module stall_fsm_tb;
                     u_top.u_eu.u_rf.d_reg[1], 32'd10);
             check32("RAW-hazard-with-Ihit: RAW hazard resolved correctly on every cache-hit-served pass (D2=1+2+...+10)",
                     u_top.u_eu.u_rf.d_reg[2], 32'd55);
+        end
+
+        // -------------------------------------------------------------
+        // CLR-non-indexed-no-extra-read (Phase 139, plan.md): direct
+        // bus-cycle-count proof that non-indexed CLR-to-memory no longer
+        // performs a phantom read before its write (the quirk
+        // tests/memind13.s's own header first documented). Each CLR is
+        // immediately followed by a MOVE.L #imm,Dn "marker" instruction;
+        // data_ds_count is bracketed on the MARKER REGISTER settling to
+        // its expected value, not on decode_pc -- an earlier version of
+        // this test bracketed on decode_pc crossing the next
+        // instruction's own address and got a spurious delta=0 for the
+        // (d16,An) case, root-caused to the same "decode_pc can be ahead
+        // of what's actually completing in EX" hazard docs/stalls.md
+        // already catalogs (here, the IFU's own extension-word prefetch
+        // for the following instruction can advance decode_pc's reported
+        // value slightly ahead of the CURRENT instruction's own write
+        // retiring). A register's own committed VALUE has no such
+        // ambiguity -- EX retires strictly in order, so D6/D7 cannot
+        // settle to their marker values until the preceding CLR's own
+        // write-phase FSM has fully released ex_mem_stall. Covers both a
+        // base-register mode (-(An), no extension word) and a
+        // displacement mode ((d16,An), one extension word).
+        // -------------------------------------------------------------
+        rom[16'h2DC0/4] = {CLR_L_D6, CLR_L_D7};        // pre-clear both markers
+        rom[16'h2DC4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2DC8/4] = {16'h3B44, MOVEA_L_IMM_A1};
+        rom[16'h2DCC/4] = {16'h0000, 16'h3B50};
+        rom[16'h2DD0/4] = {CLR_L_PREDEC_A0, MOVE_L_IMM_D6};  // CLR.L -(A0): A0=$3B40, EA=$3B40
+        rom[16'h2DD4/4] = {16'hAAAA, 16'h5555};              // D6 marker value
+        rom[16'h2DD8/4] = {CLR_L_D16_A1, 16'h0010};          // CLR.L ($10,A1): EA=$3B60
+        rom[16'h2DDC/4] = {MOVE_L_IMM_D7, 16'hBBBB};
+        rom[16'h2DE0/4] = {16'h6666, NOP_OP};                // D7 marker value
+        begin
+            int t, c0, c1, c3;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DC0; t++)
+                @(posedge clk_4x);
+            check("CLR-non-indexed-no-extra-read: reached own code",
+                  u_top.ifu_decode_pc >= 32'h0000_2DC0);
+
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DD0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hAAAA_5555; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("CLR.L -(An): exactly 1 bus cycle (the write only, no phantom read)",
+                    c1 - c0, 32'd1);
+
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'hBBBB_6666; t++)
+                @(posedge clk_4x);
+            c3 = data_ds_count;
+            check32("CLR.L (d16,An): exactly 1 bus cycle (the write only, no phantom read)",
+                    c3 - c1, 32'd1);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));

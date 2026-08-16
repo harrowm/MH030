@@ -2706,19 +2706,28 @@ module eu_seq (
                                 dec_is_tas      = 1'b1;
                             end
                         end
-                    // ── NEGX/CLR/NEG/NOT/TST to memory ea ─────────────
+                    // ── NEGX/NEG/NOT/TST to memory ea ─────────────────
                     // (d8,An,Xn) indexed dst only needs An(rd_a)+Xn(rd_b) — these are
                     // unary memory ops with no separate data-register operand, so the
                     // 2-port regfile is sufficient (same pattern as LEA/PEA indexed;
                     // see port3.md §1 Bucket A — this is not the 3-read-port gap).
                     // (d16,PC) is only reachable for TST (f_dn=101) — not alterable,
-                    // so illegal as a NEGX/CLR/NEG/NOT destination.
+                    // so illegal as a NEGX/NEG/NOT destination.
+                    // CLR (f_dn=001) used to share this block/RMW path too, but real
+                    // 68020/030 CLR-to-memory is architecturally a pure write (no
+                    // dest read — unlike the 68000) whereas NEGX/NEG/NOT genuinely
+                    // need the old value; split out into its own dedicated block
+                    // below (Phase 139, plan.md) so non-indexed CLR stops performing
+                    // a real, unnecessary bus read (tests/memind13.s's own header
+                    // already documented this quirk). Indexed CLR (mode 110) keeps
+                    // the RMW path there too — deferred to Phase 144, which shares
+                    // the same 2-register-write fix with MOVE SR,(ea).
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                   f_mode == 3'b101 || f_mode == 3'b110 ||
                                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
                                                         (f_dn == 3'b101 && f_reg == 3'b010)))) &&
-                                 (f_dn == 3'b000 || f_dn == 3'b001 || f_dn == 3'b010 ||
+                                 (f_dn == 3'b000 || f_dn == 3'b010 ||
                                   f_dn == 3'b011 || f_dn == 3'b101)) begin
                         dec_siz         = f_siz;
                         dec_unit        = UNIT_ALU;
@@ -2769,7 +2778,6 @@ module eu_seq (
                         endcase
                         case (f_dn)
                             3'b000: begin dec_alu_op=ALU_NEGX; dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
-                            3'b001: begin dec_alu_op=ALU_CLR;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b010: begin dec_alu_op=ALU_NEG;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b011: begin dec_alu_op=ALU_NOT;  dec_valid=1'b1; dec_is_mem_rmw=1'b1; end
                             3'b101: begin  // TST ea — read + CCR, no write
@@ -2780,6 +2788,74 @@ module eu_seq (
                             end
                             default: ;
                         endcase
+                    // ── CLR to memory ea ──────────────────────────────
+                    // Split out of the shared NEGX/NEG/NOT/TST block above (Phase 139,
+                    // plan.md): real 68020/030 CLR-to-memory is a pure write (no
+                    // read of the old value, a documented improvement over the
+                    // 68000) for every EA mode except indexed (f_mode==110, still
+                    // needs the RMW "2-port trick" until Phase 144's structural
+                    // fix). Non-indexed modes route through dec_is_mem_wr with
+                    // dec_unit=UNIT_MOVE/dec_use_imm=1/dec_imm=0 -- deliberately
+                    // NOT dec_unit=UNIT_ALU/ALU_CLR, reusing MOVE #imm,mem's own
+                    // already-Harte-proven CCR path instead (move_result_w becomes
+                    // ex_imm=0, giving exactly CLR's own flags: Z=1, N=V=C=0 --
+                    // architecturally identical to "MOVE #0,ea").
+                    end else if (!f_dir && f_ss != 2'b11 && f_dn == 3'b001 &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
+                                  f_mode == 3'b101 || f_mode == 3'b110 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))) begin
+                        dec_valid  = 1'b1;
+                        dec_siz    = f_siz;
+                        if (f_mode == 3'b110) begin
+                            // Indexed EA: unchanged RMW path (deferred to Phase 144).
+                            dec_unit       = UNIT_ALU;
+                            dec_alu_op     = ALU_CLR;
+                            dec_is_mem_rd  = 1'b1;
+                            dec_is_mem_rmw = 1'b1;
+                            dec_src_reg    = {1'b1, f_reg};  // An → rd_a (EA base)
+                            dec_reads_src  = 1'b1;
+                            dec_dst_reg    = {ext_data[15], ext_data[14:12]};
+                            dec_reads_dst  = 1'b1;
+                            dec_is_idx     = 1'b1;
+                            dec_xn_wl      = ext_data[11];
+                            dec_xn_scale   = ext_data[10:9];
+                            dec_ea_offset  = fi_is_full ? fi_bd
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
+                            dec_needs_ext  = 1'b1;
+                        end else begin
+                            // Non-indexed: plain write, no RMW read.
+                            dec_unit        = UNIT_MOVE;
+                            dec_use_imm     = 1'b1;
+                            dec_imm         = 32'h0;
+                            dec_updates_ccr = 1'b1;
+                            dec_is_mem_wr   = 1'b1;
+                            if (f_mode != 3'b111) begin
+                                dec_dst_reg   = {1'b1, f_reg};  // An → rd_b (write path)
+                                dec_reads_dst = 1'b1;
+                            end
+                            setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                            case (f_mode)
+                                3'b101: begin  // (d16,An)
+                                    dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                                    dec_needs_ext = 1'b1;
+                                end
+                                3'b111: begin
+                                    dec_needs_ext = 1'b1;
+                                    case (f_reg)
+                                        3'b000: begin  // abs.W
+                                            dec_abs_ea_en  = 1'b1;
+                                            dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                                        end
+                                        3'b001: begin  // abs.L
+                                            dec_abs_ea_en  = 1'b1;
+                                            dec_abs_ea_val = ext_data;
+                                        end
+                                        default: ;
+                                    endcase
+                                end
+                                default: ;
+                            endcase
+                        end
                     // ── NBCD memory EA ────────────────────────────────
                     end else if (!f_dir && f_ss == 2'b00 && f_dn == 3'b100 &&
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||

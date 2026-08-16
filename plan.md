@@ -5088,6 +5088,56 @@ non-indexed extra-read fix) is next.
 
 ---
 
+## Phase 139 (Stage 2 of 7) — CLR non-indexed extra-read fix
+
+**Goal**: second stage of the 7-stage correctness-edges plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`). `eu_seq.sv`'s shared NEGX/CLR/NEG/NOT/TST
+memory block set `dec_is_mem_rd=1'b1`/`dec_is_mem_rmw=1'b1` uniformly for all four
+write-back ops (NEGX/CLR/NEG/NOT), performing a real bus read before every write —
+correct for NEGX/NEG/NOT (which genuinely need the old value) but architecturally wrong
+for CLR: real 68020/030 CLR-to-memory is a pure write, a documented improvement over the
+68000 (which does read-before-write). `tests/memind13.s`'s own header already documented
+this phantom read as present "even for plain brief-form CLR.L" — i.e. not specific to
+indexed EA, affecting every CLR-to-memory instance.
+
+**Fix**: split CLR out of the shared block into its own dedicated decode arm.
+Non-indexed modes (`(An)`/`(An)+`/`-(An)`/`(d16,An)`/abs.W/abs.L) now route through
+`dec_is_mem_wr=1'b1` instead of the RMW path — deliberately using `dec_unit=UNIT_MOVE`
+with `dec_use_imm=1'b1`/`dec_imm=32'h0` rather than `dec_unit=UNIT_ALU`/`ALU_CLR`, reusing
+`MOVE #imm,mem`'s own already-Harte-proven CCR path verbatim (`move_result_w` becomes
+`ex_imm=0`, giving exactly CLR's own flags: Z=1, N=V=C=0 — architecturally identical to
+"MOVE #0,ea"). Indexed EA (`f_mode==3'b110`) keeps the unchanged RMW path — that specific
+case shares the 2-register-write limitation deferred to Phase 144 (Stage 7), which folds
+CLR-mode110 in alongside MOVE SR,(ea).
+
+**Verification order**: ran the CLR.b/w/l Harte suites directly first (fast feedback,
+before the full sweep) — all three 100% (`CLR.b` 8062/8062, `CLR.w` 4788/4788, `CLR.l`
+4801/4801, zero fails/timeouts), confirming the CCR-path substitution produces bit-identical
+results to the original RMW path.
+
+**Test**: a direct bus-cycle-count proof, not a Musashi-cosim trace compare (a lenient
+`--reads-only` compare, this file's own established convention, can't actually prove "the
+extra read is gone" — it's specifically designed to tolerate that). Added
+`CLR-non-indexed-no-extra-read` to `tb/stall_fsm_tb.sv`, bracketing `data_ds_count`
+around each of two forms (`CLR.L -(An)`, `CLR.L (d16,An)`) via a following `MOVE.L
+#imm,Dn` "marker" instruction settling to its expected value. **First attempt used
+decode_pc thresholds instead of a marker and got a spurious `delta=0` for the `(d16,An)`
+case** — root-caused to the same "decode_pc can be ahead of what's actually completing in
+EX" hazard `docs/stalls.md` already catalogs (the IFU's own extension-word prefetch for
+the *following* instruction can advance decode_pc's reported value slightly ahead of the
+*current* instruction's own write retiring). Fixed by bracketing on a register's own
+committed value instead (EX retires strictly in order, so a marker register can't settle
+until the preceding CLR's write-phase FSM has released `ex_mem_stall`) — both checks then
+passed cleanly: exactly 1 bus cycle each (was 2 before this fix).
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 8/8 (unchanged
+count — no new memindN test needed given the bus-cycle-count test is the actual proof
+here). Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline**, zero regressions. Stage 3
+(memory-indirect long-bd + word-od fix, including a real `fi_od` aliasing bug) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
