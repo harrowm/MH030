@@ -445,11 +445,13 @@ module eu_seq (
     // already reads fi_bd via the `fi_is_full ? fi_bd : ...` template
     // (Stages 1-3) -- this single definition change propagates to all of
     // them automatically, no per-site changes needed. Genuine indirect
-    // combined with a long bd would need q3 for bd's own low half *and*
-    // another word for od, i.e. a real q4 -- fi_od below doesn't attempt
-    // this combination (see its own comment), so it remains unsupported,
-    // same "least-wrong fallback" boundary already drawn around plain
-    // memory-indirect for every family in this rollout.
+    // combined with a long bd needs q3 for bd's own low half *and* another
+    // word (q4) for a word-size od -- fi_od below now handles exactly this
+    // combination correctly (Phase 140, plan.md; it also fixes a real
+    // aliasing bug the old code had here, not just a missing feature).
+    // Genuine indirect + long bd + LONG od (needing a real q5) remains
+    // unsupported -- see fi_od's own comment for the "least-wrong fallback"
+    // boundary in that specific combination.
     logic [31:0] fi_bd;       assign fi_bd      = (fi_bdsz == 2'b10) ? {{16{ext_data[31]}}, ext_data[31:16]}
                                                  : (fi_bdsz == 2'b11) ? {ext_data[31:16], q3_word}
                                                  : 32'h0;
@@ -457,21 +459,33 @@ module eu_seq (
     // post-indexed (fi_iis=110) -- fi_iis[1:0]==10 already implies genuine
     // indirect action (000/100 both have iis[1:0]==00), so checking just
     // that low pair (not the full 3-bit fi_iis) covers both pre/post
-    // uniformly. Position depends on whether a bd word already occupies the
-    // slot right after the descriptor (ext_data[31:16], via m68030_seq.sv's
-    // memind-specific q1/q2 swap): if bd is word-size, od's own word is one
-    // further out, at q3_word (m68030_seq.sv's ifu_q3_word, passed through
-    // unconditionally); otherwise (bd null) od is the very next word, same
-    // position a word bd would have used. Originally missing the
+    // uniformly. Position depends on how many words bd itself already
+    // consumed after the descriptor (ext_data[31:16]=q2, via m68030_seq.sv's
+    // memind-specific q1/q2 swap): null bd (01) consumes 0, so od is the
+    // very next word, q2 itself; word bd (10) consumes 1 (q2), so od is one
+    // further out, at q3_word; long bd (11) consumes 2 (q2 high half, q3
+    // low half), so od is one further out STILL, at q4 (ext34_data[15:0] --
+    // Phase 140, plan.md, reusing the same already-wired 4th extension word
+    // every other q4 consumer in this rollout does). Originally missing the
     // post-indexed case (and the word-bd-and-word-od combination) entirely
     // -- found via tests/memind2.s's own Musashi-cosim run, part of the
-    // memory-indirect EA investigation (plan.md Phase 107/115). Long bd
-    // combined with genuine indirect (needing od at q4, since q3 is now
-    // long bd's own low half) remains unsupported -- see fi_bd's own
-    // comment above; this od formula intentionally doesn't attempt it.
+    // memory-indirect EA investigation (plan.md Phase 107/115). The long-bd
+    // case was ALSO wrong until Phase 140: the old code's else-branch fired
+    // for BOTH null and long bd identically, reading ext_data[31:16] (q2)
+    // in either case -- for long bd that slot is bd's OWN high half
+    // (already consumed by fi_bd), so od silently aliased onto it instead
+    // of reading its real value at q4. Genuine indirect combined with LONG
+    // od (needing a 5th extension word, q5, on top of a long bd) remains
+    // unsupported regardless of bd size -- no q5 exists yet (see fi_bd's
+    // own comment / plan.md Phase 140 §8 "out of scope"); this formula
+    // still falls through to the long-bd branch's (now-correct-only-for-
+    // word-od) value in that combination, an unavoidable "least-wrong
+    // fallback" until q5 exists, same convention as elsewhere in this file.
     logic [31:0] fi_od;       assign fi_od      = (fi_iis[1:0] != 2'b10) ? 32'h0
                                                    : (fi_bdsz == 2'b10)
                                                      ? {{16{q3_word[15]}}, q3_word}
+                                                   : (fi_bdsz == 2'b11)
+                                                     ? {{16{ext34_data[15]}}, ext34_data[15:0]}
                                                      : {{16{ext_data[31]}}, ext_data[31:16]};
 
     // -----------------------------------------------------------------------

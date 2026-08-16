@@ -5138,6 +5138,56 @@ anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline**, zero regressions.
 
 ---
 
+## Phase 140 (Stage 3 of 7) — Memory-indirect long-bd + word-od fix (real `fi_od`
+## aliasing bug, not just a missing feature)
+
+**Goal**: third stage of the 7-stage correctness-edges plan. `eu_seq.sv:472-475`'s `fi_od`
+(outer displacement extraction for genuine memory-indirect EA) had a real, previously
+undiscovered bug, not merely a missing feature: its `else` branch fired identically
+whenever `fi_bdsz != 2'b10` (word bd) — covering BOTH null bd (`00`) and long bd (`11`) —
+and always read `ext_data[31:16]` (q2, the word immediately after the descriptor). For
+null bd that's correct (od IS the very next word when bd consumes zero words). For **long**
+bd, though, that same slot (`ext_data[31:16]`) is bd's own high half — already consumed by
+`fi_bd`'s own `{ext_data[31:16], q3_word}` construction — so `fi_od` silently **aliased
+onto bd's own data** instead of reading od's real value, which sits one word further out
+still, at the already-wired 4th extension word (`ext34_data[15:0]`, "q4" — the same signal
+Stages 1-3/Phase 138/141-142 all reuse; see this rollout's own "the 4th extension word is
+not new hardware" finding).
+
+**Fix**: split the `else` branch into two explicit cases — null bd (`fi_bdsz==2'b01` per
+this project's own encoding: `01`=null, `10`=word, `11`=long) keeps reading
+`ext_data[31:16]` (q2); long bd (`fi_bdsz==2'b11`) now reads `ext34_data[15:0]` (q4)
+instead. No
+`m68030_seq.sv` change needed — `memind_ext_count` (Phase 115's own addition,
+`m68030_seq.sv:183-193`) already computes `1 + memind_bd_words + memind_od_words`, which
+for long-bd(2)+word-od(1) already sizes to 4 extension words (5 total with the opcode) —
+exactly the already-correctly-gated `ext_count>=4 → ifu_ext5_valid` slot. Confirmed by
+direct reading before implementing, not assumed: the sizing was always right, only the
+*value extraction* was wrong. Genuine indirect + **long** od (needing a 5th extension word,
+q5, on top of a long bd — 6 total words) remains unsupported regardless of bd size — no q5
+exists (Stage 8/plan file's own out-of-scope section); the formula's long-bd branch is used
+as the unavoidable least-wrong fallback in that specific combination, matching this
+project's own established convention elsewhere.
+
+**Test**: new `tests/memind17.s` — genuine post-indexed memory-indirect EA
+(`([-$10000,A0],D1.L,$8)`) combining a long bd (forced via the same
+"base-register-above-the-4KB-window, large-negative-bd" technique as `tests/memind13.s`/
+`tests/memind16.s`) with a word od together for the first time — compared cleanly against
+Musashi/WinUAE on the first attempt (`OK 16 cycles match`), wired into `make cosim_memind`
+as `buscmp-memind17`.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 9/9 (was 8/8).
+Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline**, zero regressions — the meaningful gate here
+despite Harte having zero coverage of this 68020+-only addressing mode (it's
+68000-captured): `fi_od`/`fi_bd` are shared decode signals touching every family this
+rollout has already converted (ADD/SUB/CMP/AND/OR/EOR memory-source, dynamic bit-ops, Scc,
+CHK, ADDQ/SUBQ, LEA/JMP/JSR/PEA, CMP2/CHK2, MOVEM, MOVE mem-to-mem), so a wrong branch
+split here would have shown up broadly. Stage 4 (MOVE mem-to-mem imm-src full-format EA)
+is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

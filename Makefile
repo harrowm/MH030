@@ -363,7 +363,11 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # RMW -- Phase 121, the fi_bd fix that benefits every already-converted
 # Stage 1-3 site "for free"); memind16=long (32-bit) bd for MOVEM.L itself
 # (Phase 138 -- MOVEM's own mode110 arm has a bespoke bd extraction, not
-# fi_bd, so needed its own dedicated fix and its own dedicated test).
+# fi_bd, so needed its own dedicated fix and its own dedicated test);
+# memind17=genuine memory-indirect with long bd + word od together (Phase
+# 140 -- fixes a real fi_od aliasing bug, not just a missing feature: the
+# old code silently misread od's value from bd's own high half instead of
+# its real position one word further out).
 #
 # tests/memind.s, memind4.s (Phase 115: the very first minimal pre/post
 # reproduction, and the IS=1/index-suppressed case), memind5.s (Phase 116:
@@ -428,9 +432,14 @@ buscmp-memind16: $(SIM)/cosim_grp winuae/tests/memind16_ref.log tests/memind16.h
 	    | grep "^BUS" > /tmp/_dut_memind16.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind16.log winuae/tests/memind16_ref.log \
 	    --reads-only --dut-may-continue
+buscmp-memind17: $(SIM)/cosim_grp winuae/tests/memind17_ref.log tests/memind17.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind17.hex +grp=memind17 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind17.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind17.log winuae/tests/memind17_ref.log \
+	    --reads-only --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
-              buscmp-memind12 buscmp-memind13 buscmp-memind16
+              buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py
