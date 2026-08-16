@@ -202,6 +202,8 @@ module stall_fsm_tb;
     localparam CAS2_EXT1      = 16'h3409;  // Dc2=D3,Du2=D4,Rn2_an=1,Rn2=A1
     localparam CAS2_EXT2      = 16'h1208;  // Dc1=D1,Du1=D2,Rn1_an=1,Rn1=A0
     localparam ADDI_L_D1      = 16'h0681;
+    localparam ADD_L_D1_D2    = 16'hD481;  // ADD.L D1,D2
+    localparam DBF_D0         = 16'h51C8;  // DBF D0,disp
     // MOVEP.L D1,(d16,A0) store form: 0000 DDD1 dir siz 001 AAA per
     // eu_seq.sv's dec_is_movep block. f_dn=D1(001), f_dir=1(fixed for
     // MOVEP), f_ss=11(store=1,long=1), f_mode=001(fixed), f_reg=A0(000).
@@ -2259,6 +2261,46 @@ module stall_fsm_tb;
             wait_states = 0;
             check("WS-Memind: wait states measurably lengthen memory-indirect EA's own bus cycles too",
                   elapsedX > elapsed0);
+        end
+
+        // -------------------------------------------------------------
+        // RAW-hazard-with-Ihit (cache-verification plan, plan.md Phase
+        // 127, Step 7): confirms a RAW register hazard still resolves
+        // correctly when the producer/consumer instructions themselves
+        // are fetched via an I-cache HIT, not just from an always-real-
+        // bus-cycle fetch -- this file's own RAW-hazard-shaped checks
+        // (elsewhere in this suite) never set CACR, so caching has never
+        // composed with the hazard_ex stall mechanism before. A DBF
+        // D0,-10 self-loop (10 passes) re-fetches the SAME 4 instruction
+        // words every pass -- only the first pass can be a genuine bus
+        // miss, every later pass must be served from the cache -- and the
+        // loop body is a same-register RAW hazard (ADDI.L #1,D1
+        // immediately followed by ADD.L D1,D2, which must stall on
+        // hazard_ex to read D1's just-written value). Checks the EXACT
+        // accumulated sum (D2 = 1+2+...+10 = 55), not just "the loop
+        // finished": a single pass reading a stale D1 -- the hazard not
+        // composing correctly with a cache-hit-served fetch -- would
+        // produce a wrong sum, not an obviously-broken value or a hang,
+        // so only an exact-value check actually proves this.
+        // -------------------------------------------------------------
+        rom[16'h2DA0/4] = {16'h7201, 16'h4E7B};  // MOVEQ #1,D7 ; MOVEC D7,CACR
+        rom[16'h2DA4/4] = {16'h7002, CLR_L_D1};  // (CACR ext: icache_en=1) ; CLR.L D1
+        rom[16'h2DA8/4] = {CLR_L_D2, 16'h7009};  // CLR.L D2 ; MOVEQ #9,D0 (10 passes)
+        rom[16'h2DAC/4] = {ADDI_L_D1, 16'h0000}; // loop: ADDI.L #1,D1
+        rom[16'h2DB0/4] = {16'h0001, ADD_L_D1_D2};
+        rom[16'h2DB4/4] = {DBF_D0, 16'hFFF6};    // DBF D0,-10 (back to ADDI.L D1)
+        begin
+            int t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DA0; t++)
+                @(posedge clk_4x);
+            check("RAW-hazard-with-Ihit: reached own code", u_top.ifu_decode_pc >= 32'h0000_2DA0);
+            for (t = 0; t < 4000 && u_top.u_eu.u_rf.d_reg[0][15:0] !== 16'hFFFF; t++)
+                @(posedge clk_4x);
+            check("RAW-hazard-with-Ihit: loop completed (D0 wrapped to -1) before the hard budget", t < 4000);
+            check32("RAW-hazard-with-Ihit: RAW hazard resolved correctly on every cache-hit-served pass (D1)",
+                    u_top.u_eu.u_rf.d_reg[1], 32'd10);
+            check32("RAW-hazard-with-Ihit: RAW hazard resolved correctly on every cache-hit-served pass (D2=1+2+...+10)",
+                    u_top.u_eu.u_rf.d_reg[2], 32'd55);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));

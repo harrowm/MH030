@@ -4762,6 +4762,76 @@ exception-dispatch anomaly noted in Phase 133.
 
 ---
 
+## Phase 135 (Step 7) — Pipeline-stall interaction re-check; RAW-hazard-with-I-cache-hit composition test
+
+**Goal**: Step 7 of the cache-verification plan — confirm `tb/stall_fsm_tb.sv` and
+`tb/stall_hazard_tb.sv`'s own exact-cycle-count/hazard checks are unaffected by the
+cache work (Phases 127-134), and add cache-enabled variants of key existing checks to
+close the loop between this plan and the pipeline-stall work already done.
+
+**Confirming the existing suites are unaffected**: grepped both files for any `CACR`
+reference — zero hits in either, confirming neither has ever set a nonzero CACR value
+(both implicitly run at the reset default, `CACR=0`, i.e. every cache permanently
+disabled). `make test` (which runs both as part of the full 35-test regression, already
+re-verified clean against Phase 134's fixed RTL in that phase's own gate) confirms both
+pass unaffected: `stall_hazard` and `stall_fsm` both green.
+
+**Why the new test lives in `tb/stall_fsm_tb.sv`, not `tb/stall_hazard_tb.sv` or
+`tb/cache_tb.sv`**: `tb/stall_hazard_tb.sv`'s own header states its scope precisely —
+"`m68030_ifu` + `m68030_seq` + `m68030_eu`", a deliberately BIU-less harness for
+isolating pipeline hazard behavior without bus/cache complexity. It has no `m68030_biu`
+instance at all, so there is no I-cache or D-cache anywhere in this harness to enable —
+not a candidate for a cache-composition test by construction. `tb/cache_tb.sv` (the
+obvious first choice, already has `emit_set_cacr` and every other piece of
+infrastructure needed) was tried first and abandoned: its entire test sequence (I-1
+through I-5, T-1 through T-3, D-1 through D-5) is one long, single, natural
+NOP-fall-through address stream with no explicit jump connecting most tests to the
+next — new code appended at the end (address `0x3000`, after I-5) was simply never
+reached, because I-5 (the LAST test in program order) deliberately parks its own
+handler in a permanent `BRA_SELF` self-loop once its own checks are satisfied, with no
+mechanism to release execution onward (confirmed by tracing: the new test's own
+"reached my own code" wait timed out at the full 4000-cycle budget, and before that,
+D0 read back a stale `0xFFFF` left over from an earlier test before the new code even
+had a chance to run, since the completion-wait's own guard condition was satisfied
+before the new `MOVEQ #9,D0` ever executed). `tb/stall_fsm_tb.sv`, by contrast, already
+has exactly the reusable mechanism this needs: `claim_park()`/`PARK_ADDR` for tests that
+need an explicit release, and (for tests appended after ones that don't self-park, like
+the trailing `WS-Memind` test this new one follows) the same "wait for `ifu_decode_pc`
+to reach my own address" NOP-fall-through pattern already used throughout the file —
+plus it already instantiates the full `m68030_top` (BIU, both caches, everything),
+unlike `stall_hazard_tb.sv`.
+
+**New test: `RAW-hazard-with-Ihit`**, appended in `tb/stall_fsm_tb.sv` right after the
+existing `WS-Memind` test (the last one in the file), at a fresh address (`0x2DA0`)
+immediately following it to keep the NOP-fall-through gap short. A `MOVEC D7,CACR`
+sequence (`MOVEQ #1,D7 ; MOVEC D7,CACR`, icache_en=1 — this file's own first-ever CACR
+reference) is followed by a `DBF D0,-10` self-loop (10 passes) whose body is a
+same-register RAW hazard: `ADDI.L #1,D1` immediately followed by `ADD.L D1,D2`, which
+must stall on `hazard_ex` to read D1's just-written value rather than a stale one. Only
+the loop's first pass can be a genuine bus miss; every one of the remaining 9 passes
+must be served from a cache HIT — the same instruction bytes, re-fetched, re-decoded,
+and re-executed each time. Checks the *exact* accumulated sum (`D2 = 1+2+...+10 = 55`,
+`D1 = 10`), not just "the loop finished": a single pass reading a stale D1 (the hazard
+failing to compose correctly with a cache-hit-served fetch, rather than a real bus
+fetch) would silently produce a wrong sum, not a hang or an obviously-broken value — an
+exact-value check is the only one that actually proves this. `CLR.L D1`/`CLR.L D2`
+precede the loop (this file's registers carry real state across sequential tests, same
+established convention as every other test in the file) and the completion-wait is
+itself gated on `ifu_decode_pc` reaching this test's own address first (the same lesson
+learned the hard way in the abandoned `cache_tb.sv` attempt, applied preemptively here
+since a stale `D0==0xFFFF` from `WS-Memind`'s own predecessor tests was a real, if
+unconfirmed, risk).
+
+**Results**: 4/4 new checks pass (`stall_fsm` now 249 checks, up from 245). `make test`
+35/35, `make cosim_grp` 8/8. Testbench-only — no RTL changed, no Harte re-run needed.
+This closes Step 7 of the cache-verification plan. Remaining: the deliberately-deferred
+Step 8 (genuine SIZ=11 pin-level burst timing for I-cache linefill — reviving
+`rtl/biu_burst_ctrl.sv`, closing the CLAUDE.md-documented "Burst read" cycle-type gap
+at the pin level). Also still open, unrelated to this phase: the `JMP (An)`-after-
+exception-dispatch anomaly noted in Phase 133.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
