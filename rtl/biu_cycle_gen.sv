@@ -142,6 +142,13 @@ module biu_cycle_gen #(
     output logic [31:0] eu_burst_rdata3,
     output logic        eu_burst_ack,
     output logic        eu_burst_berr,
+    // Beat reached when eu_burst_ack fires: 3 = all 4 beats completed (a
+    // real, CBACK#-sustained burst); 0 = the burst degraded after just one
+    // beat (peripheral never asserted CBACK#, matching real 68030 fallback
+    // to individual reads). Was purely internal (bc_burst_beat) until
+    // Phase 127's cache plan Step 8 needed a consumer -- biu_icache_if.sv --
+    // able to tell a full burst from a degraded one.
+    output logic [1:0]  eu_burst_beat,
 
     // MOVE16 burst write (4×LW, AS held)
     input  logic        eu_m16_req,
@@ -1161,6 +1168,7 @@ module biu_cycle_gen #(
         eu_burst_rdata0 = bc_burst_rdata0; eu_burst_rdata1 = bc_burst_rdata1;
         eu_burst_rdata2 = bc_burst_rdata2; eu_burst_rdata3 = bc_burst_rdata3;
         eu_burst_ack = bc_eu_burst_ack; eu_burst_berr = bc_eu_burst_berr;
+        eu_burst_beat = bc_burst_beat;
         eu_m16_ack   = bc_eu_m16_ack;   eu_m16_berr   = bc_eu_m16_berr;
         eu_addr_err  = 1'b0; ifu_addr_err = 1'b0;
 
@@ -1241,6 +1249,43 @@ module biu_cycle_gen #(
                         eu_coproc_rdata = captured_rdata;
                         if (berr_abort_r) eu_coproc_berr = 1'b1;
                         else              eu_coproc_ack  = 1'b1;
+                    end else if (is_burst) begin
+                        // Burst read (ST_BURST_*) / MOVE16 burst write
+                        // (ST_BWRITE_*) own S7 completion is handled entirely
+                        // separately via biu_burst_ctrl.sv's own
+                        // eu_burst_ack/eu_burst_berr/eu_m16_ack/eu_m16_berr
+                        // outputs, assigned unconditionally every cycle
+                        // (not gated on this case statement at all) --
+                        // deliberately excluded here so it falls through to
+                        // nothing, not into whichever of
+                        // grant_mmu/grant_eu/grant_ifu happens to still be
+                        // registered true from an unrelated, already-
+                        // completed prior transaction. A first version of
+                        // this module had no such exclusion: since grant_eu/
+                        // grant_ifu are the *arbiter's* own registered
+                        // grants (biu_arbiter.sv), not gated on which
+                        // transaction is actually running on the bus right
+                        // now, a burst's own S7 with grant_eu still 1 (from
+                        // a still-registered-but-otherwise-irrelevant prior
+                        // EU grant) silently ALSO fired the ordinary eu_ack
+                        // path -- with captured_rdata still holding
+                        // whatever stale value the *previous genuine*
+                        // ST_READ_S4/S5 cycle last wrote there (captured_
+                        // rdata is only ever updated on ST_READ_S4/S5,
+                        // never during a burst), corrupting the D-cache's
+                        // own miss-fill with data belonging to a completely
+                        // different, earlier access. Found via Phase 127's
+                        // cache plan Step 8: the I-cache's own burst
+                        // linefill was the first thing in this project's
+                        // history to make eu_burst_req genuinely fire
+                        // concurrently with real, ongoing D-cache traffic
+                        // (m68030_top.sv hardwired eu_burst_req to 0 for
+                        // every phase before this one, and tb/biu_tb.sv's
+                        // own direct eu_burst_req unit tests never had a
+                        // second, concurrent grant_eu=1 transaction in
+                        // flight to collide with) -- a real, previously
+                        // unreachable bug, not something this integration
+                        // work introduced.
                     end else if (state == ST_RMW_READ_S7) begin
                         // RMW read done; pass data to EU so it can compute write value.
                         eu_rdata = captured_rdata;

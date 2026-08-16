@@ -13,14 +13,30 @@
 // every regression test has run in for the entire project until now).
 //
 // icache_en=1, hit: served from the cache array, no bus cycle at all.
-// icache_en=1, miss: full 4-longword linefill (IC_FILL_0..3, one ordinary
-// read cycle per word — genuine SIZ=11 pin-level bursts are a deferred
-// follow-up, see plan.md), then the line is marked valid regardless of
-// CACR's IBE (burst-enable) bit. This deliberately does NOT reproduce
+// icache_en=1, miss: genuine SIZ=11 pin-level burst linefill (Phase 127
+// cache plan Step 8) via ic_burst_req/addr, muxed by m68030_biu.sv into
+// biu_cycle_gen's own pre-existing eu_burst_req/addr/fc port (CBREQ#/
+// CBACK# handshake and all, tested since Phase 7 via tb/biu_tb.sv's own
+// direct eu_burst_req cases — this module is simply the first-ever real
+// consumer). A single ic_burst_req at the line's own base address either
+// completes as a genuine 4-beat burst (peripheral asserted CBACK#, all of
+// ic_burst_rdata0..3 valid in one shot) or degrades to a single beat
+// (CBACK# never asserted, matching real 68030 hardware's own fallback) —
+// in the degraded case, IC_FILL_1B/2B/3B individually re-request each
+// remaining word (each itself subject to the same possible degrade, but
+// architecturally CBACK# support is a property of the addressed region,
+// not the individual request, so each one only ever needs to actually
+// fetch the single word it's asking for). Earlier versions (Steps 1-7)
+// used 4 separate ordinary read cycles (IC_FILL_0..3 via cg_req) instead —
+// correct, but not pin-level-accurate to CLAUDE.md's own documented burst
+// cycle type; this closes that gap. The line is still marked valid
+// regardless of CACR's IBE (burst-enable) bit, same as before — IBE only
+// ever meant "use burst pin protocol", not "whether the cache fills", and
+// the degraded-fallback path above already handles the "no burst support"
+// case correctly regardless of IBE. This deliberately does NOT reproduce
 // biu_cache_if.sv's own D-cache-side quirk, where an I-cache miss with
 // IBE=0 falls through to a single-word fetch that never updates the I$
-// array at all — IBE only ever meant "use burst pin protocol", not
-// "whether the cache fills"; a non-burst-but-enabled miss must still fill.
+// array at all.
 
 module biu_icache_if (
     input  logic        clk_4x,
@@ -33,12 +49,30 @@ module biu_icache_if (
     output logic        ifu_ack,
     output logic        ifu_berr,
 
-    // biu_cycle_gen side — identical protocol to its existing ifu_* port
+    // biu_cycle_gen side — identical protocol to its existing ifu_* port.
+    // Only ever driven in the icache_en=0 bypass case now (see header
+    // comment) — the enabled-cache miss path uses ic_burst_* below instead.
     output logic [31:0] cg_addr,
     output logic        cg_req,
     input  logic [31:0] cg_rdata,
     input  logic        cg_ack,    // 1-tick pulse
     input  logic        cg_berr,
+
+    // Burst-linefill request, muxed by m68030_biu.sv into biu_cycle_gen's
+    // own eu_burst_req/addr/fc port. FC is fixed at the caller (Supervisor
+    // Program Space, matching cg_addr's own ordinary-read FC convention) —
+    // not threaded through this module, since biu_cycle_gen's own ordinary
+    // ifu_req path hardcodes the identical value (3'b110) rather than
+    // taking it as an input, so there was never a per-request FC to carry.
+    output logic         ic_burst_req,
+    output logic [31:0]  ic_burst_addr,
+    input  logic [31:0]  ic_burst_rdata0,
+    input  logic [31:0]  ic_burst_rdata1,
+    input  logic [31:0]  ic_burst_rdata2,
+    input  logic [31:0]  ic_burst_rdata3,
+    input  logic [1:0]   ic_burst_beat,   // beat reached when ic_burst_ack fires (3=full, 0=degraded)
+    input  logic         ic_burst_ack,
+    input  logic         ic_burst_berr,
 
     // Control registers (written by EU via MOVEC)
     input  logic [31:0] cacr,
@@ -55,7 +89,9 @@ module biu_icache_if (
     logic [31:0] data_i  [0:15][0:3];
 
     // cg_ack is a 1-tick pulse — edge detect for safety (mirrors
-    // biu_cache_if.sv's own sf_ack_rise technique).
+    // biu_cache_if.sv's own sf_ack_rise technique). ic_burst_ack is already
+    // a registered one-tick pulse from biu_burst_ctrl.sv itself (see its
+    // own eu_burst_ack_r), so no separate edge-detect is needed for it.
     logic cg_ack_prev_r;
     always_ff @(posedge clk_4x or negedge rst_n)
         if (!rst_n) cg_ack_prev_r <= 1'b0;
@@ -66,13 +102,13 @@ module biu_icache_if (
     // the combinational bypass in the output block below), so there is no
     // dedicated "single passthrough fetch" state here.
     typedef enum logic [2:0] {
-        IC_IDLE   = 3'd0,
-        IC_HIT    = 3'd1,
-        IC_FILL_0 = 3'd2,
-        IC_FILL_1 = 3'd3,
-        IC_FILL_2 = 3'd4,
-        IC_FILL_3 = 3'd5,
-        IC_DONE   = 3'd6
+        IC_IDLE    = 3'd0,
+        IC_HIT     = 3'd1,
+        IC_BURST0  = 3'd2,   // full-line burst attempt from fill_base_r
+        IC_FILL_1B = 3'd3,   // degraded-fallback: word 1 individually
+        IC_FILL_2B = 3'd4,   // degraded-fallback: word 2 individually
+        IC_FILL_3B = 3'd5,   // degraded-fallback: word 3 individually
+        IC_DONE    = 3'd6
     } ic_state_t;
     // BERR is signalled via a dedicated flag rather than a separate state,
     // since a BERR-vs-normal IC_DONE would otherwise be identical except
@@ -81,20 +117,20 @@ module biu_icache_if (
     ic_state_t state;
     logic      berr_r;
     // Set when the in-flight transaction's own bus/fill cycle completes
-    // (cg_ack_rise or cg_berr) but the IFU has, in the meantime, moved on
-    // to a different fetch (dropped ifu_req, or changed ifu_addr to a
-    // different line/word — e.g. a JSR/RTS/branch flush arriving mid-miss).
-    // Real 68030 hardware can't abort an S-state bus cycle already in
-    // progress either, so the fill itself is still allowed to complete and
-    // update the cache array (harmless, and a legitimate future-use cache
-    // fill) — but IC_DONE must NOT hand a now-meaningless ifu_ack/ifu_berr
-    // to a requester who no longer wants it, since m68030_ifu.sv's own
-    // fetch_pend_r may have already re-armed for the NEW address by then,
-    // causing it to misattribute this stale ack as the delivery for its
-    // *new* request (confirmed via direct trace: q[0] ended up holding an
-    // unrelated, already-consumed opcode word instead of the freshly
-    // requested one — found building the I-2 aliasing/eviction test,
-    // plan.md Phase 128).
+    // (ic_burst_ack or ic_burst_berr) but the IFU has, in the meantime,
+    // moved on to a different fetch (dropped ifu_req, or changed ifu_addr
+    // to a different line/word — e.g. a JSR/RTS/branch flush arriving
+    // mid-miss). Real 68030 hardware can't abort an S-state bus cycle
+    // already in progress either, so the fill itself is still allowed to
+    // complete and update the cache array (harmless, and a legitimate
+    // future-use cache fill) — but IC_DONE must NOT hand a now-meaningless
+    // ifu_ack/ifu_berr to a requester who no longer wants it, since
+    // m68030_ifu.sv's own fetch_pend_r may have already re-armed for the
+    // NEW address by then, causing it to misattribute this stale ack as
+    // the delivery for its *new* request (confirmed via direct trace: q[0]
+    // ended up holding an unrelated, already-consumed opcode word instead
+    // of the freshly requested one — found building the I-2 aliasing/
+    // eviction test, plan.md Phase 128).
     logic      abandoned_r;
 
     logic [31:0] fill_base_r, fill_rdata_r;
@@ -102,19 +138,19 @@ module biu_icache_if (
     logic [1:0]  woff_r;
     logic [23:0] vtag_r;
 
-    // cg_req/cg_addr are registered (not driven combinationally from
+    // ic_burst_req/addr are registered (not driven combinationally from
     // `state`), mirroring biu_sizing_fsm.sv's own documented reason for
     // existing: "one cycle of latency (registered to break combinatorial
     // loops with cycle_gen)". The raw IFU->cycle_gen wiring this module
     // replaces always drove biu_cycle_gen's ifu_* port from an
     // already-registered source (fetch_pend_r); a purely combinational
-    // case(state)-driven cg_req here reproducibly hung biu_cycle_gen's
-    // S6->S7 transition on the very first real linefill miss (found via
-    // this project's own bisection-against-a-known-working-path
-    // technique: an equivalent D-cache-enabled read via biu_cache_if.sv,
-    // which *does* register through biu_sizing_fsm, completed cleanly).
-    logic        cg_req_r;
-    logic [31:0] cg_addr_r;
+    // case(state)-driven request here reproducibly hung biu_cycle_gen's
+    // S6->S7 transition on the very first real linefill miss back in
+    // Phase 128 (found via this project's own bisection-against-a-known-
+    // working-path technique) — the same hazard applies identically to
+    // the burst request port, so it gets the same registered treatment.
+    logic        ic_burst_req_r;
+    logic [31:0] ic_burst_addr_r;
 
     wire [3:0]  idx  = ifu_addr[7:4];
     wire [1:0]  woff = ifu_addr[3:2];
@@ -130,11 +166,11 @@ module biu_icache_if (
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            state       <= IC_IDLE;
-            berr_r      <= 1'b0;
-            abandoned_r <= 1'b0;
-            cg_req_r    <= 1'b0;
-            cg_addr_r   <= 32'h0;
+            state           <= IC_IDLE;
+            berr_r          <= 1'b0;
+            abandoned_r     <= 1'b0;
+            ic_burst_req_r  <= 1'b0;
+            ic_burst_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) valid_i[k] <= 1'b0;
         end else begin
             // CACR cache-clear operations (level-sensitive while asserted,
@@ -156,74 +192,95 @@ module biu_icache_if (
                         if (ihit) begin
                             state <= IC_HIT;
                         end else begin
-                            state     <= IC_FILL_0;
-                            cg_req_r  <= 1'b1;
-                            cg_addr_r <= {ifu_addr[31:4], 4'h0};
+                            state           <= IC_BURST0;
+                            ic_burst_req_r  <= 1'b1;
+                            ic_burst_addr_r <= {ifu_addr[31:4], 4'h0};
                         end
                     end
                 end
 
                 IC_HIT: state <= IC_IDLE; // eu-style: ack fires combinationally, one-shot
 
-                IC_FILL_0: begin
+                IC_BURST0: begin
                     // Latch "abandoned" the moment the requester moves on,
-                    // not just at completion — same_req reflects the *live*
-                    // ifu_req/ifu_addr every cycle, and a mid-fill flush can
-                    // arrive, then get overwritten by yet another dispatch,
-                    // several cycles before this fill finishes; once
-                    // abandoned it must stay abandoned (sticky) regardless
-                    // of what ifu_req/ifu_addr happen to show later.
+                    // not just at completion — same as the fill states in
+                    // every other cache module in this project.
                     if (!same_req) abandoned_r <= 1'b1;
-                    if (cg_ack_rise) begin
-                        data_i[idx_r][0] <= cg_rdata;
-                        if (woff_r == 2'd0) fill_rdata_r <= cg_rdata;
-                        state     <= IC_FILL_1;
-                        cg_addr_r <= fill_base_r + 32'd4;
-                    end else if (cg_berr) begin
-                        berr_r   <= 1'b1;
-                        state    <= IC_DONE;
-                        cg_req_r <= 1'b0;
+                    if (ic_burst_ack) begin
+                        if (ic_burst_beat == 2'd3) begin
+                            // Full 4-beat burst: CBACK# was asserted, all
+                            // four words arrived in this one request.
+                            data_i[idx_r][0] <= ic_burst_rdata0;
+                            data_i[idx_r][1] <= ic_burst_rdata1;
+                            data_i[idx_r][2] <= ic_burst_rdata2;
+                            data_i[idx_r][3] <= ic_burst_rdata3;
+                            case (woff_r)
+                                2'd0: fill_rdata_r <= ic_burst_rdata0;
+                                2'd1: fill_rdata_r <= ic_burst_rdata1;
+                                2'd2: fill_rdata_r <= ic_burst_rdata2;
+                                2'd3: fill_rdata_r <= ic_burst_rdata3;
+                            endcase
+                            tag_i[idx_r]   <= vtag_r;
+                            valid_i[idx_r] <= 1'b1;
+                            state          <= IC_DONE;
+                            ic_burst_req_r <= 1'b0;
+                        end else begin
+                            // Degraded: CBACK# never asserted, only word 0
+                            // (this request's own beat 0) actually arrived —
+                            // fall back to individually re-requesting the
+                            // remaining three words.
+                            data_i[idx_r][0] <= ic_burst_rdata0;
+                            if (woff_r == 2'd0) fill_rdata_r <= ic_burst_rdata0;
+                            state           <= IC_FILL_1B;
+                            ic_burst_addr_r <= fill_base_r + 32'd4;
+                            // ic_burst_req_r stays asserted for the next request.
+                        end
+                    end else if (ic_burst_berr) begin
+                        berr_r         <= 1'b1;
+                        state          <= IC_DONE;
+                        ic_burst_req_r <= 1'b0;
                     end
                 end
-                IC_FILL_1: begin
+
+                IC_FILL_1B: begin
                     if (!same_req) abandoned_r <= 1'b1;
-                    if (cg_ack_rise) begin
-                        data_i[idx_r][1] <= cg_rdata;
-                        if (woff_r == 2'd1) fill_rdata_r <= cg_rdata;
-                        state     <= IC_FILL_2;
-                        cg_addr_r <= fill_base_r + 32'd8;
-                    end else if (cg_berr) begin
-                        berr_r   <= 1'b1;
-                        state    <= IC_DONE;
-                        cg_req_r <= 1'b0;
+                    if (ic_burst_ack) begin
+                        data_i[idx_r][1] <= ic_burst_rdata0;
+                        if (woff_r == 2'd1) fill_rdata_r <= ic_burst_rdata0;
+                        state           <= IC_FILL_2B;
+                        ic_burst_addr_r <= fill_base_r + 32'd8;
+                    end else if (ic_burst_berr) begin
+                        berr_r         <= 1'b1;
+                        state          <= IC_DONE;
+                        ic_burst_req_r <= 1'b0;
                     end
                 end
-                IC_FILL_2: begin
+                IC_FILL_2B: begin
                     if (!same_req) abandoned_r <= 1'b1;
-                    if (cg_ack_rise) begin
-                        data_i[idx_r][2] <= cg_rdata;
-                        if (woff_r == 2'd2) fill_rdata_r <= cg_rdata;
-                        state     <= IC_FILL_3;
-                        cg_addr_r <= fill_base_r + 32'd12;
-                    end else if (cg_berr) begin
-                        berr_r   <= 1'b1;
-                        state    <= IC_DONE;
-                        cg_req_r <= 1'b0;
+                    if (ic_burst_ack) begin
+                        data_i[idx_r][2] <= ic_burst_rdata0;
+                        if (woff_r == 2'd2) fill_rdata_r <= ic_burst_rdata0;
+                        state           <= IC_FILL_3B;
+                        ic_burst_addr_r <= fill_base_r + 32'd12;
+                    end else if (ic_burst_berr) begin
+                        berr_r         <= 1'b1;
+                        state          <= IC_DONE;
+                        ic_burst_req_r <= 1'b0;
                     end
                 end
-                IC_FILL_3: begin
+                IC_FILL_3B: begin
                     if (!same_req) abandoned_r <= 1'b1;
-                    if (cg_ack_rise) begin
-                        data_i[idx_r][3] <= cg_rdata;
-                        if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
+                    if (ic_burst_ack) begin
+                        data_i[idx_r][3] <= ic_burst_rdata0;
+                        if (woff_r == 2'd3) fill_rdata_r <= ic_burst_rdata0;
                         tag_i[idx_r]   <= vtag_r;
                         valid_i[idx_r] <= 1'b1;
-                        state    <= IC_DONE;
-                        cg_req_r <= 1'b0;
-                    end else if (cg_berr) begin
-                        berr_r   <= 1'b1;
-                        state    <= IC_DONE;
-                        cg_req_r <= 1'b0;
+                        state          <= IC_DONE;
+                        ic_burst_req_r <= 1'b0;
+                    end else if (ic_burst_berr) begin
+                        berr_r         <= 1'b1;
+                        state          <= IC_DONE;
+                        ic_burst_req_r <= 1'b0;
                     end
                 end
 
@@ -240,28 +297,34 @@ module biu_icache_if (
 
     // Output logic — disabled path is a pure combinational bypass (zero
     // added latency vs. the pre-existing direct ifu->cycle_gen wiring);
-    // enabled path's cg_req/cg_addr come from the registers driven above
-    // (see their own declaration comment for why), everything else is
-    // still simple combinational state decode.
+    // enabled path's ic_burst_req/addr come from the registers driven
+    // above (see their own declaration comment for why), everything else
+    // is still simple combinational state decode. cg_req/cg_addr are only
+    // ever driven in the disabled branch now — the enabled-cache miss path
+    // no longer touches biu_cycle_gen's ordinary ifu_* port at all.
     always_comb begin
         if (!icache_en) begin
-            cg_addr   = ifu_addr;
-            cg_req    = ifu_req;
-            ifu_rdata = cg_rdata;
-            ifu_ack   = cg_ack;
-            ifu_berr  = cg_berr;
+            cg_addr       = ifu_addr;
+            cg_req        = ifu_req;
+            ifu_rdata     = cg_rdata;
+            ifu_ack       = cg_ack;
+            ifu_berr      = cg_berr;
+            ic_burst_req  = 1'b0;
+            ic_burst_addr = 32'h0;
         end else begin
-            cg_addr   = cg_addr_r;
-            cg_req    = cg_req_r;
-            ifu_rdata = 32'h0;
-            ifu_ack   = 1'b0;
-            ifu_berr  = 1'b0;
+            cg_addr       = 32'h0;
+            cg_req        = 1'b0;
+            ic_burst_req  = ic_burst_req_r;
+            ic_burst_addr = ic_burst_addr_r;
+            ifu_rdata     = 32'h0;
+            ifu_ack       = 1'b0;
+            ifu_berr      = 1'b0;
 
             case (state)
                 IC_HIT: begin
                     // Single-cycle transaction: check same_req live rather
                     // than via abandoned_r (which only ever gets set from
-                    // the multi-cycle FILL states) — if the requester moved
+                    // the multi-cycle fill states) — if the requester moved
                     // on in the one cycle between dispatch and this HIT
                     // resolving, don't hand back a now-stale ack either.
                     if (same_req) begin
@@ -281,7 +344,7 @@ module biu_icache_if (
                         ifu_ack   = 1'b1;
                     end
                 end
-                default: ; // IC_IDLE, IC_FILL_0..3 (cg_req/cg_addr already set above)
+                default: ; // IC_IDLE, IC_BURST0, IC_FILL_1B/2B/3B (ic_burst_req/addr already set above)
             endcase
         end
     end

@@ -308,6 +308,13 @@ module m68030_biu #(
     // -----------------------------------------------------------------------
     // Arbiter grants
     logic grant_mmu, grant_eu, grant_ifu, dma_active;
+    // biu_icache_if's own burst-linefill request (Phase 127 cache plan
+    // Step 8) — declared here, ahead of u_arb's own instantiation below,
+    // since Icarus requires port-connection expressions to reference
+    // already-declared signals (unlike plain continuous assigns elsewhere
+    // in this file, which tolerate forward references).
+    logic        ic_burst_req;
+    logic [31:0] ic_burst_addr;
     // Sizing FSM → cycle_gen EU port (also drives arbiter eu_req)
     logic sf_cyc_req;
     logic [31:0] sf_cyc_addr, sf_cyc_wdata;
@@ -365,7 +372,28 @@ module m68030_biu #(
         .rst_n     (rst_n),
         .mmu_req   (mmu_walk_req),
         .eu_req    (sf_cyc_req),
-        .ifu_req   (ic_cg_req),  // downstream request from biu_icache_if, not the raw IFU-side ifu_req (which stays asserted on a cache hit that never reaches the bus)
+        // downstream request from biu_icache_if, not the raw IFU-side ifu_req
+        // (which stays asserted on a cache hit that never reaches the bus).
+        // ic_cg_req | ic_burst_req: biu_icache_if now has TWO distinct
+        // downstream request paths (ic_cg_req for the icache_en=0 bypass,
+        // ic_burst_req for an enabled-cache miss's own genuine burst
+        // linefill, Phase 127 cache plan Step 8) -- either one means "the
+        // I-cache module wants the bus," so the arbiter needs to see both.
+        // Missing this originally caused a real, found-by-tracing bug: with
+        // ic_burst_req wired only into biu_cycle_gen's own eu_burst_req
+        // port (which sits ABOVE grant_eu/grant_ifu in cycle_gen's own
+        // idle-priority chain, bypassing this arbiter entirely), an I-cache
+        // burst could win the bus over a simultaneously-pending, genuinely
+        // higher-priority ordinary EU access -- confirmed via direct
+        // mem_req/mem_wdata/mem_ack tracing: JSR's own return-address push
+        // reported mem_ack=1 (the EU believed its write completed) but a
+        // literal two-instruction-later RTS read back a stale, wrong value
+        // from the very same stack address, meaning the write had actually
+        // been starved/lost while an I-cache burst silently jumped the
+        // queue. See cg_burst_req_mux below for the other half of the fix
+        // (gating ic_burst_req's own entry into cycle_gen's port on
+        // grant_ifu, the same way the ordinary ifu_req path already does).
+        .ifu_req   (ic_cg_req | ic_burst_req),
         .bus_idle  (bus_idle),
         .bus_lock  (bus_lock),
         .grant_mmu (grant_mmu),
@@ -501,21 +529,69 @@ module m68030_biu #(
     // keeps this byte-for-byte identical to the pre-existing direct wiring.
     // -----------------------------------------------------------------------
 
+    // Burst-linefill wires (Phase 127 cache plan Step 8): biu_icache_if's
+    // own genuine SIZ=11 pin-level miss-fill request, muxed into the
+    // existing eu_burst_req/addr/fc port biu_cycle_gen already implements
+    // (CBREQ#/CBACK# handshake and all, tested since Phase 7 via
+    // tb/biu_tb.sv's own direct eu_burst_req cases -- until now nothing in
+    // the integrated chip ever drove it, since m68030_top.sv hardwires the
+    // external eu_burst_req input to 0). The external EU-facing port takes
+    // priority when both assert -- purely defensive, since m68030_top.sv
+    // still hardwires eu_burst_req to 0 unconditionally, so ic_burst_req is
+    // the only real requester of this port in the full chip; the collision
+    // this priority resolves cannot actually occur in any of this project's
+    // own test configurations (confirmed: tb/biu_tb.sv, the only place
+    // eu_burst_req is ever driven nonzero, instantiates m68030_biu directly
+    // and never drives ifu_req into a cache-enabled miss during its own
+    // eu_burst_req test cases).
+    //
+    // ic_burst_req's own entry is ADDITIONALLY gated on grant_ifu -- unlike
+    // the external eu_burst_req port (which, per biu_cycle_gen's own
+    // pre-existing design, bypasses biu_arbiter.sv entirely, checked above
+    // grant_eu/grant_ifu in its idle-priority chain), the I-cache's own
+    // burst request must go through NORMAL mmu>eu>ifu arbitration the same
+    // way the ordinary (non-burst) ifu_req path already correctly does.
+    // A first version omitted this gate, reasoning the external port's own
+    // "always above grant_eu" design was pre-existing and safe to reuse
+    // as-is -- wrong, and caught by direct tracing, not by inspection: an
+    // I-cache burst silently won the bus over a simultaneously-pending,
+    // genuinely higher-priority ordinary EU write (JSR's own return-address
+    // push) -- eu_seq.sv still saw mem_ack=1 (believing its write
+    // completed) but the write had actually been starved, and a
+    // two-instruction-later RTS read back stale data from the same stack
+    // address, corrupting the return address and hanging the CPU in an
+    // infinite JSR/RTS loop. u_arb's own ifu_req input is fed
+    // ic_cg_req|ic_burst_req (see its own instantiation above) so grant_ifu
+    // correctly reflects either downstream request path.
+    logic [1:0]  cg_eu_burst_beat;
+    wire         cg_burst_req_mux  = eu_burst_req | (ic_burst_req && grant_ifu);
+    wire [31:0]  cg_burst_addr_mux = eu_burst_req ? eu_burst_addr : ic_burst_addr;
+    wire [2:0]   cg_burst_fc_mux   = eu_burst_req ? eu_burst_fc   : 3'b110; // Supervisor Program Space, matches ordinary ifu_req's own fixed FC
+
     biu_icache_if u_icache (
-        .clk_4x    (clk_4x),
-        .rst_n     (rst_n),
-        .ifu_addr  (ifu_addr),
-        .ifu_req   (ifu_req),
-        .ifu_rdata (ifu_rdata),
-        .ifu_ack   (ifu_ack),
-        .ifu_berr  (ifu_berr),
-        .cg_addr   (ic_cg_addr),
-        .cg_req    (ic_cg_req),
-        .cg_rdata  (ic_cg_rdata),
-        .cg_ack    (ic_cg_ack),
-        .cg_berr   (ic_cg_berr),
-        .cacr      (cacr),
-        .caar      (caar)
+        .clk_4x         (clk_4x),
+        .rst_n          (rst_n),
+        .ifu_addr       (ifu_addr),
+        .ifu_req        (ifu_req),
+        .ifu_rdata      (ifu_rdata),
+        .ifu_ack        (ifu_ack),
+        .ifu_berr       (ifu_berr),
+        .cg_addr        (ic_cg_addr),
+        .cg_req         (ic_cg_req),
+        .cg_rdata       (ic_cg_rdata),
+        .cg_ack         (ic_cg_ack),
+        .cg_berr        (ic_cg_berr),
+        .cacr           (cacr),
+        .caar           (caar),
+        .ic_burst_req   (ic_burst_req),
+        .ic_burst_addr  (ic_burst_addr),
+        .ic_burst_rdata0(eu_burst_rdata0),
+        .ic_burst_rdata1(eu_burst_rdata1),
+        .ic_burst_rdata2(eu_burst_rdata2),
+        .ic_burst_rdata3(eu_burst_rdata3),
+        .ic_burst_beat  (cg_eu_burst_beat),
+        .ic_burst_ack   (eu_burst_ack),
+        .ic_burst_berr  (eu_burst_berr)
     );
 
     // -----------------------------------------------------------------------
@@ -673,16 +749,21 @@ module m68030_biu #(
         .eu_cas2_rdata1  (eu_cas2_rdata1),
         .eu_cas2_rdata2  (eu_cas2_rdata2),
         .eu_cas2_ack     (eu_cas2_ack),
-        // Burst read
-        .eu_burst_req    (eu_burst_req),
-        .eu_burst_addr   (eu_burst_addr),
-        .eu_burst_fc     (eu_burst_fc),
+        // Burst read -- request side muxed with biu_icache_if's own
+        // ic_burst_req/addr (see the mux comment above); response side
+        // (rdata/ack/berr) fans out unchanged to both the external port and
+        // biu_icache_if's own ic_burst_* inputs, since only one of the two
+        // requesters is ever actually in flight in any real configuration.
+        .eu_burst_req    (cg_burst_req_mux),
+        .eu_burst_addr   (cg_burst_addr_mux),
+        .eu_burst_fc     (cg_burst_fc_mux),
         .eu_burst_rdata0 (eu_burst_rdata0),
         .eu_burst_rdata1 (eu_burst_rdata1),
         .eu_burst_rdata2 (eu_burst_rdata2),
         .eu_burst_rdata3 (eu_burst_rdata3),
         .eu_burst_ack    (eu_burst_ack),
         .eu_burst_berr   (eu_burst_berr),
+        .eu_burst_beat   (cg_eu_burst_beat),
         // MOVE16 burst write
         .eu_m16_req      (eu_m16_req),
         .eu_m16_addr     (eu_m16_addr),

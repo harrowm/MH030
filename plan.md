@@ -4832,6 +4832,136 @@ exception-dispatch anomaly noted in Phase 133.
 
 ---
 
+## Phase 136 (Step 8) — Genuine SIZ=11 pin-level burst linefill; two more real RTL bugs
+## found — closes the cache-verification plan in full
+
+**Goal**: Step 8, the last item of the cache-verification plan — replace `biu_icache_if.sv`'s
+own "4 separate ordinary longword reads" miss-fill (Steps 1-7's own deliberately-simple
+placeholder) with a genuine SIZ=11 pin-level burst (AS asserts once, DS toggles 4 times,
+address increments mid-cycle, CBREQ#/CBACK# handshake), closing the CLAUDE.md-documented
+"Burst read" cycle-type gap at the pin level for the first time in this project's history.
+
+**The mechanism already existed, fully built and unit-tested, entirely dead.**
+`rtl/biu_burst_ctrl.sv` and `biu_cycle_gen.sv`'s own `ST_BURST_S0..S7`/`ST_BURST_NEXT_S3..S7`
+state machine (CBREQ#/CBACK# handshake, 4-beat linefill, all of it) have existed since
+Phase 7 and are directly, dedicatedly unit-tested via `tb/biu_tb.sv`'s own `eu_burst_req`
+test cases — but `m68030_top.sv` hardwires the external `eu_burst_req` input to `1'b0`
+unconditionally, so nothing in the *integrated* chip had ever actually triggered it before
+this phase. The work here is almost entirely *wiring*, not new mechanism: give
+`biu_icache_if.sv` a genuine burst-request interface, mux it (via a new `ic_burst_req`)
+into the existing `eu_burst_req`/`addr`/`fc`/`rdata0-3`/`ack`/`berr` port `biu_cycle_gen`
+already implements, and let the pre-existing, pre-tested mechanism do the rest.
+
+**`rtl/biu_icache_if.sv` rewrite**: `IC_FILL_0..3` (4 states, one ordinary `cg_req` read
+cycle each) replaced with `IC_BURST0` (issues one `ic_burst_req` at the line's own base
+address) plus `IC_FILL_1B/2B/3B` (individual fallback re-requests, used only if the burst
+degrades). A full burst (`ic_burst_beat==3` at ack, meaning CBACK# was asserted and all
+4 beats completed) populates all 4 cache words from `ic_burst_rdata0..3` in one shot and
+jumps straight to `IC_DONE`. A degraded burst (`ic_burst_beat==0`, CBACK# never asserted —
+real 68030 hardware's own documented fallback to individual reads) populates just the
+first word from `ic_burst_rdata0`, then re-requests each remaining word individually via
+`IC_FILL_1B/2B/3B` — architecturally correct (CBACK# support is a property of the
+addressed region, not the individual request, so each fallback request only ever needs
+to fetch the one word it's asking for) but never actually exercised in this project's own
+test corpus, since every existing testbench drives `cback_n=0` (CBACK# permanently
+asserted) except `tb/biu_tb.sv`'s own dedicated degraded-burst unit tests, which exercise
+the mechanism directly, not through the I-cache. `cg_req`/`cg_addr` (the pre-existing
+ordinary, non-burst port to `biu_cycle_gen`) are now driven only in the `icache_en=0`
+bypass branch — the enabled-cache miss path no longer touches them at all.
+
+### Bug 1 — the burst request bypassed `biu_arbiter.sv` entirely, corrupting a
+### concurrent higher-priority EU write
+
+`biu_cycle_gen.sv`'s own `eu_burst_req` port sits *above* `grant_eu`/`grant_ifu` in its
+idle-state priority chain — checked before the arbiter-mediated `grant_eu && eu_req` /
+`grant_ifu && ifu_req` block entirely. This was harmless as long as nothing used it (its
+only real driver, `tb/biu_tb.sv`, exercises it in isolation, never concurrently with
+genuine EU/D-cache traffic) — but muxing the I-cache's own `ic_burst_req` into that same
+port let an I-cache linefill unconditionally win the bus over a *simultaneously pending,
+genuinely higher-priority* ordinary EU access, for the first time in this project's
+history. Found via direct `mem_req`/`mem_wdata`/`mem_ack` tracing on `tb/cache_tb.sv`'s
+own I-4 test (self-modifying code, JSR/RTS round trips): JSR's own return-address push
+reported `mem_ack=1` (`eu_seq.sv` believed its write completed) but a two-instruction-
+later RTS read back a *stale* value from the identical stack address — the write had
+actually been starved by a concurrent I-cache burst silently jumping the queue, and the
+corrupted return address sent the CPU into a permanent JSR→RTS infinite loop (traced
+precisely: RTS kept returning to an *earlier* JSR's own already-superseded return
+address instead of the current one).
+
+Fixed in `rtl/m68030_biu.sv`: `biu_arbiter.sv`'s own `ifu_req` input, previously fed only
+from `ic_cg_req` (the ordinary, non-burst path — never asserted during a burst-based
+miss under the new design, so the arbiter had no visibility into the I-cache's own burst
+requests at all), now gets `ic_cg_req | ic_burst_req` — either downstream request path
+means "the I-cache module wants the bus." `ic_burst_req`'s own entry into
+`biu_cycle_gen`'s `eu_burst_req` port is additionally gated on `grant_ifu`
+(`cg_burst_req_mux = eu_burst_req | (ic_burst_req && grant_ifu)`), routing it through the
+exact same arbiter-mediated priority the ordinary `ifu_req` path already correctly used —
+the external `eu_burst_req` port itself keeps its own pre-existing (unused in the full
+chip, still directly tested via `tb/biu_tb.sv`) "always above grant_eu" priority
+unchanged. Verified: `tb/cache_tb.sv`'s I-1 through I-4 and T-1 through T-3 all pass
+again with correct exact-cycle-count timing.
+
+### Bug 2 — a burst's own S7 completion silently fell through into the ordinary
+### EU-ack path, using stale captured data
+
+With Bug 1 fixed, a *second*, more serious bug surfaced: `tb/cache_tb.sv`'s D-2 test
+(direct-mapped D-cache aliasing/eviction, P and Q sharing one index, evicting each other
+back and forth) started reading back stale data — Q's own cache line, correctly re-tagged
+to Q's own address after a genuine miss, silently held P's *old* data instead of Q's real
+value. Traced through three layers: (1) `biu_sizing_fsm.sv`'s own `cyc_rdata` (its input
+*from* `biu_cycle_gen`, supposedly Q's freshly-fetched data) was itself already wrong —
+not a downstream latching bug. (2) Direct `biu_cycle_gen.sv` tracing at the moment of the
+bogus ack showed `state` still deep in the *burst* state range (`ST_BURST_S7`-ish, an
+*unrelated*, concurrent I-cache readahead burst) while `grant_eu=1` (the arbiter's own
+registered EU grant, *stale* — left over from Q's own predecessor transaction, not
+reflecting what's actually running on the bus right now). (3) Root cause: `biu_cycle_gen.sv`'s
+unified `SP_S7` completion `case`/`else-if` chain (shared across *every* cycle type —
+IACK, CAS2, coprocessor, RMW, MMU, ordinary EU, IFU) had no exclusion for `is_burst`
+(`is_burst_read | is_burst_write`) — burst completion is *already* handled entirely
+separately, via `biu_burst_ctrl.sv`'s own `eu_burst_ack`/`eu_m16_ack` outputs, assigned
+unconditionally every cycle regardless of this case statement. With no exclusion, a
+burst's own S7 fell through the chain to `else if (grant_eu || in_retry_r)` (since
+`grant_eu` was still registered `1` from an earlier, already-completed, *unrelated*
+transaction) and fired the *ordinary* `eu_ack` path too — with `eu_rdata = captured_rdata`
+still holding whatever a genuinely-completed `ST_READ_S4/S5` cycle last wrote there
+(`captured_rdata` is *only* ever updated during `ST_READ_S4/S5`/`ST_RMW_READ_S4/S5`,
+never during a burst), silently handing Q's own D-cache miss-fill *P's* old data. A
+pre-existing bug, invisible for the same reason as Bug 1: `tb/biu_tb.sv`'s own direct
+`eu_burst_req` tests never had a second, genuinely concurrent `grant_eu=1` transaction in
+flight to collide with — the I-cache's own burst linefill is the first thing in this
+project's history to make `eu_burst_req` fire while real, ongoing D-cache traffic is also
+in progress.
+
+Fixed in `rtl/biu_cycle_gen.sv`: added `else if (is_burst) begin end` (a deliberate no-op,
+absorbing a burst's own S7 without firing *any* of the other completion branches) to the
+`SP_S7` chain, ahead of the `grant_mmu`/`grant_eu`/`in_retry_r`/`grant_ifu` fallthrough —
+symmetrically covers both burst reads and MOVE16 burst writes (`is_burst_write` is
+included in `is_burst`), matching how `is_cas2`/`cyc_is_coproc_r`/etc. are already
+excluded from that same fallthrough for the identical reason.
+
+**Results**: `tb/cache_tb.sv` **0 failures** (was 3, all now resolved: T-1/T-2/T-3's
+exact-cycle-count checks correctly reflect burst timing — a full 4-beat burst costs one
+external bus cycle where the old 4-separate-reads mechanism cost four; D-2's own
+aliasing/eviction correctness is restored). `make test` 35/35, `make cosim_grp` 8/8. Full
+4-config Harte sweep (baseline / I$-only / D$-only / both) — **all four bit-identical to
+Phase 134's own numbers** (baseline PASS 702142/FAIL 2/SKIP 281221/TIMEOUT 0; the three
+CACR-enabled configs all PASS 702134/FAIL 2/SKIP 281229/TIMEOUT 0, same documented
+ASL.b anomaly, zero TIMEOUT) — confirming genuine pin-level bursting preserves
+architectural correctness across the entire ~700k-test corpus, including the newly-
+exercised `is_burst` exclusion path in `biu_cycle_gen.sv`'s shared S7 logic.
+
+**This closes the cache-verification plan (Phase 127) in full — all 8 steps complete.**
+Both bugs found this phase were genuinely pre-existing (present since Phase 7's own
+original burst implementation, or inherent to `biu_cycle_gen.sv`'s shared-S7-logic
+design), invisible for 129 phases because nothing had ever made the burst mechanism a
+real, concurrent participant in the integrated chip before — the same "latent hazard,
+newly exposed by a timing/participation change" shape as every other finding across this
+entire cache-verification rollout (Phases 127-136). Remaining, deliberately out of scope
+(not part of the 8-step plan): the `JMP (An)`-after-exception-dispatch anomaly noted in
+Phase 133, still undiagnosed.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
