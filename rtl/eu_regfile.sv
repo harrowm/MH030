@@ -79,7 +79,16 @@ module eu_regfile (
     // Third write port — Dn only, for 64-bit mul/div high result (Dh or Dr)
     input  logic        wr2_en,
     input  logic [2:0]  wr2_sel,
-    input  logic [31:0] wr2_data
+    input  logic [31:0] wr2_data,
+
+    // Combinational read port C (Phase 148, plan.md) — mirrors rd_a exactly.
+    // Genuine 3rd simultaneous read port: MOVE Dn,(d8,An,Xn) needs An+Xn+Dn
+    // all live at once for a plain (non-RMW) write, the one case in the
+    // project confirmed to need this rather than the dyn_bit_get_Dn
+    // deferred-swap trick (see port3.md).
+    input  logic [3:0]  rd_c_sel,
+    input  logic [1:0]  rd_c_siz,
+    output logic [31:0] rd_c_data
 );
 
     // -----------------------------------------------------------------------
@@ -145,6 +154,20 @@ module eu_regfile (
                               (rd_b_is_addr ? {{16{rd_b_raw[15]}}, rd_b_raw[15:0]}
                                            : {16'b0,               rd_b_raw[15:0]}) :
                           rd_b_raw;
+
+    logic [31:0] rd_c_raw;
+    logic        rd_c_is_addr;
+
+    assign rd_c_is_addr = rd_c_sel[3];
+    assign rd_c_raw     = !rd_c_sel[3] ? d_reg[rd_c_sel[2:0]] :
+                          (rd_c_sel != 4'd15) ? a_reg[rd_c_sel[2:0]] : a7_current;
+    assign rd_c_data    = (rd_c_siz == 2'b01) ?
+                              (rd_c_is_addr ? {{24{rd_c_raw[7]}},  rd_c_raw[7:0]}
+                                           : {24'b0,               rd_c_raw[7:0]}) :
+                          (rd_c_siz == 2'b10) ?
+                              (rd_c_is_addr ? {{16{rd_c_raw[15]}}, rd_c_raw[15:0]}
+                                           : {16'b0,               rd_c_raw[15:0]}) :
+                          rd_c_raw;
 
     // -----------------------------------------------------------------------
     // D0-D7: byte/word writes preserve upper bits

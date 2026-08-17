@@ -5605,6 +5605,48 @@ in full. `port3.md`'s Item 1 (MOVE Dn,(d8,An,Xn) — the 3rd register-file read 
 
 ---
 
+## Phase 148 — Add the `rd_c` 3rd register-file read port (pure plumbing, no consumer yet)
+
+**Goal**: first stage of `port3.md`'s Item 1 — add a genuine 3rd simultaneous
+register-file read port, needed by MOVE Dn,(d8,An,Xn) (Phase 149), the one case in the
+whole project confirmed to need it rather than the `dyn_bit_get_Dn` deferred-swap trick
+every other "looks like it needs a 3rd port" case (Phases 81-84) turned out to need — a
+plain (non-RMW) write needs An+Xn+Dn all live in the same cycle, and there's no bus-ack
+event before the write starts to key a swap off (unlike RMW, where the read's own ack
+provides that hook).
+
+**`rtl/eu_regfile.sv`**: added `rd_c_sel`/`rd_c_siz`/`rd_c_data`, mirroring `rd_a`'s own
+combinational read block exactly (`rd_c_raw`/`rd_c_is_addr` + the same byte/word/long
+sign-extension ternary) — purely additive, zero changes to `rd_a`/`rd_b`'s own logic.
+**`rtl/eu_seq.sv`**: added the matching `rd_c_sel`/`rd_c_siz` outputs and `rd_c_data`
+input; for this phase, `rd_c_sel`/`rd_c_siz` are tied to constant 0 (dead plumbing — Phase
+149 wires them to the real Dn source register). **`rtl/m68030_eu.sv`**: threaded `rd_c_*`
+straight through between the two, exactly like `rd_a`/`rd_b` — entirely internal to
+`m68030_eu`, so testbenches that instantiate `m68030_eu` itself (`eu_tb.sv`,
+`pipeline_tb.sv`, `stall_hazard_tb.sv`) needed zero changes; only the two testbenches that
+instantiate `eu_seq`/`eu_regfile` directly with explicit (non-wildcard) port lists
+(`tb/eu_seq_tb.sv`, `tb/eu_regfile_tb.sv`) needed updating, per the plan's own
+already-correct file list.
+
+**New coverage, not just a tie-off**: added a dedicated RF-8 block to `tb/eu_regfile_tb.sv`
+(3 checks) directly exercising the new port — all three ports reading different registers
+simultaneously, byte-sized read on port C independent of A/B sizing, and all three ports
+reading the *same* register at once to confirm they agree. First draft's RF-8a expected
+A=D0=`0x12345678`/B=A0=`0xDEADBEEF` (their RF-1/RF-2 values) — failed, since RF-7's own
+generate-loop coverage (which runs earlier in the file) overwrites D0/A0 with
+`0xA0000000`/`0xB0000000` before RF-8 ever runs; a test-ordering bug, not an RTL one, fixed
+by using the actually-current values.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 10/10 (unchanged
+— nothing new consumes the port yet). Full 124-suite Harte re-run — **PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline**, zero
+regressions, confirming the new port is genuinely inert everywhere it isn't yet used.
+Phase 149 (rewrite MOVE Dn,(d8,An,Xn) to use `rd_c`, eliminating its phantom-read quirk) is
+next — the functional change, and per the plan's own framing the higher-risk gate of this
+2-phase item.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

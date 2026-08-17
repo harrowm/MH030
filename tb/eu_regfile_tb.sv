@@ -26,6 +26,10 @@ module eu_regfile_tb;
     logic [1:0]  rd_b_siz  = 0;
     logic [31:0] rd_b_data;
 
+    logic [3:0]  rd_c_sel  = 0;   // Phase 148, plan.md
+    logic [1:0]  rd_c_siz  = 0;
+    logic [31:0] rd_c_data;
+
     logic        wr_en   = 0;
     logic [3:0]  wr_sel  = 0;
     logic [1:0]  wr_siz  = 2'b00;
@@ -61,6 +65,9 @@ module eu_regfile_tb;
         .rd_b_sel    (rd_b_sel),
         .rd_b_siz    (rd_b_siz),
         .rd_b_data   (rd_b_data),
+        .rd_c_sel    (rd_c_sel),
+        .rd_c_siz    (rd_c_siz),
+        .rd_c_data   (rd_c_data),
         .wr_en       (wr_en),
         .wr_sel      (wr_sel),
         .wr_siz      (wr_siz),
@@ -327,6 +334,39 @@ module eu_regfile_tb;
             end
             if (local_fail == 0) $display("PASS  RF-7b: all 7 A-regs (A0-A6) write/read");
         end
+
+        // ================================================================
+        // RF-8 (Phase 148, plan.md): 3rd read port (rd_c), genuinely
+        // simultaneous with rd_a/rd_b -- MOVE Dn,(d8,An,Xn)'s own consumer
+        // (Phase 149) needs An+Xn+Dn all live in the same cycle.
+        // ================================================================
+        $display("--- RF-8: Third read port (rd_c) ---");
+
+        // D5=0x0A0B0C0D (fresh write); D0/A0 hold RF-7's own loop values
+        // (0xA0000000 / 0xB0000000) by this point in the file -- all three
+        // ports reading different registers at once.
+        write_reg(4'd5, 2'b00, 32'h0A0B_0C0D);
+        rd_a_sel = 4'd0;  rd_a_siz = 2'b00;   // D0
+        rd_b_sel = 4'd8;  rd_b_siz = 2'b00;   // A0
+        rd_c_sel = 4'd5;  rd_c_siz = 2'b00;   // D5
+        #1;
+        check32("RF-8a: port C = D5 = 0x0A0B0C0D", rd_c_data, 32'h0A0B_0C0D);
+        check32("RF-8a: port A unaffected by port C", rd_a_data, 32'hA000_0000);
+        check32("RF-8a: port B unaffected by port C", rd_b_data, 32'hB000_0000);
+
+        // RF-8b: byte/word sizing on port C, independent of A/B sizing
+        rd_a_siz = 2'b00; rd_b_siz = 2'b00;
+        rd_c_sel = 4'd5;  rd_c_siz = 2'b01;   // D5 byte = 0x0D
+        #1;
+        check32("RF-8b: port C byte size", rd_c_data, 32'h0000_000D);
+
+        // RF-8c: all three ports read the SAME register simultaneously
+        rd_a_sel = 4'd5; rd_a_siz = 2'b00;
+        rd_b_sel = 4'd5; rd_b_siz = 2'b00;
+        rd_c_sel = 4'd5; rd_c_siz = 2'b00;
+        #1;
+        check32("RF-8c: A=B=C=D5 all agree", rd_a_data, 32'h0A0B_0C0D);
+        check("RF-8c: A==B==C",  (rd_a_data == rd_b_data) && (rd_b_data == rd_c_data));
 
         // ================================================================
         $display("=== %0d failure(s) ===", fail_count);

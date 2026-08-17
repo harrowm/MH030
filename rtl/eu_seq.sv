@@ -42,6 +42,13 @@ module eu_seq (
     output logic [1:0]  rd_b_siz,
     input  logic [31:0] rd_b_data,
 
+    // Register file read port C (Phase 148, plan.md) — genuine 3rd
+    // simultaneous read, for MOVE Dn,(d8,An,Xn) (Phase 149; unused until
+    // then — dec_c_reg/dec_reads_c below default to 0/Dn0).
+    output logic [3:0]  rd_c_sel,
+    output logic [1:0]  rd_c_siz,
+    input  logic [31:0] rd_c_data,
+
     // Register file write port
     output logic        wr_en,
     output logic [3:0]  wr_sel,
@@ -7243,6 +7250,11 @@ module eu_seq (
     // memind post-indexed also needs full longword Xn in rd_b (for outer EA scaling)
     // CMPM rd_b carries Ax address base — must be full 32-bit regardless of siz
     assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem || ex_is_bf || ex_is_move_mm || ex_is_cas || ex_is_abcd_sbcd_mem || ex_is_cas2) ? 2'b00 : ex_siz;
+
+    // Read port C (Phase 148, plan.md): pure plumbing, no consumer yet.
+    // Phase 149 wires this to MOVE Dn,(d8,An,Xn)'s own Dn source register.
+    assign rd_c_sel = 4'd0;
+    assign rd_c_siz = 2'b00;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores) --
     // EXCEPT an indexed write (Phase 144, plan.md), which needs An on rd_a
