@@ -5948,6 +5948,57 @@ needed for copy-on-write) is next.
 
 ---
 
+## Phase 150 Stage 2 — write-protect violations
+
+**Goal**: a write to a page with the descriptor's WP bit set must fault; a read to the same
+page must not. Directly needed for copy-on-write.
+
+Checked the existing RTL before writing anything new: Stage 0's own `biu_cache_if.sv`
+`CI_XLATE` state was built defensively to already cover this case —
+`if (xl_fault || (xl_wp && !rw_r)) begin ... state <= CI_BERR; ...
+xlate_fault_r <= xl_fault ? !xl_fault_is_berr : 1'b1; end` — a pure WP violation (`xl_fault=0`,
+`xl_wp=1`, write) takes the `xlate_fault_r <= 1'b1` branch unconditionally, routing into
+exactly the same synthetic-fault-pulse → `CI_BERR` → `mem_abort`/`eu_berr` → `exc_active`
+path Stage 1 just proved end-to-end for a plain invalid descriptor — and `biu_mmu_if.sv`'s
+own `wp`/`atc_wp`/`walk_wp_r` plumbing (added in Stage 0a) was already complete: the page
+descriptor's bit 2 (`mmu_rdata[2]`) feeds `walk_wp_r` in `MS_WALK_A`'s page-descriptor case,
+cached into `atc_wp[]` on `MS_WALK_DONE`, and surfaced again on a later `MS_ATC_HIT` via
+`wp_r <= atc_hit_wp`. Nothing here was left half-built — Stage 0's own design already
+anticipated this stage.
+
+**Test**: extended `tb/mmu_xlate_tb.sv` with a Phase 4 — a fresh VA (0x20003200, deliberately
+different from phases 1/3 so there's no possibility of a stale non-WP ATC entry), a
+descriptor with WP set (bit 2) from the start (not initially invalid, unlike Phase 3 — WP
+here is permanent for the test, not something to fix and retry), a real vector-2 handler
+(repointed from Phase 3's own fix-and-RTE handler to a new one, since a WP fault has nothing
+sensible to retry — matches this project's own established BERR-mid-`<X>` convention for
+unretriable faults: mark completion and park, no RTE). Sequence: **read** the WP page first
+(must succeed, no fault: D6=333, D7 holds the page's own sentinel 0xABCD1234) — this read
+also populates the ATC — then **write** to the *same* page (must fault: a fresh `exc_active`,
+watched for only after D6==333 so Phase 3's own already-resolved exception can't be mistaken
+for this one, with vector 2 / format 9 / the new handler's own completion marker D6=444).
+Because the read primes the ATC before the write is attempted, the write's own WP check is
+exercised against a *cached* `atc_wp[]` entry, not just a fresh walk — incidental but genuine
+extra coverage of the ATC's own WP-caching correctness, not just `walk_wp_r`'s.
+
+All 17 checks (Phases 1–4 combined) passed on the very first real attempt — Stage 0's own WP
+mechanism worked correctly the first time it was actually exercised. Two ROM-addressing
+arithmetic mistakes in the test itself (not the RTL) were caught by careful re-derivation
+before running: an initial draft packed each pair of 16-bit instruction words 2 bytes
+earlier than their real addresses throughout the whole Phase 4 block (a copy-paste-style
+off-by-one against the preceding instruction's own final word), which would have corrupted
+the entire instruction stream from that point on had it been run — caught by hand-tracing
+the address sequence against the file's own `rom[addr/4] = {word_at_addr, word_at_addr+2}`
+convention before compiling, not by a failing simulation.
+
+**Results**: `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12. No RTL
+changed this stage (the mechanism already existed, verified not built) — no Harte re-run
+needed; Stage 1's own full sweep, run against the same RTL, still stands.
+**This closes Stage 2 of the 6-stage MMU-hardening plan.** Stage 3 (U/M bit hardware
+write-back per BIU-086) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

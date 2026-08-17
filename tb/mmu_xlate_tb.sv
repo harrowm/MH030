@@ -139,16 +139,23 @@ module mmu_xlate_tb;
     // -------------------------------------------------------------------
     localparam MOVEA_L_IMM_A0 = 16'h207C;
     localparam MOVEA_L_IMM_A1 = 16'h227C;
+    localparam MOVEA_L_IMM_A2 = 16'h247C;
+    localparam MOVEA_L_IMM_A3 = 16'h267C;
     localparam MOVE_L_A0_D0   = 16'h2010;
     localparam MOVE_L_A0_D2   = 16'h2410;
     localparam MOVE_L_A0_D4   = 16'h2810;
+    localparam MOVE_L_A2_D7   = 16'h2E12;  // MOVE.L (A2),D7
     localparam MOVE_L_IMM_A1_IND = 16'h22BC;  // MOVE.L #imm,(A1)
+    localparam MOVE_L_IMM_A2_IND = 16'h24BC;  // MOVE.L #imm,(A2)
+    localparam MOVE_L_IMM_A3_IND = 16'h26BC;  // MOVE.L #imm,(A3)
     localparam CLR_L_D1       = 16'h4281;
     localparam ADDI_L_D1      = 16'h0681;
     localparam CLR_L_D3       = 16'h4283;
     localparam ADDI_L_D3      = 16'h0683;
     localparam CLR_L_D5       = 16'h4285;
     localparam ADDI_L_D5      = 16'h0685;
+    localparam CLR_L_D6       = 16'h4286;
+    localparam ADDI_L_D6      = 16'h0686;
     localparam PMOVE_A0_OP    = 16'hF010;  // same opcode word as PTEST; op_type in the ext word
     localparam PMOVE_CRP_EXT  = 16'h4800;  // op_type=010(PMOVE),sub=100(CRP),dr=0(load)
     localparam PMOVE_TC_EXT   = 16'h4400;  // op_type=010(PMOVE),sub=010(TC),dr=0(load)
@@ -307,8 +314,57 @@ module mmu_xlate_tb;
         rom[16'h0454/4] = {16'h2000, 16'h2100};           // A0 = VA 0x20002100
         rom[16'h0458/4] = {MOVE_L_A0_D4, CLR_L_D5};        // MOVE.L (A0),D4  <-- faults, retries after RTE
         rom[16'h045C/4] = {ADDI_L_D5, 16'h0000};
-        rom[16'h0460/4] = {16'd777, BRA_SELF};
-        rom[16'h0464/4] = {16'h4E71, 16'h4E71};
+        rom[16'h0460/4] = {16'd777, MOVEA_L_IMM_A3};
+
+        // -------------------------------------------------------------
+        // Phase 4 (Stage 2, plan.md): write-protect violations. A page
+        // marked WP (descriptor bit 2, already tracked end-to-end since
+        // Stage 0 -- biu_mmu_if.sv's own walk_wp_r/atc_wp/wp output, and
+        // biu_cache_if.sv's CI_XLATE already checks `xl_wp && !rw_r`,
+        // routing into the exact same CI_BERR/exc_active path Stage 1
+        // just proved end-to-end for a plain invalid descriptor) must
+        // fault on a WRITE but not on a READ. Reuses vector 2 (repointed
+        // to a new, non-retrying handler -- WP is permanent for this
+        // test, unlike phase 3's fixable invalid descriptor, so there is
+        // nothing sensible to RTE back into; the handler just marks
+        // completion and parks, matching this project's own established
+        // BERR-mid-<X> convention for unretriable faults).
+        //
+        // Fresh VA (0x20003200, idx_a=3, table entry at 0x300C) --
+        // deliberately different from phases 1/3 so there's no
+        // possibility of picking up a stale ATC entry from an earlier
+        // phase's own (non-WP) translation of a different page. The read
+        // in this phase's own sequence populates the ATC itself, so the
+        // write's own fault is checked against a *cached* wp bit
+        // (MS_ATC_HIT's wp_r<=atc_hit_wp), not just a fresh walk --
+        // incidentally also exercises atc_wp[]'s own correctness, not
+        // just walk_wp_r's.
+        // -------------------------------------------------------------
+        rom[16'h0200/4] = 32'hABCD_1234;   // sentinel at the WP page's own PA (frame 0, offset 0x200)
+        rom[16'h300C/4] = 32'h0000_0005;   // descriptor: frame=0, WP=1 (bit2), DT=01 (page)
+
+        // A3 = 0x0000300C (the WP descriptor's own table entry address)
+        rom[16'h0464/4] = {16'h0000, 16'h300C};
+        // MOVE.L #0x00000005,(A3) -- redundant with the ROM preload above;
+        // installs it via a real bus write too, and lands A3 = 0x00000008
+        // (vector 2's own slot) next for the SAME reason the pattern
+        // repeats: reusing one address register across both installs.
+        rom[16'h0468/4] = {MOVE_L_IMM_A3_IND, 16'h0000};
+        rom[16'h046C/4] = {16'h0005, MOVEA_L_IMM_A3};
+        rom[16'h0470/4] = {16'h0000, 16'h0008};
+        rom[16'h0474/4] = {MOVE_L_IMM_A3_IND, 16'h0000};   // MOVE.L #0x00000520,(A3) -- vector 2 -> new handler
+        rom[16'h0478/4] = {16'h0520, MOVEA_L_IMM_A2};
+        rom[16'h047C/4] = {16'h2000, 16'h3200};            // A2 = VA 0x20003200
+        rom[16'h0480/4] = {MOVE_L_A2_D7, CLR_L_D6};        // MOVE.L (A2),D7 -- READ, must succeed (no fault)
+        rom[16'h0484/4] = {ADDI_L_D6, 16'h0000};
+        rom[16'h0488/4] = {16'd333, MOVE_L_IMM_A2_IND};    // marker D6=333 (read succeeded) ; MOVE.L #imm,(A2)
+        rom[16'h048C/4] = {16'hDEAD, 16'hBEEF};            // #0xDEADBEEF,(A2) -- WRITE, must fault (WP)
+
+        // New vector-2 handler for phase 4: mark completion (D6=444) and
+        // park -- no RTE, since a WP fault has nothing to fix and retry.
+        rom[16'h0520/4] = {CLR_L_D6, ADDI_L_D6};
+        rom[16'h0524/4] = {16'h0000, 16'd444};
+        rom[16'h0528/4] = {BRA_SELF, 16'h4E71};
 
         // Vector-2 handler: fix the descriptor at 0x3008 (page frame
         // 0x00000000, DT=01), then RTE. TT0 already covers this handler's
@@ -396,6 +452,55 @@ module mmu_xlate_tb;
         end
         check32("Phase 3: D4 holds the *fixed* PA's own sentinel (0x13572468) -- the retry genuinely re-walked the now-valid descriptor, not stale state",
                 u_top.u_eu.u_rf.d_reg[4], 32'h1357_2468);
+
+        // -------------------------------------------------------------
+        // Phase 4 (Stage 2): write-protect violations. First confirms the
+        // READ from the WP page succeeds with no fault at all (D6=333) --
+        // if the read incorrectly faulted, execution would divert straight
+        // into the new handler and D6 would jump to 444 without ever
+        // passing through 333, so this alone already proves WP doesn't
+        // block reads. Then confirms the WRITE to the *same* page
+        // genuinely faults (a fresh exc_active, watched for only after
+        // D6==333 so phase 3's own already-resolved exception can't be
+        // mistaken for this one) with the correct vector/format, and that
+        // the new handler ran (D6=444).
+        // -------------------------------------------------------------
+        begin
+            int t;
+            logic saw_d6_333;
+            saw_d6_333 = 1'b0;
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_eu.u_rf.d_reg[6] === 32'd333) begin saw_d6_333 = 1'b1; break; end
+            end
+            check("Phase 4: the READ from the WP page succeeded with no fault (D6=333)", saw_d6_333);
+        end
+        check32("Phase 4: D7 holds the WP page's own sentinel (0xABCD1234) -- the read genuinely reached the translated PA",
+                u_top.u_eu.u_rf.d_reg[7], 32'hABCD_1234);
+
+        begin
+            int t;
+            logic saw_exc4, saw_d6_444;
+            logic [3:0] seen_fmt4;
+            logic [7:0] seen_vec4;
+            saw_exc4    = 1'b0;
+            saw_d6_444  = 1'b0;
+            seen_fmt4   = 4'h0;
+            seen_vec4   = 8'h0;
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                if (!saw_exc4 && u_top.u_exc.exc_active) begin
+                    saw_exc4  = 1'b1;
+                    seen_fmt4 = u_top.u_exc.snap_fmt_r;
+                    seen_vec4 = u_top.u_exc.snap_vec_r;
+                end
+                if (u_top.u_eu.u_rf.d_reg[6] === 32'd444) begin saw_d6_444 = 1'b1; break; end
+            end
+            check("Phase 4: the WRITE to the WP page raised a real exception", saw_exc4);
+            check32("Phase 4: correct vector (2, Bus Error) dispatched for the WP violation", {24'h0, seen_vec4}, 32'd2);
+            check32("Phase 4: correct frame format (9, FMT_MMU) dispatched for the WP violation", {28'h0, seen_fmt4}, 32'd9);
+            check("Phase 4: the new (non-retrying) handler ran to completion (D6=444)", saw_d6_444);
+        end
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
         if (fail_count == 0) $display("ALL TESTS PASSED");
