@@ -410,25 +410,130 @@ module m68030_biu #(
     );
 
     // -----------------------------------------------------------------------
-    // MMU interface — ATC + table walker
+    // MMU interface — ATC + table walker, arbitrated (Phase 150, plan.md)
+    //
+    // biu_mmu_if is a single-request-at-a-time resource. Before this phase
+    // it only ever had one real requester (the EXT port below, driven by
+    // m68030_mmu.sv for PTEST/explicit translation requests). This phase
+    // wires real address translation into the live cache-miss paths,
+    // adding two more requesters — biu_cache_if.sv (D) and biu_icache_if.sv
+    // (I) — that need the same underlying biu_mmu_if instance. biu_mmu_arb
+    // arbitrates them (EXT > D > I, matching BIU-097's own MMU priority)
+    // and demuxes the shared result back to whichever owner is being
+    // serviced.
     // -----------------------------------------------------------------------
 
-    // mmu_done_ext = hit | walk_done (both one-cycle pulses)
+    // Raw, undemuxed biu_mmu_if outputs (any owner) — feeds the arbiter's
+    // own result input, and separately biu_exc_capture's own mmu_fault
+    // input below (format-$9 classification doesn't care which owner
+    // triggered a real walk-time BERR, unlike the demuxed per-owner
+    // fault/hit/walk_done pulses, which do).
+    logic [31:0] raw_mmu_pa_w;
+    logic        raw_mmu_hit_w, raw_mmu_walk_done_w, raw_mmu_fault_w;
+    logic        raw_mmu_fault_is_berr_w;
+    logic        raw_mmu_ci_w, raw_mmu_wp_w;
+
+    // Arbitrated request into biu_mmu_if
+    logic [31:0] arb_mmu_va;
+    logic [2:0]  arb_mmu_fc;
+    logic        arb_mmu_rw;
+    logic        arb_mmu_req;
+
+    // D-side (biu_cache_if.sv) translation-request wires
+    logic [31:0] ca_xl_va, ca_xl_pa;
+    logic [2:0]  ca_xl_fc;
+    logic        ca_xl_rw, ca_xl_req;
+    logic        ca_xl_hit, ca_xl_walk_done, ca_xl_fault, ca_xl_fault_is_berr;
+    logic        ca_xl_ci, ca_xl_wp;
+    logic        ca_xlate_fault_pulse;
+    logic [31:0] ca_xlate_fault_addr;
+    logic [2:0]  ca_xlate_fault_fc;
+    logic        ca_xlate_fault_rw;
+    logic [1:0]  ca_xlate_fault_siz;
+
+    // I-side (biu_icache_if.sv) translation-request wires
+    logic [31:0] ic_xl_va, ic_xl_pa;
+    logic [2:0]  ic_xl_fc;
+    logic        ic_xl_rw, ic_xl_req;
+    logic        ic_xl_hit, ic_xl_walk_done, ic_xl_fault, ic_xl_fault_is_berr;
+    logic        ic_xl_ci;
+    logic        ic_xlate_fault_pulse;
+    logic [31:0] ic_xlate_fault_addr;
+    logic [2:0]  ic_xlate_fault_fc;
+    logic        ic_xlate_fault_rw;
+    logic [1:0]  ic_xlate_fault_siz;
+
+    // mmu_done_ext = hit | walk_done (both one-cycle pulses) — EXT owner only
     logic mmu_hit_w, mmu_walk_done_w;
     assign mmu_done_ext = mmu_hit_w | mmu_walk_done_w;
+
+    biu_mmu_arb u_mmu_arb (
+        .clk_4x (clk_4x),
+        .rst_n  (rst_n),
+
+        .ext_va  (mmu_va_ext),
+        .ext_fc  (mmu_fc_ext),
+        .ext_rw  (mmu_rw_ext),
+        .ext_req (mmu_req_ext),
+        .ext_pa           (mmu_pa_ext),
+        .ext_hit          (mmu_hit_w),
+        .ext_walk_done    (mmu_walk_done_w),
+        .ext_fault        (mmu_fault),
+        .ext_fault_is_berr(),          // not consumed by m68030_mmu.sv today
+        .ext_ci           (mmu_ci),
+        .ext_wp           (),          // not consumed today
+
+        .d_va  (ca_xl_va),
+        .d_fc  (ca_xl_fc),
+        .d_rw  (ca_xl_rw),
+        .d_req (ca_xl_req),
+        .d_pa           (ca_xl_pa),
+        .d_hit          (ca_xl_hit),
+        .d_walk_done    (ca_xl_walk_done),
+        .d_fault        (ca_xl_fault),
+        .d_fault_is_berr(ca_xl_fault_is_berr),
+        .d_ci           (ca_xl_ci),
+        .d_wp           (ca_xl_wp),
+
+        .i_va  (ic_xl_va),
+        .i_fc  (ic_xl_fc),
+        .i_rw  (ic_xl_rw),
+        .i_req (ic_xl_req),
+        .i_pa           (ic_xl_pa),
+        .i_hit          (ic_xl_hit),
+        .i_walk_done    (ic_xl_walk_done),
+        .i_fault        (ic_xl_fault),
+        .i_fault_is_berr(ic_xl_fault_is_berr),
+        .i_ci           (ic_xl_ci),
+        .i_wp           (),             // I-side has no xl_wp consumer
+
+        .mmu_va  (arb_mmu_va),
+        .mmu_fc  (arb_mmu_fc),
+        .mmu_rw  (arb_mmu_rw),
+        .mmu_req (arb_mmu_req),
+        .mmu_pa            (raw_mmu_pa_w),
+        .mmu_hit           (raw_mmu_hit_w),
+        .mmu_walk_done     (raw_mmu_walk_done_w),
+        .mmu_fault         (raw_mmu_fault_w),
+        .mmu_fault_is_berr (raw_mmu_fault_is_berr_w),
+        .mmu_ci            (raw_mmu_ci_w),
+        .mmu_wp            (raw_mmu_wp_w)
+    );
 
     biu_mmu_if u_mmu (
         .clk_4x      (clk_4x),
         .rst_n       (rst_n),
-        .va          (mmu_va_ext),
-        .fc          (mmu_fc_ext),
-        .rw          (mmu_rw_ext),
-        .req         (mmu_req_ext),
-        .pa          (mmu_pa_ext),
-        .hit         (mmu_hit_w),
-        .walk_done   (mmu_walk_done_w),
-        .fault       (mmu_fault),
-        .ci          (mmu_ci),
+        .va          (arb_mmu_va),
+        .fc          (arb_mmu_fc),
+        .rw          (arb_mmu_rw),
+        .req         (arb_mmu_req),
+        .pa          (raw_mmu_pa_w),
+        .hit         (raw_mmu_hit_w),
+        .walk_done   (raw_mmu_walk_done_w),
+        .fault       (raw_mmu_fault_w),
+        .fault_is_berr(raw_mmu_fault_is_berr_w),
+        .ci          (raw_mmu_ci_w),
+        .wp          (raw_mmu_wp_w),
         .mmu_req_addr(mmu_walk_addr),
         .mmu_req_fc  (mmu_walk_fc),
         .mmu_req     (mmu_walk_req),
@@ -515,7 +620,24 @@ module m68030_biu #(
         .sf_ack      (sf_eu_ack),
         .sf_berr     (cg_eu_berr_raw),
         .cacr        (cacr),
-        .caar        (caar)
+        .caar        (caar),
+        .tc          (tc),
+        .xl_va       (ca_xl_va),
+        .xl_fc       (ca_xl_fc),
+        .xl_rw       (ca_xl_rw),
+        .xl_req      (ca_xl_req),
+        .xl_pa       (ca_xl_pa),
+        .xl_hit      (ca_xl_hit),
+        .xl_walk_done(ca_xl_walk_done),
+        .xl_fault    (ca_xl_fault),
+        .xl_fault_is_berr(ca_xl_fault_is_berr),
+        .xl_ci       (ca_xl_ci),
+        .xl_wp       (ca_xl_wp),
+        .xlate_fault_pulse(ca_xlate_fault_pulse),
+        .xlate_fault_addr (ca_xlate_fault_addr),
+        .xlate_fault_fc   (ca_xlate_fault_fc),
+        .xlate_fault_rw   (ca_xlate_fault_rw),
+        .xlate_fault_siz  (ca_xlate_fault_siz)
     );
 
     // EU data-access output mux: multiop OR cache-if path
@@ -591,7 +713,23 @@ module m68030_biu #(
         .ic_burst_rdata3(eu_burst_rdata3),
         .ic_burst_beat  (cg_eu_burst_beat),
         .ic_burst_ack   (eu_burst_ack),
-        .ic_burst_berr  (eu_burst_berr)
+        .ic_burst_berr  (eu_burst_berr),
+        .tc             (tc),
+        .xl_va       (ic_xl_va),
+        .xl_fc       (ic_xl_fc),
+        .xl_rw       (ic_xl_rw),
+        .xl_req      (ic_xl_req),
+        .xl_pa       (ic_xl_pa),
+        .xl_hit      (ic_xl_hit),
+        .xl_walk_done(ic_xl_walk_done),
+        .xl_fault    (ic_xl_fault),
+        .xl_fault_is_berr(ic_xl_fault_is_berr),
+        .xl_ci       (ic_xl_ci),
+        .xlate_fault_pulse(ic_xlate_fault_pulse),
+        .xlate_fault_addr (ic_xlate_fault_addr),
+        .xlate_fault_fc   (ic_xlate_fault_fc),
+        .xlate_fault_rw   (ic_xlate_fault_rw),
+        .xlate_fault_siz  (ic_xlate_fault_siz)
     );
 
     // -----------------------------------------------------------------------
@@ -644,6 +782,18 @@ module m68030_biu #(
     // -----------------------------------------------------------------------
     // Core bus-cycle generator — owns all S-state transitions
     // -----------------------------------------------------------------------
+
+    // Phase 150 (plan.md): declared here (ahead of use) so biu_cycle_gen's
+    // own instantiation below can target them directly -- Icarus requires
+    // a net referenced in a continuous-assignment port connection to be
+    // declared before that point in the file. See the mux logic and its
+    // own comment further down for how these combine with the new
+    // synthetic translation/WP fault pulses.
+    logic [31:0] cg_fault_addr_w, cg_fault_data_w;
+    logic [2:0]  cg_fault_fc_w;
+    logic        cg_fault_rw_w;
+    logic [1:0]  cg_fault_siz_w;
+    logic        cg_fault_valid_w;
 
     biu_cycle_gen #(.RSTOUT_CLKS(RSTOUT_CLKS)) u_cg (
         .clk_4x          (clk_4x),
@@ -723,13 +873,15 @@ module m68030_biu #(
         .init_ssp        (init_ssp),
         .init_pc         (init_pc),
         .cyc_port_dsack  (cyc_port_dsack),
-        // Fault capture
-        .fault_addr      (fault_addr),
-        .fault_data      (fault_data),
-        .fault_fc        (fault_fc),
-        .fault_rw        (fault_rw),
-        .fault_siz       (fault_siz),
-        .fault_valid     (fault_valid),
+        // Fault capture (Phase 150, plan.md: renamed to cg_*_w so a
+        // synthetic translation/WP fault can be muxed in below without
+        // touching biu_cycle_gen's own real-BERR capture)
+        .fault_addr      (cg_fault_addr_w),
+        .fault_data      (cg_fault_data_w),
+        .fault_fc        (cg_fault_fc_w),
+        .fault_rw        (cg_fault_rw_w),
+        .fault_siz       (cg_fault_siz_w),
+        .fault_valid     (cg_fault_valid_w),
         .retry_pending   (retry_pending),
         .fault_retry     (fault_retry),
         .fault_is_rmw    (fault_is_rmw),
@@ -795,6 +947,44 @@ module m68030_biu #(
     assign eu_berr = ca_eu_berr;
 
     // -----------------------------------------------------------------------
+    // Synthetic fault-capture mux (Phase 150, plan.md): a pure translation
+    // or WP fault (no real bus error at all) needs to feed the same
+    // exception-frame capture path a real BERR does. biu_cycle_gen's own
+    // cg_fault_valid_w only ever fires for a genuine external BERR sampled
+    // during a real bus cycle — an invalid descriptor or WP violation never
+    // generates one. Priority: real bus fault > D-side xlate > I-side
+    // xlate (arbitrary among the two xlate sources, since both can't fire
+    // the same cycle — only one of biu_cache_if/biu_icache_if is ever in
+    // CI_XLATE/IC_XLATE at a time in practice, but the mux is defensive
+    // either way). ca_xlate_fault_pulse/ic_xlate_fault_pulse are already
+    // gated (their own source modules) to exclude the real-walk-BERR case,
+    // which cg_fault_valid_w already captures independently — see
+    // biu_mmu_if.sv's own fault_is_berr_r comment for the full reasoning.
+    // (cg_fault_*_w themselves are declared earlier, ahead of biu_cycle_gen's
+    // own instantiation, since Icarus requires a net used in a continuous
+    // assignment port connection to be declared before that point in the
+    // file — see the comment there.)
+    // -----------------------------------------------------------------------
+    wire         xlate_fault_any = ca_xlate_fault_pulse | ic_xlate_fault_pulse;
+    wire [31:0]  xlate_fault_addr_mux = ca_xlate_fault_pulse ? ca_xlate_fault_addr : ic_xlate_fault_addr;
+    wire [2:0]   xlate_fault_fc_mux   = ca_xlate_fault_pulse ? ca_xlate_fault_fc   : ic_xlate_fault_fc;
+    wire         xlate_fault_rw_mux   = ca_xlate_fault_pulse ? ca_xlate_fault_rw   : ic_xlate_fault_rw;
+    wire [1:0]   xlate_fault_siz_mux  = ca_xlate_fault_pulse ? ca_xlate_fault_siz  : ic_xlate_fault_siz;
+
+    assign fault_valid = cg_fault_valid_w | xlate_fault_any;
+    assign fault_addr  = cg_fault_valid_w ? cg_fault_addr_w : xlate_fault_addr_mux;
+    assign fault_fc    = cg_fault_valid_w ? cg_fault_fc_w   : xlate_fault_fc_mux;
+    assign fault_rw    = cg_fault_valid_w ? cg_fault_rw_w   : xlate_fault_rw_mux;
+    assign fault_siz   = cg_fault_valid_w ? cg_fault_siz_w  : xlate_fault_siz_mux;
+    // No real bus data for a pure translation/WP fault (no bus cycle ever
+    // happened) -- pass through biu_cycle_gen's own value unconditionally;
+    // harmless when it's a stale/idle 0, and exact fault_data correctness
+    // for this new case is a documented, deliberately out-of-scope
+    // refinement beyond Stage 0 (frame_format/SSW correctness is the goal
+    // here, not full byte-perfect frame DATA-field correctness).
+    assign fault_data  = cg_fault_data_w;
+
+    // -----------------------------------------------------------------------
     // Exception frame capture — SSW + format determination
     // -----------------------------------------------------------------------
     biu_exc_capture u_exc (
@@ -810,7 +1000,14 @@ module m68030_biu #(
         .fault_is_rmw   (fault_is_rmw),
         .pipe_b_active  (1'b0),
         .pipe_c_active  (1'b0),
-        .mmu_fault      (mmu_fault),
+        // Phase 150 (plan.md): raw, undemuxed biu_mmu_if fault (any owner)
+        // -- format-$9 classification doesn't care WHICH owner triggered a
+        // real walk-time BERR, unlike the top-level mmu_fault OUTPUT port
+        // (arbiter's ext_fault, demuxed to EXT/PTEST only, consumed by
+        // m68030_mmu.sv for its own PTEST result). A pure logical fault
+        // (invalid descriptor/WP) also correctly sets raw_mmu_fault_w via
+        // the same path.
+        .mmu_fault      (raw_mmu_fault_w | xlate_fault_any),
         .frame_format   (exc_frame_format),
         .frame_valid    (exc_frame_valid),
         .frame_fault_addr(),

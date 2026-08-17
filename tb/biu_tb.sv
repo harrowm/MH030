@@ -571,6 +571,29 @@ module biu_tb;
         .sf_rdata    (eu_rdata),   // sizing_fsm eu_rdata output
         .sf_ack      (eu_ack),     // sizing_fsm eu_ack output (1-tick pulse)
         .sf_berr     (eu_berr),
+        // Phase 150 (plan.md): new MMU translation-request port. Tied to a
+        // constant TC.E=0 here deliberately -- this testbench's own P6-6/
+        // P6-7 tests exercise u_mmu (biu_mmu_if) directly as an independent
+        // unit via tc_tb, and were never designed to also exercise the new
+        // cache-triggers-live-translation integration; that gets its own
+        // dedicated tb/mmu_xlate_tb.sv instead, so none of the pre-existing
+        // tests here need to change behavior.
+        .tc          (32'h0),
+        .xl_va       (),
+        .xl_fc       (),
+        .xl_rw       (),
+        .xl_req      (),
+        .xl_pa       (32'h0),
+        .xl_hit      (1'b0),
+        .xl_walk_done(1'b0),
+        .xl_fault    (1'b0),
+        .xl_ci       (1'b0),
+        .xl_wp       (1'b0),
+        .xlate_fault_pulse(),
+        .xlate_fault_addr (),
+        .xlate_fault_fc   (),
+        .xlate_fault_rw   (),
+        .xlate_fault_siz  (),
         .cacr        (cacr_tb),
         .caar        (caar_tb)
     );

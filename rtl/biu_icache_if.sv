@@ -76,8 +76,39 @@ module biu_icache_if (
 
     // Control registers (written by EU via MOVEC)
     input  logic [31:0] cacr,
-    input  logic [31:0] caar
+    input  logic [31:0] caar,
+
+    // MMU translation control (Phase 150, plan.md)
+    input  logic [31:0] tc,
+
+    // MMU translation request/response (Phase 150, plan.md) — arbitrated
+    // via biu_mmu_arb.sv, shared with biu_cache_if.sv's own D-side request
+    // and the existing top-level (PTEST) requester. Instruction fetches are
+    // always reads, so there's no xl_wp equivalent here (WP only matters
+    // for writes) — xl_ci is threaded through but not yet acted on, same
+    // documented deferral as biu_cache_if.sv's own xl_ci.
+    output logic [31:0] xl_va,
+    output logic [2:0]  xl_fc,
+    output logic        xl_rw,
+    output logic        xl_req,
+    input  logic [31:0] xl_pa,
+    input  logic        xl_hit,
+    input  logic        xl_walk_done,
+    input  logic        xl_fault,
+    input  logic        xl_fault_is_berr, // see biu_cache_if.sv's own
+                                           // identical port for the reasoning
+    input  logic        xl_ci,
+
+    // Synthetic fault-capture pulse for biu_exc_capture (Phase 150,
+    // plan.md) — see biu_cache_if.sv's own identical port for the reasoning.
+    output logic         xlate_fault_pulse,
+    output logic [31:0]  xlate_fault_addr,
+    output logic [2:0]   xlate_fault_fc,
+    output logic         xlate_fault_rw,
+    output logic [1:0]   xlate_fault_siz
 );
+
+    wire tc_e = tc[31];
 
     // CACR bit aliases (shared encoding with biu_cache_if.sv)
     wire icache_en = cacr[0];
@@ -101,14 +132,15 @@ module biu_icache_if (
     // Disabled-cache accesses never enter this state machine at all (see
     // the combinational bypass in the output block below), so there is no
     // dedicated "single passthrough fetch" state here.
-    typedef enum logic [2:0] {
-        IC_IDLE    = 3'd0,
-        IC_HIT     = 3'd1,
-        IC_BURST0  = 3'd2,   // full-line burst attempt from fill_base_r
-        IC_FILL_1B = 3'd3,   // degraded-fallback: word 1 individually
-        IC_FILL_2B = 3'd4,   // degraded-fallback: word 2 individually
-        IC_FILL_3B = 3'd5,   // degraded-fallback: word 3 individually
-        IC_DONE    = 3'd6
+    typedef enum logic [3:0] {
+        IC_IDLE    = 4'd0,
+        IC_HIT     = 4'd1,
+        IC_BURST0  = 4'd2,   // full-line burst attempt from fill_base_r
+        IC_FILL_1B = 4'd3,   // degraded-fallback: word 1 individually
+        IC_FILL_2B = 4'd4,   // degraded-fallback: word 2 individually
+        IC_FILL_3B = 4'd5,   // degraded-fallback: word 3 individually
+        IC_DONE    = 4'd6,
+        IC_XLATE   = 4'd7    // Phase 150, plan.md
     } ic_state_t;
     // BERR is signalled via a dedicated flag rather than a separate state,
     // since a BERR-vs-normal IC_DONE would otherwise be identical except
@@ -132,6 +164,9 @@ module biu_icache_if (
     // of the freshly requested one — found building the I-2 aliasing/
     // eviction test, plan.md Phase 128).
     logic      abandoned_r;
+    logic      xlate_fault_r;  // Phase 150: distinguishes IC_DONE reached via
+                                // a pure translation fault from berr_r's own
+                                // real-bus-error path
 
     logic [31:0] fill_base_r, fill_rdata_r;
     logic [3:0]  idx_r;
@@ -169,6 +204,7 @@ module biu_icache_if (
             state           <= IC_IDLE;
             berr_r          <= 1'b0;
             abandoned_r     <= 1'b0;
+            xlate_fault_r   <= 1'b0;
             ic_burst_req_r  <= 1'b0;
             ic_burst_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) valid_i[k] <= 1'b0;
@@ -180,17 +216,26 @@ module biu_icache_if (
 
             case (state)
                 IC_IDLE: begin
-                    // Only the enabled (state-machine-driven) path passes
-                    // through IC_IDLE; the disabled path is a pure
+                    // Only the enabled-state-machine path (cache enabled,
+                    // OR the MMU enabled and needing to translate every
+                    // fetch regardless of caching, Phase 150) passes through
+                    // IC_IDLE; the fully-disabled path is a pure
                     // combinational bypass below and never touches `state`.
-                    if (ifu_req && icache_en) begin
+                    if (ifu_req && (icache_en || tc_e)) begin
                         idx_r       <= idx;
                         woff_r      <= woff;
                         vtag_r      <= vtag;
                         fill_base_r <= {ifu_addr[31:4], 4'h0};
                         abandoned_r <= 1'b0;
                         if (ihit) begin
+                            // ihit already requires icache_en, so this can
+                            // only fire when the cache is genuinely enabled
+                            // — no bus cycle at all, so no translation
+                            // needed (BIU-154's own "0 additional bus
+                            // cycles" hit penalty).
                             state <= IC_HIT;
+                        end else if (tc_e) begin
+                            state <= IC_XLATE;
                         end else begin
                             state           <= IC_BURST0;
                             ic_burst_req_r  <= 1'b1;
@@ -200,6 +245,29 @@ module biu_icache_if (
                 end
 
                 IC_HIT: state <= IC_IDLE; // eu-style: ack fires combinationally, one-shot
+
+                // Phase 150 (plan.md): translate before starting the real
+                // burst/fill. xl_req held (output block, below) for the
+                // whole time this state is active. fill_base_r must also be
+                // updated to the translated line base — IC_FILL_1B/2B/3B's
+                // own degraded-fallback addressing depends on it.
+                IC_XLATE: begin
+                    if (!same_req) abandoned_r <= 1'b1;
+                    if (xl_fault) begin
+                        berr_r        <= 1'b1;
+                        // Suppress the synthetic pulse for a real bus error
+                        // during the walk -- biu_cycle_gen's own
+                        // fault_valid_r already captured it independently
+                        // (see biu_cache_if.sv's own identical comment).
+                        xlate_fault_r <= !xl_fault_is_berr;
+                        state         <= IC_DONE;
+                    end else if (xl_hit || xl_walk_done) begin
+                        fill_base_r     <= {xl_pa[31:4], 4'h0};
+                        ic_burst_req_r  <= 1'b1;
+                        ic_burst_addr_r <= {xl_pa[31:4], 4'h0};
+                        state           <= IC_BURST0;
+                    end
+                end
 
                 IC_BURST0: begin
                     // Latch "abandoned" the moment the requester moves on,
@@ -237,6 +305,7 @@ module biu_icache_if (
                         end
                     end else if (ic_burst_berr) begin
                         berr_r         <= 1'b1;
+                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
                         state          <= IC_DONE;
                         ic_burst_req_r <= 1'b0;
                     end
@@ -251,6 +320,7 @@ module biu_icache_if (
                         ic_burst_addr_r <= fill_base_r + 32'd8;
                     end else if (ic_burst_berr) begin
                         berr_r         <= 1'b1;
+                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
                         state          <= IC_DONE;
                         ic_burst_req_r <= 1'b0;
                     end
@@ -264,6 +334,7 @@ module biu_icache_if (
                         ic_burst_addr_r <= fill_base_r + 32'd12;
                     end else if (ic_burst_berr) begin
                         berr_r         <= 1'b1;
+                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
                         state          <= IC_DONE;
                         ic_burst_req_r <= 1'b0;
                     end
@@ -279,15 +350,17 @@ module biu_icache_if (
                         ic_burst_req_r <= 1'b0;
                     end else if (ic_burst_berr) begin
                         berr_r         <= 1'b1;
+                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
                         state          <= IC_DONE;
                         ic_burst_req_r <= 1'b0;
                     end
                 end
 
                 IC_DONE: begin
-                    berr_r      <= 1'b0;
-                    abandoned_r <= 1'b0;
-                    state       <= IC_IDLE;
+                    berr_r        <= 1'b0;
+                    abandoned_r   <= 1'b0;
+                    xlate_fault_r <= 1'b0;
+                    state         <= IC_IDLE;
                 end
 
                 default: state <= IC_IDLE;
@@ -303,7 +376,26 @@ module biu_icache_if (
     // ever driven in the disabled branch now — the enabled-cache miss path
     // no longer touches biu_cycle_gen's ordinary ifu_* port at all.
     always_comb begin
-        if (!icache_en) begin
+        // Phase 150 (plan.md): MMU translation request, defaults
+        xl_va  = fill_base_r;
+        xl_fc  = 3'b110;  // fixed Supervisor Program Space, matches the
+                           // pre-existing burst path's own cg_burst_fc_mux
+                           // default — biu_cycle_gen never took a live FC
+                           // for ordinary instruction fetches even before
+                           // this phase, so this preserves that convention
+                           // rather than introducing a new inconsistency
+                           // between "FC translated with" and "FC fetched
+                           // with".
+        xl_rw  = 1'b1;     // instruction fetches are always reads
+        xl_req = 1'b0;
+
+        xlate_fault_pulse = 1'b0;
+        xlate_fault_addr  = fill_base_r;
+        xlate_fault_fc    = 3'b110;
+        xlate_fault_rw    = 1'b1;
+        xlate_fault_siz   = 2'b00;
+
+        if (!icache_en && !tc_e) begin
             cg_addr       = ifu_addr;
             cg_req        = ifu_req;
             ifu_rdata     = cg_rdata;
@@ -321,6 +413,10 @@ module biu_icache_if (
             ifu_berr      = 1'b0;
 
             case (state)
+                IC_XLATE: begin
+                    xl_req = 1'b1;   // held for the whole translation window
+                end
+
                 IC_HIT: begin
                     // Single-cycle transaction: check same_req live rather
                     // than via abandoned_r (which only ever gets set from
@@ -338,8 +434,14 @@ module biu_icache_if (
                         // update (if any) already happened; silently drop
                         // this stale ack/berr instead of misattributing it
                         // to whatever the IFU has since re-armed for.
-                    end else if (berr_r) ifu_berr = 1'b1;
-                    else begin
+                    end else if (berr_r) begin
+                        ifu_berr = 1'b1;
+                        // Phase 150 (plan.md): a pure translation fault (no
+                        // real bus error) needs a synthetic fault-capture
+                        // pulse, since biu_cycle_gen's own fault_valid_r
+                        // never fires for one.
+                        xlate_fault_pulse = xlate_fault_r;
+                    end else begin
                         ifu_rdata = fill_rdata_r;
                         ifu_ack   = 1'b1;
                     end

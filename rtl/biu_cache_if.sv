@@ -41,8 +41,54 @@ module biu_cache_if (
 
     // Control registers (written by EU via MOVEC)
     input  logic [31:0] cacr,
-    input  logic [31:0] caar
+    input  logic [31:0] caar,
+
+    // MMU translation control (Phase 150, plan.md) — only tc[31]=E is used
+    // here; the actual walk/ATC logic lives entirely in biu_mmu_if.sv.
+    input  logic [31:0] tc,
+
+    // MMU translation request/response (Phase 150, plan.md) — arbitrated
+    // via biu_mmu_arb.sv, one physical biu_mmu_if instance shared with the
+    // I-cache side (biu_icache_if.sv) and the existing top-level (PTEST)
+    // requester. va/fc/rw/req held as a level for the whole CI_XLATE
+    // window (see biu_mmu_arb.sv's own header for why this is safe).
+    output logic [31:0] xl_va,
+    output logic [2:0]  xl_fc,
+    output logic        xl_rw,
+    output logic        xl_req,
+    input  logic [31:0] xl_pa,
+    input  logic        xl_hit,
+    input  logic        xl_walk_done,
+    input  logic        xl_fault,
+    input  logic        xl_fault_is_berr, // 1=real bus error during the walk
+                                           // (biu_cycle_gen already captured
+                                           // it independently -- suppress
+                                           // the synthetic pulse below to
+                                           // avoid a stale double-capture)
+    input  logic        xl_ci,   // deferred this phase — see header note
+    input  logic        xl_wp,
+
+    // Synthetic fault-capture pulse for biu_exc_capture (Phase 150,
+    // plan.md) — fires the cycle a pure translation/WP fault (no real bus
+    // error at all) is detected. biu_cycle_gen's own fault_valid_r only
+    // ever fires for a genuine external BERR sampled during a real bus
+    // cycle, which an invalid-descriptor or WP fault never generates.
+    output logic         xlate_fault_pulse,
+    output logic [31:0]  xlate_fault_addr,
+    output logic [2:0]   xlate_fault_fc,
+    output logic         xlate_fault_rw,
+    output logic [1:0]   xlate_fault_siz
 );
+
+    // Phase 150 (plan.md): CI (mmu_ci input above, pre-existing) still gates
+    // hit detection using its own pre-existing, never-yet-live semantics —
+    // deliberately NOT touched by this phase. The new xl_ci result above is
+    // read but not yet acted on: real CI-driven "don't allocate this page
+    // into the cache" behavior on a fresh miss is deferred to a documented
+    // follow-up, out of Stage 0's own scope (translation + fault handling
+    // only). xl_ci is threaded through end-to-end now so that follow-up is
+    // a pure behavioral addition, not new plumbing.
+    wire tc_e = tc[31];
 
     // CACR bit aliases
     wire icache_en = cacr[0];
@@ -147,7 +193,8 @@ module biu_cache_if (
         CI_D_MISS = 4'd6,
         CI_WRITE  = 4'd7,
         CI_DONE   = 4'd8,
-        CI_BERR   = 4'd9
+        CI_BERR   = 4'd9,
+        CI_XLATE  = 4'd10   // Phase 150, plan.md
     } ci_state_t;
 
     ci_state_t state;
@@ -162,6 +209,10 @@ module biu_cache_if (
     logic [1:0]  woff_r;
     logic [23:0] vtag_r;
     logic [31:0] fill_rdata_r;  // captured rdata for CI_DONE return
+    logic        xlate_fault_r; // Phase 150: distinguishes a CI_BERR entered
+                                 // from CI_XLATE (pure translation/WP fault,
+                                 // no real bus error) from one entered via a
+                                 // genuine sf_berr elsewhere
 
     // Combinatorial hit detection (in CI_IDLE, before latching)
     wire [3:0]  idx  = eu_addr[7:4];
@@ -206,6 +257,7 @@ module biu_cache_if (
         if (!rst_n) begin
             state       <= CI_IDLE;
             fill_rdata_r <= 32'h0;
+            xlate_fault_r <= 1'b0;
             for (k = 0; k < 16; k++) begin
                 valid_i[k] <= 1'b0;
                 for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0;
@@ -231,11 +283,22 @@ module biu_cache_if (
                         vtag_r      <= vtag;
                         fill_base_r <= {eu_addr[31:4], 4'h0};
 
-                        if (!eu_rw) begin
-                            state <= CI_WRITE;
-                        end else if (eu_is_icache ? ihit : dhit) begin
-                            // Cache hit — serve from cache array (idx_r/woff_r latched above)
+                        if (eu_rw && (eu_is_icache ? ihit : dhit)) begin
+                            // Cache hit — serve from cache array (idx_r/woff_r
+                            // latched above). No bus cycle at all, so no
+                            // translation needed either way (Phase 150,
+                            // plan.md) — matches BIU-154's own "0 additional
+                            // bus cycles" hit-penalty spec.
                             state <= CI_HIT;
+                        end else if (tc_e) begin
+                            // Phase 150 (plan.md): any access that DOES need
+                            // a real bus cycle (a miss, or any write —
+                            // write-through always goes to the bus even on a
+                            // hit) needs its address translated first when
+                            // the MMU is enabled.
+                            state <= CI_XLATE;
+                        end else if (!eu_rw) begin
+                            state <= CI_WRITE;
                         end else if (eu_is_icache && icache_en && iburst_en) begin
                             state <= CI_FILL_0;
                         end else begin
@@ -249,12 +312,50 @@ module biu_cache_if (
                     state <= CI_IDLE;
                 end
 
+                // Phase 150 (plan.md): translate addr_r (still logical here)
+                // before proceeding to the real bus cycle. xl_req is held
+                // (output block, below) for the whole time this state is
+                // active — see biu_mmu_arb.sv's own header for why that's
+                // safe. A write to a write-protected page aborts exactly
+                // like a genuine translation fault.
+                CI_XLATE: begin
+                    if (xl_fault || (xl_wp && !rw_r)) begin
+                        // A WP violation is always a purely logical fault
+                        // (checked before any real access, no bus cycle
+                        // involved). xl_fault might be a real bus error
+                        // during the walk (biu_cycle_gen's own
+                        // fault_valid_r already captured it independently)
+                        // or a purely logical one (invalid descriptor) --
+                        // only the logical case needs our own synthetic
+                        // capture pulse; firing it for the real-BERR case
+                        // too would double-capture and stomp the correct
+                        // first capture with a later, stale one.
+                        xlate_fault_r <= xl_fault ? !xl_fault_is_berr : 1'b1;
+                        state         <= CI_BERR;
+                    end else if (xl_hit || xl_walk_done) begin
+                        // Overwrite the logical address with the translated
+                        // PA in place. Safe: page-offset bits (including
+                        // addr_r[1:0], which CI_WRITE's merge_wr() depends
+                        // on) pass through translation unchanged — only the
+                        // page-frame bits above the page boundary differ.
+                        addr_r <= xl_pa;
+                        if (!rw_r) begin
+                            state <= CI_WRITE;
+                        end else if (is_icache_r && icache_en && iburst_en) begin
+                            state <= CI_FILL_0;
+                        end else begin
+                            state <= CI_D_MISS;
+                        end
+                    end
+                end
+
                 CI_FILL_0: begin
                     if (sf_ack_rise) begin
                         data_i[idx_r][0] <= sf_rdata;
                         if (woff_r == 2'd0) fill_rdata_r <= sf_rdata;
                         state <= CI_FILL_1;
                     end else if (sf_berr) begin
+                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
                     end
                 end
@@ -264,6 +365,7 @@ module biu_cache_if (
                         if (woff_r == 2'd1) fill_rdata_r <= sf_rdata;
                         state <= CI_FILL_2;
                     end else if (sf_berr) begin
+                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
                     end
                 end
@@ -273,6 +375,7 @@ module biu_cache_if (
                         if (woff_r == 2'd2) fill_rdata_r <= sf_rdata;
                         state <= CI_FILL_3;
                     end else if (sf_berr) begin
+                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
                     end
                 end
@@ -284,6 +387,7 @@ module biu_cache_if (
                         valid_i[idx_r] <= 1'b1;
                         state <= CI_DONE;
                     end else if (sf_berr) begin
+                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
                     end
                 end
@@ -341,6 +445,7 @@ module biu_cache_if (
                         end
                         state <= CI_DONE;
                     end else if (sf_berr) begin
+                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
                     end
                 end
@@ -358,6 +463,7 @@ module biu_cache_if (
                         end
                         state <= CI_DONE;
                     end else if (sf_berr) begin
+                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
                     end
                 end
@@ -395,7 +501,23 @@ module biu_cache_if (
         sf_is_op = 1'b0;
         sf_req   = 1'b0;
 
+        // Phase 150 (plan.md): MMU translation request, defaults
+        xl_va  = addr_r;
+        xl_fc  = fc_r;
+        xl_rw  = rw_r;
+        xl_req = 1'b0;
+
+        xlate_fault_pulse = 1'b0;
+        xlate_fault_addr  = addr_r;
+        xlate_fault_fc    = fc_r;
+        xlate_fault_rw    = rw_r;
+        xlate_fault_siz   = siz_r;
+
         case (state)
+            CI_XLATE: begin
+                xl_req = 1'b1;   // held for the whole translation window
+            end
+
             CI_HIT: begin
                 // Serve directly from cache; no sf_req
                 if (is_icache_r)
@@ -461,6 +583,10 @@ module biu_cache_if (
 
             CI_BERR: begin
                 eu_berr  = 1'b1;
+                // Phase 150 (plan.md): a pure translation/WP fault (no real
+                // bus error) needs a synthetic fault-capture pulse, since
+                // biu_cycle_gen's own fault_valid_r never fires for one.
+                xlate_fault_pulse = xlate_fault_r;
             end
 
             default: ;  // CI_IDLE: sf_req=0, eu_ack=0

@@ -34,6 +34,7 @@ BIU_SRCS := \
     rtl/biu_cache_if.sv \
     rtl/biu_icache_if.sv \
     rtl/biu_mmu_if.sv \
+    rtl/biu_mmu_arb.sv \
     rtl/biu_exc_capture.sv \
     rtl/biu_byte_lane_ctrl.sv \
     rtl/biu_config.sv \

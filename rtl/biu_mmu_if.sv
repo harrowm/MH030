@@ -47,7 +47,9 @@ module biu_mmu_if (
     output logic        hit,        // ATC hit
     output logic        walk_done,  // TT bypass or walk complete
     output logic        fault,
+    output logic        fault_is_berr, // Phase 150 (plan.md): see fault_is_berr_r's own comment
     output logic        ci,
+    output logic        wp,         // write-protect (Phase 150, plan.md)
 
     // Bus port → cycle_gen mmu_req
     output logic [31:0] mmu_req_addr,
@@ -134,11 +136,13 @@ module biu_mmu_if (
     logic [4:0]  atc_hit_idx;
     logic [31:0] atc_hit_pa;
     logic        atc_hit_ci;
+    logic        atc_hit_wp;
     always_comb begin
         atc_hit_found = 1'b0;
         atc_hit_idx   = 5'd0;
         atc_hit_pa    = 32'h0;
         atc_hit_ci    = 1'b0;
+        atc_hit_wp    = 1'b0;
         for (int i = 0; i < ATC_SIZE; i++) begin
             if (atc_valid[i] && (atc_fc[i] == fc) &&
                 ((va & page_mask) == (atc_va[i] & page_mask))) begin
@@ -146,6 +150,7 @@ module biu_mmu_if (
                 atc_hit_idx   = 5'(i);
                 atc_hit_pa    = (atc_pa[i] & page_mask) | (va & ~page_mask);
                 atc_hit_ci    = atc_ci[i];
+                atc_hit_wp    = atc_wp[i];
             end
         end
     end
@@ -188,7 +193,18 @@ module biu_mmu_if (
     // Latched outputs (hold until next req)
     logic [31:0] pa_r;
     logic        ci_r;
+    logic        wp_r;   // write-protect (Phase 150, plan.md): mirrors ci_r exactly
     logic        hit_r, walk_done_r, fault_r;
+    // Phase 150 (plan.md): distinguishes a real bus error during the walk
+    // (already correctly captured by biu_cycle_gen's own generic S4-S6
+    // fault_valid_r sampling, completely independent of this module) from a
+    // purely logical fault (invalid descriptor / WP violation, no real bus
+    // error at all) that needs a NEW synthetic capture path instead (see
+    // m68030_biu.sv's own xlate_fault_pulse muxing) — consumers must gate
+    // on this to avoid double-capturing the same real BERR event twice and
+    // overwriting biu_exc_capture's correct first capture with a later,
+    // stale one (its own frame_valid has no re-capture guard by design).
+    logic        fault_is_berr_r;
 
     integer m;
 
@@ -197,9 +213,11 @@ module biu_mmu_if (
             ms_state       <= MS_IDLE;
             pa_r           <= 32'h0;
             ci_r           <= 1'b0;
+            wp_r           <= 1'b0;
             hit_r          <= 1'b0;
             walk_done_r    <= 1'b0;
             fault_r        <= 1'b0;
+            fault_is_berr_r <= 1'b0;
             atc_victim      <= 5'd0;
             walk_req_addr_r <= 32'h0;
             fa_lo_r         <= 5'd22;
@@ -238,18 +256,22 @@ module biu_mmu_if (
                             // MMU disabled: identity mapping
                             pa_r     <= va;
                             ci_r     <= 1'b0;
+                            wp_r     <= 1'b0;
                             ms_state <= MS_TT_HIT;
                         end else if (tt_match(tt0, va, fc, rw)) begin
                             pa_r     <= va;
                             ci_r     <= tt0[13];
+                            wp_r     <= 1'b0;   // TT bypass: no page descriptor, no WP
                             ms_state <= MS_TT_HIT;
                         end else if (tt_match(tt1, va, fc, rw)) begin
                             pa_r     <= va;
                             ci_r     <= tt1[13];
+                            wp_r     <= 1'b0;
                             ms_state <= MS_TT_HIT;
                         end else if (atc_hit_found) begin
                             pa_r     <= atc_hit_pa;
                             ci_r     <= atc_hit_ci;
+                            wp_r     <= atc_hit_wp;
                             ms_state <= MS_ATC_HIT;
                         end else begin
                             // ATC miss → start table walk level A
@@ -272,13 +294,15 @@ module biu_mmu_if (
 
                 MS_WALK_A: begin
                     if (mmu_berr) begin
-                        fault_r  <= 1'b1;
+                        fault_r        <= 1'b1;
+                        fault_is_berr_r <= 1'b1;  // Phase 150: real bus error
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
                         walk_desc_r <= mmu_rdata;
                         case (mmu_rdata[1:0])
                             2'b00: begin  // invalid descriptor
-                                fault_r  <= 1'b1;
+                                fault_r         <= 1'b1;
+                                fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                                 ms_state <= MS_FAULT;
                             end
                             2'b01: begin  // page descriptor (leaf at level A)
@@ -317,13 +341,15 @@ module biu_mmu_if (
 
                 MS_WALK_B: begin
                     if (mmu_berr) begin
-                        fault_r  <= 1'b1;
+                        fault_r        <= 1'b1;
+                        fault_is_berr_r <= 1'b1;  // Phase 150: real bus error
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
                         walk_desc_r <= mmu_rdata;
                         case (mmu_rdata[1:0])
                             2'b00: begin
-                                fault_r  <= 1'b1;
+                                fault_r         <= 1'b1;
+                                fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                                 ms_state <= MS_FAULT;
                             end
                             2'b01: begin  // page descriptor (leaf at level B)
@@ -360,7 +386,8 @@ module biu_mmu_if (
 
                 MS_WALK_C: begin
                     if (mmu_berr) begin
-                        fault_r  <= 1'b1;
+                        fault_r        <= 1'b1;
+                        fault_is_berr_r <= 1'b1;  // Phase 150: real bus error
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
                         // Must be a page descriptor
@@ -371,7 +398,8 @@ module biu_mmu_if (
                             walk_wp_r  <= mmu_rdata[2];
                             ms_state   <= MS_WALK_DONE;
                         end else begin
-                            fault_r  <= 1'b1;
+                            fault_r         <= 1'b1;
+                            fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                             ms_state <= MS_FAULT;
                         end
                     end
@@ -389,6 +417,7 @@ module biu_mmu_if (
                     // Output PA
                     pa_r        <= walk_pa_r;
                     ci_r        <= walk_ci_r;
+                    wp_r        <= walk_wp_r;
                     walk_done_r <= 1'b1;
                     ms_state    <= MS_IDLE;
                 end
@@ -408,9 +437,11 @@ module biu_mmu_if (
     // -----------------------------------------------------------------------
     assign pa        = pa_r;
     assign ci        = ci_r;
+    assign wp        = wp_r;
     assign hit       = hit_r;
     assign walk_done = walk_done_r;
     assign fault     = fault_r;
+    assign fault_is_berr = fault_is_berr_r;
     assign pflush_ack = pflush_ack_r;
     assign mmusr     = 16'h0;  // placeholder: PTEST result not yet implemented
 

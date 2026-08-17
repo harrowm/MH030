@@ -845,12 +845,31 @@ module stall_fsm_tb;
         // technique as biu_tb.sv's own P6-6 TT0-bypass test, just widened
         // to match any VA rather than one specific range — so PTEST
         // resolves immediately without needing any actual page-table data.
+        //
+        // Phase 150 (plan.md): TT0 is now genuinely wired into every real
+        // IFU/EU bus access (previously it only ever mattered to PTEST's
+        // own dedicated walk), so the *order* of these two PMOVEs matters
+        // for the first time — TT0 must be configured (transparent) BEFORE
+        // TC.E is ever set to 1, not after. The original order set TC.E=1
+        // first: the very next instruction fetch (loading TT0's own address
+        // into A0) then needed real translation despite TT0 still being
+        // disabled and CRP still holding its power-on-reset garbage,
+        // triggering a genuine translation fault the RTL correctly detects
+        // but this test has no vector-2 handler installed yet to service —
+        // confirmed via a standalone probe (500000-cycle budget, ~10x this
+        // test's normal margin) that this truly never completes, not just a
+        // budget shortfall. Real 68030 firmware has the identical
+        // constraint: transparent windows must be live before the MMU
+        // itself is enabled. Swapped so TT0 loads first (still under
+        // TC.E=0, translation-free — the pre-Phase-150 default path) and
+        // TC loads last, so every fetch from that point on is immediately
+        // covered by the already-live transparent TT0.
         // -----------------------------------------------------------------
         rom[16'h1700/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h1704/4] = {16'h3800, PMOVE_A0_OP};     // PMOVE (A0),TC
-        rom[16'h1708/4] = {PMOVE_TC_EXT, MOVEA_L_IMM_A0};
-        rom[16'h170C/4] = {16'h0000, 16'h3804};
-        rom[16'h1710/4] = {PMOVE_A0_OP, PMOVE_TT0_EXT}; // PMOVE (A0),TT0
+        rom[16'h1704/4] = {16'h3804, PMOVE_A0_OP};     // PMOVE (A0),TT0
+        rom[16'h1708/4] = {PMOVE_TT0_EXT, MOVEA_L_IMM_A0};
+        rom[16'h170C/4] = {16'h0000, 16'h3800};
+        rom[16'h1710/4] = {PMOVE_A0_OP, PMOVE_TC_EXT};  // PMOVE (A0),TC
         rom[16'h1714/4] = {MOVEA_L_IMM_A0, 16'h0000};
         rom[16'h1718/4] = {16'h3700, PTEST_A0_OP};
         rom[16'h171C/4] = {PTEST_EXT, CLR_L_D5};
@@ -1001,6 +1020,38 @@ module stall_fsm_tb;
         // real cycles per access, so this needs a much larger budget than
         // every earlier MMU-disabled test in this file.
         run_and_check("B-21: PMOVE CRP dependent instr ran (D5=913)", 5, 32'd913, 20000);
+
+        // Phase 150 (plan.md): disable the MMU again immediately after B-21
+        // (mirroring BERR-mid-PTEST's own already-established convention of
+        // disabling TC right after its own MMU-enabled use, below). Every
+        // test from here through BERR-mid-CAS2 was designed and verified
+        // (Phases 103-126) with translation genuinely inert — TC.E=0 was
+        // just a register bit with no bus-level effect. Phase 150 makes
+        // TC.E=1 a real, live condition for the first time, and none of
+        // these downstream tests configure page tables or a transparent
+        // window covering their own code, so leaving TC.E=1 live across
+        // them (as B-20/B-21 originally did, harmlessly, pre-Phase-150)
+        // now causes every subsequent fetch to attempt a real walk against
+        // an unconfigured CRP and hang. Returning to TC.E=0 here restores
+        // the exact translation-free behavior these tests were verified
+        // against.
+        rom[16'h1814/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h1818/4] = {16'h3808, PMOVE_A0_OP};      // PMOVE (A0),TC
+        rom[16'h181C/4] = {PMOVE_TC_EXT, NOP_OP};
+        rom[16'h3808/4] = 32'h0000_0000;                // TC: E=0 (disabled)
+
+        // Settle wait: block until the disable-TC PMOVE above has actually
+        // retired (confirmed via TC's own live value, not a cycle guess) —
+        // its own data read of rom[0x3808] is a real data-space bus cycle,
+        // and without this wait it can land inside T4a's own c0/c1
+        // data_ds_count window below, inflating "4 bus cycles" to 5. B-21's
+        // run_and_check already returns the instant D5==913 lands, which is
+        // earlier in real hardware time than this PMOVE has even started.
+        begin
+            int tw;
+            for (tw = 0; tw < 2000 && u_top.u_eu.tc_out !== 32'h0; tw++)
+                @(posedge clk_4x);
+        end
 
         // -----------------------------------------------------------------
         // Task #4a (post-Phase-104 follow-up list): back-to-back FSM
@@ -1544,7 +1595,20 @@ module stall_fsm_tb;
             logic saw_biu_berr, injected4, exc_seen4;
 
             rom[16'h2300/4] = 32'h8C0A_A000;  // TC: E=1,PS=12,TIA=10,TIB=10
-            rom[16'h2304/4] = 32'h0000_0000;  // TT0: disabled (E=0)
+            // Phase 150 (plan.md): TT0 must stay live (narrowed to an exact
+            // top-byte match, LAM=0x00 instead of B-20's LAM=0xFF-any) so
+            // this file's own code -- now genuinely translated for every
+            // real fetch -- keeps bypassing via TT0, while the deliberately
+            // different-top-byte PTEST target VA below (0x01001000) falls
+            // outside it and correctly reaches the real walker. Fully
+            // disabling TT0 (the original design) broke the very next
+            // ordinary instruction fetch after this PMOVE: CRP hadn't been
+            // loaded yet at that point, so it hit a real walk against
+            // garbage/zero CRP -- confirmed via direct signal trace
+            // (mmu_walk_req never asserted where expected; the fault-detect
+            // check below failed outright) once Phase 150 wired real
+            // translation into ordinary IFU/EU fetches for the first time.
+            rom[16'h2304/4] = 32'h0000_80E0;  // TT0: LAB=0,LAM=0x00(exact top-byte 0x00 match, code-only),E=1,FCM=any
             rom[16'h2308/4] = 32'h0000_0000;  // CRP hi (limit, unused)
             rom[16'h230C/4] = 32'h0000_2002;  // CRP lo: base=0x2000, DT=10 (table)
 
@@ -1562,7 +1626,11 @@ module stall_fsm_tb;
             rom[16'h1D14/4] = {MOVEA_L_IMM_A0, 16'h0000};
             rom[16'h1D18/4] = {16'h2308, PMOVE_A0_OP};      // PMOVE (A0),CRP
             rom[16'h1D1C/4] = {PMOVE_CRP_EXT, MOVEA_L_IMM_A0};
-            rom[16'h1D20/4] = {16'h0040, 16'h1000};         // A0 = VA 0x00401000
+            // VA's top byte (0x01) deliberately differs from this file's own
+            // code (top byte 0x00, covered by TT0's new narrowed match
+            // above) so PTEST's own translation request is the one thing
+            // that genuinely falls through to the real walker.
+            rom[16'h1D20/4] = {16'h0100, 16'h1000};         // A0 = VA 0x01001000
             rom[16'h1D24/4] = {PTEST_A0_OP, PTEST_EXT};      // PTEST (A0)
             // Reached once PTEST completes -- with or without a translation
             // fault, per real 68030 semantics (no trap either way).
