@@ -669,7 +669,7 @@ module eu_seq (
     // MOVE memory→memory (2-phase: read src EA, write to dst EA)
     logic        dec_is_move_mm;
     logic        dec_is_move_mm_idx_dst; // dst is (d8,An,Xi); src is abs.L or PC-rel
-    logic        dec_is_move_reg_idx_dst; // MOVE Dn/An→(d8,An,Xi): write data from rd_b after dyn_bit
+    logic        dec_is_move_reg_idx_dst; // MOVE Dn/An→(d8,An,Xi): plain write, source reg on rd_c (Phase 149)
     logic [31:0] dec_dst_ea_offset;
     logic        dec_abs_dst_ea_en;
     logic [31:0] dec_abs_dst_ea_val;
@@ -6016,7 +6016,7 @@ module eu_seq (
     // MOVE memory→memory
     logic        ex_is_move_mm;
     logic        ex_is_move_mm_idx_dst;
-    logic        ex_is_move_reg_idx_dst; // MOVE Dn/An→(d8,An,Xi): write from rd_b after dyn_bit
+    logic        ex_is_move_reg_idx_dst; // MOVE Dn/An→(d8,An,Xi): plain write, source reg on rd_c (Phase 149)
     logic [31:0] ex_dst_ea_offset;
     logic        ex_abs_dst_ea_en;
     logic [31:0] ex_abs_dst_ea_val;

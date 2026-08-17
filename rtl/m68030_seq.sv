@@ -283,12 +283,13 @@ module m68030_seq (
     // same "q1=other data, q2=EA descriptor" shape as abs.W-src/(d16,PC)-
     // src just above, so directly reuses peek_fi_full_movem/
     // movem_bd_words/movem_od_words (both word AND long bd supported,
-    // same as those two arms). MOVE.L's own baseline is imm32@q1,q2 +
-    // descriptor@q3 -- one word further out, so needs its own peek at
-    // q3's own bits; only WORD bd is achievable there (its own value
-    // needs q4, the last word before this project's IFU hard limit) --
-    // long bd and any od would need a genuine q5, unsupported, same
-    // Stage 8 boundary as elsewhere in this rollout.
+    // same as those two arms). This signal is MOVE.B/W only (word bd
+    // suffices at this baseline, no q5 needed); MOVE.L's own baseline
+    // is imm32@q1,q2 + descriptor@q3 -- one word further out, needing
+    // its own peek at q3's own bits (is_move_mm_imml_idxdst_full,
+    // below) -- word bd via q4, and (Phase 147, once q5 existed) long
+    // bd too via q5. Genuine memory-indirect + any od remain the only
+    // gap left for either arm.
     logic is_move_mm_immw_idxdst_full;
     assign is_move_mm_immw_idxdst_full =
         (f_group == 4'h1 || f_group == 4'h3) &&   // MOVE.B/W, not .L
@@ -416,11 +417,12 @@ module m68030_seq (
     // dyn_bit_get_Dn deferred-register swap for the tested Dn is orthogonal,
     // same as it was for Stage 2's dynamic bit-ops) -- no new decode
     // machinery needed, only the fi_is_full/fi_bd template plus feeding
-    // is_memind_full's gate. CMP2/CHK2's own indexed form is a genuine
-    // missing-decode gap (no f_mode==110 case exists in eu_seq.sv at all,
-    // brief or full -- unlike every other family here, it was never
-    // implemented, not just brief-limited), so it's deliberately excluded
-    // and left for its own future phase, not this one.
+    // is_memind_full's gate. CMP2/CHK2's own indexed form was, at this
+    // phase, a genuine missing-decode gap (no f_mode==110 case existed in
+    // eu_seq.sv at all, brief or full -- unlike every other family here,
+    // it had never been implemented, not just brief-limited), so it was
+    // deliberately excluded here; implemented in Phase 120
+    // (is_cmp2chk2_idx_full, below).
     // is_addq_subq_ext and is_pea are both declared later in this file;
     // Icarus's forward-reference limitation (see Stage 2's own comment on
     // is_alu_mem_src above) applies here too, so both conditions are
