@@ -41,6 +41,11 @@ module biu_mmu_if (
     input  logic [2:0]  fc,
     input  logic        rw,
     input  logic        req,
+    input  logic        is_ptest,   // Phase 150 Stage 4: PTEST query -- never
+                                     // writes U/M back, even when they'd
+                                     // otherwise need setting (confirmed
+                                     // against a real-hardware-faithful
+                                     // reference 68030 MMU emulator)
 
     // Translation result (registered; hold until next req)
     output logic [31:0] pa,
@@ -201,6 +206,7 @@ module biu_mmu_if (
     logic [31:0] walk_va_r;
     logic [2:0]  walk_fc_r;
     logic        walk_rw_r;
+    logic        walk_is_ptest_r; // Phase 150 Stage 4: latched is_ptest, gates MS_UPDATE
     logic [31:0] walk_desc_r;     // last read descriptor
     logic [31:0] walk_req_addr_r; // address to issue in current walk state
     logic [4:0]  fa_lo_r;         // latched fa_lo for B index computation
@@ -246,6 +252,36 @@ module biu_mmu_if (
     // stale one (its own frame_valid has no re-capture guard by design).
     logic        fault_is_berr_r;
 
+    // Phase 150 Stage 4 (plan.md): real MMUSR (BIU-087), replacing the
+    // dead 16'h0 placeholder this output used to be (nothing had ever
+    // consumed it before -- m68030_mmu.sv built its own separate, cruder
+    // approximation instead, including a real bug where CI was placed at
+    // bit 7, which the spec actually defines as S; fixed by having
+    // m68030_mmu.sv simply relay this output instead of computing its own).
+    // Bit layout (confirmed against Motorola's own MMU documentation):
+    // 15=B(bus error, real-hardware bit, not in biu_spec.md's own table but
+    // a confirmed real-chip fact -- kept from this project's own
+    // pre-existing convention), 13=T(translation fault), 12=WP(current
+    // page WP status), 11=I(invalid descriptor), 10=M(current M status),
+    // 8=U(current U status), 2=ATC(hit, not a fresh walk). Deliberately
+    // left at their reset default of 0, not implemented this stage: 7=S
+    // (supervisor violation -- this project's MMU has no FC-based
+    // protection-check mechanism to ever set it), 6:3=Level and 1:0=N
+    // (which table level a walk resolved/faulted at, and how many levels
+    // were searched -- correctly computing these needs the outcome-level
+    // tracked at every one of MS_WALK_A/B/C's own leaf/fault/no-next-level
+    // sites, a substantially larger change deferred as a documented,
+    // lower-confidence follow-up rather than guessed at here; the bits
+    // that actually drive real OS page-fault-handler logic -- T/WP/I --
+    // are unaffected by this simplification).
+    logic [15:0] mmusr_r;
+    function automatic logic [15:0] build_mmusr(
+        input logic b, input logic t, input logic wp_b, input logic i_b,
+        input logic m_b, input logic u_b, input logic atc_b
+    );
+        build_mmusr = {b, 1'b0, t, wp_b, i_b, m_b, 1'b0, u_b, 1'b0, 4'b0000, atc_b, 2'b00};
+    endfunction
+
     integer m;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -267,6 +303,8 @@ module biu_mmu_if (
             update_wdata_r     <= 32'h0;
             update_from_atc_r  <= 1'b0;
             atc_m_update_idx_r <= 5'd0;
+            walk_is_ptest_r    <= 1'b0;
+            mmusr_r            <= 16'h0;
             for (m = 0; m < ATC_SIZE; m++) begin
                 atc_valid[m]     <= 1'b0;
                 atc_ci[m]        <= 1'b0;
@@ -298,6 +336,7 @@ module biu_mmu_if (
                         walk_va_r  <= va;
                         walk_fc_r  <= fc;
                         walk_rw_r  <= rw;
+                        walk_is_ptest_r <= is_ptest;
 
                         if (!tc_e) begin
                             // MMU disabled: identity mapping
@@ -327,7 +366,7 @@ module biu_mmu_if (
                             pa_r <= atc_hit_pa;
                             ci_r <= atc_hit_ci;
                             wp_r <= atc_hit_wp;
-                            if (!rw && !atc_hit_m) begin
+                            if (!rw && !atc_hit_m && !is_ptest) begin
                                 walk_desc_addr_r  <= atc_hit_desc_addr;
                                 update_wdata_r    <= (atc_hit_pa & page_mask) |
                                                       (atc_hit_ci ? 32'h40 : 32'h0) |
@@ -352,24 +391,30 @@ module biu_mmu_if (
 
                 MS_TT_HIT: begin
                     walk_done_r <= 1'b1;
+                    mmusr_r     <= 16'h0;  // Phase 150 Stage 4: TT bypass, no page-level detail
                     ms_state    <= MS_IDLE;
                 end
 
                 MS_ATC_HIT: begin
                     hit_r    <= 1'b1;
+                    // Phase 150 Stage 4: atc_hit_wp/atc_hit_m are still live
+                    // here (purely combinational off va/fc, which the
+                    // requester holds stable throughout the whole
+                    // transaction -- the same assumption pa_r/ci_r/wp_r's
+                    // own pre-existing MS_IDLE-time capture already relies
+                    // on).
+                    mmusr_r  <= build_mmusr(1'b0, 1'b0, atc_hit_wp, 1'b0, atc_hit_m, 1'b1, 1'b1);
                     ms_state <= MS_IDLE;
                 end
 
                 MS_WALK_A: begin
                     if (mmu_berr) begin
-                        fault_r        <= 1'b1;
                         fault_is_berr_r <= 1'b1;  // Phase 150: real bus error
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
                         walk_desc_r <= mmu_rdata;
                         case (mmu_rdata[1:0])
                             2'b00: begin  // invalid descriptor
-                                fault_r         <= 1'b1;
                                 fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                                 ms_state <= MS_FAULT;
                             end
@@ -378,7 +423,7 @@ module biu_mmu_if (
                                               (walk_va_r & ~page_mask);
                                 walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6 (see walk_desc_addr_r's own comment)
                                 walk_wp_r  <= mmu_rdata[2];
-                                if (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4])) begin
+                                if (!walk_is_ptest_r && (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4]))) begin
                                     // U and/or M needs setting -- a real write-back
                                     // cycle (BIU-086) before this access can complete.
                                     walk_desc_addr_r  <= walk_req_addr_r;
@@ -423,14 +468,12 @@ module biu_mmu_if (
 
                 MS_WALK_B: begin
                     if (mmu_berr) begin
-                        fault_r        <= 1'b1;
                         fault_is_berr_r <= 1'b1;  // Phase 150: real bus error
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
                         walk_desc_r <= mmu_rdata;
                         case (mmu_rdata[1:0])
                             2'b00: begin
-                                fault_r         <= 1'b1;
                                 fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                                 ms_state <= MS_FAULT;
                             end
@@ -439,7 +482,7 @@ module biu_mmu_if (
                                               (walk_va_r & ~page_mask);
                                 walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6
                                 walk_wp_r  <= mmu_rdata[2];
-                                if (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4])) begin
+                                if (!walk_is_ptest_r && (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4]))) begin
                                     walk_desc_addr_r  <= walk_req_addr_r;
                                     update_wdata_r     <= mmu_rdata |
                                                            (!mmu_rdata[3] ? 32'h8 : 32'h0) |
@@ -480,7 +523,6 @@ module biu_mmu_if (
 
                 MS_WALK_C: begin
                     if (mmu_berr) begin
-                        fault_r        <= 1'b1;
                         fault_is_berr_r <= 1'b1;  // Phase 150: real bus error
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
@@ -490,7 +532,7 @@ module biu_mmu_if (
                                           (walk_va_r & ~page_mask);
                             walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6
                             walk_wp_r  <= mmu_rdata[2];
-                            if (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4])) begin
+                            if (!walk_is_ptest_r && (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4]))) begin
                                 walk_desc_addr_r  <= walk_req_addr_r;
                                 update_wdata_r     <= mmu_rdata |
                                                        (!mmu_rdata[3] ? 32'h8 : 32'h0) |
@@ -504,7 +546,6 @@ module biu_mmu_if (
                                 ms_state <= MS_WALK_DONE;
                             end
                         end else begin
-                            fault_r         <= 1'b1;
                             fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                             ms_state <= MS_FAULT;
                         end
@@ -527,6 +568,10 @@ module biu_mmu_if (
                     ci_r        <= walk_ci_r;
                     wp_r        <= walk_wp_r;
                     walk_done_r <= 1'b1;
+                    // Phase 150 Stage 4: fresh walk, not an ATC hit. U is
+                    // unconditionally 1 by this point (MS_UPDATE always
+                    // resolves it before a walk ever reaches here).
+                    mmusr_r     <= build_mmusr(1'b0, 1'b0, walk_wp_r, 1'b0, walk_m_r, 1'b1, 1'b0);
                     ms_state    <= MS_IDLE;
                 end
 
@@ -542,16 +587,37 @@ module biu_mmu_if (
                 // nothing left to cache).
                 MS_UPDATE: begin
                     if (mmu_berr) begin
-                        fault_r        <= 1'b1;
                         fault_is_berr_r <= 1'b1;
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
                         if (update_from_atc_r) begin
+                            // pa_r/ci_r/wp_r are deliberately NOT re-driven
+                            // here: they were already correctly set at the
+                            // MS_IDLE ATC-hit decision point
+                            // (pa_r<=atc_hit_pa; etc.) and nothing else
+                            // touches them while MS_UPDATE waits for its own
+                            // ack. A first version re-read walk_pa_r/
+                            // walk_ci_r/walk_wp_r here instead -- wrong,
+                            // since the ATC-hit path never populates those
+                            // (only the fresh-walk path does); it happened
+                            // to still work in tb/mmu_xlate_tb.sv's own
+                            // Phase 5 test purely because that test's
+                            // immediately-preceding read (of the *same*
+                            // page) coincidentally left walk_pa_r holding
+                            // the right value -- a genuinely different page
+                            // translated in between would have corrupted
+                            // the result. Found by re-deriving Stage 4's
+                            // own MMUSR computation from first principles
+                            // and noticing this branch's own data flow
+                            // didn't add up, not by a failing test.
                             atc_m[atc_m_update_idx_r] <= 1'b1;
-                            pa_r     <= walk_pa_r;
-                            ci_r     <= walk_ci_r;
-                            wp_r     <= walk_wp_r;
                             hit_r    <= 1'b1;
+                            // Phase 150 Stage 4: wp_r is already correct
+                            // here (see the comment above -- untouched
+                            // since the MS_IDLE ATC-hit decision point);
+                            // M is 1 unconditionally since that's exactly
+                            // what this write-back just accomplished.
+                            mmusr_r  <= build_mmusr(1'b0, 1'b0, wp_r, 1'b0, 1'b1, 1'b1, 1'b1);
                             ms_state <= MS_IDLE;
                         end else begin
                             ms_state <= MS_WALK_DONE;
@@ -561,6 +627,18 @@ module biu_mmu_if (
 
                 MS_FAULT: begin
                     fault_r  <= 1'b1;
+                    // Phase 150 Stage 4: fault_is_berr_r was already set
+                    // correctly one cycle ago (the same cycle MS_WALK_A/B/C
+                    // decided to transition here) and is untouched since --
+                    // matches this project's own pre-existing 16'h8000
+                    // convention for a real bus error (B alone, no other
+                    // bits), and T+I together for the only other fault
+                    // shape this module currently detects (invalid
+                    // descriptor -- WP violations are a separate path,
+                    // detected downstream in biu_cache_if.sv, and never
+                    // reach fault_r here at all).
+                    mmusr_r  <= fault_is_berr_r ? 16'h8000
+                                                 : build_mmusr(1'b0, 1'b1, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0);
                     ms_state <= MS_IDLE;
                 end
 
@@ -580,7 +658,7 @@ module biu_mmu_if (
     assign fault     = fault_r;
     assign fault_is_berr = fault_is_berr_r;
     assign pflush_ack = pflush_ack_r;
-    assign mmusr     = 16'h0;  // placeholder: PTEST result not yet implemented
+    assign mmusr     = mmusr_r;  // Phase 150 Stage 4 (plan.md): real MMUSR (BIU-087)
 
     // mmu_req: assert while issuing walk read cycles, or the Phase 150
     // Stage 3 U/M write-back cycle. mmu_req_rw/mmu_req_wdata (1=read,

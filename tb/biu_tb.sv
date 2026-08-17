@@ -612,6 +612,7 @@ module biu_tb;
         .fc           (eu_fc_tb),
         .rw           (eu_rw_tb),
         .req          (use_mmu_tb ? eu_req_tb : 1'b0),
+        .is_ptest     (1'b0),   // Phase 150 Stage 4: this file's own tests are never PTEST
         .pa           (mmu_pa_out),
         .hit          (mmu_hit_out),
         .walk_done    (mmu_walk_done_out),

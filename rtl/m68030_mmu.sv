@@ -54,10 +54,21 @@ module m68030_mmu (
     output logic [2:0]  biu_fc,
     output logic        biu_rw,
     output logic        biu_req,       // one-cycle strobe to biu_mmu_if
+    output logic        biu_is_ptest,  // Phase 150 Stage 4 (plan.md): tells biu_mmu_if
+                                        // this request is a PTEST query, not a real
+                                        // access -- PTEST must never write U/M back
+                                        // (confirmed against a real-hardware-faithful
+                                        // reference 68030 MMU emulator: PTEST's own
+                                        // table search explicitly skips the descriptor
+                                        // update step a normal access takes). Without
+                                        // this, Stage 3's new U/M write-back logic
+                                        // would incorrectly treat a pure status query
+                                        // as a real access and write to memory.
     input  logic [31:0] biu_pa,
     input  logic        biu_done,      // mmu_done_ext from BIU (hit|walk_done)
     input  logic        biu_fault,     // mmu_fault from BIU
     input  logic        biu_ci,        // mmu_ci from BIU
+    input  logic [15:0] biu_mmusr,     // Phase 150 Stage 4: real MMUSR from biu_mmu_if
 
     // ── BIU pflush port ───────────────────────────────────────────────────
     output logic        biu_pflush_req,
@@ -101,6 +112,7 @@ module m68030_mmu (
             biu_va          <= 32'h0;
             biu_fc          <= 3'b0;
             biu_rw          <= 1'b1;
+            biu_is_ptest    <= 1'b0;
             biu_pflush_req  <= 1'b0;
             biu_pflush_all  <= 1'b0;
             biu_pflush_fc   <= 3'b0;
@@ -131,6 +143,7 @@ module m68030_mmu (
                         biu_va          <= ptest_va;
                         biu_fc          <= ptest_fc;
                         biu_rw          <= 1'b1;  // PTEST is always a read walk
+                        biu_is_ptest    <= 1'b1;  // Phase 150 Stage 4: no U/M side effects
                         ptest_pending_r <= 1'b1;
                         mm_state        <= MM_WAIT;
 
@@ -148,6 +161,7 @@ module m68030_mmu (
                             biu_va          <= va_in;
                             biu_fc          <= fc_in;
                             biu_rw          <= rw_in;
+                            biu_is_ptest    <= 1'b0;  // Phase 150 Stage 4: a real access
                             ptest_pending_r <= 1'b0;
                             mm_state        <= MM_WAIT;
                         end
@@ -160,16 +174,22 @@ module m68030_mmu (
                         pa_r     <= 32'h0;
                         fault_r  <= 1'b1;
                         ci_r     <= 1'b0;
-                        // Build minimal MMUSR: B=1 (bus error), L=level, other=0
-                        mmusr_r  <= 16'h8000;  // Bus fault
+                        // Phase 150 Stage 4: biu_mmu_if.sv's own MS_FAULT
+                        // already computes the correct MMUSR (16'h8000 for
+                        // a real bus error, or T+I set for an invalid
+                        // descriptor) -- just relay it instead of
+                        // re-deriving a cruder approximation here.
+                        mmusr_r  <= biu_mmusr;
                         mm_state <= MM_DONE;
                     end else if (biu_done) begin
                         pa_r     <= biu_pa;
                         fault_r  <= 1'b0;
                         ci_r     <= biu_ci;
-                        // MMUSR: PA[7:0] = 0, T=0, L=0, S=supervisor(implicit)
-                        // WP and CI come from the walk result (BIU drives mmu_ci)
-                        mmusr_r  <= {8'h00, biu_ci, 7'h00};
+                        // Phase 150 Stage 4: real MMUSR (BIU-087), relayed
+                        // from biu_mmu_if.sv -- was `{8'h00,biu_ci,7'h00}`,
+                        // a real bug (CI squatting on bit 7, which the spec
+                        // defines as S) fixed by this stage.
+                        mmusr_r  <= biu_mmusr;
                         mm_state <= MM_DONE;
                     end
                 end

@@ -217,6 +217,7 @@ module m68030_biu #(
     input  logic [2:0]  mmu_fc_ext,
     input  logic        mmu_rw_ext,
     input  logic        mmu_req_ext,
+    input  logic        mmu_is_ptest_ext, // Phase 150 Stage 4
     output logic [31:0] mmu_pa_ext,
     output logic        mmu_done_ext,   // hit | walk_done (one-cycle pulse)
 
@@ -434,12 +435,14 @@ module m68030_biu #(
     logic        raw_mmu_hit_w, raw_mmu_walk_done_w, raw_mmu_fault_w;
     logic        raw_mmu_fault_is_berr_w;
     logic        raw_mmu_ci_w, raw_mmu_wp_w;
+    logic [15:0] raw_mmu_mmusr_w; // Phase 150 Stage 4
 
     // Arbitrated request into biu_mmu_if
     logic [31:0] arb_mmu_va;
     logic [2:0]  arb_mmu_fc;
     logic        arb_mmu_rw;
     logic        arb_mmu_req;
+    logic        arb_mmu_is_ptest; // Phase 150 Stage 4
 
     // D-side (biu_cache_if.sv) translation-request wires
     logic [31:0] ca_xl_va, ca_xl_pa;
@@ -477,6 +480,7 @@ module m68030_biu #(
         .ext_fc  (mmu_fc_ext),
         .ext_rw  (mmu_rw_ext),
         .ext_req (mmu_req_ext),
+        .ext_is_ptest     (mmu_is_ptest_ext), // Phase 150 Stage 4
         .ext_pa           (mmu_pa_ext),
         .ext_hit          (mmu_hit_w),
         .ext_walk_done    (mmu_walk_done_w),
@@ -484,6 +488,7 @@ module m68030_biu #(
         .ext_fault_is_berr(),          // not consumed by m68030_mmu.sv today
         .ext_ci           (mmu_ci),
         .ext_wp           (),          // not consumed today
+        .ext_mmusr        (mmusr),     // Phase 150 Stage 4: now the real, EXT-demuxed MMUSR
 
         .d_va  (ca_xl_va),
         .d_fc  (ca_xl_fc),
@@ -513,13 +518,15 @@ module m68030_biu #(
         .mmu_fc  (arb_mmu_fc),
         .mmu_rw  (arb_mmu_rw),
         .mmu_req (arb_mmu_req),
+        .mmu_is_ptest      (arb_mmu_is_ptest), // Phase 150 Stage 4
         .mmu_pa            (raw_mmu_pa_w),
         .mmu_hit           (raw_mmu_hit_w),
         .mmu_walk_done     (raw_mmu_walk_done_w),
         .mmu_fault         (raw_mmu_fault_w),
         .mmu_fault_is_berr (raw_mmu_fault_is_berr_w),
         .mmu_ci            (raw_mmu_ci_w),
-        .mmu_wp            (raw_mmu_wp_w)
+        .mmu_wp            (raw_mmu_wp_w),
+        .mmu_mmusr         (raw_mmu_mmusr_w) // Phase 150 Stage 4
     );
 
     biu_mmu_if u_mmu (
@@ -529,6 +536,7 @@ module m68030_biu #(
         .fc          (arb_mmu_fc),
         .rw          (arb_mmu_rw),
         .req         (arb_mmu_req),
+        .is_ptest    (arb_mmu_is_ptest), // Phase 150 Stage 4
         .pa          (raw_mmu_pa_w),
         .hit         (raw_mmu_hit_w),
         .walk_done   (raw_mmu_walk_done_w),
@@ -536,6 +544,7 @@ module m68030_biu #(
         .fault_is_berr(raw_mmu_fault_is_berr_w),
         .ci          (raw_mmu_ci_w),
         .wp          (raw_mmu_wp_w),
+        .mmusr       (raw_mmu_mmusr_w), // Phase 150 Stage 4
         .mmu_req_addr(mmu_walk_addr),
         .mmu_req_fc  (mmu_walk_fc),
         .mmu_req     (mmu_walk_req),
@@ -549,7 +558,6 @@ module m68030_biu #(
         .srp         (srp),
         .tt0         (tt0),
         .tt1         (tt1),
-        .mmusr       (mmusr),
         .pflush_req  (mmu_pflush_req),
         .pflush_all  (mmu_pflush_all),
         .pflush_fc   (mmu_pflush_fc),

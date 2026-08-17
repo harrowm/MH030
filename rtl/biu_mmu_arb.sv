@@ -42,6 +42,7 @@ module biu_mmu_arb (
     input  logic [2:0]  ext_fc,
     input  logic        ext_rw,
     input  logic        ext_req,
+    input  logic        ext_is_ptest, // Phase 150 Stage 4: PTEST query, not a real access
     output logic [31:0] ext_pa,
     output logic        ext_hit,
     output logic        ext_walk_done,
@@ -49,6 +50,7 @@ module biu_mmu_arb (
     output logic        ext_fault_is_berr,
     output logic        ext_ci,
     output logic        ext_wp,
+    output logic [15:0] ext_mmusr,    // Phase 150 Stage 4: real MMUSR, broadcast like pa/ci/wp
 
     // Requester D — biu_cache_if.sv (D-cache/EU side miss-path translation)
     input  logic [31:0] d_va,
@@ -81,13 +83,15 @@ module biu_mmu_arb (
     output logic [2:0]  mmu_fc,
     output logic        mmu_rw,
     output logic        mmu_req,
+    output logic        mmu_is_ptest, // Phase 150 Stage 4
     input  logic [31:0] mmu_pa,
     input  logic        mmu_hit,
     input  logic        mmu_walk_done,
     input  logic        mmu_fault,
     input  logic        mmu_fault_is_berr,
     input  logic        mmu_ci,
-    input  logic        mmu_wp
+    input  logic        mmu_wp,
+    input  logic [15:0] mmu_mmusr     // Phase 150 Stage 4
 );
 
     typedef enum logic [1:0] {
@@ -112,6 +116,10 @@ module biu_mmu_arb (
     assign mmu_fc  = grant_ext ? ext_fc : (grant_d ? d_fc : i_fc);
     assign mmu_rw  = grant_ext ? ext_rw : (grant_d ? d_rw : i_rw);
     assign mmu_req = grant_ext || grant_d || grant_i;
+    // Phase 150 Stage 4: only EXT (m68030_mmu.sv's own PTEST path) can ever
+    // set this; D/I (ordinary EU/IFU cache-miss translation) are always
+    // real accesses.
+    assign mmu_is_ptest = grant_ext && ext_is_ptest;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -135,12 +143,13 @@ module biu_mmu_arb (
         end
     end
 
-    // Result demux — pa/ci/wp broadcast freely (harmless outside the owner's
-    // own window); hit/walk_done/fault gated so a pulse only ever reaches
-    // the requester actually being serviced.
+    // Result demux — pa/ci/wp/mmusr broadcast freely (harmless outside the
+    // owner's own window); hit/walk_done/fault gated so a pulse only ever
+    // reaches the requester actually being serviced.
     assign ext_pa       = mmu_pa;
     assign ext_ci        = mmu_ci;
     assign ext_wp        = mmu_wp;
+    assign ext_mmusr     = mmu_mmusr;
     assign ext_fault_is_berr = mmu_fault_is_berr;
     assign ext_hit        = mmu_hit       && (owner_r == OWN_EXT);
     assign ext_walk_done  = mmu_walk_done && (owner_r == OWN_EXT);

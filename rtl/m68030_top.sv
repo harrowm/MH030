@@ -336,6 +336,7 @@ module m68030_top #(
     logic        biu_mmu_rw_w, biu_mmu_req_w;
     logic [31:0] biu_mmu_pa_w;
     logic        biu_mmu_done_w, biu_mmu_fault_w, biu_mmu_ci_w;
+    logic        biu_mmu_is_ptest_w; // Phase 150 Stage 4
 
     // BIU ↔ MMU pflush port wires
     logic        biu_pflush_req_w, biu_pflush_all_w;
@@ -600,6 +601,8 @@ module m68030_top #(
         .biu_fc         (biu_mmu_fc_w),
         .biu_rw         (biu_mmu_rw_w),
         .biu_req        (biu_mmu_req_w),
+        .biu_is_ptest   (biu_mmu_is_ptest_w), // Phase 150 Stage 4
+        .biu_mmusr      (mmusr),              // Phase 150 Stage 4
         .biu_pa         (biu_mmu_pa_w),
         .biu_done       (biu_mmu_done_w),
         .biu_fault      (biu_mmu_fault_w),
@@ -782,6 +785,7 @@ module m68030_top #(
         .mmu_fc_ext      (biu_mmu_fc_w),
         .mmu_rw_ext      (biu_mmu_rw_w),
         .mmu_req_ext     (biu_mmu_req_w),
+        .mmu_is_ptest_ext(biu_mmu_is_ptest_w), // Phase 150 Stage 4
         .mmu_pa_ext      (biu_mmu_pa_w),
         .mmu_done_ext    (biu_mmu_done_w),
         // External PFLUSH port

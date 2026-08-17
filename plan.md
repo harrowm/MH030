@@ -6084,6 +6084,123 @@ BIU-087) is next.
 
 ---
 
+## Phase 150 Stage 4 — MMUSR correctness (BIU-087)
+
+### Goal
+
+Replace `biu_mmu_if.sv`'s dead `mmusr=16'h0` placeholder and `m68030_mmu.sv`'s ad hoc,
+spec-incorrect approximation (CI squatting on bit 7, which BIU-087 defines as S) with the
+real bit layout — T(13)/WP(12)/I(11)/M(10)/U(8)/S(7)/Level(6:3)/ATC(2)/N(1:0), plus B(15)
+for a genuine bus error during the walk — populated correctly by both PTEST and every real
+table walk.
+
+### Implementation
+
+`rtl/biu_mmu_if.sv`: new `build_mmusr()` function assembling the 16-bit result from named
+fields (Level/N/S deliberately left 0 — diagnostic-only bits with lower-confidence
+real-hardware edge-case semantics that don't gate any OS page-fault-handler decision, unlike
+T/WP/I which do); `mmusr_r` computed per-state: `MS_ATC_HIT` and `MS_WALK_DONE` build a
+success result (`atc=1`/`atc=0` respectively, `u=1` always — U is guaranteed set by that
+point since `MS_UPDATE` always resolves it first), `MS_UPDATE`'s own ATC-hit-needing-only-M
+completion path builds one with `m=1` (that's exactly what the write-back just accomplished),
+`MS_FAULT` builds either `16'h8000` (pure B, a real bus error) or `T=1,I=1` (invalid
+descriptor) depending on `fault_is_berr_r`. `rtl/biu_mmu_arb.sv`: broadcasts `mmusr` from the
+arbitrated `biu_mmu_if` port straight to the `EXT` (PTEST) requester, same style as the
+pre-existing `pa`/`ci`/`wp` broadcast — harmless outside the owner's own window since only
+one requester is ever mid-transaction. `rtl/m68030_mmu.sv`: `mmusr_r` simplified from two
+separate hand-rolled approximations (one for the fault path, one for the success path) down
+to a single `mmusr_r <= biu_mmusr;` relay in both `MM_WAIT` branches — `biu_mmu_if.sv` is now
+the sole source of truth. `rtl/m68030_top.sv`/`rtl/m68030_biu.sv`: threaded the new
+`biu_mmusr`/`biu_is_ptest` ports end-to-end between `m68030_mmu` and the arbiter.
+
+### Bug found during design (before any test ran): PTEST must not write U/M back
+
+Confirmed via a real-hardware-faithful reference 68030 MMU emulator (WinUAE's
+`cpummu030.c`) that PTEST's own table search explicitly skips the descriptor-update step a
+normal access takes — PTEST is a pure read-only status query. Stage 3's own new U/M
+write-back logic had no way to distinguish a PTEST-driven walk from a real access, so
+without a fix PTEST would have started incorrectly mutating page tables. Fixed by threading
+a new `is_ptest` signal end-to-end (`biu_mmu_if.sv` ← `biu_mmu_arb.sv` ← `m68030_biu.sv` ←
+`m68030_top.sv` ← `m68030_mmu.sv`), gating every U/M-update trigger condition on `!is_ptest`.
+
+### Bug found during design (before any test ran): MS_UPDATE stale-register read
+
+`MS_UPDATE`'s own `update_from_atc_r` completion branch originally re-read
+`walk_pa_r`/`walk_ci_r`/`walk_wp_r` — registers the ATC-hit dispatch path (`MS_IDLE`) never
+populates (only the fresh-walk path does; the ATC-hit path sets `pa_r`/`ci_r`/`wp_r`
+directly instead). Found by re-deriving Stage 4's own MMUSR computation from first
+principles and noticing the data flow didn't add up — not by a failing test. Fixed by
+removing the incorrect reassignment; `pa_r`/`ci_r`/`wp_r` are already correct and simply
+left untouched in that branch.
+
+### Bug found by the new test: `fault_r`/`mmusr_r` one-cycle race (a real, previously-latent RTL timing bug)
+
+The first version of the new MMUSR bit-level test (below) failed on the invalid-descriptor
+and bus-error scenarios, both showing a value that was exactly the *previous* PTEST call's
+own result — a one-PTEST-call-wide staleness. Traced with a temporary per-cycle `$display`
+of `mm_state`/`ms_state`/`mmusr_out`/`ptest_ack` and found the root cause: `MS_WALK_A/B/C`'s
+own transition-into-`MS_FAULT` branches asserted `fault_r <= 1'b1;` *at the transition
+itself* (one cycle before `MS_FAULT`'s own body computes the correct classification into
+`mmusr_r`, which only lands the cycle after). `m68030_mmu.sv`'s `MM_WAIT` relay
+(`mmusr_r <= biu_mmusr;`) fires the instant it first observes `biu_fault=1` — which, because
+of this early assertion, was one cycle *before* `biu_mmu_if.sv`'s own `mmusr_r` held the
+value for *this* fault, so it captured the stale value left over from whatever the *previous*
+successful translation had computed. This is the same class of bug the file's own `hit_r`
+(`MS_ATC_HIT`) and `walk_done_r` (`MS_WALK_DONE`) do NOT have — both of those pulse registers
+are set *inside* their own target state's body, in the same cycle as their own `mmusr_r`
+computation, which is exactly why the ATC-hit and fresh-walk-success MMUSR checks (MMU-9/10)
+passed on the first attempt while the fault checks (MMU-11/12) didn't. **Fixed** by removing
+the premature `fault_r <= 1'b1;` from all 7 sites where `MS_WALK_A`/`MS_WALK_B`/`MS_WALK_C`/
+`MS_UPDATE` transition into `MS_FAULT` (both the `mmu_berr` branches and the invalid-
+descriptor branches), leaving `fault_is_berr_r`'s own early assertion untouched (it's
+correctly read back one cycle later inside `MS_FAULT`'s own body, per that state's existing
+comment) — `MS_FAULT`'s own pre-existing `fault_r <= 1'b1;` (previously redundant with the
+early assertions) is now the sole place `fault_r` is ever set, synchronizing it with
+`mmusr_r` exactly the way `hit_r`/`walk_done_r` already were. This adds exactly one cycle of
+pure latency to every fault path (bus error or invalid descriptor) — functionally invisible
+to every existing consumer, all of which poll in a loop for `fault||hit||walk_done` rather
+than assuming a fixed cycle count.
+
+### Test
+
+Extended `tb/mmu_tb.sv` with MMU-9 through MMU-14, all PTEST-driven, checking `mmusr_out`
+bit-for-bit against `build_mmusr()`'s own computed value rather than the prior coarse "B=0"
+check: MMU-9 (fresh walk through a WP=1 page, not ATC'd — `wp=1,u=1` else 0), MMU-10 (same
+VA immediately re-queried — now an ATC hit, `atc=1` added — confirming a real 68030's PTEST
+does load the ATC even though it must skip U/M write-back), MMU-11 (an unmapped VA — level-A
+descriptor `DT=00` — `t=1,i=1`), MMU-12 (a genuine bus error injected mid-walk via the
+existing `inject_berr` stub knob — `mmusr==16'h8000` exactly), MMU-13 (PTEST on a fresh
+U=0/M=0/WP=0 page — `u=1` only — **plus** a new sticky write-cycle monitor on the walk bus,
+watching for any `mmu_req_rw==0` pulse, proving PTEST never issues a write, closing the
+"also test that PTEST does NOT modify U/M" item this session's own earlier work had left
+unverified), MMU-14 (a control/positive-proof case: a REAL, non-PTEST read of a different
+fresh page DOES trigger a write-cycle, proving the monitor genuinely catches a real write so
+MMU-13's negative result means something, and that Stage 3's write-back mechanism is live
+end-to-end through this harness). All 3 new fresh-VA routes (`VA2`/`VA4`/`VA5`) use the same
+CRP/2-level-walk shape as the file's own pre-existing `VA_TEST`, added to the walk-memory
+stub's combinational case list; `bm_walk_rw`/`bm_walk_wdata` newly wired into the `u_bm`
+instantiation to make the write-cycle monitor possible (previously left floating/unused in
+this file, only ever connected in `tb/mmu_xlate_tb.sv`). One test-authoring arithmetic
+mistake found and fixed along the way (not an RTL bug): MMU-13's own expected value was
+first computed as `16'h1000` (confusing bit 12 with bit 8 while eyeballing nibble
+boundaries) — `build_mmusr()`'s field layout doesn't align to nibble boundaries (`Level`
+spans bits 6:3, straddling a nibble), so bit-by-bit derivation is required; corrected to the
+right value (`16'h0100`, U alone) after the RTL fix already had the timing right and this
+was the only remaining mismatch.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (Verilator batch backend) — **PASS 702142, FAIL 2 (same documented ASL.b corpus
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline** — the mandatory gate here since
+the `fault_r` fix touches `biu_mmu_if.sv`'s core FSM again, even though Harte itself never
+sets `TC.E=1` and so never exercises any of Stage 0-4's own translation machinery at all.
+**This closes Stage 4 of the 6-stage MMU-hardening plan.** Stage 5 (PLOAD, currently
+entirely unimplemented) is next; Stage 6 (long-format descriptors) remains flagged as
+possibly out of scope, to be confirmed with the user before Stage 5 closes.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
