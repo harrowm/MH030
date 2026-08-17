@@ -1368,13 +1368,14 @@ module stall_fsm_tb;
         //   `mem_abort` collapses `ex_mem_stall`) suppresses the WB latch
         //   for that one cycle, so an aborted instruction never commits a
         //   phantom register write with garbage/stale data.
-        // Remaining ~15+ ex_mem_stall FSM sources (MOVEP, MOVE16, ADDX/
+        // The remaining ~15+ ex_mem_stall FSM sources (MOVEP, MOVE16, ADDX/
         // ABCD/PACK predecrement forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE,
-        // PFLUSH/PTEST/PMOVE64, single CAS, memory-indirect EA) still need
-        // the same `mem_abort` treatment — deliberately deferred as a
-        // follow-up, exactly mirroring how Category B's own FSM-decode-
-        // holdoff coverage was staged across Phases 103-104 (4 sources,
-        // then 21) rather than attempted in one pass.
+        // PFLUSH/PTEST/PMOVE64, single CAS, memory-indirect EA) got the
+        // same `mem_abort` treatment in Phase 109 (mirroring how Category
+        // B's own FSM-decode-holdoff coverage was staged across Phases
+        // 103-104, 4 sources then 21); PFLUSH/PTEST were confirmed already
+        // correctly handled in Phase 113. No `ex_mem_stall` source remains
+        // without BERR-abort coverage — see docs/stalls.md's own Category I.
         // -----------------------------------------------------------------
         $display("=== BERR mid-CAS2 sequence ===");
         begin
@@ -1623,16 +1624,15 @@ module stall_fsm_tb;
 
         // -----------------------------------------------------------------
         // BERR-mid-<X> for the remaining 12 of the 13 ex_mem_stall sources
-        // Phase 109 fixed with the mem_abort pattern (memory-indirect EA's
-        // own BERR test is deliberately deferred until task #3's decode
-        // investigation resolves whether that addressing mode's own EA
-        // computation is even correct -- building a BERR test on top of a
-        // suspected-buggy decode would be premature). Each reuses its
-        // corresponding B-N test's exact, already-proven opcode encoding
-        // and operand addresses -- safe to reuse here since every B-N
-        // test's own checks (in the "run to completion" section above)
-        // have already completed by the time any of this code runs, this
-        // being a purely sequential (not parallel) initial block.
+        // Phase 109 fixed with the mem_abort pattern. (Memory-indirect EA's
+        // own decode-correctness question was resolved in Phase 115, and
+        // its own BERR test -- BERR-mid-Memind -- was added in Phase 124,
+        // below.) Each reuses its corresponding B-N test's exact,
+        // already-proven opcode encoding and operand addresses -- safe to
+        // reuse here since every B-N test's own checks (in the "run to
+        // completion" section above) have already completed by the time
+        // any of this code runs, this being a purely sequential (not
+        // parallel) initial block.
         //
         // Must first disable the MMU that BERR-mid-PTEST just enabled with
         // a deliberately incomplete table (CRP pointing at a table that was

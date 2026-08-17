@@ -3205,8 +3205,11 @@ module eu_seq (
                                 dec_needs_ext   = 1'b1;
                             end
                         end else if (f_mode == 3'b111) begin
-                            // JSR (special EA) — abs or PC-relative target, push return PC
-                            // (d8,PC,Xn) deferred: needs A7 + Xn + PC simultaneously
+                            // JSR (special EA) — abs or PC-relative target, push return PC.
+                            // (d8,PC,Xn) (f_reg==011, below) needs A7+Xn+PC simultaneously --
+                            // resolved via dec_is_jsr_idx routing the push address through
+                            // the dedicated ex_cur_sp path (same mechanism as PEA/JSR
+                            // (d8,An,Xn)) instead of rd_b, freeing rd_b for Xn.
                             dec_valid      = 1'b1;
                             dec_is_jsr     = 1'b1;
                             dec_is_mem_wr  = 1'b1;
