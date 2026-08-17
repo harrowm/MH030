@@ -5431,6 +5431,65 @@ attempted, per the plan's own explicit scoping.
 
 ---
 
+## Phase 145 — Genuine q5 (5th extension word) IFU plumbing
+
+**Goal**: first stage of a new, user-approved plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`) tackling the two items deliberately left
+out of scope by the 7-stage correctness-edges rollout: MOVE Dn,(d8,An,Xn)'s own 3-register
+phantom read, and anything needing a genuine 5th extension word. A dedicated investigation
+(via a research agent, this session) confirmed the exact scope precisely: the IFU's 6-word
+prefetch queue `q[0:5]` already correctly fills `q[5]` today (the fill logic's own
+`q_cnt_df` can reach 6), but nothing ever exposes it — no output port, no `dn==6` drain
+case, no `ext6_valid` gate. Exposing it is a small, mechanical, purely additive change
+mirroring the already-proven `q3_word`/`ext34_data`/`ext4_valid`/`ext5_valid` pattern
+exactly — this stage adds the plumbing only, with zero consumers wired yet (deliberately
+inert, matching this project's own "safety net before consumers" discipline established
+back in the cache-verification plan's own Step 1/2 split).
+
+**`rtl/m68030_ifu.sv`**: added `q5_word` output (`=q[5]`), `ext6_valid` output
+(`=q_cnt>=3'd6`), and a new `3'd6` arm in the drain-shift `case(dn)` block — draining all
+6 words empties the queue entirely (only reachable when `q_cnt==6`, the queue's own
+physical maximum, so there's no `q[6]` to shift in; every `qd[]` slot simply goes to
+0/don't-care since `q_cnt_d` becomes 0 and nothing downstream reads it as valid). `dn`'s
+own field width (3 bits) already accommodated 6 with no widening needed — confirmed by
+reading the declaration directly before assuming a change was required.
+
+**`rtl/m68030_seq.sv`**: threaded `ifu_q5_word`/`ifu_ext6_valid` in and `eu_q5_word` out,
+mirroring the existing 3-hop `q3_word`/`ext34_data` wiring exactly. Also fixed a **real,
+previously-latent gap** in `eu_ext_valid`'s own priority formula while extending it: the
+old formula topped out at `ext_count>=4 → ifu_ext5_valid` — meaning any *future*
+`ext_count` value of 5 or higher would have incorrectly gated on "at least 5 words
+available" instead of the 6 it actually needs, an under-gating bug that would have let
+decode dispatch one word early. Not exploitable before this phase (nothing ever assigned
+`ext_count=5`), but real once Phase 146/147 do — fixed now, ahead of any consumer, by
+adding an explicit `ext_count>=5 → ifu_ext6_valid` tier above the existing one.
+
+**`rtl/m68030_top.sv`/`rtl/m68030_eu.sv`/`rtl/eu_seq.sv`**: mechanical 3-hop wiring
+extension for the same `q5_word` signal through to `eu_seq.sv`'s own input port (unused
+there for now — Phase 146/147 will consume it).
+
+**Testbench fix**: `tb/seq_ctrl_tb.sv` uses wildcard (`.*`) port connection, which (unlike
+every other affected testbench's own explicit named-port style) requires an
+identically-named signal in scope for *every* port including the new ones — added
+`ifu_q5_word`/`ifu_ext6_valid`/`eu_q5_word` declarations. Every other testbench touching
+`m68030_ifu`/`m68030_seq`/`m68030_eu`/`eu_seq` (`eu_seq_tb.sv`, `eu_tb.sv`, `ifu_tb.sv`,
+`pipeline_tb.sv`, `stall_hazard_tb.sv`) uses explicit named-port lists that already omit
+`q3_word`/`ext34_data` entirely (pre-existing, unrelated to this phase) — confirmed by
+reading each one directly rather than assuming — so needed no changes at all.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 9/9 (unchanged —
+no new consumer yet). Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline**, zero regressions, as
+expected for pure additive plumbing with no live consumer. Confirmed scope for what's next
+(re-derived word-by-word from the code, not assumed): this q5 addition uniformly unlocks
+exactly 3 sites — genuine memory-indirect long-bd+long-od (`fi_bd`/`fi_od`), and the
+MOVE.L imm-src/abs.L-src arms' own long-bd cases (Phase 141/142, currently word-bd only).
+MOVEM's own genuine memory-indirect worst case needs a **7th** physical queue word
+(`q[6]`) and stays explicitly out of scope, confirmed structurally bigger, not unlocked by
+this phase. Phase 146 (genuine memory-indirect long-bd+long-od) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

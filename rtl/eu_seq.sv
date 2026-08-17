@@ -30,6 +30,7 @@ module eu_seq (
     input  logic        ext_valid,   // ext_data is valid this cycle
     input  logic [15:0] q3_word,     // third extension word (for MOVE.L #imm, abs.W)
     input  logic [31:0] ext34_data,  // ext words 3+4 (for MOVE.L #imm, abs.L)
+    input  logic [15:0] q5_word,     // fifth extension word (Phase 145, plan.md)
 
     // Register file read port A — source operand
     output logic [3:0]  rd_a_sel,

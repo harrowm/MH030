@@ -175,7 +175,9 @@ module m68030_top #(
     logic [31:0] ifu_ext_data;
     logic [15:0] ifu_q3_word;
     logic [31:0] ifu_ext34_data;
+    logic [15:0] ifu_q5_word;      // Phase 145
     logic        ifu_instr_valid, ifu_ext_valid, ifu_ext4_valid, ifu_ext5_valid;
+    logic        ifu_ext6_valid;   // Phase 145
     logic [31:0] ifu_decode_pc;
     logic [31:0] ifu_bus_addr;
     logic        ifu_bus_req;
@@ -192,6 +194,7 @@ module m68030_top #(
     logic [31:0] seq_eu_ext_data;
     logic [15:0] seq_eu_q3_word;
     logic [31:0] seq_eu_ext34_data;
+    logic [15:0] seq_eu_q5_word;    // Phase 145
     logic        seq_eu_instr_valid, seq_eu_ext_valid;
 
     // ───────────────────────────────────────────────────────────────────────
@@ -346,10 +349,12 @@ module m68030_top #(
         .ext_data     (ifu_ext_data),
         .q3_word      (ifu_q3_word),
         .ext34_data   (ifu_ext34_data),
+        .q5_word      (ifu_q5_word),
         .instr_valid  (ifu_instr_valid),
         .ext_valid    (ifu_ext_valid),
         .ext4_valid   (ifu_ext4_valid),
         .ext5_valid   (ifu_ext5_valid),
+        .ext6_valid   (ifu_ext6_valid),
         .decode_pc    (ifu_decode_pc),
         .ifu_addr     (ifu_bus_addr),
         .ifu_req      (ifu_bus_req),
@@ -371,15 +376,18 @@ module m68030_top #(
         .ifu_ext_data    (ifu_ext_data),
         .ifu_q3_word     (ifu_q3_word),
         .ifu_ext34_data  (ifu_ext34_data),
+        .ifu_q5_word     (ifu_q5_word),
         .instr_valid     (ifu_instr_valid),
         .ifu_ext_valid   (ifu_ext_valid),
         .ifu_ext4_valid  (ifu_ext4_valid),
         .ifu_ext5_valid  (ifu_ext5_valid),
+        .ifu_ext6_valid  (ifu_ext6_valid),
         .drain           (seq_drain),
         .eu_instr_word   (seq_eu_instr_word),
         .eu_ext_data     (seq_eu_ext_data),
         .eu_q3_word      (seq_eu_q3_word),
         .eu_ext34_data   (seq_eu_ext34_data),
+        .eu_q5_word      (seq_eu_q5_word),
         .eu_instr_valid  (seq_eu_instr_valid),
         .eu_ext_valid    (seq_eu_ext_valid),
         .eu_instr_ack    (eu_instr_ack),
@@ -397,6 +405,7 @@ module m68030_top #(
         .ext_data      (seq_eu_ext_data),
         .q3_word       (seq_eu_q3_word),
         .ext34_data    (seq_eu_ext34_data),
+        .q5_word       (seq_eu_q5_word),
         .ext_valid     (seq_eu_ext_valid),
         .instr_ack     (eu_instr_ack),
         .eu_busy       (eu_busy),

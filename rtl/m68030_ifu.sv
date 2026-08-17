@@ -5,9 +5,16 @@
 //
 // 6-word × 16-bit prefetch queue.  The BIU always returns a 32-bit
 // longword per fetch; the IFU splits it into two 16-bit words and pushes
-// them to the queue tail.  The EU/sequencer drains up to 5 words per
-// cycle (opcode + up to 4 extension words).
-// 6 words supports MOVE.L #imm32, abs.L (5 total words: opcode+2+2).
+// them to the queue tail.  The EU/sequencer drains up to 6 words per
+// cycle (opcode + up to 5 extension words, Phase 145, plan.md — q[5] was
+// already correctly filled by the existing logic below, just never
+// exposed as its own output/drain case until this phase).
+// 6 words supports MOVE.L #imm32, abs.L (5 total words: opcode+2+2), and
+// (Phase 145) genuine memory-indirect EA with long bd + long od together
+// (6 total words: opcode+descriptor+bd_hi+bd_lo+od_hi+od_lo), the last
+// combination this physical 6-word queue can support without growing it
+// further (MOVEM's own genuine-memory-indirect worst case needs a 7th
+// word and remains out of scope — see plan.md Phase 145's own writeup).
 //
 // ext_data format: {q[1], q[2]} — first extension word in bits[31:16],
 // second extension word in bits[15:0].  This is the hardware-accurate
@@ -35,7 +42,7 @@ module m68030_ifu (
 
     // Drain: 16-bit words consumed by EU/sequencer this cycle
     //   0 = nothing  1 = opcode only  2 = opcode + 1 ext  3 = opcode + 2 ext
-    //   4 = opcode + 3 ext  5 = opcode + 4 ext
+    //   4 = opcode + 3 ext  5 = opcode + 4 ext  6 = opcode + 5 ext (Phase 145)
     input  logic [2:0]  drain,
 
     // Instruction stream outputs (combinational, valid the cycle after fill)
@@ -43,10 +50,12 @@ module m68030_ifu (
     output logic [31:0] ext_data,     // {q[1], q[2]} — two extension words
     output logic [15:0] q3_word,      // q[3] — third extension word
     output logic [31:0] ext34_data,   // {q[3], q[4]} — words 3+4
+    output logic [15:0] q5_word,      // q[5] — fifth extension word (Phase 145)
     output logic        instr_valid,  // q_cnt >= 1
     output logic        ext_valid,    // q_cnt >= 3
     output logic        ext4_valid,   // q_cnt >= 4
     output logic        ext5_valid,   // q_cnt >= 5
+    output logic        ext6_valid,   // q_cnt >= 6 (Phase 145)
     output logic [31:0] decode_pc,    // PC of instr_word
 
     // BIU longword-read interface
@@ -86,10 +95,12 @@ module m68030_ifu (
     assign ext_data     = {q[1], q[2]};
     assign q3_word      = q[3];
     assign ext34_data   = {q[3], q[4]};
+    assign q5_word      = q[5];
     assign instr_valid  = (q_cnt >= 3'd1);
     assign ext_valid    = (q_cnt >= 3'd3);
     assign ext4_valid   = (q_cnt >= 3'd4);
     assign ext5_valid   = (q_cnt >= 3'd5);
+    assign ext6_valid   = (q_cnt >= 3'd6);
     assign decode_pc    = decode_pc_r;
     assign ifu_addr     = fetch_addr_r;
     assign ifu_req      = fetch_pend_r;
@@ -115,6 +126,12 @@ module m68030_ifu (
             3'd3: begin qd[0]=q[3]; qd[1]=q[4]; qd[2]=q[5]; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
             3'd4: begin qd[0]=q[4]; qd[1]=q[5]; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
             3'd5: begin qd[0]=q[5]; qd[1]=16'h0; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
+            // Phase 145: draining all 6 words (opcode+5 ext) empties the
+            // queue entirely -- only reachable when q_cnt==6 (ext6_valid),
+            // the physical maximum this queue can ever hold, so there is
+            // no q[6] to shift in; every slot simply goes to 0/don't-care
+            // (q_cnt_d becomes 0, so nothing downstream reads qd[] as valid).
+            3'd6: begin qd[0]=16'h0; qd[1]=16'h0; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
             default: begin qd[0]=q[0]; qd[1]=q[1]; qd[2]=q[2]; qd[3]=q[3]; qd[4]=q[4]; qd[5]=q[5]; end
         endcase
     end
