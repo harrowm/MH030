@@ -5845,6 +5845,109 @@ BIU-152 — the most Linux-relevant behavior in the whole plan) is next.
 
 ---
 
+## Phase 150 Stage 1 — translation fault → real exception, end to end (RTE-driven retry, BIU-152)
+
+**Goal**: prove the full page-fault-then-retry round trip a real kernel's fault handler
+depends on — a genuine translation fault during a real instruction raises vector 2 with
+the correct frame format, a handler runs and fixes the fault, and RTE correctly re-drives
+the original faulting access from scratch.
+
+Investigated with a standalone scratch probe (`/private/tmp/.../scratchpad/probe_fault.sv`,
+not committed) before writing any RTL: `MOVEA.L #0x20001004,A0` / `MOVE.L (A0),D0` against a
+deliberately invalid descriptor. Reasoned first that the mechanism should already work,
+since Stage 0 deliberately reused the existing, mature BERR-abort/exception-dispatch
+machinery (`mem_abort`, `eu_berr`, `biu_exc_capture`'s `fault_is_berr`-gated frame-format
+selection) rather than building a parallel path — `biu_exc_capture.sv`'s `determine_format()`
+already selects `FMT_MMU=4'h9` off the very same `mmu_fault` input Stage 0 wired, and
+`m68030_exc.sv`'s priority encoder already sources `pend_fmt` from `bus_err_fmt` generically
+for any `bus_err_req`. Verified rather than assumed — direct signal tracing found **two
+real, previously-undiscovered RTL bugs**, both invisible until this phase since nothing had
+ever driven a genuine mid-instruction EU-side bus error immediately followed by a real,
+already-decoded next instruction before (every prior BERR-mid-`<X>` test parks into a
+self-loop handler rather than checking what happens to the *next* instruction in the normal
+stream; Harte's own single-instruction-then-STOP structure can't reach this at all).
+
+**Bug 1 — mem_berr-driven dispatch race**: `mem_berr`'s own same-cycle assertion drops
+`ex_mem_stall` (every `_mem_stall` formula's own `!(mem_berr || exc_active)` term) the exact
+cycle the fault is detected — freeing decode to dispatch whatever instruction is already
+sitting decoded downstream on the very same cycle — but `exc_active` (driven by
+`m68030_exc`'s own FSM recognizing `bus_err_req`, itself derived from a sticky-to-pulse
+edge-detector) takes a further cycle to assert. Traced directly: the instruction
+immediately after a faulting `MOVE.L` — already decoded and waiting — launched into EX and
+fully committed (visible in its own destination register) one full cycle before `exc_active`
+ever turned on. Same hazard *class* as Phase 108's `int_ready`/`int_pending` fix and Phase
+134's own `ex_exc_dispatch_hazard` fix, but for the `mem_berr` trigger specifically, which
+neither of those covered. Fixed in `rtl/eu_seq.sv`: `ex_exc_dispatch_hazard` extended to
+`ex_will_except || exc_active || mem_berr || pending_mem_berr_r`, where `mem_berr` itself
+(combinational) covers the same-cycle window (a first attempt using only a registered latch,
+updating one cycle later, was traced and found to still be one cycle too late — `stall_base`
+read 0 at `mem_berr`'s own first cycle, since the registered latch can't possibly help until
+the cycle after) and `pending_mem_berr_r` (a new sticky flag, set on `mem_berr`, cleared once
+`exc_active` takes over) covers the cycle(s) in between.
+
+**Bug 2 — wrong captured `fault_pc` for a mid-EX-stage fault**: even with Bug 1 fixed, the
+dispatched frame's own `snap_pc_r` (BIU-152's whole basis for "re-execute from instruction
+start") pointed 2 bytes past the true faulting instruction — at whatever instruction decode
+had already legitimately raced ahead to reach, since a multi-cycle EX-stage access lets
+decode continue decoding downstream instructions while the current one is still executing
+(completely normal pipelining, just wrong to sample `fault_pc` from `ifu_decode_pc` — decode's
+own current position — for anything beyond a single-cycle op). Root cause: `fault_pc` was fed
+from raw `ifu_decode_pc` unconditionally for every exception source. Fix: `eu_seq.sv` already
+had an unused, perfectly-shaped signal for this — `ex_decode_pc` (latched from `decode_pc` at
+the decode→EX transfer, and — confirmed by reading the surrounding `always_ff`'s own
+`ex_mem_stall`/`stall` branches — deliberately never re-latched while frozen or bubbled,
+staying correct for the instruction's *entire* time in EX) was already computed for DBcc's own
+branch-target math but never exported. Exported as a new `ex_decode_pc_out` port, threaded
+through `m68030_eu.sv` to `m68030_top.sv`. **Not** wired in as a blanket replacement for
+`ifu_decode_pc`, though — a first attempt that switched *every* exception source to
+`eu_ex_decode_pc` broke `INT-mid-MOVEM` (`tb/stall_fsm_tb.sv`): an interrupt's own correct
+resume address is "the next instruction about to decode" (real 68030 semantics — interrupts
+only fire at instruction boundaries, held off by `eu_int_ready_w` until one is reached), which
+*is* `ifu_decode_pc`; `eu_ex_decode_pc` would instead point at whatever instruction had *just
+finished* (the FSM that just retired), making RTE silently re-execute it. Final fix: a mux in
+`m68030_top.sv`, `fault_pc = bus_err_req_w ? eu_ex_decode_pc : ifu_decode_pc` — bus-error/
+translation faults (mid-instruction, need the EX-stage PC) get the new signal; every other
+exception source (interrupts, internal exceptions — already correct, confirmed by the full
+Harte re-run below) keeps the original.
+
+**RTE's own wide-frame support turned out to already exist**: before assuming a fix was
+needed, checked whether RTE could even pop a 12-word Format $9 frame at all — found
+`rte_frame_extra()` (a lookup table mapping format code → extra bytes beyond the base 8) and
+`rte_fmt_skip_r`, already wired into A7's own post-RTE update (`an_wr_data = rte_a7_next_r +
+32'd4 + rte_fmt_skip_r`), for every format `$0`/`$2`/`$3`/`$4`/`$8`/`$9`/`$A`/`$B` — a
+general mechanism, seemingly built during Phase 99/100's own RTE work but never exercised
+against anything wider than Format `$0` before (Harte's own RTE coverage is exclusively
+`$0`, and no prior phase ever RTE'd from a real Format `$9`/`$A`/`$B` frame). Zero changes
+needed here — it worked correctly the first time the committed test exercised it.
+
+**Test**: extended `tb/mmu_xlate_tb.sv` with a Phase 3 — a deliberately invalid descriptor at
+a *fresh* VA (0x20002100, never translated by Phases 1/2, sidestepping any ATC-staleness
+question entirely rather than relying on the "faults never populate the ATC" reasoning
+alone), a real vector-2 handler (VBR defaults to 0, installed at the vector 2 slot) that
+fixes the descriptor and RTEs, asserting: a real exception was taken with the correct
+vector (2) and frame format (9, FMT_MMU); the handler ran, RTE'd, and the *retried* `MOVE.L`
+completed; the retried read's own destination register holds the *fixed* PA's own sentinel
+(0x13572468) — proving the retry genuinely re-walked the now-valid descriptor rather than
+reading stale state. All 11 checks (Phases 1–3 combined) passed once the two RTL bugs above
+were fixed. Two address-choice mistakes were made and caught by direct signal tracing before
+landing: a first sentinel PA (page frame 0x00004000) silently aliased, via this testbench's
+own 16KB memory model (`ext_a[13:2]`, 14 significant bits), onto the file's own PC boot
+vector; a second attempt (0x00003C00) turned out not to be page-aligned at all for PS=12 —
+its own nonzero low 12 bits were silently discarded by `page_mask`, collapsing the intended
+PA onto Phase 1's own descriptor address. Fixed by using a genuinely page-aligned frame
+(0x00000000) combined with a VA whose own page offset (0x100) lands in the one 4KB-aligned
+slot, of the memory model's only four, not already claimed by something else in the file.
+
+**Results**: `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full
+124-suite Harte sweep (Verilator batch backend) — **PASS 702142, FAIL 2 (same documented
+ASL.b corpus anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline** — the critical gate
+here given both fixes touch shared dispatch/fault-capture logic used by every exception type
+and, for Bug 1, every one of the ~19 `ex_mem_stall` sources, not just the new MMU path.
+**This closes Stage 1 of the 6-stage MMU-hardening plan.** Stage 2 (write-protect violations,
+needed for copy-on-write) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

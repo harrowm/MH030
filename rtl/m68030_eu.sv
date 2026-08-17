@@ -71,6 +71,10 @@ module m68030_eu (
 
     // ── Branch signals (to IFU via top) ──────────────────────────────────
     input  logic [31:0] decode_pc,    // PC of instruction at decode (from IFU)
+    output logic [31:0] ex_decode_pc, // Phase 150 Stage 1 (plan.md): PC of the
+                                       // instruction currently/most-recently
+                                       // in EX -- see eu_seq.sv's own
+                                       // ex_decode_pc_out comment
     output logic        branch_taken, // combinational: taken branch this cycle
     output logic [31:0] branch_target,// combinational: branch destination
 
@@ -308,6 +312,7 @@ module m68030_eu (
         .div_trap     (div_trap),
         .chk_trap     (chk_trap),
         .decode_pc    (decode_pc),
+        .ex_decode_pc_out (ex_decode_pc),
         .branch_taken (branch_taken),
         .branch_target(branch_target),
         .mem_req      (mem_req),

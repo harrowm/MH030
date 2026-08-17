@@ -143,6 +143,31 @@ module eu_seq (
 
     // ── Branch control ──────────────────────────────────────────────────────
     input  logic [31:0] decode_pc,    // PC of instruction at decode stage
+    output logic [31:0] ex_decode_pc_out, // Phase 150 Stage 1 (plan.md): PC of
+                                       // whatever instruction is/was most
+                                       // recently in EX -- latched from
+                                       // decode_pc at the decode->EX transfer
+                                       // and held (not re-latched) for the
+                                       // entire time that instruction remains
+                                       // in EX (ex_mem_stall's own "keep all
+                                       // EX latch signals unchanged" branch,
+                                       // and stall's own bubble branch, both
+                                       // deliberately never touch the
+                                       // internal ex_decode_pc register). The
+                                       // raw decode_pc input above is WRONG
+                                       // for capturing a mid-EX fault's own
+                                       // address (a multi-cycle EX-stage
+                                       // access lets decode legitimately race
+                                       // ahead to the next instruction while
+                                       // this one is still executing) --
+                                       // confirmed via a Stage 1 investigation
+                                       // probe (a real MMU translation fault
+                                       // on MOVE.L's own data read) showing
+                                       // the exception frame's own captured
+                                       // PC pointing 2 bytes past the actual
+                                       // faulting instruction, at whatever
+                                       // instruction decode had already
+                                       // reached by fault-detection time.
     output logic        branch_taken, // combinational: taken branch this cycle
     output logic [31:0] branch_target,// combinational: branch destination
 
@@ -6743,8 +6768,55 @@ module eu_seq (
     assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
                                           ex_is_priv || ex_is_linea || ex_is_linef) ||
                              chk_trap || div_trap || eu_fmt_err_req;
+
+    // Phase 150 Stage 1 (plan.md): mem_berr-driven dispatch race, the same
+    // hazard class as ex_will_except's own gap above but for a BUS ERROR
+    // rather than an internal exception. mem_berr (asserted the one cycle
+    // an EU-initiated access's abort is detected) immediately clears
+    // ex_mem_stall for the faulting instruction -- freeing decode to
+    // dispatch whatever instruction is already sitting decoded downstream
+    // on the VERY NEXT cycle -- but m68030_exc's own exc_active takes one
+    // further cycle to recognize bus_err_req (via the sticky-to-pulse
+    // eu_bus_err_r edge-detector in m68030_top.sv), leaving a genuine
+    // 1-cycle window where neither ex_will_except-style pre-signaling nor
+    // exc_active yet blocks new dispatch. Found via a Stage 1 investigation
+    // probe (a deliberate MMU translation fault on a MOVE.L's own data
+    // read): the instruction immediately after the faulting one -- already
+    // decoded and waiting -- launched into EX and fully committed (visible
+    // in its own destination register) one cycle before exc_active ever
+    // turned on. Same shape as Phase 108's int_ready/int_pending fix and
+    // Phase 134's own ex_exc_dispatch_hazard fix, just for the mem_berr
+    // trigger specifically: latch mem_berr into a sticky flag that holds
+    // the hazard from the fault-detection cycle through to the cycle
+    // exc_active itself takes over (its own first cycle asserted), exactly
+    // filling the gap. mem_berr (not the wider mem_abort, which already
+    // includes exc_active) is the correct trigger -- it is already the
+    // canonical "a bus error was just detected on any EU-initiated access"
+    // pulse shared by every ex_mem_stall-shaped `_mem_stall`/`_stall`
+    // formula above (ordinary reads/writes and all ~19 FSM sources the
+    // BERR-abort rollout, Phases 108-109, already covers), so this
+    // automatically applies to all of them, not just ordinary MOVE.
+    // mem_berr itself (combinational) must be included directly, not just
+    // latched a cycle later: mem_berr's own same-cycle assertion is what
+    // makes ex_mem_stall/stall_base drop to 0 in the first place (every
+    // `_mem_stall` formula's own `!(mem_berr || exc_active)` term), so a
+    // registered-only latch (updating one cycle later) is one cycle too
+    // late to prevent that exact same-cycle dispatch window -- confirmed
+    // by re-tracing after a first attempt that used only the registered
+    // form: stall_base read 0 at t=6665 (mem_berr's own first cycle) and
+    // MOVEQ still dispatched then, one full cycle before pending_mem_berr_r
+    // (which only updates starting the NEXT clock edge) could possibly
+    // help. pending_mem_berr_r still covers the cycle(s) after that, until
+    // exc_active itself takes over.
+    logic pending_mem_berr_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)             pending_mem_berr_r <= 1'b0;
+        else if (mem_berr)      pending_mem_berr_r <= 1'b1;
+        else if (exc_active)    pending_mem_berr_r <= 1'b0;
+    end
+
     logic ex_exc_dispatch_hazard;
-    assign ex_exc_dispatch_hazard = ex_will_except || exc_active;
+    assign ex_exc_dispatch_hazard = ex_will_except || exc_active || mem_berr || pending_mem_berr_r;
     logic stall_base;
     assign stall_base = ex_mem_stall
                       || ex_exc_dispatch_hazard
@@ -6793,6 +6865,7 @@ module eu_seq (
     logic [3:0]  ex_dbcc_cond;
     logic [31:0] ex_dbcc_disp;
     logic [31:0] ex_decode_pc;
+    assign ex_decode_pc_out = ex_decode_pc;
     // Memory-access EX signals
     logic [31:0] ex_ea_offset;   // displacement for EA (0 or d16 or -step)
     logic [31:0] ex_an_delta;    // An update amount (Ax step for CMPM; Ay step computed separately)

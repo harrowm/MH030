@@ -138,16 +138,22 @@ module mmu_xlate_tb;
     // elsewhere in this project — tb/stall_fsm_tb.sv/tb/cache_tb.sv).
     // -------------------------------------------------------------------
     localparam MOVEA_L_IMM_A0 = 16'h207C;
+    localparam MOVEA_L_IMM_A1 = 16'h227C;
     localparam MOVE_L_A0_D0   = 16'h2010;
     localparam MOVE_L_A0_D2   = 16'h2410;
+    localparam MOVE_L_A0_D4   = 16'h2810;
+    localparam MOVE_L_IMM_A1_IND = 16'h22BC;  // MOVE.L #imm,(A1)
     localparam CLR_L_D1       = 16'h4281;
     localparam ADDI_L_D1      = 16'h0681;
     localparam CLR_L_D3       = 16'h4283;
     localparam ADDI_L_D3      = 16'h0683;
+    localparam CLR_L_D5       = 16'h4285;
+    localparam ADDI_L_D5      = 16'h0685;
     localparam PMOVE_A0_OP    = 16'hF010;  // same opcode word as PTEST; op_type in the ext word
     localparam PMOVE_CRP_EXT  = 16'h4800;  // op_type=010(PMOVE),sub=100(CRP),dr=0(load)
     localparam PMOVE_TC_EXT   = 16'h4400;  // op_type=010(PMOVE),sub=010(TC),dr=0(load)
     localparam PMOVE_TT0_EXT  = 16'h4200;  // op_type=010(PMOVE),sub=001(TT0),dr=0(load)
+    localparam RTE_OP         = 16'h4E73;
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
 
     int fail_count = 0;
@@ -255,7 +261,63 @@ module mmu_xlate_tb;
         rom[16'h043C/4] = {16'h1004, MOVE_L_A0_D2};       // A0 = VA 0x20001004 ; MOVE.L (A0),D2
         rom[16'h0440/4] = {CLR_L_D3, ADDI_L_D3};
         rom[16'h0444/4] = {16'h0000, 16'd222};
-        rom[16'h0448/4] = {BRA_SELF, 16'h4E71};
+
+        // -------------------------------------------------------------
+        // Phase 3 (Stage 1, plan.md): fault -> real exception -> handler
+        // fixes the descriptor -> RTE -> the original instruction re-
+        // executes and now succeeds. This is BIU-152 end to end -- the
+        // page-fault-then-retry cycle a real kernel's fault handler
+        // depends on. Deliberately a *fresh* VA (0x20002100, idx_a=2,
+        // never translated by phases 1/2) so there's no possibility of a
+        // stale ATC entry masking the fault -- biu_mmu_if.sv only ever
+        // populates the ATC from MS_WALK_DONE, never MS_FAULT, so a
+        // faulted VA can't have one anyway, but a fresh VA sidesteps the
+        // question entirely rather than relying on that reasoning alone.
+        //
+        // Vector 2 (VBR defaults to 0 at reset) -> handler at 0x500.
+        // Descriptor at 0x3008 starts deliberately invalid (DT=00) --
+        // explicit, not left to the default memory fill: 0x4E714E71's own
+        // low 2 bits happen to be "01" (a coincidentally *valid*-looking
+        // page descriptor), which would silently defeat this test.
+        //
+        // PA page frame: 0x00000000 (giving PA=0x00000100, matching VA's
+        // own preserved page offset 0x100). A first attempt used
+        // 0x00004000 (PA=0x00004004) and then 0x00003C00 (PA=0x00003C04)
+        // -- both wrong, for two different reasons found by direct signal
+        // tracing of biu_mmu_if.sv's own ms_state/walk_desc_r/pa: (1)
+        // 0x00004000's low-14-bit alias in this testbench's own 16KB
+        // memory model (which only ever looks at ext_a[13:2]) landed
+        // exactly on this file's own PC boot vector; (2) 0x00003C00 is
+        // *not actually page-aligned* for PS=12 (4KB pages) -- its own low
+        // 12 bits (0xC00) are nonzero, so page_mask (0xFFFFF000) silently
+        // discards them, collapsing the intended PA to 0x00003004 (aliasing
+        // phase 1's own descriptor address). With a page-aligned frame and
+        // VA's own offset changed from 0x004 (already spoken for by 3 of
+        // the memory model's only 4 available 4KB-aligned slots) to 0x100
+        // (unused), frame=0 is the remaining free slot.
+        rom[16'h0008/4] = 32'h0000_0500;   // vector 2 -> handler
+        rom[16'h3008/4] = 32'h0000_0000;   // invalid descriptor (DT=00)
+        rom[16'h0100/4] = 32'h1357_2468;   // sentinel at the *fixed* PA
+
+        // Re-enable TC (phase 2 disabled it); TT0/CRP are already correctly
+        // configured from phase 1 and untouched since.
+        rom[16'h0448/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h044C/4] = {16'h3900, PMOVE_A0_OP};        // PMOVE (A0),TC (E=1 again)
+        rom[16'h0450/4] = {PMOVE_TC_EXT, MOVEA_L_IMM_A0};
+        rom[16'h0454/4] = {16'h2000, 16'h2100};           // A0 = VA 0x20002100
+        rom[16'h0458/4] = {MOVE_L_A0_D4, CLR_L_D5};        // MOVE.L (A0),D4  <-- faults, retries after RTE
+        rom[16'h045C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h0460/4] = {16'd777, BRA_SELF};
+        rom[16'h0464/4] = {16'h4E71, 16'h4E71};
+
+        // Vector-2 handler: fix the descriptor at 0x3008 (page frame
+        // 0x00000000, DT=01), then RTE. TT0 already covers this handler's
+        // own code (top byte 0x00) and its write target (also top byte
+        // 0x00), so neither needs any special handling.
+        rom[16'h0500/4] = {MOVEA_L_IMM_A1, 16'h0000};
+        rom[16'h0504/4] = {16'h3008, MOVE_L_IMM_A1_IND};   // MOVE.L #imm,(A1)
+        rom[16'h0508/4] = {16'h0000, 16'h0001};
+        rom[16'h050C/4] = {RTE_OP, 16'h4E71};
 
         saw_walk_read_addr       = 1'b0;
         saw_translated_data_read = 1'b0;
@@ -300,6 +362,40 @@ module mmu_xlate_tb;
 
         check32("Phase 2: D2 holds the raw VA's own data (0xBAADF00D) -- translation genuinely inert with TC.E=0",
                 u_top.u_eu.u_rf.d_reg[2], 32'hBAAD_F00D);
+
+        // -------------------------------------------------------------
+        // Phase 3 (Stage 1): fault -> exception -> handler fixes the
+        // descriptor -> RTE -> the faulting MOVE.L re-executes and now
+        // succeeds. Watches for a genuine vector-2/format-9 dispatch
+        // *before* waiting for D5==777, so a false pass (D5 reaching 777
+        // by some unrelated fluke, without ever actually faulting) can't
+        // slip through.
+        // -------------------------------------------------------------
+        begin
+            int t;
+            logic saw_exc3, saw_d5;
+            logic [3:0] seen_fmt;
+            logic [7:0] seen_vec;
+            saw_exc3 = 1'b0;
+            saw_d5   = 1'b0;
+            seen_fmt = 4'h0;
+            seen_vec = 8'h0;
+            for (t = 0; t < 30000; t++) begin
+                @(posedge clk_4x); #1;
+                if (!saw_exc3 && u_top.u_exc.exc_active) begin
+                    saw_exc3 = 1'b1;
+                    seen_fmt = u_top.u_exc.snap_fmt_r;
+                    seen_vec = u_top.u_exc.snap_vec_r;
+                end
+                if (u_top.u_eu.u_rf.d_reg[5] === 32'd777) begin saw_d5 = 1'b1; break; end
+            end
+            check("Phase 3: a real exception was taken on the deliberate invalid-descriptor fault", saw_exc3);
+            check32("Phase 3: correct vector (2, Bus Error) dispatched", {24'h0, seen_vec}, 32'd2);
+            check32("Phase 3: correct frame format (9, FMT_MMU) dispatched", {28'h0, seen_fmt}, 32'd9);
+            check("Phase 3: handler ran, RTE'd, and the retried MOVE.L completed (D5=777)", saw_d5);
+        end
+        check32("Phase 3: D4 holds the *fixed* PA's own sentinel (0x13572468) -- the retry genuinely re-walked the now-valid descriptor, not stale state",
+                u_top.u_eu.u_rf.d_reg[4], 32'h1357_2468);
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
         if (fail_count == 0) $display("ALL TESTS PASSED");

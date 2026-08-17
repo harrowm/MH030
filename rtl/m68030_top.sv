@@ -179,6 +179,7 @@ module m68030_top #(
     logic        ifu_instr_valid, ifu_ext_valid, ifu_ext4_valid, ifu_ext5_valid;
     logic        ifu_ext6_valid;   // Phase 145
     logic [31:0] ifu_decode_pc;
+    logic [31:0] eu_ex_decode_pc;  // Phase 150 Stage 1 (plan.md): see eu_seq.sv's own ex_decode_pc_out comment
     logic [31:0] ifu_bus_addr;
     logic        ifu_bus_req;
     logic [2:0]  ifu_fc_out;
@@ -285,6 +286,12 @@ module m68030_top #(
     // the identical problem correctly via its own already-pulsed source.
     // ───────────────────────────────────────────────────────────────────────
     logic eu_bus_err_r;
+    // Declared ahead of use (Icarus requires a net referenced in a
+    // continuous-assignment port connection to be declared before that
+    // point in the file) -- shared by u_exc's own bus_err_req input and
+    // Phase 150 Stage 1's fault_pc mux below, both needing the identical
+    // "is a bus error the thing dispatching right now" condition.
+    wire bus_err_req_w = ifu_bus_err | eu_bus_err_r;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)                      eu_bus_err_r <= 1'b0;
         else if (pc_wr_en_common)        eu_bus_err_r <= 1'b0;
@@ -413,6 +420,7 @@ module m68030_top #(
         .pc_wr_data    (pc_wr_data_common),
         .pc_out        (eu_pc_out),
         .decode_pc     (ifu_decode_pc),
+        .ex_decode_pc  (eu_ex_decode_pc),
         .branch_taken  (eu_branch_taken),
         .branch_target (eu_branch_target),
         .mem_req       (eu_mem_req),
@@ -494,7 +502,7 @@ module m68030_top #(
         .clk_4x       (clk_4x),
         .rst_n        (rst_n),
         // Exception sources
-        .bus_err_req  (ifu_bus_err | eu_bus_err_r),
+        .bus_err_req  (bus_err_req_w),
         .addr_err_req (ifu_addr_err_int),
         .ipl_sync     (ipl_sync),
         .ipl_mask     (eu_ipl_mask),
@@ -512,7 +520,25 @@ module m68030_top #(
         .trap_req     (eu_trap_req_w),
         .trap_num     (eu_trap_num_w),
         // Fault snapshot
-        .fault_pc     (ifu_decode_pc),
+        // Phase 150 Stage 1 (plan.md): fault_pc is muxed by exception type,
+        // not a single blanket source. bus_err_req_w (a mid-instruction
+        // fault detected well after decode may have legitimately raced
+        // ahead to the next instruction) needs eu_ex_decode_pc, the PC of
+        // whatever instruction is/was actually in EX -- see eu_seq.sv's own
+        // ex_decode_pc_out comment; confirmed via a Stage 1 investigation
+        // probe (a real MMU translation fault on MOVE.L's own data read)
+        // that raw ifu_decode_pc pointed 2 bytes past the true faulting
+        // instruction. Every OTHER exception source (interrupts, internal
+        // exceptions) keeps the original ifu_decode_pc -- a first attempt
+        // that switched ALL sources to eu_ex_decode_pc broke
+        // INT-mid-MOVEM (tb/stall_fsm_tb.sv): an interrupt's own correct
+        // resume address is "the next instruction about to decode" (real
+        // 68030 semantics -- interrupts only ever fire at instruction
+        // boundaries, held off by eu_int_ready_w until the boundary is
+        // reached), which IS ifu_decode_pc; eu_ex_decode_pc would instead
+        // point at whatever instruction had *just* finished (e.g. the FSM
+        // that just retired), making RTE silently re-execute it.
+        .fault_pc     (bus_err_req_w ? eu_ex_decode_pc : ifu_decode_pc),
         .fault_sr     (eu_sr_out),
         .fault_addr   (ifu_bus_err ? ifu_bus_err_addr : fault_addr_biu),
         .fault_ssw    (exc_ssw),
