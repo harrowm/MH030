@@ -1,5 +1,13 @@
 # RTL Readability Improvement Notes
 
+> **Historical, inactive.** A single-day (2026-07-29) refactor worklist targeting
+> specific `eu_seq.sv`/`biu_cycle_gen.sv` line numbers that no longer match the
+> current file (both have grown substantially since). The `make test (51/51)` count
+> below is stale (current is 35/35 — a different count for a different reason: the
+> test *suite* has grown, this isn't the same 51→35 as a regression). Not referenced
+> anywhere else in the repo. Items #8 and #10 have no `[DONE]`/`[SKIPPED]` tag — if
+> ever revisited, their line-number references need re-deriving from scratch first.
+
 All changes are structural/cosmetic — no functional intent. Run `make test` (51/51) after each.
 
 ---

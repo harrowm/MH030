@@ -1113,11 +1113,21 @@ m68030_biu          top-level wrapper                  ~200 lines
                     Estimated total                    ~7000 lines
 ```
 
-The original `output.txt` proposal included `biu_byte_lane_ctrl` for LDS/UDS
+**Note (post-implementation correction)**: this appendix is the pre-implementation
+plan and predates the real `rtl/` layout — see `plan.md` for what was actually built
+and `README.md`'s Module Hierarchy for the current, accurate module list. One
+concrete correction worth flagging here since it's a direct contradiction rather than
+just an omission: the line below originally said the proposed `biu_byte_lane_ctrl`
+module "is eliminated" in favor of folding its function into `biu_sizing_fsm`. It was
+not eliminated — `rtl/biu_byte_lane_ctrl.sv` exists and is a real, wired-in module
+(write-data steering from `SIZ[1:0]`+`A[1:0]`, per the Module Hierarchy diagram in
+`README.md`).
+
+~~The original `output.txt` proposal included `biu_byte_lane_ctrl` for LDS/UDS
 generation. That module is eliminated: the 68030 has a single DS pin and byte-lane
 selection is entirely external logic (SIZ[1:0] + A[1:0]). Internal data alignment
 (shifting received bytes into the correct register lane positions) lives in
-`biu_sizing_fsm`.
+`biu_sizing_fsm`.~~
 
 ---
 

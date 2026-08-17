@@ -16,9 +16,11 @@ The EU's pipeline stall is `eu_seq.sv`'s `stall` signal (mirrored out as `seq_bu
 
 ```systemverilog
 assign stall_base = ex_mem_stall
+                  || ex_exc_dispatch_hazard
                   || (ex_jmp_taken | ex_jsr_taken | ex_bsr_taken
                      | ex_rts_taken | ex_rtr_taken | ex_rte_taken | ex_dbcc_taken)
-                  || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext || stop_first_cycle));
+                  || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext
+                                    || stop_first_cycle || stop_wb_hazard));
 
 assign int_defer  = dec_valid && !stall_base && int_pending;
 assign stall      = stall_base || int_defer;
@@ -26,6 +28,8 @@ assign eu_int_ready = int_defer;
 assign seq_busy    = stall;
 assign instr_ack   = dec_valid && !stall;
 ```
+(`ex_exc_dispatch_hazard` and `stop_wb_hazard` were added in Phase 134 — see Categories
+J and K below.)
 
 `stall_base` is the "normal" reasons DECODE can't hand its instruction to EX this
 cycle. `int_defer` is a separate, additive layer specifically for interrupt
@@ -341,11 +345,81 @@ fault-injection test coverage for every one of them.** History:
 
 No known gap remains in BERR-abort coverage.
 
+## Category J — internal exception dispatch stall
+
+**What**: an internal trap (privilege violation, illegal instruction, Line-A/Line-F,
+TRAP/TRAPV, CHK/CHK2 bound trap, divide-by-zero, RTE format error) reaching EX has the
+identical race Category F solves for external interrupts, but for a different trigger:
+nothing previously blocked `dec_valid`'s continued advance behind it. `m68030_exc.sv`'s
+actual flush (`new_pc_wr`, at the end of the `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` sequence)
+doesn't fire until several cycles after the trap is recognized, so — unblocked — decode
+kept fetching and committing side effects (e.g. an EA autodecrement) from stale/garbage
+bytes for the entire dispatch window.
+
+**RTL**: `eu_seq.sv`:
+```systemverilog
+assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
+                                      ex_is_priv || ex_is_linea || ex_is_linef) ||
+                         chk_trap || div_trap || eu_fmt_err_req;
+assign ex_exc_dispatch_hazard = ex_will_except || exc_active;
+```
+Folded into `stall_base`'s own top-level OR (see Signal hierarchy above) using plain
+bubble semantics, not `ex_mem_stall`'s frozen-EX shape — `m68030_exc.sv`'s `EXC_IDLE`
+case only needs a single-cycle pulse to see the request, so nothing is lost by letting EX
+advance immediately afterward; what matters is that `exc_active` itself, folded into the
+same OR term, keeps blocking new dispatch for the rest of the window regardless of what
+EX holds. Excludes `eu_reset_req` (RESET pulses RSTOUT directly, no frame dispatch to
+race) and `eu_trace_req` (a genuinely different, post-retirement hazard shape, not
+reproduced here — left as its own follow-up).
+
+**Duration**: held for the entire `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` window, same shape as
+Category F's `int_defer`.
+
+**Found**: Phase 134, while running the cache-verification plan's Step 6 (a 4-config
+Harte sweep with the I-cache/D-cache enabled) — see `docs/cache.md`. Not
+cache-*specific*: the bug is a plain pipeline race that an I-cache hit's shorter fetch
+latency was simply the first thing in 133 prior phases to expose, by shrinking the
+window between a trap firing and the next instruction's own opcode already sitting ready
+in decode. No dedicated `tb/stall_fsm_tb.sv` test exists for this by name; verified via
+the full 4-config Harte re-run coming back bit-identical to the disabled-cache baseline
+across all ~700k tests.
+
+## Category K — STOP SR-write collision
+
+**What**: a narrower, WAW-shaped variant of Category B. `STOP`'s own SR write
+(`stop_sr_wr_en`) fires unconditionally the instant STOP reaches EX, with nothing
+previously gating it against a *different*, still-in-flight instruction's own same-cycle
+CCR/SR commit — `sr_wr_data`'s priority mux would silently discard the real result,
+corrupting the following instruction's own decode (traced symptom: STOP's own 2-word
+opcode+operand desynced, and the operand word got misdecoded as a fresh, unrelated
+instruction with a real side effect — an address register corrupted by exactly the
+autodecrement amount of the accidental "instruction").
+
+**RTL**: `eu_seq.sv`:
+```systemverilog
+assign stop_wb_hazard = dec_is_stop && !need_ext && (
+                            sr_wr_en ||
+                            (ex_valid && (ex_updates_ccr || ex_is_move_sr_w || ex_is_move_ccr_w)));
+```
+The `ex_valid` check covers all three of `sr_wr_data`'s own WB-delayed source flags, not
+just the ordinary ALU-CCR-commit one — `MOVE Dn,SR`/`MOVE Dn,CCR` commit via
+`wb_is_move_sr_w`/`wb_is_move_ccr_w`, a completely different flag an early version of
+this fix didn't check, leaving that specific pairing (the shortest-EX-residency
+instruction forms, so the most likely to still be in EX when STOP reaches decode)
+exposed. Gated on `!need_ext` so it doesn't fire before STOP's own operand word has
+actually arrived — otherwise it would collide with, rather than compose with, the
+pre-existing Category C stall already handling that wait.
+
+**Duration**: one cycle — resolves as soon as the colliding write commits.
+
+**Found**: same Phase 134 investigation as Category J, same discovery mechanism (4-config
+Harte sweep) — see `docs/cache.md`.
+
 ## Test coverage map
 
 | Category | File | Representative checks |
 |---|---|---|
-| A. RAW/WAW hazard | `tb/stall_hazard_tb.sv` | 4 producer types × no-gap/1-gap/multi-gap timing; exact 2/1/0-cycle counts via direct signal reads |
+| A. RAW/WAW hazard | `tb/stall_hazard_tb.sv`, `tb/stall_fsm_tb.sv` | 4 producer types × no-gap/1-gap/multi-gap timing; exact 2/1/0-cycle counts via direct signal reads. `RAW-hazard-with-Ihit` (Phase 135, `stall_fsm_tb.sv`) additionally confirms the hazard still resolves correctly across 10 passes of a loop served entirely from I-cache hits after the first — see `docs/cache.md` |
 | B. CCR hazard | `tb/stall_hazard_tb.sv` | Same shape as A, using `CMP`→`Scc`; exact 2/1/0-cycle counts |
 | C. Missing ext word | *(folded into A's harness where reachable; see file header for scope note)* | |
 | D. Multi-cycle FSM | `tb/stall_fsm_tb.sv` | All 23 of ~23 sources (closed Phase 124), decode-holdoff + a real dependent instruction after; exact bus-cycle counts for TAS/MOVEM/CMPM/CAS2/MOVEP/ADDX.L/memory-indirect EA; the memory-indirect EA check (B-22) also verifies the loaded register's actual value, not just "did it unstick" |
@@ -354,9 +428,13 @@ No known gap remains in BERR-abort coverage.
 | G. Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU 3-way priority; IFU starvation+recovery under a real multi-beat burst; DMA held off by `bus_lock` |
 | H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 4 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA at wait_states=10, Phases 125/126; see Category H's own absorption-effect note for why the values differ) |
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
+| J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
+| K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
 | Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 3 pairs (Phases 107/126): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, each a genuinely different FSM-shape handoff, no instruction between them |
 
-Run everything with `make test` (34/34, includes all of the above). See `plan.md`
+Run everything with `make test` (35/35, includes all of the above except Categories J/K,
+which are verified via the Harte sweep instead — see those categories' own entries). See
+`plan.md`
 Phases 103–126 for the full session-by-session narrative, including dead ends that
 are worth knowing about before extending this suite:
 

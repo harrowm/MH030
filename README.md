@@ -23,26 +23,31 @@ m68030_top
 │   ├── biu_burst_ctrl      Burst linefill and MOVE16 burst sequencing
 │   ├── biu_multiop_fsm     MOVEM / MOVEP multi-transfer sequences
 │   ├── biu_error_handler   BERR detection, timeout, fault capture
-│   ├── biu_cache_if        Cache hit/miss and CBREQ/CBACK handshake
+│   ├── biu_cache_if        D-cache: direct-mapped, per-word valid bits (Phase 133), write-through
+│   ├── biu_icache_if       I-cache: direct-mapped, genuine SIZ=11 pin-level burst linefill — see `docs/cache.md`
 │   ├── biu_mmu_if          MMU table-walk bus hijack port
 │   ├── biu_exc_capture     Fault snapshot for exception stack frames
 │   ├── biu_eclk_gen        E-clock generator (÷10 of bus clock)
 │   └── biu_config          Reset sequencing and tri-state release timing
-├── m68030_ifu          Instruction Fetch Unit — 4-word prefetch queue
+├── m68030_ifu          Instruction Fetch Unit — 6-word prefetch queue (q[0]-q[5])
 ├── m68030_seq          Micro-sequencer — IFU→EU glue and extension-word counting
 ├── m68030_eu           Execution Unit
-│   ├── eu_regfile          D0–D7, A0–A7, USP/MSP/ISP, PC, SR, VBR — 3 write ports
+│   ├── eu_regfile          D0–D7, A0–A7, USP/MSP/ISP, PC, SR, VBR — 3 write ports, 3 read ports
 │   ├── eu_alu              ADD/SUB/AND/OR/EOR/NEG/CMP/CLR/TST + X-extended forms
 │   ├── eu_shifter          ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR, all sizes
 │   ├── eu_mul_div          MULS/MULU (word+long), DIVS/DIVU (word+long)
 │   ├── eu_bcd              ABCD/SBCD/NBCD
 │   ├── eu_bitops           BTST/BCHG/BCLR/BSET
+│   ├── eu_bitfield         BFTST/BFEXTU/BFEXTS/BFINS/BFCHG/BFCLR/BFSET/BFFFO
 │   ├── eu_agu              Address Generation Unit — all EA modes including memory-indirect
 │   └── eu_seq              Instruction decode, pipeline control, writeback
 ├── m68030_mmu          MMU — TLB, 3-level table walker, TT0/TT1, CRP/SRP
-├── m68030_cache        I-Cache + D-Cache (256 bytes each, direct-mapped, 16-byte lines)
 └── m68030_exc          Exception controller — all 9 68030 stack frame formats
 ```
+
+The I-cache and D-cache each live inside `m68030_biu` as their own controller
+(`biu_icache_if.sv` / `biu_cache_if.sv`) rather than as a separate top-level cache
+module — see `docs/cache.md` for how they work and are tested.
 
 ---
 
@@ -139,15 +144,25 @@ Results latch into `wb_*` and the regfile write port fires. The EU has three ind
 
 ### Instruction Fetch and Extension Words
 
-`m68030_ifu` maintains a 4-word prefetch queue. `m68030_seq` sits between the IFU and EU: it counts how many extension words the current opcode needs (0, 1, or 2), converts the IFU's extension word format to the EU convention, and tells the IFU how many queue entries to drain when the EU accepts an instruction.
+`m68030_ifu` maintains a 6-word prefetch queue (`q[0]`-`q[5]`) — wide enough for the opcode plus up to 5 extension words, the worst case being genuine memory-indirect EA with a long base *and* long outer displacement together. `m68030_seq` sits between the IFU and EU: it counts how many extension words the current opcode needs (0 through 5, depending on addressing mode), converts the IFU's extension word format to the EU convention, and tells the IFU how many queue entries to drain when the EU accepts an instruction.
 
 The EU stalls on `need_ext` if it requires an extension word and `ext_valid` is not yet asserted — this is the only IFU→EU back-pressure mechanism.
 
 ---
 
-## D-Cache Write Policy
+## Caches
 
-The 68030 D-cache is **write-through only**. Every store goes to the external bus simultaneously; there are no write-back cycles. The cache simply absorbs subsequent reads of recently-written data. This matches real 68030 silicon behavior.
+Both the I-cache and D-cache are direct-mapped, live inside `m68030_biu` (as
+`biu_icache_if.sv`/`biu_cache_if.sv`), and are disabled at reset (`CACR`, all-zero
+until software enables them — every test in the project runs with caches disabled
+unless it's specifically exercising cache behavior). The D-cache is
+**write-through only**: every store goes to the external bus simultaneously, no
+write-back cycles, matching real 68030 silicon. The I-cache fills via genuine
+`SIZ=11` pin-level burst linefill.
+
+**See `docs/cache.md`** for how each cache works, their timing, and how they're
+tested (correctness, aliasing/eviction, CACR flush, self-modifying code, BERR
+mid-linefill, and combined-with-pipeline-stalls coverage).
 
 ---
 
@@ -187,16 +202,16 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 **Test strategy**: Three independent verification layers:
 
-1. **Unit + integration regression** (`make test`) — 34 testbenches covering BIU S-state timing, EU instruction decode, exception frames, MMU, cache, full-chip co-simulation, and pipeline stall/hazard behavior. 34/34 pass.
+1. **Unit + integration regression** (`make test`) — 35 testbenches covering BIU S-state timing, EU instruction decode, exception frames, MMU, both caches, full-chip co-simulation, and pipeline stall/hazard behavior. 35/35 pass.
 
-2. **Bus co-simulation** (`make cosim_grp`) — run 8 opcode-group assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle. All 8 groups pass.
+2. **Bus co-simulation** (`make cosim_grp`, `make cosim_memind`) — run opcode-group and memory-indirect-EA assembly programs through both the DUT and Musashi (reference 68030 emulator), diff bus logs cycle-by-cycle.
 
-3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. Structurally single-instruction — see "Pipeline stall/hazard coverage" below for what this can't reach. See `plan.md §Phase 84` for full results table.
+3. **Tom Harte SingleStepTests** — 68000 one-instruction test vectors (JSON, ~8000 per instruction mnemonic). Each test sets initial register + memory state, executes one instruction, and verifies final state. Structurally single-instruction — see `docs/stalls.md` for what this can't reach. All 124 suites are either 100% pass or a documented, confirmed non-bug (2 corpus data anomalies, plus permanent 68000-vs-68030 divergences that can't be replicated by construction) — see `plan.md` for the full phase-by-phase history.
 
-4. **Pipeline stall/hazard tests** (`tb/stall_hazard_tb.sv`, `tb/stall_fsm_tb.sv`, part of `make test`) — bus-arbitration contention, RAW/CCR/autoincrement hazards, control-transfer stall depth, multi-cycle FSM decode-holdoff, interrupt/BERR arrival mid-FSM, and back-to-back FSM composition across real multi-instruction sequences. See `plan.md §Phase 103` and §§105-107.
+4. **Pipeline stall/hazard tests** (`tb/stall_hazard_tb.sv`, `tb/stall_fsm_tb.sv`, part of `make test`) — bus-arbitration contention, RAW/CCR/autoincrement/CCR-write-collision hazards, control-transfer stall depth, multi-cycle FSM decode-holdoff, interrupt/BERR arrival mid-FSM, internal-exception dispatch races, and back-to-back FSM composition across real multi-instruction sequences. **See `docs/stalls.md` for the full catalog** — what triggers each stall, where it lives in the RTL, and which test proves it works.
 
 ```bash
-make test                  # 34/34 regression suite
+make test                  # 35/35 regression suite
 make cosim_grp             # 8 opcode group bus comparisons (DUT vs Musashi)
 make dat-synth             # 50-vector synthetic dat-replay cosim; 50/50 pass
 make sim/harte_dat         # rebuild Harte testbench binary after RTL changes
@@ -220,334 +235,80 @@ python3 -u scripts/run_harte_batch.py tests/harte/*.json.gz tests/harte/*.json.b
     --backend verilator -j 10 --chunk-size 300   # full 124-suite corpus in ~3m18s
 ```
 
-Full-corpus result: `PASS 689711 FAIL 2 SKIP 293652 TIMEOUT 0` — the 2 fails are the same
+Full-corpus result: `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — the 2 fails are the same
 documented `ASL.b` corpus anomaly (below), zero other differences from the original
-per-process runner. Not yet the default for RTL-change verification gates, which still
+per-process runner. This baseline is re-verified after any RTL change with pipeline- or
+cache-wide reach (most recently Phase 149) and has stayed bit-identical since Phase 112.
+Not yet the default for RTL-change verification gates, which still
 use `run_harte.py`. See `plan.md §Phase 110`/`§Phase 111` for the full investigation
 (including two dead ends: tiered memory-array sizing and SystemVerilog associative
 arrays, both rejected before landing on batching).
 
-### Pipeline stall/hazard coverage (Phases 103-108)
+### Pipeline stall/hazard coverage
 
 Every Harte test resets state, executes exactly one instruction, and checks the
 result — by construction it can never exercise anything that spans two
-instructions. This suite covers what that structurally leaves out:
+instructions or an asynchronous event arriving mid-instruction. `tb/stall_hazard_tb.sv`
+and `tb/stall_fsm_tb.sv` cover what that structurally leaves out: bus-arbitration
+contention, RAW/CCR/autoincrement register hazards (with exact cycle counts),
+control-transfer stall depth, decode-holdoff for all ~23 multi-cycle EX-stage FSM
+sources (RMW locks, MOVEM/MOVEP, CAS/CAS2, genuine memory-indirect EA, and more),
+DSACK wait-state composition, interrupt and bus-error arrival mid-FSM, two
+CCR/exception-dispatch pipeline races found while verifying the caches (Phase 134),
+and back-to-back FSM composition.
 
-| Category | File | What it covers |
-|---|---|---|
-| Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU priority under 3-way contention (previously zero coverage), IFU starvation/recovery under a sustained multi-beat burst, DMA held off by `bus_lock` during an RMW cycle |
-| RAW/CCR/autoincrement hazards | `tb/stall_hazard_tb.sv` | 4 producer types (immediate-ALU, autoincrement-An, long-latency-multiply, CCR-only) × no-gap/1-gap/multi-gap consumer timing, via real instruction sequences, plus exact hazard-stall cycle counts (2/1/0) verified via direct RTL signal reads |
-| Control-transfer stall depth | `tb/stall_hazard_tb.sv` | BRA (decode-resolved), JMP (register-indirect + absolute), taken DBF loop, JSR/RTS round trip through real memory |
-| Multi-cycle FSM decode-holdoff | `tb/stall_fsm_tb.sv` | All 23 of the ~23 `ex_mem_stall` sources in `eu_seq.sv` (TAS, MOVEM.L load+store, CMPM.B, BCHG, CAS/CAS2, MOVEP, MOVE16, ADDX/ABCD/PACK memory forms, BFINS, CMP2, MOVE mem-mem, RTR/RTE, RESET, PFLUSHA/PTEST/PMOVE, and — closing the last gap, Phase 124 — genuine memory-indirect EA `([bd,An],Xn,od)`) — verifies decode stays held off for each FSM's full duration and a real dependent instruction after it executes correctly, with exact bus-cycle counts verified for a representative set; memory-indirect EA's own test goes further, verifying the loaded register actually receives the correct value read through both indirection levels |
-| DSACK wait-state composition | `tb/stall_fsm_tb.sv` | A stretched (0/2/5 wait-state) bus cycle correctly composes with a downstream RAW hazard, and separately with every beat of a real multi-phase FSM — TAS (wait_states=3) and, added Phase 125, MOVEM (needed wait_states=10: at 3, the S-state FSM's own DSACK-sampling slack fully absorbs the extra latency with zero visible effect — a genuine, instruction-shape-dependent absorption effect, not a bug, confirmed via cycle-completion tracing before bisecting to a value with real margin) |
-| Interrupt arrival mid-FSM | `tb/stall_fsm_tb.sv` | Level-7 NMI injected mid-CAS2: found and fixed a real `m68030_exc.sv` gating bug (interrupts could hijack the bus mid-FSM), then a second, deeper dispatch-race bug (Phase 108); extended to MOVEM and genuine memory-indirect EA (Phase 125) via a new shared `run_int_mid_test` task, both passing cleanly first try |
-| BERR arrival mid-FSM | `tb/stall_fsm_tb.sv` | Sustained bus error injected mid-instruction: found and fixed a severe hang bug, extended from 4 to 16 of ~19 FSM sources (Phases 108-109); PFLUSH/PTEST investigated last (Phase 113) and found already correct; dedicated fault-injection tests added for all 12 remaining `mem_abort` sources, finding and fixing a real RTL bug along the way — only the first-ever fault in a session was reported (Phase 114); 3 more dedicated tests added (Phase 123) for the full-format mode=110 EA paths added by the Phases 115-122 rollout (full-format CMP2, and MOVE mem-to-mem indexed-dst full-format via both its abs.W-src and register-src mechanisms) — all passed on the first run, confirming empirically that `mem_abort`'s decode-content-agnosticism (`mem_berr \|\| exc_active`, untouched by any of that rollout's own changes) holds for the new paths too, not just by inspection; a final test added (Phase 124) for genuine memory-indirect EA — **every `ex_mem_stall` source of any kind now has its own dedicated BERR-mid test** — see below |
-| Back-to-back FSM composition | `tb/stall_fsm_tb.sv` | TAS immediately followed by MOVEM.L with no instruction between them — one FSM's decode-holdoff handing directly to another's, including write-then-read ordering across the boundary |
+**`docs/stalls.md` is the authoritative catalog** — what triggers each stall, where
+it lives in the RTL, and which test proves it works, kept current as new stall
+sources or coverage are added. Don't duplicate it here; see that file directly.
 
-Memory-indirect EA (`([bd,An],Xn,od)`) — Phase 107 narrowed the original "genuine
-encoding ambiguity" to a specific, falsifiable hypothesis (a suspected wrong-bit
-decode for pre- vs. post-indexed selection in `eu_seq.sv`); **Phase 115 confirmed and
-fixed it** via a dedicated Musashi cosim (`tools/m68ksim` + `tools/buscmp.py`, since
-Harte is 68000-captured and has zero coverage of this 68020+-only mode). Confirmed
-exactly as hypothesized: `dec_memind_is_post` read the wrong extension-word bit (Index
-Suppress instead of the real I/IS pre/post selector), causing post-indexed accesses to
-silently execute as pre-indexed. Building a second test then found a deeper, separate
-bug: a non-null base displacement wasn't fetched as an extension word at all, desyncing
-the whole instruction stream — fixed in `m68030_seq.sv`'s `ext_count` classifier and
-`eu_seq.sv`'s extension-word routing. See `plan.md §Phase 115` for the full writeup,
-including a regression this same investigation caught and fixed in `tb/ea_modes_tb.sv`'s
-own pre-existing memory-indirect unit test (it had the identical bit-conflation baked
-into its expected values).
+Musashi-cosim also covers the 68020+-only genuine memory-indirect EA addressing
+mode (`([bd,An],Xn,od)`), which Harte has zero coverage of since its corpus is
+68000-captured — `make cosim_memind` runs the dedicated `tests/memind*.s` suite
+against `tools/m68ksim`/`tools/buscmp.py`.
 
-**Phase 116 (Stage 1 of extending this beyond MOVE)** picked up the identical
-`ext_count`/decode gap for the "unary memory operand" family — TAS, NBCD, NEGX/CLR/
-NEG/NOT/TST, memory shift/rotate (the same `An`+`Xn`-only shape Phase 81's own "Bucket
-A" grouped for indexed EA). Found the real gap is bigger than "generalize
-`ext_count`": each family's own EA-decode block in `eu_seq.sv` also hardcodes the
-brief-only 8-bit-displacement interpretation, a pattern repeating at ~57 sites
-project-wide — extending every family is out of scope for one session, so this staged
-the rollout the same way Category B's FSM coverage (4→21) and the BERR-abort rollout
-(4→16→19) were staged. Generalized `is_memind_full`'s gate to cover all five families
-(`m68030_seq.sv`) and taught each family's own mode=110 decode arm to use `fi_bd`
-instead of the brief 8-bit offset when the extension word is full-format
-(`eu_seq.sv`) — brief format (the vast majority of real usage) is unaffected. Scoped
-down during implementation to the "full-format, non-indirect" case only: TAS/NBCD are
-RMW ops, and genuine memory-indirect would need their own multi-phase FSMs taught an
-extra pointer-read phase, qualitatively different work not attempted this pass.
-Verified via two new hand-run Musashi-cosim tests (`tests/memind5.s`, `memind6.s`) and
-a full Harte re-run — these are all Harte-covered instructions today, unlike Phase
-115's MOVE work, making this the highest-value regression gate available. See
-`plan.md §Phase 116` for the full writeup, including why neither new test cleanly
-passes automated `buscmp.py` comparison (two different, both pre-existing and
-unrelated causes) despite being hand-verified correct.
+### Harte Pass Rates
 
-**Phase 117 (Stage 2 of extending this beyond MOVE)** covered ALU-mem-src (ADD/SUB/
-CMP/AND/OR/EOR/ADDA/SUBA/CMPA/MULU/MULS/DIVU/DIVS memory forms, both directions) and
-dynamic BTST/BCHG/BCLR/BSET — the highest real-world-value families left, since these
-are among the most common uses of indexed addressing in compiled code. Surveyed every
-remaining brief-only `dec_ea_offset` site in `eu_seq.sv` (26 found beyond Stage 1's 4)
-before changing anything: 2 were false positives (already correctly handled by Phase
-115's own MOVE/MOVEA blocks), 12 were ALU-mem-src (ADD and SUB share one physical
-decode block via a `grp_aop(f_group)` helper, so no separate ADD-specific sites
-existed to find), 2 were the dynamic bit-ops, and the remaining ~10 map to Stage 3/4
-families. `is_alu_mem_src_mode110` turned out simpler than expected: the pre-existing
-`is_alu_mem_src` ext_count flag already covers both directions (doesn't check
-`f_dir`), so narrowing it to `f_mode==3'b110` alone covered all 12 sites at once — the
-`dyn_bit_get_Dn` deferred-register mechanism (proven in Phases 81-84) needed zero
-changes, confirming it's orthogonal to the EA-offset fix. Verified with a new
-Musashi-cosim test (`tests/memind7.s`, ADD+OR, cleanly automated) plus a hand-verified
-one (`tests/memind8.s`, BSET — hit the same byte-transfer bus-logging quirk Stage 1's
-TAS uncovered, not a real bug) and a full Harte re-run, the highest-value gate yet in
-this rollout given how heavily ADD/SUB/CMP/AND/OR/EOR/BTST-family/MUL/DIV are
-exercised by the corpus — zero regressions. See `plan.md §Phase 117` for the full
-writeup.
+**All 124 Harte suites are either 100% pass or a documented, confirmed non-bug** —
+see `CLAUDE.md`'s "Current state" section for the live summary and `plan.md` for the
+full phase-by-phase derivation of every fix along the way (many turned out to be
+test-harness bugs in `gen_harte_hex.py`/`run_harte.py`, not RTL bugs; a handful were
+genuine RTL bugs, root-caused and fixed; two categories are permanently, provably
+unfixable — see below). The two non-bug categories:
 
-**Phase 118 (Stage 3)** covered Scc, CHK (reusing CHK's own pre-existing
-`dyn_bit_get_Dn` deferred-register swap unchanged), ADDQ/SUBQ, MOVE-to/from-CCR/SR,
-and LEA/JMP/JSR/PEA indexed — 9 `eu_seq.sv` sites in total, 6 via `dec_ea_offset`
-and 3 via a second signal (`dec_jump_offset`) that JMP/JSR/PEA use instead for their
-target/push-address computation. **CMP2/CHK2's own indexed form turned out to be a
-different, larger gap**: `eu_seq.sv` has no `f_mode==110` decode for CMP2/CHK2 at
-all — never implemented, unlike every other family here which was merely
-brief-limited — so it's out of scope for this template and deferred to its own
-future phase. **Found a genuine pre-existing bug while adding JSR's own new
-`is_jsr_idx` classifier**: JSR `(d8,An,Xn)` had no `ext_count` entry at all
-(`is_jmp_idx` only ever matched JMP's own `f_ss` encoding, never JSR's) — harmless
-for post-execution IFU drain (JSR's PC redirect flushes/refills the queue
-regardless, explaining why Harte's own 100%-passing JSR suite never caught it) but
-real for gating the extra bd/od extension words a full-format target needs before
-decode reads them; fixed and verified via a dedicated cosim test with a landing pad
-at the computed jump target. Also found, and deliberately left unresolved: MOVE
-SR,(ea)'s write-side site performs an extra bus read before the write that Musashi
-doesn't, for indexed EA specifically (both brief and full) — pre-existing, doesn't
-affect correctness (`MOVEfromSR`'s own Harte suite is 100%, since Harte diffs final
-state rather than bus-cycle timing), documented in `tests/memind9.s` rather than
-investigated. Verified via `tests/memind9.s` (LEA+CHK.L+ADDQ.L+MOVE-to-CCR,
-hand-verified — hits the same prefetch-interleave reordering as `memind.s`/
-`memind4.s`/`memind6.s`) and `tests/memind10.s` (PEA+JSR, cleanly automated) plus a
-full 124-suite Harte re-run — PASS 702142, FAIL 2 (same documented ASL.b anomaly),
-0 TIMEOUT, matching the Phase 112 baseline exactly, zero regressions across
-Scc/CHK/ADDQ-SUBQ/LEA/JMP/JSR/PEA/MOVEtoSR. See `plan.md §Phase 118` for the full
-writeup.
+- **ASL.b**: 2 of 8065 tests are confirmed Tom Harte corpus data anomalies (the
+  claimed expected value doesn't match the initial value under any size/count/type
+  for that opcode) — not a bug, cross-checked against 41 other passing instances of
+  the same opcode.
+- **TRAP/TRAPV-taken, and Address-Error's exception frame**: permanently unfixable
+  by construction. The corpus is captured on real 68000 hardware, whose exception
+  frame is narrower (3-7 words, no format field) than the 68030's correct frame
+  (4-16 words, always includes a format/vector word). For traps the DUT's own
+  *output* is this frame — there's no input to synthesize around the width
+  mismatch, unlike other 68000-vs-68030 divergences this project *could* work
+  around (e.g. RTE, where the corpus's input frame can be reshaped before feeding
+  it in). Both cases are 100% SKIP by design, not failing.
 
-**Phase 119 (Stage 4a)** covered MOVEM's own extended-EA form — the first family in
-this rollout needing additive rather than override `ext_count` arithmetic, since
-MOVEM's baseline is already 2 extension words (register mask + EA descriptor) before
-any full-format concept applies, unlike every earlier family's baseline of 1. The
-existing `is_memind_full`/`fi_bd` machinery reads the wrong word for MOVEM (the mask,
-not the descriptor) in two independent spots, so dedicated MOVEM-specific peek signals
-and a genuine third extension word (`q3_word`, previously only used by MOVEM's own
-abs.L case) were needed for the bd value. **Found a real bug via cosim**: the first
-draft's gating flag was based on a pre-existing signal that structurally excludes the
-indexed EA mode entirely — compiled clean but produced a visibly wrong address (and,
-tellingly, reads where a store should write) in the very first test; fixed by basing
-it on the correct pre-existing flag instead. Verified via `tests/memind11.s` (MOVEM.L
-store+load through full-format indexed EA, cleanly automated) and a full Harte re-run
-— PASS 702142, FAIL 2 (same documented anomaly), 0 TIMEOUT, zero regressions, with
-MOVEM.l's own 100%-passing Harte suite as the key gate proving the common brief-EA
-paths are undisturbed. See `plan.md §Phase 119` for the full writeup.
+### Known Architectural Gap — closed, but not the way originally expected
 
-**Phase 120** implemented CMP2/CHK2's own indexed EA, per the user-approved 3-item
-follow-up plan. Unlike every other family in this rollout, this one had **no**
-`f_mode==110` decode arm at all — genuinely unimplemented, not brief-limited. Added
-one, reusing the `dyn_bit_get_Dn` deferred-register swap already proven for CHK's own
-indexed form, and reused Phase 119's own MOVEM-shaped `peek_fi_full_movem`/
-`movem_bd_words`/`movem_od_words` machinery directly (CMP2/CHK2's layout shares
-MOVEM's exact "q1=other data, q2=EA descriptor" shape). **Found two real bugs in the
-shared `dyn_bit_get_Dn` mechanism itself** — CMP2/CHK2 is the first consumer needing a
-*second* memory access after the register swap, exposing a same-cycle address
-corruption (the second bound read's own address was derived from `ex_ea` sampled at
-the exact instant the swap fires) and a same-edge stale-read race in the flag
-computation once the first bug's fix moved the swap later. Both fixed at the shared
-mechanism level (gating the swap to the second read specifically, and consuming the
-swapped value live rather than through an extra register) — a full regression sweep
-confirmed zero effect on every other `dyn_bit_get_Dn` consumer (CHK, ALU-mem-src,
-dynamic bit-ops, MOVE mem-to-mem indexed-dst). See `plan.md §Phase 120` for the full
-writeup, including the debugging trail.
+An early diagnostic (Phase 81, `AND.b` retested at 100% using the same 2-port
+time-multiplexing trick a then-broken indexed-write form used) showed the
+"needs a 3rd register-file read port" explanation for several indexed-EA failures
+was overbroad. Following that thread through Phases 81-84, all four original
+"looks like it needs a 3rd port" cases closed without ever touching the register
+file — three were missing decode or test-harness bugs, and even the one case with
+a plausible on-paper argument (CHK's indexed form) turned out solvable by the
+existing 2-port deferred-swap trick, since the value it needs is only read *after*
+the memory access completes, never simultaneously with the index register.
 
-**Phase 121** delivered long (32-bit) bd support for every family already converted in
-Stages 1-3, confirming the Phase 120 plan's own hunch that this was smaller than the
-original Stage 4 framing suggested. `fi_bd` only ever returned a non-zero value for
-word-size bd, silently returning 0 for long bd — but since every Stage 1-3 site
-already reads `fi_bd` unconditionally, fixing its own definition (one ternary branch,
-reusing the already-wired `q3_word` — no new extension-word plumbing needed for the
-non-indirect case) fixed all ~25 sites simultaneously. `memind_ext_count` already
-correctly counted the extra words for long bd; it just never had a value to go with
-it. Verified via `tests/memind13.s` (ADD.L memory-source + OR.L memory-dest RMW, both
-long-bd) — CLR.L was tried first for the memory-dest half but hit an unrelated,
-pre-existing quirk (an extra bus read before indexed-EA writes, present even for
-brief-form CLR.L, matching the same shape as Phase 118's MOVE SR,(ea) finding) — no
-correctness impact, documented rather than investigated, switched to OR.L instead.
-Genuine memory-indirect combined with long bd/od remains unsupported (same
-"least-wrong fallback" boundary drawn around plain indirect everywhere else in this
-rollout); MOVEM's own long-bd would need a real fourth extension word, also
-out of scope. Full Harte re-run at the Phase 112 baseline, zero regressions. See
-`plan.md §Phase 121` for the full writeup.
-
-**Phase 122** delivered MOVE mem-to-mem's dst-side full-format support — the third
-and final item of the follow-up plan, closing the entire memory-indirect/full-format
-mode=110 EA rollout (Phases 115-122). `is_move_mm`'s indexed-dst decode has ~6 case
-arms by source shape; scope narrowed further during design based on each arm's own
-extension-word baseline. Register src has a fixed 1-word baseline, folding straight
-into the existing `mode110_ea_src`/`fi_bd` machinery unchanged. Abs.W src and
-`(d16,PC)` src have a fixed 2-word baseline matching MOVEM/CMP2CHK2's own shape,
-reusing their `peek_fi_full_movem`/`movem_bd_words`/`movem_od_words` machinery
-directly. Imm src, abs.L src (already need `q3_word` for their own brief dst,
-leaving no free word for a full-format bd — would need a genuine 4th word) and
-plain-memory src (variable baseline per sub-mode) were deferred as needing either
-new hardware or materially higher wiring risk — **3 of the original ~5 targeted arms
-delivered**. Verified via `tests/memind14.s` (abs.W+PC-rel src) and `tests/memind15.s`
-(register src) — both hand-verified (the same benign prefetch-interleave and
-extra-read quirks already documented elsewhere in this rollout), with every actual
-write matching Musashi exactly. Full Harte re-run at the Phase 112 baseline, zero
-regressions — a meaningful gate given how heavily MOVE.b/w/l/q are exercised in the
-corpus. See `plan.md §Phase 122` for the full writeup.
-
-**Deliberately out of scope, documented and closed out** (see
-`~/.claude/plans/compressed-hopping-cocoa.md` for the full history): MOVE
-mem-to-mem's imm-src/abs.L-src/plain-memory-src arms (need a genuine 4th extension
-word or per-sub-mode wiring); genuine memory-indirect combined with long bd/od for
-any family; MOVEM's own long-bd support; the MOVE SR,(ea) and CLR-to-indexed-EA
-extra-read quirks (pre-existing, no correctness impact).
-
-**Phase 124 closed the project's last known stall-coverage gap**: genuine
-memory-indirect EA (`([bd,An],Xn,od)`) had no dedicated Category B decode-holdoff test
-(left out of the 21-of-23-source sweep since Phase 104) and no dedicated BERR-mid
-test either (the existing "BERR-mid-MOVE-mem-mem" test uses plain register-indirect,
-a different addressing mode). Added both, reusing `tests/memind2.s`'s own
-Musashi-verified encoding. Found and fixed 3 real bugs along the way, all in the
-*test* — this instruction had never run through this particular harness before: (a)
-`MOVEA.L #imm,An` needs a full 32-bit immediate, not one word — a bug present in
-Phase 123's own three new tests too, which "passed" anyway since they never check a
-data value, only recovery; (b) two fresh data addresses fell entirely outside this
-testbench's own 16KB memory-model bound, silently returning garbage rather than
-erroring — caught by the new Category B test's own D2-correctness check (the first
-check in the file to verify actual data flow through a memory-indirect FSM, not just
-a marker register). See `plan.md §Phase 124` for the full debugging trail.
-
-**Phase 125 added multi-source depth** to two generic pipeline mechanisms that had
-each been backed by exactly one data point: interrupt-mid-FSM (CAS2 only) and DSACK
-wait-states composing with a real FSM's own multi-beat bus cycles (TAS only). Added a
-new shared task, `run_int_mid_test` (mirrors `run_berr_mid_test`'s own factoring, but
-ends via a genuine `RTE` back into the main instruction stream instead of
-`claim_park`), plus `INT-mid-MOVEM` and `INT-mid-Memind` (reusing `tests/memind2.s`'s
-own encoding) — both passed cleanly on the first attempt. The wait-state test needed
-real debugging: `wait_states=3` (T4b's own value) gave bit-identical elapsed counts for
-both instances across three different attempts, ruling out a sequencing bug. Temporary
-cycle-completion tracing confirmed the DSACK-stretch mechanism genuinely fires (3 extra
-ticks counted on both reads) — the real explanation is that the S-state FSM doesn't
-sample DSACK until several ticks into a bus cycle regardless of how early it's
-asserted, and MOVEM's own baseline per-beat latency has enough slack to fully absorb 3
-extra ticks with zero visible effect on total elapsed time (TAS's shorter baseline has
-less slack, which is why the same value works for T4b) — a genuine,
-instruction-shape-dependent absorption effect, not a bug anywhere. Settled on
-`wait_states=10` for comfortable margin above the absorption threshold. Interrupt-mid-
-FSM coverage: 3 sources now (CAS2/MOVEM/memory-indirect EA). Wait-states-on-FSM-beats:
-2 sources now (TAS/MOVEM). Back-to-back FSM composition remains single-source
-(TAS→MOVEM). No RTL changed. See `plan.md §Phase 125` for the full debugging trail.
-
-**Two real RTL gaps found in Phases 105-106 were fixed in Phases 108-109, and a third
-was found and fixed in Phase 114** (see `plan.md §Phase 108`/`§Phase 109`/`§Phase 114`,
-and the corrected root-cause chain in the `feedback_berr_hang_deferred` Claude Code
-memory note): (1) an interrupt could land on the exact cycle a newly-ready instruction
-launches into EX right after an FSM retires, with the saved return PC pointing at that
-already-executing instruction, causing RTE to silently re-execute it — fixed by
-threading `int_pending` into `eu_seq.sv`'s own `stall` so the ready instruction is
-deliberately held in DECODE for the recognition window instead of racing it (Phase 108,
-fully closed); (2) a sustained bus error during almost any EU-initiated access hung the
-CPU forever instead of raising a Bus Error exception — fixed by giving `biu_cache_if.sv`
-a real abort path and wiring a proper EU-side `bus_err_req` into `m68030_exc.sv`
-(Phase 108), then extended from the initial 4 sources (ordinary reads/writes, TAS,
-MOVEM, CAS2) to 16 of ~19 `ex_mem_stall` sources — also MOVEP, MOVE16, ADDX/ABCD/SBCD/
-PACK predecrement forms, BFINS, CMP2/CHK2, MOVE mem-mem, RTR/RTE, PMOVE64, single CAS,
-and memory-indirect EA (Phase 109). **PFLUSH/PTEST investigated next** (Phase 113) —
-they route through a different ack/fault interface (`m68030_mmu.sv`/`biu_mmu_if.sv`),
-and turned out to already be correctly handled: PFLUSH never touches the bus at all
-(pure internal ATC-array comparison, nothing for a BERR to interrupt), and PTEST's table
-walker already had its own `mmu_berr` handling predating this session. (3) **Building
-dedicated fault-injection tests for the 12 sources Phase 109 fixed via `mem_abort`**
-(Phase 114) — the first time this codebase ever chained more than one independent fault
-into a single simulation run — found that `exc_frame_valid`'s deliberately-sticky
-"latched until reset" design (needed so the exception frame's captured fault data stays
-stable through the whole push sequence) meant the edge-detector Phase 108 built on top
-of it to drive `bus_err_req` could structurally only ever fire once per session: once
-`exc_frame_valid` first goes high it never returns to 0, so every fault after the first
-was silently dropped, with the faulted instruction's own abort completing correctly but
-having no exception to land in. Fixed by latching `eu_bus_err_r` directly off `eu_berr`
-(`biu_cache_if.sv`'s `CI_BERR` state, which is a genuine one-cycle pulse per fault, not a
-sticky level) instead of an edge-detector on `exc_frame_valid`. Zero RTL changes were
-needed for PFLUSH/PTEST specifically — a new BERR-mid-PTEST test confirms it end-to-end
-— but Phase 114's own bug was real RTL, in the notification path shared by every source.
-This closes the BERR-abort rollout completely, all ~19 `ex_mem_stall` sources confirmed
-correct with dedicated test coverage (memory-indirect EA's own BERR-mid-`<X>` fault-
-injection test excepted, still deferred — separate from its EA-decode-correctness
-investigation, covered next and now complete as of Phase 115).
-
-### Harte Pass Rates (Phase 102 summary — all 124 suites confirmed)
-
-| Family | Sizes | Pass rate | Notes |
-|--------|-------|-----------|-------|
-| ADD | b/w/l | 100% | |
-| SUB | b/w/l | 100% | |
-| AND | b/w/l | 100% | |
-| OR | b/w/l | 100% | |
-| EOR | b/w/l | 100% | |
-| CMP | b/w/l | 100% | |
-| MOVE | b/w/l/q | **100%** (all) | Phase 85: indexed-src added (dual swap-both register-file ports) + fixed a `get_scale_remap()` single-side-only harness bug. Phase 89: MOVEQ retested, already 100% (previously-noted 4 TIMEOUTs resolved as a side effect of an earlier fix) |
-| BCHG/BCLR/BSET/BTST | — | **100%** (all) | Phase 83: root cause was a test-harness bug, not RTL — zero RTL changes. Phase 88: BTST retested, already 100% |
-| TRAPV | — | 100% | |
-| MOVEfromUSP/toUSP | — | 100% | |
-| CLR/NEG/NOT/NEGX/TST | b/w/l | **100%** (all) | Phase 81 (b/w spot checks) + Phase 87 (full size sweep) |
-| TAS | — | **100%** | Phase 81: indexed EA added, no port needed (unary op) |
-| ASL | b/w/l | 99.98%\* / **100%** / **100%** | \*ASL.b: 2/8065 confirmed Tom Harte corpus data anomalies (opcode `0xe502`, passes 41/43 other instances) — not a bug |
-| ASR/LSL/LSR/ROL/ROR | b/w/l | **100%** (all) | Phase 87 full sweep |
-| ROXL/ROXR | b/w/l | **100%** (all) | Phase 87: found + fixed a real `eu_shifter.sv` bug — `count==0` register-count ROX must set `C=X` per 68k PRM, RTL cleared it to 0 like the other 6 shift/rotate types |
-| CHK | — | **100%** | Phase 84: `(d8,An,Xn)` indexed EA added, no port needed. Phase 86: remaining EA modes (`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)`) added — `(d8,PC,Xn)` needed the same swap trick, no port needed either |
-| ADDX/SUBX | b/w/l | **100%** | Phase 90 sweep (ADDX.w had 1 unexamined fail). Phase 102: root-caused — the `-(Ay),-(Ax)` destination address comes from a separate auto-decrementing register, invisible to the harness's single-EA-field collision check, so it was never checked against the STOP+NOP runway; 1/8065 cases coincidentally landed there. Added a dedicated check |
-| ANDI/EORI/ORI to CCR/SR | — | **100%** | Phase 90 sweep |
-| Bcc/BSR/DBcc | — | **100%** | Phase 90 sweep |
-| EXG/EXT/LINK/UNLINK/SWAP/NOP/RESET | — | **100%** | Phase 90 sweep |
-| MOVEA/MOVEfromSR/MOVEtoCCR/MOVEM.w/MOVEP | — | **100%** | Phase 90 sweep (MOVEP.w/.l each had 1 unexamined fail). Phase 102: root-caused — MOVEP's fixed encoding aliases `ea_mode=1` ("no memory operand") in the harness's generic EA decode, so its `(d16,An)` EA was never computed or range-checked; both failures landed inside the harness's own init-code region |
-| **JMP/JSR** | — | **100% / 100%** (was 0%/0%) | Phase 90: harness bug fixed (`can_run()` misclassified every JMP/JSR as invalid — see below); residual was TIMEOUTs on `(d8,An,Xn)`/`(d8,PC,Xn)` indexed targets. Phase 95: root-caused — scale≠0 sends our correctly-68030-scaled RTL to a genuinely different jump target than the 68000 reference (unlike MULS/MULU/DIVS/DIVU's case, this isn't limited to odd-address parity — the landing *address itself* differs), and the harness's STOP runway is only ever placed at the reference's target, so our RTL runs off into uninitialized memory. Fixed by skipping scale≠0 indexed JMP/JSR tests (unreplicable by construction). No RTL change |
-| **ABCD / NBCD** | — | **100% / 100%** | Phase 91: N/V are "undefined" per the PRM but real hardware is deterministic — reverse-engineered the actual formulas from raw Harte JSON (Musashi's own reference doesn't match real hardware either); fixed 2 real RTL bugs (Verilog sign-extension gotcha, a 9-bit field overflow) plus a pre-existing `-(An)` A7-step-size bug |
-| **SBCD** | — | **100%** | Phase 91: same fixes as ABCD/NBCD (99.7%, 28/8065 residual — C and result-correction decoupled in real hardware in a way not yet captured). Phase 101: found the missing condition — every residual case has `dst_hi - src_hi == 1` (raw, uncorrected nibbles); C was always correct, only the `+0xA0` result correction needed suppressing in that specific case. Verified against the full 1164-case ambiguous population with zero mismatches |
-| **MULS / MULU** | — | **100% / 100%** | Phase 92: memory-EA decode was entirely missing, plus a missing bus-read-size override that hung every memory-source multiply, plus a harness `f_ss`/`f_dir` misclassification bug. Phase 94: root-caused the remaining indexed-EA TIMEOUT — the Harte corpus is 68000-captured and faults (Address Error) on misaligned *data* access, which a 68030 legitimately does not; fixed a `gen_harte_hex.py` harness bug that placed the STOP runway using the reference's post-fault PC delta, causing our non-faulting RTL to run into uninitialized memory and hang. No RTL change |
-| **DIVS / DIVU** | — | **100% / 100%** | Phase 93: two real bugs — an RTL comment claiming C is "unchanged" on overflow was wrong (must always clear, hand-verified against 1400+ vectors); `div_trap` evaluated `md_div_by_zero` from `mem_rdata` before the memory read actually completed, firing a bogus trap that collided with the pending stall and hung the pipeline. Phase 94: same indexed-EA TIMEOUT root cause and harness fix as MULS/MULU, no RTL change |
-| **Scc** | — | **100%** | Phase 90: found (72.7%). Phase 96: root-caused — Scc's `(xxx).W` abs form and TRAPcc share the same opcode slot family; `f_reg==000` (Scc abs.W) was mislabeled as TRAPcc in decode *and* mislabeled as TRAPcc.L (2 ext words instead of 1) in the ext_count table, in two separate places; `(d16,An)`/`(d8,An,Xn)` had no ext_count entry at all. Fixed all three; TRAPcc.L made reachable as a byproduct (unverified, no dedicated suite) |
-| **PEA / LEA** | — | **100% / 100%** | Phase 90: found (86.0%/89.0%). Phase 97: LEA and PEA's `(d8,An,Xn)` form were the Phase 94/95 68000-vs-68030 scale divergence again (the EA *is* the result here, so a scale mismatch changes it directly, unreplicable, harness skip added, no RTL change); PEA's `(d8,PC,Xn)` was a genuine RTL gap — no decode case existed at all (100% TIMEOUT), plus the fix needed the same `ex_cur_sp` A7-routing PEA's `(d8,An,Xn)` sibling already uses, and the pushed value needed the missing `ex_xn_scaled` term added |
-| **MOVEM.l** | — | **100%** | Phase 90: found (95.0%). Phase 98: `get_scale_remap()`'s size calc had a "MOVE SR/CCR ↔ ea" clause (`f_group==4, f_ss==3`) positioned before the MOVEM check — MOVEM.l's own encoding also matches that pattern, truncating the scale-remap byte range to 2 instead of `4×popcount(mask)` and leaving most write addresses unredirected in `compare()`. Harness fix, zero RTL change |
-| **MOVEtoSR** | — | **100%** | Phase 90: found (96.3%, only `(A7)+`/`-(A7)` failing). Phase 98: genuine RTL race — `eu_regfile.sv` had two `if` clauses able to write the same bank register in one cycle (the auto-decrement, and the SR-write's "save A7 before the S/M switch" step), and the textually-later one clobbered the correct decrement with a stale pre-decrement value. Fixed with `a7_save_val`, which uncovered an unrelated pre-existing `tb/eu_regfile_tb.sv` gap (3 ports never driven, floating at X) also fixed |
-| **RTS / RTR / RTE** | — | **100% / 100% / 100%** | Was 100% SKIP for the project's entire history (a `get_operand_ea()` decode bug — these opcodes alias a real indexed-EA bit pattern despite having no EA — caused every one to be misrouted through bogus backstops). Phase 99: fixed the decode bug; RTR needed an additional real RTL fix (`eu_seq.sv` advanced SP by 4 instead of 2 after popping the CCR word — a known, self-documented placeholder bug, never revisited since RTR had never run end-to-end); RTE needed 68030 exception-frame-format synthesis (68000 corpus has no format word) |
-| **TRAP / TRAPV-taken** | — | — | Confirmed permanently unfixable, not a gap: our correct 68030 exception-frame push (4 words incl. format/vector word) can never match the reference 68000's native 3-word push — the DUT constructs this as *output*, so (unlike RTE) there's no input to synthesize around. Remains 100% SKIP by design. TRAPV's non-trapping cases pass 100% (3970/3970) |
-| **Odd-restored-PC Address Error** | — | — | Phase 99 found a runtime PC-restore (RTS/RTE/RTR) landing on an odd address hung the RTL instead of trapping. **Phase 100 root-caused it: the mechanism was already correct** — `m68030_ifu.sv`'s `addr_err`/`m68030_exc.sv`'s redirect fire and complete properly; the hang was actually the vector-3 table read (fixed address `VBR+12`=`0xC` at reset) colliding with the harness's own init code and returning garbage. Fixed by relocating VBR for these tests via a synthesized `MOVEC A7,VBR` (which exposed and fixed a second real gap: MOVEC had no `ext_count` entry, never having been exercised through the IFU before). Confirmed via repro: vector read now correct, PC redirects correctly, DUT reaches STOP cleanly. Still can't PASS the byte-level comparison — Address Error's frame has the same permanent 68000-vs-68030 width divergence as TRAP — but the underlying mechanism is now validated. Still skipped, now for a confirmed reason instead of an unknown |
-
-**JMP/JSR harness bug (Phase 90)**: both were 0% (100% SKIP, never ran at
-all) before this phase. `can_run()`'s "EA overlaps STOP runway" check treated
-the jump target — which `build_patches()` *deliberately* places the STOP
-opcode at — as a data-operand conflict; a second "misaligned EA" backstop
-then re-triggered on the same underlying issue (PC-after-jump isn't
-"instruction start + length", so the wild PC delta looked like an exception
-that never happened). Both fixed in `gen_harte_hex.py`. See `plan.md §Phase
-90` for the residual indexed-EA timeout that's still open.
-
-### Known Architectural Gap — did not exist
-
-A diagnostic in Phase 81 (`AND.b` retested at 100% using the same 2-port
-time-multiplexing trick BCHG's broken indexed form uses) showed the "2-port register
-file" explanation for `(d8,An,Xn)`-destination failures was overbroad. Following that
-thread through Phases 81–84, all four original buckets closed without ever touching
-the register file: unary memory ops just needed EA decode (Bucket A); AND/OR/EOR/SUB/
-CMP/ADDA/SUBA/CMPA already worked with the existing 2-port scheme (Bucket B);
-BCHG/BCLR/BSET — the case that looked most like a real RTL limitation, since it
-silently produced wrong output rather than just timing out — turned out to be a
-**test-harness bug** (Bucket C, Phase 83): the harness misclassified dynamic bit-ops
-and read the extension word from the wrong offset. And **CHK's indexed form**
-(Bucket D, Phase 84) — the one case with a plausible on-paper argument for a genuine
-3rd simultaneous register read — closed the same way as Bucket B once actually
-attempted: the tested value isn't needed until after the memory read completes, so it
-defers to the existing swap mechanism instead. See `port3.md` for the full analysis —
-the investigation is concluded, and nothing in the codebase requires the
-register-file port.
+That result held until Phase 148-149 found the one genuine exception: **MOVE
+Dn/An,(d8,An,Xn)** (register source, indexed destination) needs the base register,
+index register, *and* source register all live in the same cycle for a plain write
+— unlike every 2-port-solvable case, there's no bus-ack event before the write
+starts to key a deferred swap off. Phase 148 added a genuine 3rd read port
+(`eu_regfile.sv`'s `rd_c`); Phase 149 gave it its one real consumer, eliminating an
+architecturally-unnecessary RMW "phantom read" this arm had been using as a
+workaround since Phase 122. See `port3.md` for the full analysis and its own
+corrected conclusion.
 
 ---
 

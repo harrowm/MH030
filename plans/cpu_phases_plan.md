@@ -1,5 +1,11 @@
 # MC68030 CPU — Development Plan
 
+> **Superseded.** This snapshot stops at Phase 76; the project is well past Phase
+> 149 now. `plan.md` (repo root) is the actively-maintained, full phase-by-phase
+> log — use that instead. Kept here only for its own historical value describing
+> the early Phase 1-76 design intent in more prose form than `plan.md`'s own
+> terser early entries. Not referenced by any Makefile target or other doc.
+
 ## Status (as of Phase 76)
 
 ### BIU — complete (Phases 1–22)
