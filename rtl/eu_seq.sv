@@ -508,12 +508,13 @@ module eu_seq (
     // -----------------------------------------------------------------------
     logic        dec_valid, dec_writes_reg, dec_updates_ccr;
     logic        dec_x_unchanged, dec_use_imm, dec_use_reg_cnt, dec_needs_ext;
-    logic        dec_reads_src, dec_reads_dst;
+    logic        dec_reads_src, dec_reads_dst, dec_reads_c;
     logic [2:0]  dec_unit;
     logic [3:0]  dec_alu_op, dec_shf_op;
     logic [2:0]  dec_md_op;
     logic [3:0]  dec_src_reg;   // rd_a: source operand register
     logic [3:0]  dec_dst_reg;   // rd_b: destination/second-operand register
+    logic [3:0]  dec_c_reg;     // rd_c: 3rd simultaneous read (Phase 149, plan.md)
     logic [3:0]  dec_dest_reg;  // register to commit result into
     logic [1:0]  dec_siz;       // 00=long, 01=byte, 10=word
     logic [31:0] dec_imm;
@@ -738,9 +739,11 @@ module eu_seq (
         // ── Register operands ──────────────────────────────────────────────────
         dec_src_reg      = 4'h0;
         dec_dst_reg      = 4'h0;
+        dec_c_reg        = 4'h0;
         dec_dest_reg     = 4'h0;
         dec_reads_src    = 1'b0;
         dec_reads_dst    = 1'b0;
+        dec_reads_c      = 1'b0;
         dec_writes_reg   = 1'b0;
         dec_sext_src     = 1'b0;
 
@@ -2129,41 +2132,46 @@ module eu_seq (
                         end
                     end else if (f_move_dst_mode == 3'b110) begin
                         // ── dst = (d8,An,Xn) indexed ──
-                        // Use RMW so rd_a=An_base and rd_b=Xn (pure write can't split them).
-                        // CCR fires from WB at RMW cleanup cycle (ex_mem_rmw_ccr=0 for UNIT_MOVE).
-                        // Exception: MOVE Dn/An→indexed dst uses mem_rmw CCR path (ex_is_move_reg_idx_dst).
                         if (f_mode == 3'b000 || f_mode == 3'b001) begin
                             // MOVE Dn/An, (d8,An_dst,Xn) brief, or (bd,An_dst,Xn) full
-                            // (Phase 122, Sub-scope A) -- register source, indexed dst.
-                            // RMW "read" computes the indexed EA; after read_ack dyn_bit switches
-                            // rd_b to the source register. mem_rmw_wdata_r = rd_b_data = src reg.
+                            // (Phase 149, plan.md): register source, indexed dst -- the one
+                            // case in the project confirmed to genuinely need a 3rd
+                            // simultaneous register-file read (port3.md): An_dst_base
+                            // (rd_a) + Xn (rd_b) are both needed live for the EA the
+                            // entire write cycle, and the source register's own value
+                            // (rd_c) is needed at the very same moment for the write data
+                            // -- unlike every dyn_bit_get_Dn-solvable case elsewhere in
+                            // this project, there's no bus-ack event before a plain write
+                            // starts to key a deferred register-port swap off. Was RMW
+                            // (a "2-port trick": real but unnecessary bus read, purely to
+                            // get 2 simultaneous register reads) until Phase 148 added the
+                            // rd_c port -- now a genuine single-phase write, same
+                            // dec_is_mem_wr/dec_updates_ccr shape as CLR's own indexed
+                            // form (Phase 144) reusing the already-Harte-proven CCR path,
+                            // except the write data is the live rd_c_data instead of a
+                            // constant 0 (see move_result_w's own first branch and
+                            // mem_wdata's own ex_is_move_reg_idx_dst case below).
                             // brief_ext in ext_data[15:0] (ext_count=1 -> eu_ext_data={16'h0,q[1]});
-                            // full-format bd via the standard fi_is_full/fi_bd template -- this
-                            // arm's own baseline is already 1 word (no extra src words), matching
-                            // every single-EA-word family from Stages 1-3, so it folds into the
-                            // existing is_memind_full/fi_bd machinery unchanged (see
-                            // is_move_reg_idx_dst_mode110 in m68030_seq.sv).
+                            // full-format bd via the standard fi_is_full/fi_bd template.
                             dec_valid               = 1'b1;
-                            dec_is_mem_rd           = 1'b1;
-                            dec_is_mem_rmw          = 1'b1;
+                            dec_is_mem_wr           = 1'b1;
                             dec_unit                = UNIT_MOVE;
                             dec_src_reg             = {1'b1, f_dn};  // dst_An_base → rd_a (indexed EA)
                             dec_reads_src           = 1'b1;
                             dec_dst_reg             = {ext_data[15], ext_data[14:12]};  // dst_Xn → rd_b
                             dec_reads_dst           = 1'b1;
+                            dec_c_reg               = {(f_mode == 3'b001), f_reg};  // source reg → rd_c
+                            dec_reads_c             = 1'b1;
                             dec_is_idx              = 1'b1;
                             dec_xn_wl               = ext_data[11];
                             dec_xn_scale            = ext_data[10:9];
                             dec_ea_offset           = fi_is_full ? fi_bd
                                                     : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_writes_reg          = 1'b0;
+                            dec_updates_ccr         = 1'b1;
                             dec_needs_ext           = 1'b1;
                             dec_siz                 = f_move_sz;
-                            dec_is_dyn_bit_idx      = 1'b1;
-                            dec_dyn_bit_reg         = f_reg;  // source register number
-                            dec_dyn_bit_is_an       = (f_mode == 3'b001);
                             dec_is_move_reg_idx_dst = 1'b1;
-                            // CCR via mem_rmw path (ex_mem_rmw_ccr overridden for move_reg_idx_dst)
                         end else if (f_mode == 3'b111 && f_reg == 3'b000) begin
                             // MOVE (xxx).W, (d8,An_dst,Xn) brief, or (bd,An_dst,Xn) full
                             // (Phase 122, Sub-scope A): abs.W src, indexed dst.
@@ -6528,21 +6536,26 @@ module eu_seq (
     logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
                             (dec_reads_src && ex_dest_reg == dec_src_reg) ||
-                            (dec_reads_dst && ex_dest_reg == dec_dst_reg)) ||
+                            (dec_reads_dst && ex_dest_reg == dec_dst_reg) ||
+                            (dec_reads_c   && ex_dest_reg == dec_c_reg)) ||
                         (ex_valid && ex_is_muldivl && ex_md_64bit && (
                             (dec_reads_src && {1'b0, ex_md_dst2} == dec_src_reg) ||
-                            (dec_reads_dst && {1'b0, ex_md_dst2} == dec_dst_reg))) ||
+                            (dec_reads_dst && {1'b0, ex_md_dst2} == dec_dst_reg) ||
+                            (dec_reads_c   && {1'b0, ex_md_dst2} == dec_c_reg))) ||
                         // An-update hazard: non-RMW instruction updates An via an_upd_en; wb fires
                         // one cycle after stall clears so the next instruction must wait one cycle
                         (ex_valid && ex_an_upd_en && !ex_is_mem_rmw && (
                             (dec_reads_src && dec_src_reg == {1'b1, ex_an_upd_reg}) ||
-                            (dec_reads_dst && dec_dst_reg == {1'b1, ex_an_upd_reg})));
+                            (dec_reads_dst && dec_dst_reg == {1'b1, ex_an_upd_reg}) ||
+                            (dec_reads_c   && dec_c_reg   == {1'b1, ex_an_upd_reg})));
     assign hazard_wb  = wb_valid && wb_writes_reg && (
                             (dec_reads_src && wb_dest_reg == dec_src_reg) ||
-                            (dec_reads_dst && wb_dest_reg == dec_dst_reg)) ||
+                            (dec_reads_dst && wb_dest_reg == dec_dst_reg) ||
+                            (dec_reads_c   && wb_dest_reg == dec_c_reg)) ||
                         (wb_valid && wb_is_muldivl && wb_md_64bit && (
                             (dec_reads_src && {1'b0, wb_md_dst2} == dec_src_reg) ||
-                            (dec_reads_dst && {1'b0, wb_md_dst2} == dec_dst_reg)));
+                            (dec_reads_dst && {1'b0, wb_md_dst2} == dec_dst_reg) ||
+                            (dec_reads_c   && {1'b0, wb_md_dst2} == dec_c_reg)));
     assign hazard_ccr = dec_reads_ccr && (
                             (ex_valid && ex_updates_ccr) ||
                             (wb_valid && wb_updates_ccr));
@@ -6764,7 +6777,7 @@ module eu_seq (
     logic [4:0]  ex_bit_num;
     logic        ex_bit_from_reg;
     logic        ex_is_bit_imm;
-    logic [3:0]  ex_src_reg, ex_dst_reg;
+    logic [3:0]  ex_src_reg, ex_dst_reg, ex_c_reg;  // ex_c_reg: Phase 149, plan.md
     assign bcds_ay_step = (ex_src_reg[2:0] == 3'b111) ? 32'd2 : 32'd1;
     assign bcds_ax_step = (ex_dst_reg[2:0] == 3'b111) ? 32'd2 : 32'd1;
     logic [1:0]  ex_siz;
@@ -7053,6 +7066,7 @@ module eu_seq (
             ex_bit_from_reg   <= dec_bit_from_reg;
             ex_src_reg        <= dec_src_reg;
             ex_dst_reg        <= dec_dst_reg;
+            ex_c_reg          <= dec_c_reg;
             ex_dest_reg       <= dec_dest_reg;
             ex_siz            <= dec_siz;
             ex_imm            <= dec_imm;
@@ -7196,7 +7210,9 @@ module eu_seq (
     // Scc to memory is UNIT_MOVE and does NOT affect CCR.
     // All other memory RMW ops (ALU/SHF/BIT) do affect CCR.
     logic ex_mem_rmw_ccr;
-    assign ex_mem_rmw_ccr = ex_is_mem_rmw && (ex_unit != UNIT_MOVE || ex_is_move_reg_idx_dst);
+    // ex_is_move_reg_idx_dst removed (Phase 149, plan.md): no longer RMW-shaped,
+    // uses the ordinary WB-commit dec_updates_ccr path like CLR's own indexed form.
+    assign ex_mem_rmw_ccr = ex_is_mem_rmw && (ex_unit != UNIT_MOVE);
 
     // -----------------------------------------------------------------------
     // Drive functional unit inputs from EX stage + register file
@@ -7251,9 +7267,10 @@ module eu_seq (
     // CMPM rd_b carries Ax address base — must be full 32-bit regardless of siz
     assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem || ex_is_bf || ex_is_move_mm || ex_is_cas || ex_is_abcd_sbcd_mem || ex_is_cas2) ? 2'b00 : ex_siz;
 
-    // Read port C (Phase 148, plan.md): pure plumbing, no consumer yet.
-    // Phase 149 wires this to MOVE Dn,(d8,An,Xn)'s own Dn source register.
-    assign rd_c_sel = 4'd0;
+    // Read port C: MOVE Dn/An,(d8,An,Xn)'s own source register (Phase 149,
+    // plan.md) -- the sole consumer today. Always full longword (like rd_a's
+    // own ex_is_mem_wr case): eu_lane() sizes the write from d[7:0]/d[15:0].
+    assign rd_c_sel = ex_is_move_reg_idx_dst ? ex_c_reg : 4'd0;
     assign rd_c_siz = 2'b00;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores) --
@@ -8000,8 +8017,9 @@ module eu_seq (
     // Must be pre-computed assigns to avoid Icarus constant-select warnings.
     logic [31:0] move_result_w;
     assign move_result_w =
-        // MOVE Dn/An → (d8,An,Xn): at dyn_bit fire, rd_b_data IS the source register value
-        (ex_is_move_reg_idx_dst && dyn_bit_get_Dn) ? rd_b_data :
+        // MOVE Dn/An → (d8,An,Xn) (Phase 149, plan.md): genuine single-phase write,
+        // source register value always live on rd_c (no swap-timing gating needed).
+        ex_is_move_reg_idx_dst ? rd_c_data :
         ex_is_swap       ? {rd_a_data[15:0], rd_a_data[31:16]} :
         ex_sext          ? (ex_sext_from_byte ? {{24{rd_a_data[7]}},  rd_a_data[7:0]}
                                               : {{16{rd_a_data[15]}}, rd_a_data[15:0]}) :
@@ -9266,6 +9284,9 @@ module eu_seq (
                      : (movem_run_r && !movem_load_r && !movem_long_r) ? {rd_a_data[15:0], 16'h0}
                      // LINK A7: push decremented SP (A7-4), not original A7
                      : (ex_is_link && ex_src_reg == ex_dst_reg) ? ex_ea
+                     // MOVE Dn/An → (d8,An,Xn) (Phase 149, plan.md): rd_a/rd_b hold the
+                     // indexed EA's An/Xn; the source register's value is on rd_c.
+                     : ex_is_move_reg_idx_dst  ? eu_lane(rd_c_data, ex_siz)
                      :                                             eu_lane(rd_a_data, ex_siz);
     // RMW — assert during TAS (An) read phase (not during write or cooldown).
     assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;

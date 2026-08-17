@@ -471,9 +471,26 @@ buscmp-memind21: $(SIM)/cosim_grp winuae/tests/memind21_ref.log tests/memind21.h
 	    | grep "^BUS" > /tmp/_dut_memind21.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind21.log winuae/tests/memind21_ref.log \
 	    --reads-only --dut-may-continue
+# memind15 (Phase 149, plan.md): full comparison, NOT --reads-only -- the
+# phantom read this file's own header used to document is gone now that
+# MOVE Dn,(d8,An,Xn) is a genuine single-phase write via rd_c, so the full
+# bus trace (reads AND the write) matches Musashi/WinUAE exactly.
+buscmp-memind15: $(SIM)/cosim_grp winuae/tests/memind15_ref.log tests/memind15.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind15.hex +grp=memind15 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind15.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind15.log winuae/tests/memind15_ref.log \
+	    --dut-may-continue
+# memind24 (Phase 149, plan.md): An-source sibling of memind15 -- exercises
+# dec_c_reg's own is_an bit for the first time. Also a full comparison.
+buscmp-memind24: $(SIM)/cosim_grp winuae/tests/memind24_ref.log tests/memind24.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind24.hex +grp=memind24 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind24.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind24.log winuae/tests/memind24_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
-              buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21
+              buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
+              buscmp-memind15 buscmp-memind24
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

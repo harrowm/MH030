@@ -1,11 +1,31 @@
 # Plan: Add a 3rd combinational read port to `eu_regfile`
 
-Status: **CONCLUDED. All four original "arch gap" buckets (A, B, C, D) are closed.
-None of them needed the register-file port. No port was built, and as of this
-writing nothing in the codebase requires one.** Kept as a reference design (§3-4)
-in case a genuine 3-simultaneous-operand case turns up later — the design itself
-is still sound and cheap to build if that ever happens — but the investigation
-that motivated it is complete.
+Status: **One genuine exception found and built (Phases 148-149, plan.md).** All
+four original "arch gap" buckets (A, B, C, D) investigated below remain closed —
+none of them needed the register-file port, and every fix in that investigation
+used the existing 2-port `dyn_bit_get_Dn` deferred-swap trick. But a *separate*
+case, found later while working through the correctness-edges rollout (Phase 144)
+and its own follow-up plan, turned out to be the real exception this doc's §3-4
+design was speculatively built for: **MOVE Dn/An,(d8,An,Xn)** (register source,
+indexed destination). Unlike every Bucket A-D case, the deferred register there
+is needed *simultaneously* with An+Xn, not just after a read completes — a plain
+(non-RMW) write has no bus-ack event to key a 2-port swap off, since the write
+data is needed the moment the write cycle starts. Before Phase 148, this arm
+worked around the gap with a real, architecturally-unnecessary RMW read purely
+to get 2 simultaneous register-file reads (An+Xn) via the existing ports, then a
+deferred swap at the read's own ack to also grab the source register — the same
+"phantom read" quirk documented for CLR-indexed and MOVE SR,(ea) before Phase 144
+fixed those two (which *were* 2-port-solvable, since neither reads a register for
+its write data). Phase 148 added the `rd_c` port (`eu_regfile.sv`/`eu_seq.sv`/
+`m68030_eu.sv`, exactly matching §3-4's own design); Phase 149 rewired this one
+arm to use it, eliminating the phantom read entirely (confirmed via a full,
+non-`--reads-only` Musashi bus-trace comparison — `tests/memind15.s`/
+`tests/memind24.s`) and closing `hazard_ex`/`hazard_wb`'s own coverage gap for
+the new port (a genuine RAW hazard on the source register was previously
+undetectable, since neither hazard formula had ever checked a 3rd read register
+against `ex_dest_reg`). Full 124-suite Harte re-run after both phases: bit-
+identical to baseline, zero regressions. **No other case in the codebase has
+needed the port** — kept built (not reverted) since it now has a real consumer.
 
 The only thing still open, unrelated to the port question, is MOVE's remaining
 `(d8,An,Xn)`/`(d8,PC,Xn)` indexed-*source* forms and CHK's remaining

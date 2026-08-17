@@ -5647,6 +5647,65 @@ next — the functional change, and per the plan's own framing the higher-risk g
 
 ---
 
+## Phase 149 — MOVE Dn,(d8,An,Xn) genuine single-phase write via `rd_c` (closes `port3.md`'s
+## Item 1 and the whole Phase 145-149 rollout)
+
+**Goal**: rewrite the `dec_is_move_reg_idx_dst` decode arm (MOVE Dn/An, register source,
+indexed destination) to use Phase 148's new `rd_c` port instead of the RMW "2-port trick" —
+a real, architecturally-unnecessary bus read purely to get 2 simultaneous register-file
+reads (An+Xn), with the source register grabbed via a `dyn_bit_get_Dn` deferred swap at the
+read's own ack. This is the one case in the whole project (Buckets A-D, Phases 81-84, all
+confirmed *not* to need a 3rd port) that genuinely does: a plain write has no bus-ack event
+before it starts to key a 2-port swap off, and An+Xn+the source register are all needed
+live in the exact same write cycle.
+
+**`rtl/eu_seq.sv`**: the arm now sets `dec_is_mem_wr=1` (was `dec_is_mem_rd`+
+`dec_is_mem_rmw`), `dec_updates_ccr=1` (reusing the same already-Harte-proven CCR path
+CLR's own indexed form uses, Phase 144), `dec_c_reg={(f_mode==3'b001), f_reg}` (source
+register → rd_c, the same D/A-select-bit encoding `dyn_bit_is_an` used) + `dec_reads_c=1`;
+dropped `dec_is_mem_rd`/`dec_is_mem_rmw`/`dec_is_dyn_bit_idx`/`dec_dyn_bit_reg`/
+`dec_dyn_bit_is_an`. `rd_a`(An)/`rd_b`(Xn) stay exactly as before, matching Phase 144's own
+`ex_an_base` mux unchanged. New `dec_c_reg`/`ex_c_reg`/`dec_reads_c` signals added mirroring
+`dec_src_reg`/`ex_src_reg`/`dec_reads_src` exactly; `rd_c_sel` (tied to constant 0 since
+Phase 148) now drives `ex_c_reg` whenever `ex_is_move_reg_idx_dst`. `move_result_w`'s own
+mux collapsed from `(ex_is_move_reg_idx_dst && dyn_bit_get_Dn) ? rd_b_data : ...` to a plain
+`ex_is_move_reg_idx_dst ? rd_c_data : ...` — no swap-timing gating needed, `rd_c` is always
+correct the instant it's read. `mem_wdata`'s own mux gained a matching
+`ex_is_move_reg_idx_dst ? eu_lane(rd_c_data, ex_siz) : ...` case (ahead of the plain
+`rd_a_data` default, which would otherwise read An's value instead of the source register's
+— rd_a is occupied by An for this arm, unlike the ordinary non-indexed MOVE Dn,ea arm where
+rd_a holds the source). `ex_mem_rmw_ccr`'s own condition dropped `|| ex_is_move_reg_idx_dst`
+(no longer RMW-shaped, uses the ordinary WB-commit `dec_updates_ccr` path instead).
+
+**A real, previously-latent hazard-detection gap found while wiring this up (not a
+regression — a coverage gap that only bites once a 3rd read register genuinely exists)**:
+`hazard_ex`/`hazard_wb` only ever checked `dec_reads_src`/`dec_reads_dst` against
+`ex_dest_reg`/`wb_dest_reg` — with no 3rd-operand equivalent, a genuine RAW hazard on the
+new `rd_c` source register (a preceding instruction still writing the same register this
+arm reads via rd_c) would have gone completely undetected, reading a stale value. Extended
+both formulas' three OR-clauses (plain writes, 64-bit mul/div's second destination, and the
+An-update-hazard clause) with a matching `(dec_reads_c && ... == dec_c_reg)` term each.
+
+**Test**: `tests/memind15.s` (Phase 122's own original register-source test, previously
+documenting the phantom-read quirk with a `--reads-only` workaround) now compares **cleanly
+in full** — reads AND the write both match Musashi/WinUAE exactly, no workaround needed;
+updated its own header and wired into `make cosim_memind` as `buscmp-memind15` (full
+comparison, not `--reads-only`). Added `tests/memind24.s`, the An-source sibling (`MOVE
+A2,(d8,A0,Xn)`), to specifically exercise `dec_c_reg`'s own is-An bit for the first time —
+also compares cleanly, wired in as `buscmp-memind24`.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 12/12 (was 10/10).
+Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline**, zero regressions — the highest-value gate
+available for this phase, since it touches a shared CCR path plus both hazard-detection
+formulas used by every instruction in the pipeline; MOVE.b/w/l/q's own suites (among the
+most heavily Harte-exercised in the corpus) all independently confirmed 100%. **This closes
+`port3.md`'s Item 1 and the Phase 145-149 rollout in full** — `port3.md` updated to record
+this one genuine 3rd-port exception, correcting its own prior "concluded, nothing needs a
+3rd port" framing.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

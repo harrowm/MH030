@@ -3,15 +3,16 @@
 ; (fixed 1-word baseline, folds into the ordinary is_memind_full/fi_bd
 ; machinery unchanged, see is_move_reg_idx_dst_mode110 in m68030_seq.sv).
 ;
-; Not wired into make cosim_memind: this arm's own RMW mechanism (needed to
-; split rd_a=An/rd_b=Xn during the read, same as every other indexed-dst
-; RMW form) performs an extra bus READ before the write that Musashi
-; doesn't -- the same pre-existing quirk already documented for CLR.L
-; (Phase 121) and MOVE SR,(ea) (Phase 118), confirmed present for this
-; arm's own *brief* form too via a standalone throwaway repro (not kept),
-; so it predates this phase's own fi_bd extension. Hand-verified instead:
-; the actual WRITE (address and value) matches Musashi exactly, only the
-; extra read before it doesn't.
+; FIXED (Phase 149, plan.md): this arm used to be RMW (a real, unnecessary
+; extra bus READ before the write, purely to get An+Xn on 2 simultaneous
+; register-file ports -- the same pre-existing quirk documented for CLR.L
+; (Phase 121) and MOVE SR,(ea) (Phase 118) before Phase 144 fixed those
+; two). MOVE Dn,(d8,An,Xn) needed a genuine 3rd register-file read port
+; (rd_c) since An+Xn+the source register are all needed live in the same
+; write cycle, with no bus-ack event to key a 2-port deferred swap off --
+; Phase 148 added rd_c, Phase 149 wired this arm to use it. Now a genuine
+; single-phase write; wired into `make cosim_memind` as `buscmp-memind15`,
+; comparing the FULL trace (reads and the write), not just --reads-only.
 ;
 ;   MOVE.L D2,($100,A0,D1.L)  -- EA = A0+$100+D1
 ;
