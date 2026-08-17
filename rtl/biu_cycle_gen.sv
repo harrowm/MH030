@@ -75,6 +75,8 @@ module biu_cycle_gen #(
     input  logic [31:0] mmu_addr,
     input  logic [2:0]  mmu_fc,
     input  logic        mmu_req,
+    input  logic        mmu_rw,      // Phase 150 Stage 3: 1=read (walk), 0=write (U/M write-back)
+    input  logic [31:0] mmu_wdata,   // Phase 150 Stage 3: write data for the U/M write-back cycle
     output logic [31:0] mmu_rdata,
     output logic        mmu_ack,
     output logic        mmu_berr,
@@ -628,6 +630,7 @@ module biu_cycle_gen #(
             cyc_is_op = retry_is_op_r; cyc_wdata = retry_wdata_r;
         end else if (grant_mmu) begin
             cyc_addr = mmu_addr; cyc_fc = mmu_fc;
+            cyc_rw   = mmu_rw;   cyc_wdata = mmu_wdata;  // Phase 150 Stage 3: U/M write-back support
         end else if (grant_eu) begin
             cyc_addr  = eu_addr;       cyc_fc    = eu_fc;
             cyc_siz   = eu_siz;        cyc_is_op = eu_is_operand;

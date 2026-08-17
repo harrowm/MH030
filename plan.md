@@ -5999,6 +5999,91 @@ write-back per BIU-086) is next.
 
 ---
 
+## Phase 150 Stage 3 — U/M bit hardware write-back (BIU-086)
+
+**Goal**: on first access to a page, the MMU must write the descriptor's Accessed (U)
+bit back to physical memory via a real FC=101 bus write; on first write, it must
+additionally set the Modified (M) bit the same way. Neither had ever been implemented —
+the walker only ever read descriptors.
+
+### A real, previously-undiscovered bug found while researching the bit layout
+
+Before touching any RTL, researched the real 68030 short-format page descriptor's exact
+bit layout (needed to know which bits U and M actually occupy) via the Motorola manual
+and the Linux m68k port's own `motorola_pgtable.h` (which must match real hardware
+exactly, since it directly walks real 68030 page tables) — both independently confirmed:
+bits[1:0]=DT, bit2=WP, **bit3=U**, **bit4=M**, bit5=reserved, **bit6=CI**, bit7=reserved.
+This exposed a real, previously-undiscovered bug in every existing leaf-descriptor read
+in `biu_mmu_if.sv` (predating this whole MMU-hardening plan): CI was being read from
+`mmu_rdata[3]` — bit 3, which is actually **U**, a completely different field CI has
+nothing to do with. Fixed as part of this stage, since the U/M work touches the exact
+same bits. Its live impact was limited: Stage 0's own notes already flagged
+`biu_cache_if.sv`'s `mmu_ci` input as fed from a stale, EXT-owner-only demuxed value, not
+a live per-access signal, which is presumably why no test had ever caught the wrong bit
+position.
+
+### RTL changes
+
+`biu_mmu_if.sv`'s state enum widened to 4 bits; new `MS_UPDATE` state issues a real write
+bus cycle (FC=101, per BIU-086) to the leaf descriptor's own physical address whenever a
+walk or a cached ATC hit determines U and/or M still needs setting, then continues on to
+wherever it would have gone anyway (`MS_WALK_DONE` for a fresh walk; straight to
+completion, matching `MS_ATC_HIT`, for a cached-entry M-only update) — from the rest of
+the pipeline's perspective this is invisible except for one extra bus cycle when (and
+only when) an update is actually needed. Two data paths, since a fresh walk already has
+the raw descriptor value in hand (`mmu_rdata`, OR real update bits directly into it) while
+a cached ATC hit doesn't (only derived `pa`/`ci`/`wp` were ever stored) — reconstructs the
+descriptor from those cached fields plus U=1 (guaranteed already true for any cached
+entry) and the newly-set M bit, a deliberate, documented simplification that doesn't
+preserve any *other* reserved bits the original descriptor might have carried (out of
+scope; no test in this project's own corpus, real or synthetic, ever sets one). New ATC
+fields `atc_m[]` (per-entry M-bit shadow) and `atc_desc_addr[]` (the leaf descriptor's own
+physical address, needed so a later write through an already-cached entry can still find
+it without re-walking) — `atc_m[]` alone is sufficient (no `atc_u[]` needed) since every
+ATC entry is only ever populated *after* `MS_UPDATE` has already guaranteed U=1.
+
+`biu_cycle_gen.sv`'s own MMU port was architecturally read-only before this stage (no
+`mmu_wdata`/`mmu_rw` at all — BIU-082 only ever described "up to 3 read cycles"); added
+both, wired into the `grant_mmu` branch of the cycle-type mux (`cyc_rw=mmu_rw;
+cyc_wdata=mmu_wdata;`) — the pre-existing default (`cyc_rw=1'b1`, read) is unchanged for
+every walk-read cycle, so this is a structurally zero-risk addition for the read path;
+only `biu_mmu_if.sv`'s new `MS_UPDATE` state ever drives `mmu_req_rw=1'b0`. Threaded
+`mmu_req_rw`/`mmu_req_wdata` through `m68030_biu.sv`'s existing walker-port wiring.
+`tb/biu_tb.sv`'s own direct `biu_mmu_if`+`biu_cycle_gen` instantiation (which wires the
+two together directly, bypassing the arbiter, to unit-test the walker in relative
+isolation) needed the two new signals threaded through the same way; `tb/mmu_tb.sv`'s own
+walker unit tests needed no changes (its walk-memory stub already acks any request
+uniformly regardless of direction, matching every other bus cycle it's ever driven).
+
+### Test
+
+Extended `tb/mmu_xlate_tb.sv` with a Phase 5: a fresh page (U=0, M=0 in its own
+descriptor from the start, at a VA/table-entry untouched by any earlier phase), a read
+(must set U) followed by a write (must additionally set M, while the write's own *data*
+still lands correctly at the translated PA alongside the side-channel descriptor update).
+Checks at three independent levels: the retried instruction's own register result; the
+exact pin-level bus-cycle shape of each write-back (a real FC=101 write landing at the
+descriptor's own address with the exact expected bit pattern, not just "some write
+happened somewhere"); and the descriptor's own backing memory read back directly (the
+most direct proof — U/M genuinely persisted). All 8 new checks (26 total across Phases
+1-5) passed on the very first real attempt — a good sign the FSM/ATC-field/reconstruction
+design was reasoned through correctly before implementation, matching this project's
+`port3.md`-era discipline of designing on paper first for changes this structurally
+involved.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (Verilator batch backend) — **PASS 702142, FAIL 2 (same documented ASL.b corpus
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline** — the mandatory gate here
+given this stage touches `biu_cycle_gen.sv`, the single most sensitive module in the
+project (CLAUDE.md's own module hierarchy calls it out as "most critical; drives external
+pins"), even though Harte itself never sets `TC.E=1` and so can never reach `MS_UPDATE`.
+**This closes Stage 3 of the 6-stage MMU-hardening plan.** Stage 4 (MMUSR correctness per
+BIU-087) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

@@ -55,6 +55,8 @@ module biu_mmu_if (
     output logic [31:0] mmu_req_addr,
     output logic [2:0]  mmu_req_fc,
     output logic        mmu_req,
+    output logic         mmu_req_rw,    // Phase 150 Stage 3: 1=read, 0=write (U/M write-back)
+    output logic [31:0]  mmu_req_wdata, // Phase 150 Stage 3: write data for the U/M write-back cycle
     input  logic [31:0] mmu_rdata,
     input  logic        mmu_ack,    // combinatorial, holds for 4 ticks at S7
     input  logic        mmu_berr,
@@ -128,6 +130,15 @@ module biu_mmu_if (
     logic [31:0] atc_pa    [0:ATC_SIZE-1];
     logic        atc_ci    [0:ATC_SIZE-1];
     logic        atc_wp    [0:ATC_SIZE-1];
+    // Phase 150 Stage 3 (plan.md): per-entry M-bit shadow + the leaf
+    // descriptor's own physical address, needed so a later write through
+    // an already-cached ATC entry can still find the descriptor and mark
+    // M without re-walking. U is NOT tracked here -- every ATC entry is
+    // only ever populated once U is already guaranteed 1 (MS_UPDATE
+    // always resolves U before MS_WALK_DONE caches anything), so there is
+    // nothing for an ATC hit to ever need to update on that bit.
+    logic        atc_m         [0:ATC_SIZE-1];
+    logic [31:0] atc_desc_addr [0:ATC_SIZE-1];
     logic [4:0]  atc_victim;
     logic        pflush_ack_r;
 
@@ -137,12 +148,16 @@ module biu_mmu_if (
     logic [31:0] atc_hit_pa;
     logic        atc_hit_ci;
     logic        atc_hit_wp;
+    logic        atc_hit_m;
+    logic [31:0] atc_hit_desc_addr;
     always_comb begin
         atc_hit_found = 1'b0;
         atc_hit_idx   = 5'd0;
         atc_hit_pa    = 32'h0;
         atc_hit_ci    = 1'b0;
         atc_hit_wp    = 1'b0;
+        atc_hit_m     = 1'b0;
+        atc_hit_desc_addr = 32'h0;
         for (int i = 0; i < ATC_SIZE; i++) begin
             if (atc_valid[i] && (atc_fc[i] == fc) &&
                 ((va & page_mask) == (atc_va[i] & page_mask))) begin
@@ -151,6 +166,8 @@ module biu_mmu_if (
                 atc_hit_pa    = (atc_pa[i] & page_mask) | (va & ~page_mask);
                 atc_hit_ci    = atc_ci[i];
                 atc_hit_wp    = atc_wp[i];
+                atc_hit_m     = atc_m[i];
+                atc_hit_desc_addr = atc_desc_addr[i];
             end
         end
     end
@@ -166,15 +183,16 @@ module biu_mmu_if (
     // -----------------------------------------------------------------------
     // State machine
     // -----------------------------------------------------------------------
-    typedef enum logic [2:0] {
-        MS_IDLE      = 3'd0,
-        MS_TT_HIT    = 3'd1,
-        MS_ATC_HIT   = 3'd2,
-        MS_WALK_A    = 3'd3,
-        MS_WALK_B    = 3'd4,
-        MS_WALK_C    = 3'd5,
-        MS_WALK_DONE = 3'd6,
-        MS_FAULT     = 3'd7
+    typedef enum logic [3:0] {
+        MS_IDLE      = 4'd0,
+        MS_TT_HIT    = 4'd1,
+        MS_ATC_HIT   = 4'd2,
+        MS_WALK_A    = 4'd3,
+        MS_WALK_B    = 4'd4,
+        MS_WALK_C    = 4'd5,
+        MS_WALK_DONE = 4'd6,
+        MS_FAULT     = 4'd7,
+        MS_UPDATE    = 4'd8   // Phase 150 Stage 3 (plan.md): U/M bit write-back
     } ms_state_t;
 
     ms_state_t ms_state;
@@ -189,6 +207,28 @@ module biu_mmu_if (
     logic [31:0] walk_pa_r;
     logic        walk_ci_r;
     logic        walk_wp_r;
+
+    // Phase 150 Stage 3 (plan.md): U (Accessed, descriptor bit 3) / M
+    // (Modified, descriptor bit 4) hardware write-back (BIU-086). Real
+    // 68030 short-format PAGE descriptor bit layout (confirmed against
+    // Motorola's own MMU documentation and the Linux m68k port's own
+    // motorola_pgtable.h, which must match real hardware exactly since it
+    // walks real 68030 page tables): bits[1:0]=DT, bit2=WP, bit3=U,
+    // bit4=M, bit5=reserved, bit6=CI, bit7=reserved. This ALSO corrects a
+    // real, previously-undiscovered bug found while researching this
+    // stage: every existing walk_ci_r assignment below read CI from bit 3
+    // (`mmu_rdata[3]`) instead of bit 6 -- bit 3 is actually U, a
+    // completely different field, never previously read at all. CI's
+    // live effect was limited enough (Stage 0's own notes: biu_cache_if's
+    // mmu_ci input is fed from the EXT-owner-only demuxed value, a
+    // documented pre-existing follow-up, not a live per-access signal)
+    // that this was never caught by any test; fixed as part of this stage
+    // since U/M work touches the exact same bits.
+    logic [31:0] walk_desc_addr_r; // physical address the leaf descriptor was read from
+    logic        walk_m_r;         // final M-bit state this walk will result in
+    logic [31:0] update_wdata_r;   // write-back data for MS_UPDATE
+    logic        update_from_atc_r;// 1 = M-only update via a cached ATC hit; 0 = walk-path U/M update
+    logic [4:0]  atc_m_update_idx_r;
 
     // Latched outputs (hold until next req)
     logic [31:0] pa_r;
@@ -222,10 +262,17 @@ module biu_mmu_if (
             walk_req_addr_r <= 32'h0;
             fa_lo_r         <= 5'd22;
             pflush_ack_r    <= 1'b0;
+            walk_desc_addr_r   <= 32'h0;
+            walk_m_r           <= 1'b0;
+            update_wdata_r     <= 32'h0;
+            update_from_atc_r  <= 1'b0;
+            atc_m_update_idx_r <= 5'd0;
             for (m = 0; m < ATC_SIZE; m++) begin
-                atc_valid[m] <= 1'b0;
-                atc_ci[m]    <= 1'b0;
-                atc_wp[m]    <= 1'b0;
+                atc_valid[m]     <= 1'b0;
+                atc_ci[m]        <= 1'b0;
+                atc_wp[m]        <= 1'b0;
+                atc_m[m]         <= 1'b0;
+                atc_desc_addr[m] <= 32'h0;
             end
         end else begin
             // Default: clear one-cycle pulse outputs
@@ -269,10 +316,31 @@ module biu_mmu_if (
                             wp_r     <= 1'b0;
                             ms_state <= MS_TT_HIT;
                         end else if (atc_hit_found) begin
-                            pa_r     <= atc_hit_pa;
-                            ci_r     <= atc_hit_ci;
-                            wp_r     <= atc_hit_wp;
-                            ms_state <= MS_ATC_HIT;
+                            // Phase 150 Stage 3 (plan.md): a write through
+                            // an already-cached entry whose M bit hasn't
+                            // been marked yet still needs a real write-back
+                            // cycle (BIU-086) before this access can be
+                            // reported as translated -- U is never checked
+                            // here since every cached entry already has it
+                            // guaranteed 1 (see atc_m's own declaration
+                            // comment).
+                            pa_r <= atc_hit_pa;
+                            ci_r <= atc_hit_ci;
+                            wp_r <= atc_hit_wp;
+                            if (!rw && !atc_hit_m) begin
+                                walk_desc_addr_r  <= atc_hit_desc_addr;
+                                update_wdata_r    <= (atc_hit_pa & page_mask) |
+                                                      (atc_hit_ci ? 32'h40 : 32'h0) |
+                                                      (atc_hit_wp ? 32'h4  : 32'h0) |
+                                                      32'h8  /* U, already guaranteed set */ |
+                                                      32'h10 /* M, being newly set */ |
+                                                      32'h1  /* DT = 01, page descriptor */;
+                                update_from_atc_r  <= 1'b1;
+                                atc_m_update_idx_r <= atc_hit_idx;
+                                ms_state <= MS_UPDATE;
+                            end else begin
+                                ms_state <= MS_ATC_HIT;
+                            end
                         end else begin
                             // ATC miss → start table walk level A
                             walk_req_addr_r <= walk_a_addr_w;
@@ -308,9 +376,23 @@ module biu_mmu_if (
                             2'b01: begin  // page descriptor (leaf at level A)
                                 walk_pa_r  <= (mmu_rdata & page_mask) |
                                               (walk_va_r & ~page_mask);
-                                walk_ci_r  <= mmu_rdata[3];
+                                walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6 (see walk_desc_addr_r's own comment)
                                 walk_wp_r  <= mmu_rdata[2];
-                                ms_state   <= MS_WALK_DONE;
+                                if (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4])) begin
+                                    // U and/or M needs setting -- a real write-back
+                                    // cycle (BIU-086) before this access can complete.
+                                    walk_desc_addr_r  <= walk_req_addr_r;
+                                    update_wdata_r     <= mmu_rdata |
+                                                           (!mmu_rdata[3] ? 32'h8 : 32'h0) |
+                                                           ((!walk_rw_r && !mmu_rdata[4]) ? 32'h10 : 32'h0);
+                                    walk_m_r           <= walk_rw_r ? mmu_rdata[4] : 1'b1;
+                                    update_from_atc_r  <= 1'b0;
+                                    ms_state <= MS_UPDATE;
+                                end else begin
+                                    walk_desc_addr_r <= walk_req_addr_r;
+                                    walk_m_r <= mmu_rdata[4];
+                                    ms_state <= MS_WALK_DONE;
+                                end
                             end
                             default: begin  // 2'b10 or 2'b11: table descriptor
                                 if (tib == 4'h0) begin
@@ -355,9 +437,21 @@ module biu_mmu_if (
                             2'b01: begin  // page descriptor (leaf at level B)
                                 walk_pa_r  <= (mmu_rdata & page_mask) |
                                               (walk_va_r & ~page_mask);
-                                walk_ci_r  <= mmu_rdata[3];
+                                walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6
                                 walk_wp_r  <= mmu_rdata[2];
-                                ms_state   <= MS_WALK_DONE;
+                                if (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4])) begin
+                                    walk_desc_addr_r  <= walk_req_addr_r;
+                                    update_wdata_r     <= mmu_rdata |
+                                                           (!mmu_rdata[3] ? 32'h8 : 32'h0) |
+                                                           ((!walk_rw_r && !mmu_rdata[4]) ? 32'h10 : 32'h0);
+                                    walk_m_r           <= walk_rw_r ? mmu_rdata[4] : 1'b1;
+                                    update_from_atc_r  <= 1'b0;
+                                    ms_state <= MS_UPDATE;
+                                end else begin
+                                    walk_desc_addr_r <= walk_req_addr_r;
+                                    walk_m_r <= mmu_rdata[4];
+                                    ms_state <= MS_WALK_DONE;
+                                end
                             end
                             default: begin  // table descriptor → level C
                                 if (tic == 4'h0) begin
@@ -394,9 +488,21 @@ module biu_mmu_if (
                         if (mmu_rdata[1:0] == 2'b01) begin
                             walk_pa_r  <= (mmu_rdata & page_mask) |
                                           (walk_va_r & ~page_mask);
-                            walk_ci_r  <= mmu_rdata[3];
+                            walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6
                             walk_wp_r  <= mmu_rdata[2];
-                            ms_state   <= MS_WALK_DONE;
+                            if (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4])) begin
+                                walk_desc_addr_r  <= walk_req_addr_r;
+                                update_wdata_r     <= mmu_rdata |
+                                                       (!mmu_rdata[3] ? 32'h8 : 32'h0) |
+                                                       ((!walk_rw_r && !mmu_rdata[4]) ? 32'h10 : 32'h0);
+                                walk_m_r           <= walk_rw_r ? mmu_rdata[4] : 1'b1;
+                                update_from_atc_r  <= 1'b0;
+                                ms_state <= MS_UPDATE;
+                            end else begin
+                                walk_desc_addr_r <= walk_req_addr_r;
+                                walk_m_r <= mmu_rdata[4];
+                                ms_state <= MS_WALK_DONE;
+                            end
                         end else begin
                             fault_r         <= 1'b1;
                             fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
@@ -407,12 +513,14 @@ module biu_mmu_if (
 
                 MS_WALK_DONE: begin
                     // Load ATC entry
-                    atc_valid[atc_victim] <= 1'b1;
-                    atc_va[atc_victim]    <= walk_va_r;
-                    atc_fc[atc_victim]    <= walk_fc_r;
-                    atc_pa[atc_victim]    <= walk_pa_r;
-                    atc_ci[atc_victim]    <= walk_ci_r;
-                    atc_wp[atc_victim]    <= walk_wp_r;
+                    atc_valid[atc_victim]     <= 1'b1;
+                    atc_va[atc_victim]        <= walk_va_r;
+                    atc_fc[atc_victim]        <= walk_fc_r;
+                    atc_pa[atc_victim]        <= walk_pa_r;
+                    atc_ci[atc_victim]        <= walk_ci_r;
+                    atc_wp[atc_victim]        <= walk_wp_r;
+                    atc_m[atc_victim]         <= walk_m_r;         // Phase 150 Stage 3
+                    atc_desc_addr[atc_victim] <= walk_desc_addr_r; // Phase 150 Stage 3
                     atc_victim <= (atc_victim == 5'd21) ? 5'd0 : atc_victim + 5'd1;
                     // Output PA
                     pa_r        <= walk_pa_r;
@@ -420,6 +528,35 @@ module biu_mmu_if (
                     wp_r        <= walk_wp_r;
                     walk_done_r <= 1'b1;
                     ms_state    <= MS_IDLE;
+                end
+
+                // Phase 150 Stage 3 (plan.md): U/M bit hardware write-back
+                // (BIU-086) -- a real FC=101 supervisor-data WRITE bus
+                // cycle to the leaf descriptor's own physical address,
+                // setting whichever of U/M was found to still be 0.
+                // Reached either from a fresh walk (update_from_atc_r=0,
+                // continues on to MS_WALK_DONE exactly as if this state
+                // had never existed) or from an already-cached ATC hit
+                // needing only its M bit marked (update_from_atc_r=1,
+                // completes directly like MS_ATC_HIT since there is
+                // nothing left to cache).
+                MS_UPDATE: begin
+                    if (mmu_berr) begin
+                        fault_r        <= 1'b1;
+                        fault_is_berr_r <= 1'b1;
+                        ms_state <= MS_FAULT;
+                    end else if (mmu_ack_rise) begin
+                        if (update_from_atc_r) begin
+                            atc_m[atc_m_update_idx_r] <= 1'b1;
+                            pa_r     <= walk_pa_r;
+                            ci_r     <= walk_ci_r;
+                            wp_r     <= walk_wp_r;
+                            hit_r    <= 1'b1;
+                            ms_state <= MS_IDLE;
+                        end else begin
+                            ms_state <= MS_WALK_DONE;
+                        end
+                    end
                 end
 
                 MS_FAULT: begin
@@ -445,12 +582,19 @@ module biu_mmu_if (
     assign pflush_ack = pflush_ack_r;
     assign mmusr     = 16'h0;  // placeholder: PTEST result not yet implemented
 
-    // mmu_req: assert while issuing walk read cycles
+    // mmu_req: assert while issuing walk read cycles, or the Phase 150
+    // Stage 3 U/M write-back cycle. mmu_req_rw/mmu_req_wdata (1=read,
+    // 0=write, matching this project's universal rw convention) are 0
+    // (write) only in MS_UPDATE; every walk read leaves them at their
+    // read-cycle defaults, matching the pre-Stage-3 behavior exactly.
     assign mmu_req      = (ms_state == MS_WALK_A) ||
                           (ms_state == MS_WALK_B) ||
-                          (ms_state == MS_WALK_C);
-    assign mmu_req_addr = walk_req_addr_r;
-    assign mmu_req_fc   = 3'b101;  // supervisor data space for all walk cycles
+                          (ms_state == MS_WALK_C) ||
+                          (ms_state == MS_UPDATE);
+    assign mmu_req_addr = (ms_state == MS_UPDATE) ? walk_desc_addr_r : walk_req_addr_r;
+    assign mmu_req_fc   = 3'b101;  // supervisor data space for all walk/update cycles
+    assign mmu_req_rw   = (ms_state == MS_UPDATE) ? 1'b0 : 1'b1;
+    assign mmu_req_wdata = update_wdata_r;
 
 endmodule
 

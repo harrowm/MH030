@@ -334,6 +334,8 @@ module m68030_biu #(
     logic [31:0] mmu_walk_addr;
     logic [2:0]  mmu_walk_fc;
     logic        mmu_walk_req;
+    logic        mmu_walk_rw;      // Phase 150 Stage 3: 1=read, 0=write (U/M write-back)
+    logic [31:0] mmu_walk_wdata;   // Phase 150 Stage 3: write data for the U/M write-back cycle
     logic [31:0] cg_mmu_rdata;
     logic        cg_mmu_ack, cg_mmu_berr;
     // Multiop → sizing_fsm
@@ -537,6 +539,8 @@ module m68030_biu #(
         .mmu_req_addr(mmu_walk_addr),
         .mmu_req_fc  (mmu_walk_fc),
         .mmu_req     (mmu_walk_req),
+        .mmu_req_rw  (mmu_walk_rw),
+        .mmu_req_wdata(mmu_walk_wdata),
         .mmu_rdata   (cg_mmu_rdata),
         .mmu_ack     (cg_mmu_ack),
         .mmu_berr    (cg_mmu_berr),
@@ -850,6 +854,8 @@ module m68030_biu #(
         .mmu_addr        (mmu_walk_addr),
         .mmu_fc          (mmu_walk_fc),
         .mmu_req         (mmu_walk_req),
+        .mmu_rw          (mmu_walk_rw),
+        .mmu_wdata       (mmu_walk_wdata),
         .mmu_rdata       (cg_mmu_rdata),
         .mmu_ack         (cg_mmu_ack),
         .mmu_berr        (cg_mmu_berr),

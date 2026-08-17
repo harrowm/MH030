@@ -124,11 +124,28 @@ module mmu_xlate_tb;
     // immune to ordering/timing noise from surrounding instruction fetches.
     logic saw_walk_read_addr;
     logic saw_translated_data_read;
+    // Phase 150 Stage 3 (plan.md): the U/M bit write-back cycle's own pin-
+    // level shape (BIU-086: a real write, FC=101, to the descriptor's own
+    // address) -- two independent flags since the U update (on the read)
+    // and the M update (on the later write) are two separate bus cycles.
+    logic        saw_u_writeback;
+    logic [31:0] u_writeback_data;
+    logic        saw_m_writeback;
+    logic [31:0] m_writeback_data;
     logic ext_ds_n_prev = 1'b1;
     always_ff @(posedge clk_4x) begin
         if (!ext_ds_n && ext_ds_n_prev && ext_fc == 3'b101) begin
             if (ext_a == 32'h0000_3004) saw_walk_read_addr       <= 1'b1;
             if (ext_a == 32'h0000_2004) saw_translated_data_read <= 1'b1;
+            if (!ext_rw && ext_a == 32'h0000_3010) begin
+                if (!saw_u_writeback) begin
+                    saw_u_writeback   <= 1'b1;
+                    u_writeback_data  <= ext_d_out;
+                end else begin
+                    saw_m_writeback   <= 1'b1;
+                    m_writeback_data  <= ext_d_out;
+                end
+            end
         end
         ext_ds_n_prev <= ext_ds_n;
     end
@@ -148,6 +165,8 @@ module mmu_xlate_tb;
     localparam MOVE_L_IMM_A1_IND = 16'h22BC;  // MOVE.L #imm,(A1)
     localparam MOVE_L_IMM_A2_IND = 16'h24BC;  // MOVE.L #imm,(A2)
     localparam MOVE_L_IMM_A3_IND = 16'h26BC;  // MOVE.L #imm,(A3)
+    localparam CLR_L_D0       = 16'h4280;
+    localparam ADDI_L_D0      = 16'h0680;
     localparam CLR_L_D1       = 16'h4281;
     localparam ADDI_L_D1      = 16'h0681;
     localparam CLR_L_D3       = 16'h4283;
@@ -162,6 +181,7 @@ module mmu_xlate_tb;
     localparam PMOVE_TT0_EXT  = 16'h4200;  // op_type=010(PMOVE),sub=001(TT0),dr=0(load)
     localparam RTE_OP         = 16'h4E73;
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
+    localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
 
     int fail_count = 0;
     task automatic check(input string name, input logic cond);
@@ -360,11 +380,35 @@ module mmu_xlate_tb;
         rom[16'h0488/4] = {16'd333, MOVE_L_IMM_A2_IND};    // marker D6=333 (read succeeded) ; MOVE.L #imm,(A2)
         rom[16'h048C/4] = {16'hDEAD, 16'hBEEF};            // #0xDEADBEEF,(A2) -- WRITE, must fault (WP)
 
-        // New vector-2 handler for phase 4: mark completion (D6=444) and
-        // park -- no RTE, since a WP fault has nothing to fix and retry.
+        // New vector-2 handler for phase 4: mark completion (D6=444), then
+        // jump on to phase 5's own setup (no RTE -- a WP fault has nothing
+        // to fix and retry).
         rom[16'h0520/4] = {CLR_L_D6, ADDI_L_D6};
         rom[16'h0524/4] = {16'h0000, 16'd444};
-        rom[16'h0528/4] = {BRA_SELF, 16'h4E71};
+        rom[16'h0528/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h052C/4] = {16'h0540, 16'h4E71};
+
+        // -------------------------------------------------------------
+        // Phase 5 (Stage 3, plan.md): U/M bit hardware write-back
+        // (BIU-086). A fresh page (U=0, M=0 in its own descriptor from
+        // the start -- deliberately different from every earlier phase's
+        // own VA/descriptor so this is a genuinely first-ever access).
+        // Read first (must set U in the descriptor's own backing memory);
+        // then write (must additionally set M), while the write's own
+        // *data* value still lands correctly at the translated PA
+        // alongside the side-channel descriptor update.
+        // -------------------------------------------------------------
+        rom[16'h0300/4] = 32'hFEED_BEEF;   // sentinel at the fresh page's own PA
+        rom[16'h3010/4] = 32'h0000_0001;   // descriptor: frame=0, U=0, M=0, DT=01 (page)
+
+        rom[16'h0540/4] = {MOVEA_L_IMM_A2, 16'h2000};
+        rom[16'h0544/4] = {16'h4300, MOVE_L_A2_D7};        // A2 = VA 0x20004300 ; MOVE.L (A2),D7 -- READ
+        rom[16'h0548/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h054C/4] = {16'h0000, 16'd555};             // marker D1=555 (read done, U should now be set)
+        rom[16'h0550/4] = {MOVE_L_IMM_A2_IND, 16'h1234};   // MOVE.L #0x12345678,(A2) -- WRITE
+        rom[16'h0554/4] = {16'h5678, CLR_L_D0};
+        rom[16'h0558/4] = {ADDI_L_D0, 16'h0000};
+        rom[16'h055C/4] = {16'd666, BRA_SELF};             // marker D0=666 (write done, M should now be set)
 
         // Vector-2 handler: fix the descriptor at 0x3008 (page frame
         // 0x00000000, DT=01), then RTE. TT0 already covers this handler's
@@ -377,6 +421,8 @@ module mmu_xlate_tb;
 
         saw_walk_read_addr       = 1'b0;
         saw_translated_data_read = 1'b0;
+        saw_u_writeback          = 1'b0;
+        saw_m_writeback          = 1'b0;
 
         // Reset pulse.
         #100 rst_n = 1'b1;
@@ -501,6 +547,55 @@ module mmu_xlate_tb;
             check32("Phase 4: correct frame format (9, FMT_MMU) dispatched for the WP violation", {28'h0, seen_fmt4}, 32'd9);
             check("Phase 4: the new (non-retrying) handler ran to completion (D6=444)", saw_d6_444);
         end
+
+        // -------------------------------------------------------------
+        // Phase 5 (Stage 3): U/M bit hardware write-back (BIU-086). A
+        // fresh page (U=0, M=0 from the start) -- first a read, then a
+        // write, each checked independently: the retried instruction's
+        // own register result, the exact bus-cycle shape of the write-
+        // back itself (a real FC=101 write to the descriptor's own
+        // address, not just "some write happened somewhere"), and the
+        // descriptor's own backing memory directly (the most direct
+        // proof of all -- U/M genuinely persisted, not just a passing
+        // bus transaction).
+        // -------------------------------------------------------------
+        begin
+            int t;
+            logic saw_d1_555;
+            saw_d1_555 = 1'b0;
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_eu.u_rf.d_reg[1] === 32'd555) begin saw_d1_555 = 1'b1; break; end
+            end
+            check("Phase 5: the READ from the fresh page completed (D1=555)", saw_d1_555);
+        end
+        check32("Phase 5: D7 holds the fresh page's own sentinel (0xFEEDBEEF)",
+                u_top.u_eu.u_rf.d_reg[7], 32'hFEED_BEEF);
+        check("Phase 5: the U write-back cycle hit the descriptor's own address (0x3010) with FC=101, a real write",
+              saw_u_writeback);
+        check32("Phase 5: the U write-back wrote the correct value (U set, bit 3, everything else unchanged)",
+                u_writeback_data, 32'h0000_0009);
+        check32("Phase 5: the descriptor's own backing memory now shows U set (direct check, not just the bus transaction)",
+                rom[16'h3010/4], 32'h0000_0009);
+
+        begin
+            int t;
+            logic saw_d0_666;
+            saw_d0_666 = 1'b0;
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_eu.u_rf.d_reg[0] === 32'd666) begin saw_d0_666 = 1'b1; break; end
+            end
+            check("Phase 5: the WRITE to the fresh page completed (D0=666)", saw_d0_666);
+        end
+        check32("Phase 5: the write's own DATA landed correctly at the translated PA (0x00000300), alongside the U/M side-channel update",
+                rom[16'h0300/4], 32'h1234_5678);
+        check("Phase 5: the M write-back cycle hit the descriptor's own address (0x3010) with FC=101, a real write",
+              saw_m_writeback);
+        check32("Phase 5: the M write-back wrote the correct value (U and M both set now)",
+                m_writeback_data, 32'h0000_0019);
+        check32("Phase 5: the descriptor's own backing memory now shows both U and M set",
+                rom[16'h3010/4], 32'h0000_0019);
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
         if (fail_count == 0) $display("ALL TESTS PASSED");
