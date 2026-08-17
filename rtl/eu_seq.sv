@@ -2230,10 +2230,10 @@ module eu_seq (
                             // bd) -- matches m68030_seq.sv's own movem_bd_words-style
                             // additive sizing for this arm. MOVE.L's descriptor is one word
                             // later still, at q3_word itself, so its own full/bdsz/iis bits
-                            // come from q3_word directly; only WORD bd is achievable there
-                            // (value at ext34_data[15:0]=q4) -- long bd would need a genuine
-                            // q5, unsupported, same Stage 8 boundary as elsewhere in this
-                            // rollout.
+                            // come from q3_word directly; word bd's value is at
+                            // ext34_data[15:0]=q4, and (Phase 147, plan.md, now that Phase
+                            // 145's genuine q5 exists) long bd's own low half is one word
+                            // further out still, at q5_word (high half stays at q4).
                             dec_valid      = 1'b1;
                             dec_is_mem_rd  = 1'b1;
                             dec_is_mem_rmw = 1'b1;
@@ -2252,6 +2252,8 @@ module eu_seq (
                             if (f_group == 4'h2) begin
                                 dec_ea_offset = (q3_word[8] && q3_word[5:4] == 2'b10 && q3_word[2:0] == 3'b000)
                                               ? {{16{ext34_data[15]}}, ext34_data[15:0]}
+                                              : (q3_word[8] && q3_word[5:4] == 2'b11 && q3_word[2:0] == 3'b000)
+                                              ? {ext34_data[15:0], q5_word}
                                               : {{24{q3_word[7]}}, q3_word[7:0]};
                             end else begin
                                 dec_ea_offset = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
@@ -2273,12 +2275,12 @@ module eu_seq (
                             // Full-format bd (Phase 142, plan.md): abs.L src's own 2-word
                             // baseline pushes the dst descriptor to q3_word, the exact same
                             // "one word further out" position MOVE.L imm-src (Phase 141)
-                            // already needed its own peek for -- only WORD bd is achievable
-                            // (value at ext34_data[15:0]=q4); long bd would need a genuine
-                            // q5, out of scope (Stage 8). Unlike the imm-src arm, this one
-                            // uses the move_mm FSM (a real src-then-dst read/write, not the
-                            // RMW "2-port trick"), so it doesn't share that arm's own
-                            // phantom-read quirk.
+                            // already needed its own peek for -- word bd's value is at
+                            // ext34_data[15:0]=q4, and (Phase 147, plan.md) long bd's own
+                            // low half is one word further out still, at q5_word. Unlike the
+                            // imm-src arm, this one uses the move_mm FSM (a real src-then-dst
+                            // read/write, not the RMW "2-port trick"), so it doesn't share
+                            // that arm's own phantom-read quirk.
                             dec_valid              = 1'b1;
                             dec_is_move_mm         = 1'b1;
                             dec_is_move_mm_idx_dst = 1'b1;
@@ -2297,6 +2299,8 @@ module eu_seq (
                             dec_xn_scale           = q3_word[10:9];
                             dec_dst_ea_offset      = (q3_word[8] && q3_word[5:4] == 2'b10 && q3_word[2:0] == 3'b000)
                                                    ? {{16{ext34_data[15]}}, ext34_data[15:0]}
+                                                   : (q3_word[8] && q3_word[5:4] == 2'b11 && q3_word[2:0] == 3'b000)
+                                                   ? {ext34_data[15:0], q5_word}
                                                    : {{24{q3_word[7]}}, q3_word[7:0]};
                             dec_siz                = f_move_sz;
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||

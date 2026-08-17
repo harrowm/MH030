@@ -5534,6 +5534,77 @@ sites) is next.
 
 ---
 
+## Phase 147 — MOVE mem-to-mem imm-src/abs.L-src long-bd via q5, and a genuine IFU
+## parity-lock bug this uncovered
+
+**Goal**: third and last item of Phase 145's q5 unlock list — `MOVE.L #imm32,(bd,An,Xn)`
+(Phase 141's arm) and `MOVE (xxx).L,(bd,An,Xn)` (Phase 142's arm), both extended from
+word-only bd to also support long bd, reading its low half from the new `q5_word`.
+
+**Decode fix (as planned)**: `m68030_seq.sv` renamed `is_move_mm_imml_idxdst_wordbd`/
+`is_move_mm_absl_idxdst_wordbd` to `..._full`, widened their own bdsz check from
+`==2'b10` (word only) to `[1]` (word OR long), and added a shared `q3bd_words` (mirrors
+`movem_bd_words`' own additive shape) feeding `move_mm_imml_idxdst_ext_count`/
+`move_mm_absl_idxdst_ext_count = 3'd3 + q3bd_words`. `eu_seq.sv`: both arms' own
+`dec_ea_offset`/`dec_dst_ea_offset` ternaries gained a long-bd branch reading
+`{ext34_data[15:0], q5_word}` (bd_hi at q4, bd_lo at the new q5). Exactly the template every
+Stage 1-8 site in this rollout has followed since Phase 116.
+
+**A genuine, previously-latent IFU bug this phase's own test exposed — not decode-side at
+all.** `tests/memind22.s`'s first draft hung the simulator outright building the imm-src
+case (`MOVE.L #$13572468,(-$10000,A0,D1.L)`, needing q_cnt to reach 6 for the first time in
+this instruction's own byte-alignment). Root-caused via targeted `$display` tracing of
+`q3_word`/`ext34_data`/`q5_word`/`ext_valid`/`stall` at every cycle `instr_word` matched
+this opcode: the queue's fetch-trigger condition (`q_cnt_d <= 3'd4`, unchanged since long
+before this rollout) combined with the fixed "always 2 words per fill" fill shape means
+**queue parity, once set, is permanent** — a fetch always adds exactly 2 words (or, for the
+one-time `skip_first_r` catch-up right after an odd-aligned branch/flush, exactly 1, which
+is what sets the parity in the first place), so from an odd starting `q_cnt` every
+subsequent fill lands on another odd number: 1→3→5→7(capped at 6, never reached). At
+`q_cnt==5` the trigger's own `<=4` bound never re-arms, so the queue permanently stalls one
+word short of the 6 Phase 145's plumbing added support for — invisible in every phase
+before this one, since nothing previously needed `q_cnt` to reach 6 in the first place
+(Phase 146's own `memind21.s` test happened to land at even parity by chance). Confirmed via
+direct trace: `q3_word`/`ext34_data` settle to the exact correct fetched bytes and then sit
+there forever with `ext_valid=0`, `stall=1`, no further bus activity ever occurring.
+
+**Fix, in `rtl/m68030_ifu.sv`**: widened the fetch-trigger condition from `q_cnt_d<=3'd4` to
+`q_cnt_d<=3'd5`, and added a `held_word_r`/`held_valid_r` stash pair to handle the resulting
+1-slot-only overflow — a fetch always returns 2 words, but when `q_cnt_d==5` only one
+physical slot (`q[5]`) is free; the fill logic's new `fill_at==3'd5` case keeps the first
+word at `q[5]` and stashes the second in `held_word_r` (no data lost, `fetch_addr_r` still
+advances by the full 4 since both bytes of that bus read were genuinely consumed). The
+drain-only branch gained a matching injection path: whenever a later drain frees a slot
+(`q_cnt_d<3'd6`) and `held_valid_r`, the stashed word is placed into the first free slot with
+**zero bus cost** (no new fetch needed for it) before the normal shift-only drain would
+otherwise apply; the new-fetch trigger is additionally gated on `!held_valid_r` to avoid a
+second overflow landing before the first held word has been placed. Reset and the
+`pc_wr_en` flush path both clear `held_word_r`/`held_valid_r`, matching every other queue
+register. This is a genuine, structural IFU bug independent of anything Phase 141-147 added
+to decode — it was simply unreachable until a real instruction needed the 6th queue word.
+
+**Test bug found along the way, before the RTL bug**: `tests/memind22.s`'s first draft used
+`($800)` (unsuffixed) as the abs.L-src operand; since `$800` fits in a signed 16-bit range,
+vasm silently assembled it as **abs.W**, routing execution through the *older* Phase 118
+abs.W-src arm (which never gained long-bd support, since Phase 147's own scope was
+specifically abs.L-src) instead of this phase's new code at all — the resulting wrong EA
+($10234, a brief-8-bit-fallback artifact) was a real symptom but of a different, pre-existing
+gap, not this phase's own arm. Fixed by using an explicit absolute address `$10900`
+(> `$FFFF`, so vasm can't fold it to abs.W) for the source operand instead.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 10/10 (unchanged —
+`memind22.s` has the same benign prefetch-interleave reordering quirk as `memind9/14/19/20`,
+so per that established convention it's hand-verified (`BUS W` lines match Musashi/WinUAE
+exactly for both writes: `$204`←`$13572468` and `$404`←`$2468ACE0`) rather than wired into
+the automated `--reads-only` target). Full 124-suite Harte re-run — **PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline**, zero
+regressions — the highest-value gate this phase could run, since the IFU fix touches the
+shared prefetch-queue fill/drain logic underneath every single instruction in the corpus,
+not just the two new decode sites. This closes Phase 145's q5-unlock plan (Phases 145-147)
+in full. `port3.md`'s Item 1 (MOVE Dn,(d8,An,Xn) — the 3rd register-file read port) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

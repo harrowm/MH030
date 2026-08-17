@@ -87,6 +87,8 @@ module m68030_ifu (
     logic        initialized_r;   // set on first pc_wr_en; gate auto-fetch
     logic        bus_err_r;
     logic [31:0] bus_err_addr_r;
+    logic [15:0] held_word_r;      // Phase 147: overflow stash (see below)
+    logic        held_valid_r;
 
     // -----------------------------------------------------------------------
     // Combinational outputs
@@ -171,6 +173,8 @@ module m68030_ifu (
             initialized_r  <= 1'b0;
             bus_err_r      <= 1'b0;
             bus_err_addr_r <= 32'h0;
+            held_word_r    <= 16'h0;
+            held_valid_r   <= 1'b0;
 
         end else if (pc_wr_en) begin
             // Flush queue and restart from new PC.
@@ -187,6 +191,8 @@ module m68030_ifu (
             initialized_r  <= 1'b1;
             bus_err_r      <= 1'b0;
             bus_err_addr_r <= 32'h0;
+            held_word_r    <= 16'h0;
+            held_valid_r   <= 1'b0;
 
         end else begin
             // Always advance decode_pc for consumed words (2 bytes each)
@@ -205,10 +211,27 @@ module m68030_ifu (
                 // Fill: write new word(s) into qd at position fill_at
                 fetch_addr_r <= fetch_addr_r + 32'd4;
                 skip_first_r <= 1'b0;
-                q_cnt        <= q_cnt_df;
                 // Clear fetch_pend_r; drain-only branch re-asserts next cycle
                 // with the updated fetch_addr_r, avoiding address-race with the BIU.
                 fetch_pend_r <= 1'b0;
+
+                // Phase 147 (plan.md): fill_at==5 overflow. A fetch always
+                // returns 2 words, but only 1 physical slot (q[5]) remains
+                // free when q_cnt_d==5 -- this is now reachable because the
+                // fetch trigger below was widened from <=4 to <=5 to fix a
+                // parity-lock bug (see that comment). Keep the first word
+                // at q[5]; stash the second in held_word_r for the next
+                // free slot (injected with zero bus cost in the drain-only
+                // branch below) instead of losing it.
+                if (fill_at == 3'd5) begin
+                    q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
+                    q[3] <= qd[3]; q[4] <= qd[4];
+                    q[5] <= ifu_rdata[31:16];
+                    held_word_r  <= ifu_rdata[15:0];
+                    held_valid_r <= 1'b1;
+                    q_cnt        <= 3'd6;
+                end else begin
+                q_cnt        <= q_cnt_df;
 
                 // Write queue: cases on {skip_first_r, fill_at[2:0]}
                 // skip_first=0: rdata[31:16] at fill_at, rdata[15:0] at fill_at+1
@@ -262,21 +285,53 @@ module m68030_ifu (
                         q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
                     end
                 endcase
+                end
 
             end else begin
-                // Drain only: just shift the queue
-                q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
-                q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
-                q_cnt <= q_cnt_d;
+                // Phase 147 (plan.md): parity-lock fix. A fetch always
+                // delivers 2 words, so once a fresh instruction stream's
+                // queue parity goes odd (via the one-time skip_first
+                // catch-up below), every later fill preserves that parity
+                // (1->3->5->7...) -- q_cnt could only ever land on 5, never
+                // 6, and the old trigger ("<=4") never re-armed from 5,
+                // permanently stalling any instruction needing q[5] valid
+                // (ext_count==5, unreachable before Phase 145/147). Fixed
+                // by widening the trigger to <=5 (below) and handling the
+                // resulting 1-slot-only overflow via held_word_r/
+                // held_valid_r (stash the fetch's 2nd word, no bus cost to
+                // place it once a slot frees up -- see the fill_at==5 case
+                // above and the injection just below).
+                if (held_valid_r && (q_cnt_d < 3'd6)) begin
+                    // Inject the stashed word into the first free slot
+                    // instead of a plain shift-only drain -- zero bus cost.
+                    case (q_cnt_d)
+                        3'd0: begin q[0]<=held_word_r; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; end
+                        3'd1: begin q[0]<=qd[0]; q[1]<=held_word_r; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; end
+                        3'd2: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=held_word_r; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; end
+                        3'd3: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=held_word_r; q[4]<=qd[4]; q[5]<=qd[5]; end
+                        3'd4: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=held_word_r; q[5]<=qd[5]; end
+                        default: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=held_word_r; end
+                    endcase
+                    q_cnt        <= q_cnt_d + 3'd1;
+                    held_valid_r <= 1'b0;
+                end else begin
+                    // Drain only: just shift the queue
+                    q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
+                    q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                    q_cnt <= q_cnt_d;
+                end
 
-                // Issue a new fetch if queue has room (≤ 4 words after drain).
+                // Issue a new fetch if queue has room (<= 5 words after
+                // drain, widened from <=4 -- see comment above) and we
+                // aren't already holding a stashed word (avoid a second
+                // overflow before the first held word has been placed).
                 // Guard !ifu_ack: biu_cycle_gen holds ifu_ack high for all 4
                 // ticks of S7.  Without this guard the drain-only path re-arms
                 // fetch_pend_r on tick 1 of S7, causing a spurious second fill
                 // (at tick 2) with stale captured_rdata and advancing
                 // fetch_addr_r past the next real fetch address.
                 if (!fetch_pend_r && !bus_err_r && initialized_r &&
-                    (q_cnt_d <= 3'd4) && !ifu_ack) begin
+                    (q_cnt_d <= 3'd5) && !ifu_ack && !held_valid_r) begin
                     fetch_pend_r <= 1'b1;
                 end
             end
