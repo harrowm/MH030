@@ -162,6 +162,9 @@ $(SIM)/cache:         $(TOP_SRCS) tb/cache_tb.sv | $(SIM)
 $(SIM)/stall_fsm:     $(TOP_SRCS) tb/stall_fsm_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/mmu_xlate:     $(TOP_SRCS) tb/mmu_xlate_tb.sv | $(SIM)
+	$(IVCOMP)
+
 $(SIM)/cosim_smoke:   $(TOP_SRCS) tb/cosim_smoke_tb.sv | $(SIM)
 	$(IVCOMP)
 
@@ -236,7 +239,7 @@ ALL_TESTS := \
     $(SIM)/special_instr $(SIM)/ea_extended $(SIM)/cmpm \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
-    $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache
+    $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate
 
 # ── Phase 74: Musashi reference log ─────────────────────────────────────────
 MUSASHI_DIR := tools/musashi

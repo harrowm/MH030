@@ -5706,6 +5706,145 @@ this one genuine 3rd-port exception, correcting its own prior "concluded, nothin
 
 ---
 
+## Phase 150 Stage 0 — wire real MMU address translation into the live IFU/EU datapath
+
+**Goal**: the user asked to test the MMU more thoroughly, with an explicit goal — the
+68030 implementation eventually needs to run Linux, which uses the MMU heavily (demand
+paging, copy-on-write). Reading the RTL before writing any new tests (`rtl/m68030_mmu.sv`,
+`rtl/biu_mmu_if.sv`, `rtl/biu_cache_if.sv`, `rtl/biu_icache_if.sv`, `rtl/m68030_top.sv`)
+turned up a problem much bigger than a testing gap: **the MMU had zero effect on any real
+memory access.** `m68030_top.sv` hardwired `m68030_mmu`'s general translation-request port
+to dead constants (`.va_in(32'h0), .req_in(1'b0)`); only the explicit PFLUSH/PTEST/PMOVE
+instructions ever drove the MMU. The 3-level walker, 22-entry ATC, and TT0/TT1 — all real,
+all unit-tested in isolation — were never actually consulted for a real instruction fetch
+or data access, even with `TC.E=1`. A 6-stage plan was written and approved
+(`~/.claude/plans/compressed-hopping-cocoa.md`): Stage 0 (this phase, the core fix — wire
+translation into the live datapath), Stage 1 (translation fault → real exception + RTE
+retry, BIU-152), Stage 2 (write-protect), Stage 3 (U/M bit hardware write-back, BIU-086),
+Stage 4 (MMUSR correctness, BIU-087), Stage 5 (PLOAD, currently unimplemented), Stage 6
+(long-format descriptors, flagged as possibly out of scope).
+
+### Architectural grounding (confirmed by reading the RTL, not assumed)
+
+The 68030's on-chip caches are indexed/tagged by the **logical** address — confirmed in
+`biu_cache_if.sv`: `idx`/`vtag`/`woff` all derive from `eu_addr` directly, and
+`biu_icache_if.sv` fetches by `ifu_addr` the same way. A cache **hit** needs zero
+translation; only a **miss** (a real external bus cycle) needs the address translated
+first — the natural, minimal-blast-radius insertion point. `biu_cache_if.sv` already had an
+`mmu_ci` input, already wired end-to-end from `biu_mmu_if.sv`'s own `ci` output through
+`m68030_biu.sv` — confirming part of this integration was anticipated by the original
+design, just never live since the request driving it was permanently 0.
+
+### RTL changes
+
+- **`rtl/biu_mmu_if.sv`**: new `wp` output (write-protect, mirrors `ci` exactly — `wp_r`
+  set alongside `ci_r` in the TT-match/ATC-hit/walk-done branches, sourced from
+  `atc_wp[atc_hit_idx]`/`walk_wp_r`, both already computed but never exposed). New
+  `fault_is_berr` output: distinguishes a **real bus error during the walk** (the 3
+  `mmu_berr`-triggered sites in `MS_WALK_A/B/C`) from a **purely logical fault** (invalid
+  descriptor, `DT=00`, 3 sites) — needed because a synthetic fault-capture pulse for the
+  logical case must NOT re-fire for a real BERR that `biu_cycle_gen`'s own independent
+  `fault_valid_r` mechanism (BIU-085) has *already* correctly captured; `biu_exc_capture.sv`'s
+  own `frame_valid`/`frame_format` latch has no re-capture guard by design (sticky-forever,
+  overwritable on any later `fault_valid` pulse) — an unguarded synthetic pulse arriving
+  cycles after a real capture would silently overwrite it with stale/wrong data. Identified
+  and fixed *before* it could cause a bug, through reasoning rather than a failing test.
+- **`rtl/biu_mmu_arb.sv`** (new): `biu_mmu_if` is a single-request-at-a-time resource with
+  exactly one pre-existing requester (the top-level EXT port, driven by `m68030_mmu.sv` for
+  PFLUSH/PTEST/PMOVE). Stage 0 adds two more — `biu_cache_if.sv` (D-cache/EU miss path) and
+  `biu_icache_if.sv` (I-cache/IFU miss path) — needing arbitration: EXT > D > I, matching
+  BIU-097's own MMU priority ordering. An `owner_r` register tags which requester is in
+  flight so `pa`/`ci`/`wp`/`hit`/`walk_done`/`fault` demux back to the correct requester
+  only (this demuxing didn't exist before, since nothing but EXT had ever used the port).
+  EXT's own request (`m68030_mmu.sv`'s `biu_req`) is a genuine one-shot pulse, latched via
+  `ext_pend_r` so it isn't lost if it arrives while the arbiter is busy servicing D or I; D
+  and I hold their own request line asserted for their entire wait (level, not pulse), so
+  need no equivalent latch.
+- **`rtl/biu_cache_if.sv`** (D-cache/EU side): new `tc` input (already an `m68030_biu.sv`
+  port, just not yet forwarded) and the full `xl_*`/`xlate_fault_*` translation-request
+  protocol. New state `CI_XLATE`: `CI_IDLE`'s miss transition goes here instead of straight
+  to `CI_D_MISS`/`CI_WRITE`/`CI_FILL_0` when `tc_e=1`. On success, `addr_r` is overwritten
+  in place with the translated PA (safe — page-offset bits, including the low 2 bits
+  `CI_WRITE`'s `merge_wr()` depends on, pass through translation unchanged), then falls into
+  the existing miss-fill states unmodified. On fault, or a write hitting a WP page
+  (`xl_fault || (xl_wp && !rw_r)`), transitions to the *existing* `CI_BERR` state (already
+  asserts `eu_berr` correctly — no new abort plumbing needed). `TC.E=0` keeps the exact
+  pre-existing state graph untaken — a structural, not just empirical, zero-regression
+  guarantee. The pre-existing `mmu_ci` input (used in `dhit`/`ihit`/`dhit_r` hit-gating) was
+  deliberately left untouched — still fed from the EXT-owner-only demuxed value, a
+  documented follow-up, not addressed this phase.
+- **`rtl/biu_icache_if.sv`** (I-cache/IFU side): identical shape — new `tc` input, new
+  `IC_XLATE` state, `IC_IDLE`'s entry condition widened from `icache_en` alone to
+  `icache_en || tc_e` (a real instruction fetch needs translation even when the I-cache
+  itself is disabled), the top-level bypass condition correspondingly narrowed from
+  `!icache_en` to `!icache_en && !tc_e`. No WP check (fetches are always reads).
+- **`rtl/m68030_biu.sv`**: instantiates `biu_mmu_arb` in front of the (renamed/rewired)
+  `biu_mmu_if` instance; threads `tc` into both cache-if modules; adds a synthetic one-cycle
+  `fault_valid` pulse (carrying the already-latched logical address/FC/RW/SIZ) fired the
+  cycle `CI_XLATE`/`IC_XLATE` aborts on a purely logical fault, OR'd into
+  `biu_exc_capture`'s own `fault_valid`/`mmu_fault` inputs — required, not optional, since an
+  invalid-descriptor fault has no real bus error at all (the descriptor read succeeded; it
+  just decoded `DT=00`) and without this the abort would still reach `eu_berr`/`mem_abort`
+  but stack a stale/wrong exception frame.
+
+### Test-suite fallout: two genuine bootstrap-ordering hazards, not RTL bugs
+
+Wiring translation into the live datapath meant `TC.E` — previously a register bit with
+zero effect on any real bus cycle — became live for the first time, and two pre-existing
+`tb/stall_fsm_tb.sv` tests (B-20/B-21's PTEST/PMOVE-CRP tests, and BERR-mid-PTEST) broke as
+a direct, correct consequence: both enabled `TC.E=1` *before* configuring the transparent
+`TT0` window, so the very next instruction fetch needed a real page-table walk against an
+unconfigured `CRP` — exactly the bootstrap hazard real 68030 firmware has too (transparent
+windows must be live before the MMU itself is enabled). Confirmed via a standalone probe
+(500000-cycle budget, ~10x normal margin) that B-20 truly never completes, not just a
+budget shortfall. Fixed by reordering B-20 to load TT0 before TC, and by disabling TC.E
+again immediately after B-21 (mirroring BERR-mid-PTEST's own already-established
+convention) so every downstream test through BERR-mid-CAS2 — none of which were designed to
+exercise live translation — goes back to running translation-free, matching their
+originally-verified Phase 103-126 behavior. BERR-mid-PTEST had the identical ordering
+hazard for its own real (non-TT0-bypassed) walk; fixed by narrowing TT0 to an *exact*
+top-byte match (`LAM=0x00` instead of B-20's `LAM=0xFF`-any) — still covering all of this
+file's own code (top byte 0x00) — instead of fully disabling it, and moving PTEST's own
+target VA to a different top byte (0x01) so it alone falls through to the real walker,
+leaving ordinary code fetches transparently bypassed throughout. A secondary,
+unrelated-to-MMU bug surfaced by the new TC-disable code inserted between B-21 and T4a: a
+settle-wait's own 200-cycle budget was too small for the real PMOVE (fetch+execute+
+writeback) it was waiting on, silently giving up early and letting one of the disable
+PMOVE's own bus reads land inside T4a's bus-cycle-count window — fixed by widening the
+budget to 2000, confirmed via direct signal tracing of `tc_out`'s own settle time.
+
+### New test: `tb/mmu_xlate_tb.sv` (Stage 0f)
+
+A dedicated full-chip integration test (mirrors `tb/cache_tb.sv`'s harness pattern) proving
+real translation happens for a real instruction, deliberately scoped to exactly what
+Stage 0 delivers: a single-level walk (`TIB=TIC=0`, `IS=5,TIA=15,PS=12` — sums to 32, so
+the walker's one real table read directly returns the leaf page descriptor) with TT0
+narrowed to cover only this file's own code (top byte 0x00, same technique validated fixing
+BERR-mid-PTEST above). `MOVEA.L #0x20001004,A0` / `MOVE.L (A0),D0` with CRP pointing at a
+one-entry table mapping VA page 0x20001000 to a genuinely different physical page
+(0x00002000). Phase 1 (`TC.E=1`) asserts: D0 holds the translated PA's own sentinel
+(0xCAFEF00D) not the raw VA's (0xBAADF00D); the table-walk's own descriptor read hit the
+exact expected address (0x3004, hand-derived from `biu_mmu_if.sv`'s own `fa_lo_w`/`idx_a_w`
+formulas before writing the test) with FC=101 per BIU-083; the actual data read hit the
+translated PA on the external bus. Phase 2 (`TC.E=0` control case, same VA) asserts D2
+holds the raw VA's own data — translation genuinely inert, byte-for-byte matching every
+pre-Phase-150 test in this project. All 6 checks passed on the first run. Wired into
+`make test` as a new `mmu_xlate` target.
+
+### Results
+
+`make test` 36/36 (was 35/35), `make cosim_grp` 8/8, `make cosim_memind` 12/12, full
+124-suite Harte sweep (Verilator batch backend) — **PASS 702142, FAIL 2 (same documented
+ASL.b corpus anomaly), SKIP 281221, TIMEOUT 0, bit-identical to the pre-Stage-0 baseline** —
+the mandatory gate here, since Stage 0 touches the shared cache-miss path every
+instruction's memory access goes through, even though Harte itself never sets `TC.E=1`; the
+point is proving the `TC.E=0` bypass is truly zero-cost across the whole corpus, not just in
+the new dedicated test. **This closes Stage 0 of the 6-stage MMU-hardening plan.** Stage 1
+(translation fault → real exception, end to end, including RTE-driven re-execution per
+BIU-152 — the most Linux-relevant behavior in the whole plan) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
