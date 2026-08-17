@@ -367,7 +367,9 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # memind17=genuine memory-indirect with long bd + word od together (Phase
 # 140 -- fixes a real fi_od aliasing bug, not just a missing feature: the
 # old code silently misread od's value from bd's own high half instead of
-# its real position one word further out).
+# its real position one word further out); memind21=genuine memory-
+# indirect with long bd AND long od together (Phase 146 -- the last
+# combination requiring the new genuine-q5 IFU plumbing, Phase 145).
 #
 # memind18 (Phase 141: MOVE #imm,(bd,An,Xn) full-format indexed dst) is
 # deliberately NOT wired in here, same reason as memind9/14/15: this arm's
@@ -464,8 +466,14 @@ buscmp-memind17: $(SIM)/cosim_grp winuae/tests/memind17_ref.log tests/memind17.h
 	    | grep "^BUS" > /tmp/_dut_memind17.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind17.log winuae/tests/memind17_ref.log \
 	    --reads-only --dut-may-continue
+buscmp-memind21: $(SIM)/cosim_grp winuae/tests/memind21_ref.log tests/memind21.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind21.hex +grp=memind21 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind21.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind21.log winuae/tests/memind21_ref.log \
+	    --reads-only --dut-may-continue
+
 cosim_memind: buscmp-memind2 buscmp-memind3 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
-              buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17
+              buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

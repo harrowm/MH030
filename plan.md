@@ -5490,6 +5490,50 @@ this phase. Phase 146 (genuine memory-indirect long-bd+long-od) is next.
 
 ---
 
+## Phase 146 — Genuine memory-indirect long-bd + long-od fix (the first real q5 consumer)
+
+**Goal**: second stage of the new plan — the first genuine consumer of Phase 145's q5
+plumbing: single-EA-family memory-indirect EA (`fi_bd`/`fi_od` in `eu_seq.sv`) with a
+**long** base displacement **and** a **long** outer displacement together — the one
+combination that was flatly impossible before Phase 145 (needs descriptor+bd_hi+bd_lo+
+od_hi+od_lo = 5 extension words = 6 total, one word beyond what the IFU could ever drain).
+
+**Sizing already correct, confirmed before touching value extraction**: per the plan's own
+"confirm before implementing" discipline, `m68030_seq.sv`'s `memind_od_words` was directly
+re-read first — it already returns `3'd2` for `peek_fi_iis[1:0]==2'b11` (long od), so
+`memind_ext_count = 1 + memind_bd_words + memind_od_words` already correctly computes `5`
+for the long-bd+long-od combination (`1+2+2`), exactly matching the new `ext_count>=5 →
+ifu_ext6_valid` gating tier Phase 145 itself added. **Zero `m68030_seq.sv` changes needed**
+— this phase is purely the missing value extraction in `eu_seq.sv`.
+
+**Fix**: `fi_od`'s formula previously returned `32'h0` unconditionally whenever
+`fi_iis[1:0]==2'b11` (long od) — that case was never implemented at all, distinct from the
+real *aliasing bug* Phase 140 fixed for the word-od case. Restructured into an explicit
+3-way split on `fi_iis[1:0]` (null/word/long) crossed with the existing 3-way split on
+`fi_bdsz` (null/word/long bd), giving 9 total position combinations, all derived from first
+principles (bd's own words always occupy the slot(s) immediately after the descriptor; od's
+own word(s) always start immediately after wherever bd's own words end) rather than
+extending the old code's own ad-hoc branch shape. The new long-od cases: null bd → od_hi/lo
+at q2/q3; word bd → od_hi/lo at q3/q4; **long bd → od_hi/lo at q4/q5 (the new case this
+phase adds)**. `fi_bd` itself needed no change — its own value only depends on bd's size,
+never on od's.
+
+**Test**: new `tests/memind21.s` — genuine post-indexed memory-indirect EA combining a long
+bd (`-$10000`) with a long od (`-$20000`) together for the first time, forced via the same
+out-of-brief-range technique as `memind13/16/17.s` applied to *both* displacements
+simultaneously — compared cleanly against Musashi/WinUAE on the first attempt (`OK 15
+cycles match`), wired into `make cosim_memind` as `buscmp-memind21`.
+
+**Results**: `make test` 35/35, `make cosim_grp` 8/8, `make cosim_memind` 10/10 (was 9/9).
+Full 124-suite Harte re-run — **PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline**, zero regressions — meaningful despite Harte
+having zero coverage of this 68020+-only mode, since `fi_od` is a shared decode signal
+touching every already-converted family in the Phase 115-146 memory-indirect lineage.
+Phase 147 (MOVE mem-to-mem imm-src/abs.L-src long-bd via q5, the two remaining q5-unlocked
+sites) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
