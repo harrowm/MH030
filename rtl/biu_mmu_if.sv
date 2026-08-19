@@ -132,8 +132,20 @@ module biu_mmu_if (
     // Page mask (0 in page offset bits, 1 elsewhere)
     wire [31:0] page_mask = ~((32'h1 << ps) - 32'h1);
 
-    // CRP/SRP base (use lower 32-bit, bits[31:4] give base >> 4)
-    wire [31:0] crp_base = {crp[31:4], 4'h0};
+    // Phase 157 Stage 2 (plan.md): active root pointer selection. Per the
+    // real MC68030 manual (Section 9.5.2, "General Table Search"): "SRE is
+    // set to enable the supervisor root pointer, and FC2 is set for
+    // supervisor-level accesses. The translation tree with its root
+    // defined by the SRP register is selected only when SRE and FC2 are
+    // both set. Otherwise, the translation table with its root defined by
+    // the CRP register is selected." SRE is TC bit 30 (this file's own
+    // header comment). Previously `crp` was used unconditionally -- a
+    // real, previously-undiscovered gap: `srp` was threaded through as a
+    // port everywhere above this module but never actually read here.
+    wire        use_srp   = tc[30] && fc[2];
+    wire [63:0] active_root = use_srp ? srp : crp;
+    // Root base (use lower 32-bit, bits[31:4] give base >> 4)
+    wire [31:0] crp_base = {active_root[31:4], 4'h0};
 
     // -----------------------------------------------------------------------
     // TT match function
@@ -435,9 +447,11 @@ module biu_mmu_if (
                             // ATC miss → start table walk level A
                             walk_req_addr_r <= walk_a_addr_w;
                             fa_lo_r         <= fa_lo_w;
-                            // Phase 150 Stage 6: CRP's own DT (bits[33:32],
-                            // Figure 9-9) selects level A's format.
-                            walk_long_r     <= (crp[33:32] == 2'b11);
+                            // Phase 150 Stage 6: the active root's own DT
+                            // (bits[33:32], Figure 9-9) selects level A's
+                            // format. Phase 157 Stage 2: now correctly
+                            // reads SRP here too when it's the active root.
+                            walk_long_r     <= (active_root[33:32] == 2'b11);
                             ms_state        <= MS_WALK_A;
                         end
                     end

@@ -6496,6 +6496,69 @@ the gap-closure plan.** See `~/.claude/plans/compressed-hopping-cocoa.md` for th
 
 ---
 
+## Phase 157 Stage 2 — SRP (Supervisor Root Pointer) selection
+
+### Goal
+
+`srp` (Supervisor Root Pointer) was already threaded end-to-end as a port from
+`m68030_top.sv` through `m68030_biu.sv` into `rtl/biu_mmu_if.sv` — but the table walker
+never actually read it. Every walk unconditionally used `crp` (User/Common Root
+Pointer), regardless of `TC.SRE` (bit 30) or the access's own FC2 bit. Confirmed against
+the real manual (Section 9.5.2, "General Table Search"): "SRE is set to enable the
+supervisor root pointer, and FC2 is set for supervisor-level accesses. The translation
+tree with its root defined by the SRP register is selected only when SRE and FC2 are
+both set. Otherwise, the translation table with its root defined by the CRP register is
+selected." A real, previously-undiscovered gap — every prior MMU test (Phase 150 Stages
+0-6) exercised only `TC.SRE=0`, so `crp`-always never showed up as wrong.
+
+### Implementation
+
+`rtl/biu_mmu_if.sv`: replaced the unconditional `crp_base` computation with an
+"active root" mux:
+
+```systemverilog
+wire        use_srp   = tc[30] && fc[2];
+wire [63:0] active_root = use_srp ? srp : crp;
+wire [31:0] crp_base = {active_root[31:4], 4'h0};
+```
+
+and updated the level-A long/short-format check Phase 150 Stage 6 added
+(`walk_long_r <= (active_root[33:32] == 2'b11);`, was `crp[33:32]` — same bit position,
+Figure 9-9, applies identically to both CRP and SRP). `walk_a_addr_w` (the dispatched
+level-A walk address) needed no direct edit — it already derives from `crp_base`, which
+now correctly reflects the active root.
+
+### Test
+
+New MMU-19 in `tb/mmu_tb.sv`: a fresh VA (`VA_SRP=0x50505050`) reachable via two
+*distinct* root pointers — the existing CRP (base 0x10000) and a new, different SRP
+(base 0x20000) — each with its own valid, distinguishable page descriptor
+(`0xC0000000`-framed via CRP, `0xD0000000`-framed via SRP), so a wrong-root selection
+produces an observably wrong PA rather than a coincidental match or a fault either way.
+Three sub-cases exercise the full SRE×FC2 truth table (the SRE=0,FC2=0 quadrant is
+already covered by every pre-existing test in the file):
+- **19a** (SRE=1, FC=101/supervisor, FC2=1): must use SRP → PA=0xD0000050.
+- **19b** (SRE=1, FC=001/user, FC2=0): must use CRP (FC2 gates it off despite SRE=1) →
+  PA=0xC0000050. Uses a different FC than 19a, so it naturally can't hit 19a's own
+  now-cached ATC entry.
+- **19c** (SRE=0, FC=101/supervisor, FC2=1): must use CRP (SRE gates it off despite
+  FC2=1) → PA=0xC0000050. Reuses 19a's own FC (101), so 19a's cached ATC entry for this
+  VA+FC is explicitly `PFLUSH`ed first (`do_pflush(1'b1, 3'b101, 32'h0)`) to force a
+  genuine fresh walk rather than a stale hit.
+
+All 3 sub-cases (7 checks total) passed on the first run — no debugging needed.
+
+### Results
+
+`make test` 36/36, `sim/mmu` standalone 0 failures (MMU-1 through MMU-19), `make
+cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep (Verilator batch
+backend, mandatory — `biu_mmu_if.sv` changed) — PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected: Harte never
+sets `TC.SRE`). **Closes Stage 2 of the gap-closure plan.** Stage 3 (BKPT instruction)
+is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

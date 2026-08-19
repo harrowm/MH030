@@ -108,6 +108,21 @@ module mmu_tb;
     localparam logic [31:0] DESC_B_LF_1 = 32'h0000_0001; // 1st longword: DT=1 (page), WP=U=M=CI=0
     localparam logic [31:0] DESC_B_LF_2 = 32'hCAFE_5000; // 2nd longword: page address
 
+    // Phase 157 Stage 2: SRP (Supervisor Root Pointer) selection test
+    // (MMU-19). Same VA reachable via two DISTINCT root pointers -- CRP's
+    // own existing base (0x10000, short format, matches VA_TEST's own
+    // layout) and a fresh SRP base (0x20000) -- each with its own valid,
+    // DISTINGUISHABLE page descriptor, so a wrong-root selection produces
+    // an observably wrong PA rather than silently matching by coincidence.
+    localparam logic [31:0] VA_SRP        = 32'h5050_5050;
+    localparam logic [63:0] SRP_VAL_TEST  = 64'h0000_0000_0002_0000; // base=0x20000
+    localparam logic [31:0] ADDR_A_SRP_CRP = 32'h0001_0140; // 0x10000 + 0x50*4
+    localparam logic [31:0] ADDR_A_SRP_SRP = 32'h0002_0140; // 0x20000 + 0x50*4
+    localparam logic [31:0] DESC_A_SRP_CRP = 32'hC000_0001; // page, frame=0xC0000000 ("CRP used")
+    localparam logic [31:0] DESC_A_SRP_SRP = 32'hD000_0001; // page, frame=0xD0000000 ("SRP used")
+    localparam logic [31:0] PA_SRP_VIA_CRP = 32'hC000_0050;
+    localparam logic [31:0] PA_SRP_VIA_SRP = 32'hD000_0050;
+
     // -----------------------------------------------------------------------
     // Clock + reset
     // -----------------------------------------------------------------------
@@ -305,6 +320,8 @@ module mmu_tb;
             ADDR_A_LF_2: stub_rdata = DESC_A_LF_2;
             ADDR_B_LF:   stub_rdata = DESC_B_LF_1;
             ADDR_B_LF_2: stub_rdata = DESC_B_LF_2;
+            ADDR_A_SRP_CRP: stub_rdata = DESC_A_SRP_CRP;
+            ADDR_A_SRP_SRP: stub_rdata = DESC_A_SRP_SRP;
             default: stub_rdata = 32'h0;    // invalid DT=00 → fault
         endcase
     end
@@ -802,6 +819,52 @@ module mmu_tb;
                   saw_write_r);
             check32("MMU-18: write-back sets U (DESC_B_LF_1 | 0x8)",
                     write_wdata_r, DESC_B_LF_1 | 32'h0000_0008);
+        end
+
+        // ----------------------------------------------------------------
+        // MMU-19 (Phase 157 Stage 2): SRP (Supervisor Root Pointer)
+        // selection. Per the real MC68030 manual (Section 9.5.2): "The
+        // translation tree with its root defined by the SRP register is
+        // selected only when SRE and FC2 are both set. Otherwise, ... CRP
+        // ... is selected." Same VA reached via two DISTINCT root
+        // pointers, each with its own valid, distinguishable page
+        // descriptor -- a wrong-root selection produces an observably
+        // wrong PA, not just a coincidental match or a fault either way.
+        //   Test A: SRE=1, FC2=1 (supervisor) -> must use SRP.
+        //   Test B: SRE=1, FC2=0 (user)       -> must use CRP (FC2 gates).
+        //   Test C: SRE=0, FC2=1 (supervisor) -> must use CRP (SRE gates).
+        // Test A's own successful walk caches an ATC entry for
+        // (VA_SRP,FC=101); test C reuses that same FC, so it's explicitly
+        // PFLUSHed first to force a genuine fresh walk (test B naturally
+        // avoids the collision via its own different FC).
+        // ----------------------------------------------------------------
+        $display("--- MMU-19: SRP (Supervisor Root Pointer) selection ---");
+        begin
+            logic [31:0] pa; logic fault, ci;
+            crp = CRP_VAL;
+            srp = SRP_VAL_TEST;
+
+            // Test A: SRE=1, FC=101 (supervisor data, FC2=1) -> SRP
+            tc = TC_MMU_ON | 32'h4000_0000; // SRE=1
+            translate(VA_SRP, 3'b101, 1'b1, pa, fault, ci);
+            check  ("MMU-19a: no fault (SRE=1,FC2=1)", !fault);
+            check32("MMU-19a: SRE=1,FC2=1 uses SRP", pa, PA_SRP_VIA_SRP);
+
+            // Test B: SRE=1, FC=001 (user data, FC2=0) -> CRP
+            translate(VA_SRP, 3'b001, 1'b1, pa, fault, ci);
+            check  ("MMU-19b: no fault (SRE=1,FC2=0)", !fault);
+            check32("MMU-19b: SRE=1,FC2=0 uses CRP", pa, PA_SRP_VIA_CRP);
+
+            // Flush test A's own cached (VA_SRP,FC=101) ATC entry so test
+            // C (same VA+FC as A) gets a genuine fresh walk, not a stale
+            // cached SRP-based hit.
+            do_pflush(1'b1, 3'b101, 32'h0);
+
+            // Test C: SRE=0, FC=101 (supervisor data, FC2=1) -> CRP
+            tc = TC_MMU_ON; // SRE=0
+            translate(VA_SRP, 3'b101, 1'b1, pa, fault, ci);
+            check  ("MMU-19c: no fault (SRE=0,FC2=1)", !fault);
+            check32("MMU-19c: SRE=0,FC2=1 uses CRP", pa, PA_SRP_VIA_CRP);
         end
 
         $display("=== %0d failure(s) ===", fail_count);
