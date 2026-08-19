@@ -227,6 +227,7 @@ module m68030_top #(
     logic [2:0]  eu_mem_fc;
     logic [31:0] eu_mem_addr, eu_mem_wdata;
     logic        eu_mem_rmw;
+    logic        eu_mem_rmw_lookup;  // Phase 158 Stage 3
     logic        eu_an_wr_en;
     logic [2:0]  eu_an_wr_sel;
     logic [31:0] eu_an_wr_data;
@@ -446,6 +447,7 @@ module m68030_top #(
         .mem_ack       (eu_ack && !exc_active),
         .mem_berr      (eu_berr && !exc_active),
         .mem_rmw       (eu_mem_rmw),
+        .mem_rmw_lookup (eu_mem_rmw_lookup),
         .eu_coproc_req   (eu_coproc_req),
         .eu_coproc_rw    (eu_coproc_rw),
         .eu_coproc_siz   (eu_coproc_siz),
@@ -701,6 +703,7 @@ module m68030_top #(
         .eu_ack          (eu_ack),
         .eu_berr         (eu_berr),
         .eu_retry        (eu_retry),
+        .mem_rmw_lookup  (eu_mem_rmw_lookup),  // Phase 158 Stage 3
         // IACK (stub)
         .eu_iack_req     (1'b0),
         .eu_iack_level   (3'b0),

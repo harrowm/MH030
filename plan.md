@@ -6874,6 +6874,74 @@ Stage 3 (RMW read forced-miss for D-cache) is next.
 
 ---
 
+## Phase 158 Stage 3 — RMW read forced-miss for D-cache
+
+### Goal
+
+Manual §6.1.2.2 (p.6-9), confirmed by direct re-read: "The read portion of a
+read-modify-write cycle is always forced to miss in the data cache." (Nuance also
+confirmed: the read's own data still populates/updates the cache entry afterward if
+cachable — only the *lookup* is forced off-cache, not the whole RMW cycle.)
+`rtl/biu_cache_if.sv` had zero RMW-awareness in its `dhit` computation — a TAS/CAS/CAS2
+read on an already-cached address would incorrectly serve from the (possibly stale)
+cache instead of always going to the bus.
+
+### Scope clarification
+
+This project's own `dec_is_mem_rmw` decode flag is much broader than the manual's own
+"read-modify-write cycle" concept — it covers every software RMW-shaped instruction
+(BCHG/BCLR/BSET, NEG/NOT/NEGX-to-memory, ADD/SUB/AND/OR/EOR-to-memory, etc.), none of
+which use a real bus-locked cycle (they're two ordinary, separate read/write bus
+cycles). The manual's own narrower concept — a genuinely bus-locked, indivisible RMW
+cycle — only applies to TAS, CAS, and CAS2 in this project's ISA. The existing `mem_rmw`
+port (bus-level "hold AS", feeding `biu_cycle_gen.sv` directly) already correctly
+scopes to TAS alone — reused its own shape for a new, separate signal rather than
+conflating the two concepts.
+
+### Finding (documented, not fixed this stage): CAS/CAS2 have no real bus lock at all
+
+While researching this, found `bus_lock` (`m68030_top.sv:114`) is declared but never
+driven anywhere — permanently 0 — and the existing `mem_rmw` signal only ever fires for
+TAS. This means CAS/CAS2 currently issue their own read/write as two *ordinary*,
+unlocked bus cycles, not the hardware-locked RMW cycle real 68030 silicon uses for
+them too. A separate, deeper, pin-level-timing gap from this stage's own cache-behavior
+scope — documented here and in CLAUDE.md, not fixed.
+
+### Fix
+
+New `mem_rmw_lookup` output on `eu_seq.sv`, computed as TAS's own existing `mem_rmw`
+condition OR'd with CAS's own read-phase condition (`cas_read_ack`'s own formula minus
+`mem_ack`, so it's true for the whole in-flight read, not just the ack cycle) OR'd with
+CAS2's own two read phases (`cas2_rd1_ack`'s own formula minus `mem_ack` for rd1;
+the existing `cas2_rd2_r` register, already representing "currently issuing the second
+read," for rd2) — deliberately separate from `mem_rmw` itself, zero effect on the
+existing TAS bus-lock mechanism. Threaded through `m68030_eu.sv` → `m68030_top.sv` →
+`m68030_biu.sv` → new `biu_cache_if.sv` input; ANDed into the combinational `dhit`
+(the lookup sampled at dispatch in `CI_IDLE`) as `!mem_rmw_lookup` — `dhit_r` (used
+later for the RMW's own write-phase cache update) is deliberately untouched, since by
+the write phase `mem_rmw_lookup` has already gone low and the write should update the
+cache normally on a genuine hit, same as any other write.
+
+### Tests
+
+New `tb/cache_tb.sv` check (D-8, inserted between the existing D-1 and D-2 tests):
+an ordinary ELDER read caches a fresh address (E=0x2F00), then `TAS (A0)` targets the
+SAME, already-cached address — checked via exact bus-cycle count (proven pattern
+already used throughout this file): TAS costs exactly 2 real bus cycles (forced-miss
+read + its own mandatory write-through write), not 1 (which is what a bug — read served
+from cache — would show). Passed on the first real attempt.
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures. `make test` 36/36, `make cosim_grp` 8/8,
+`make cosim_memind` 12/12, full 124-suite Harte sweep (mandatory — `eu_seq.sv`/
+`biu_cache_if.sv`/`m68030_eu.sv`/`m68030_biu.sv` changed) — PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected:
+Harte never enables the D-cache). **Closes Stage 3.** Stage 4 (IBE gating fix + WA + DBE
+D-cache burst) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

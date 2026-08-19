@@ -81,6 +81,7 @@ module m68030_biu #(
     output logic        eu_ack,
     output logic        eu_berr,
     output logic        eu_retry,
+    input  logic        mem_rmw_lookup,  // Phase 158 Stage 3 — D-cache force-miss
 
     // EU special interfaces (direct to biu_cycle_gen — bypass cache/sizing)
     input  logic        eu_iack_req,
@@ -627,6 +628,7 @@ module m68030_biu #(
         .eu_wdata    (eu_wdata),
         .eu_req      (eu_req & !eu_mo_req),  // gate when multiop active
         .eu_is_icache(eu_is_icache),
+        .mem_rmw_lookup(mem_rmw_lookup),  // Phase 158 Stage 3
         .eu_rdata    (ca_eu_rdata),
         .eu_ack      (ca_eu_ack),
         .eu_berr     (ca_eu_berr),

@@ -24,6 +24,13 @@ module biu_cache_if (
     output logic        eu_ack,
     output logic        eu_berr,
 
+    // Phase 158 Stage 3: true for the entire read phase of TAS/CAS/CAS2
+    // (manual §6.1.2.2: "The read portion of a read-modify-write cycle is
+    // always forced to miss in the data cache"). Forces dhit=0 on the
+    // lookup only -- the read's own returned data still populates/updates
+    // the cache entry afterward as normal (not a full cache-bypass).
+    input  logic        mem_rmw_lookup,
+
     // Cache Inhibit from MMU
     input  logic        mmu_ci,
 
@@ -263,7 +270,14 @@ module biu_cache_if (
     wire d_size_ok   = !(eu_siz   == 2'b00 && eu_addr[1:0]   != 2'b00);
     wire d_size_ok_r = !(siz_r    == 2'b00 && addr_r[1:0]    != 2'b00);
 
-    wire dhit = dcache_en && d_size_ok && valid_d[idx][woff] && (tag_d[idx] == vtag) && !mmu_ci;
+    // Phase 158 Stage 3: !mem_rmw_lookup forces a miss for the read half of
+    // TAS/CAS/CAS2, per manual §6.1.2.2 -- only gates the read-time LOOKUP
+    // (this combinational dhit, sampled at dispatch in CI_IDLE); dhit_r
+    // below (used later for the RMW's own write-phase update) is
+    // deliberately untouched, since by the write phase mem_rmw_lookup has
+    // already gone low and the write should update the cache normally on
+    // a genuine hit, same as any other write.
+    wire dhit = dcache_en && d_size_ok && valid_d[idx][woff] && (tag_d[idx] == vtag) && !mmu_ci && !mem_rmw_lookup;
 
     // Also need dhit based on latched idx_r/vtag_r for write update in CI_WRITE
     wire dhit_r = dcache_en && d_size_ok_r && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !mmu_ci;

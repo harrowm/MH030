@@ -187,6 +187,18 @@ module eu_seq (
                                        // race — do not use this raw signal
                                        // directly for FSM abort logic)
     output logic        mem_rmw,      // 1=hold bus for RMW (TAS)
+    // Phase 158 Stage 3: separate from mem_rmw above (which only ever
+    // covers TAS, and feeds biu_cycle_gen.sv's own bus-level "hold AS"
+    // mechanism — untouched here). This is a pure D-cache lookup-forcing
+    // signal, true for the entire read phase of TAS, CAS, or CAS2 (both
+    // reads), consumed only by biu_cache_if.sv to force dhit=0 per manual
+    // §6.1.2.2: "The read portion of a read-modify-write cycle is always
+    // forced to miss in the data cache." NOTE (found while implementing,
+    // documented, out of scope): CAS/CAS2 have no real bus-level lock at
+    // all today (bus_lock is declared but never driven anywhere; mem_rmw
+    // above only ever fires for TAS) — a separate, deeper gap from this
+    // stage's own cache-behavior scope, not fixed here.
+    output logic        mem_rmw_lookup,
 
     // ── FPU coprocessor interface (FC=111 CPU Space) ──────────────
     output logic        eu_coproc_req,
@@ -9619,6 +9631,19 @@ module eu_seq (
                      :                                             eu_lane(rd_a_data, ex_siz);
     // RMW — assert during TAS (An) read phase (not during write or cooldown).
     assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
+
+    // Phase 158 Stage 3: mem_rmw_lookup — TAS (same condition as mem_rmw
+    // above) OR CAS's own read phase (cas_read_ack's own condition, minus
+    // mem_ack, so it's true for the whole in-flight read not just the ack
+    // cycle) OR CAS2's own two read phases (cas2_rd1_ack's own condition
+    // minus mem_ack, for rd1; cas2_rd2_r, an existing register already
+    // representing "currently issuing the second read", for rd2).
+    assign mem_rmw_lookup =
+        (ex_valid && ex_is_tas  && ex_is_mem_rd && !tas_run_r && !tas_after_write_r) ||
+        (ex_valid && ex_is_cas  && ex_is_mem_rd && !cas_get_du_r && !cas_active_r &&
+         !ex_cas_mem_done_r) ||
+        (ex_valid && ex_is_cas2 && ex_is_mem_rd && !cas2_active_r && !ex_cas2_done_r) ||
+        cas2_rd2_r;
 
     // -----------------------------------------------------------------------
     // FPU coprocessor / cpSAVE / cpRESTORE bus interface outputs

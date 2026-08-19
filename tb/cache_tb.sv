@@ -212,6 +212,9 @@ module cache_tb;
     // cross-checked against MOVE_W_IMM_A0's own already-verified derivation
     // above.
     localparam MOVE_L_A0_D5   = 16'h2A10;  // MOVE.L (A0),D5
+    // TAS (A0): opcode 0x4AD0 (already proven in tb/stall_fsm_tb.sv's own
+    // TAS_A0 constant) -- Phase 158 Stage 3.
+    localparam TAS_A0         = 16'h4AD0;
     localparam MOVE_L_A0_D6   = 16'h2C10;  // MOVE.L (A0),D6
     // MOVE.L (d16,A0),D6: src mode=101 ((d16,An)) instead of 010 ((An)) --
     // needs one extension word (the 16-bit displacement).
@@ -392,6 +395,7 @@ module cache_tb;
         rom[16'h2B00/4] = 32'h1234_5678;  // T2  (idx=B, tag=0x2B -- BERR-mid-write target)
         rom[16'h2C00/4] = 32'hCCCC_1111;  // T3  (idx=C, tag=0x2C -- D-6's own BERR-mid-read-miss target)
         rom[16'h2D00/4] = 32'hDDDD_2222;  // T4  (idx=D, tag=0x2D -- D-6's own BERR-mid-write target)
+        rom[16'h2F00/4] = 32'h1111_1111;  // E   (idx=F, tag=0x2F -- Phase 158 Stage 3: RMW forced-miss)
 
         // D-5's own two independent handlers, one per fault -- an earlier
         // draft used ONE shared handler plus a register-indirect
@@ -1089,6 +1093,22 @@ module cache_tb;
             rom[a4[31:2]] = {CLR_L_D5, MOVE_L_A0_D5};   // P#2 (revisit woff0, must hit)
             a = a + 32'd8;
 
+            // ---- D-8 (Phase 158 Stage 3): RMW forced-miss (E=0x2F00) ----
+            // Ordinary read caches E. TAS (A0) then targets the SAME,
+            // already-cached address -- per manual §6.1.2.2, its own read
+            // must always be forced to miss (a real bus cycle), never
+            // served from the cache. Verified via exact bus-cycle count:
+            // TAS costs exactly 2 real cycles (forced-miss read + its own
+            // mandatory write-through write) even though the address was
+            // already resident.
+            rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            a4 = a + 32'd4; a8 = a + 32'd8;
+            rom[a4[31:2]] = {16'h2F00, CLR_L_D5};
+            rom[a8[31:2]] = {MOVE_L_A0_D5, TAS_A0};      // cache-populating read ; TAS (A0)
+            a = a + 32'd12;
+            rom[a[31:2]] = {CLR_L_D6, NOP_OP};           // completion marker
+            a = a + 32'd4;
+
             // ---- D-2: aliasing/eviction (P vs Q, same idx0) ----
             rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
             a4 = a + 32'd4; a8 = a + 32'd8;
@@ -1227,6 +1247,26 @@ module cache_tb;
             c3 = data_ds_count;
             check32("D-1: P#2 (revisit woff0) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'h1111_2222);
             check32("D-1: P#2's own revisit cost exactly 0 bus cycles (pure hit)", c3 - c2, 32'd0);
+
+            // D-8 (Phase 158 Stage 3): RMW forced-miss (E=0x2F00)
+            begin
+                int rc0, rc1;
+                wait_cleared_then_set(5, 32'h1111_1111, 20000, e);
+                rc0 = data_ds_count;
+                check32("D-8: cache-populating read loaded E correctly",
+                        u_top.u_eu.u_rf.d_reg[5], 32'h1111_1111);
+                // D6 last held D-1's own P+4 value (0x33334444, definitely
+                // non-zero), so waiting for it to become 0 unambiguously
+                // detects this test's own CLR.L D6 completion marker
+                // (unlike wait_cleared_then_set, whose "wait for 0, then
+                // wait for target" shape can't distinguish a target of 0
+                // from its own starting sentinel).
+                for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'd0; t++)
+                    @(posedge clk_4x);
+                rc1 = data_ds_count;
+                check32("D-8: TAS on an already-cached address still cost exactly 2 real bus cycles (forced-miss read + write-through write)",
+                        rc1 - rc0, 32'd2);
+            end
 
             // D-2
             c0 = c3;
