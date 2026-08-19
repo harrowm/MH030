@@ -6201,6 +6201,123 @@ possibly out of scope, to be confirmed with the user before Stage 5 closes.
 
 ---
 
+## Phase 150 Stage 5 — PLOAD
+
+### Goal
+
+Implement the one MMU instruction with no RTL at all before this stage: PLOAD explicitly
+loads an ATC entry for a given VA/FC/access-type without a normal access driving it —
+decode (a new case arm in `eu_seq.sv`, alongside the existing PFLUSH/PTEST/PMOVE arms) and
+FSM wiring to `biu_mmu_if.sv`'s existing walker.
+
+### Encoding: a real collision found and fixed before this ever ran
+
+Real Motorola silicon actually overlaps PLOAD's bit pattern with PFLUSH's own
+`ext_data[15:13]==001` prefix (reverse-derived from Musashi's `m68kdasm.c`
+`d68851_p000()` disassembler, the only available reference — Harte has zero coverage of
+this 68020+-only instruction and Musashi doesn't functionally implement it either). A
+first attempt used that literal encoding (recognition mask `0xFDE0`/match `0x2000`) and
+immediately broke `tb/stall_fsm_tb.sv`'s own already-passing B-19 (PFLUSHA): its real,
+already-established `PFLUSHA_EXT = 16'h2000` collided with the new mask exactly
+(`0x2000 & 0xFDE0 == 0x2000`), since real PFLUSHA's own "flush all" encoding sits
+squarely inside PLOAD's own claimed bit envelope. Given `mmu_op_type` is already this
+codebase's own clean, non-overlapping 3-bit reinterpretation of Motorola's genuinely
+context-dependent bit scheme (not a literal silicon encoding for PFLUSH/PTEST/PMOVE
+either), PLOAD was reassigned the same way: an otherwise-unused `mmu_op_type` value
+(`011`; only `001`/`010`/`100` are used by PFLUSH/PMOVE/PTEST), guaranteeing no collision
+with any existing MMU instruction. VA is taken from an An-indirect EA (same restriction
+as PTEST/PFLUSH); the FC-selector reuses PTEST's own `mmu_pt_fc_mode`/`mmu_pt_fc_val`
+fields; bit 9 (otherwise unused for this `mmu_op_type`) selects the R/W access-type
+direction real PLOAD specifies. This is flagged as lower-confidence than PFLUSH/PTEST/
+PMOVE's own encodings (which trace back to earlier, more carefully-verified phases) —
+internal self-consistency with this codebase's own established convention is the
+achievable, honest bar here, not bit-for-bit real-silicon fidelity.
+
+### Implementation
+
+`rtl/eu_seq.sv`: new `dec_is_pload`/`dec_pload_fc`/`dec_pload_rw` decode signals; a
+`pload_start_r`/`pload_run_r` FSM mirroring PTEST's own exactly (`eu_pload_req` asserted
+until `eu_pload_ack`, VA captured from `ex_ea` the same way PFLUSH/PTEST already do), with
+one deliberate difference: `mmusr_r` is updated from `eu_pload_mmusr` on completion (per
+BIU-088/BIU-087: "MMUSR is updated during PTEST and after every table walk" — PLOAD's own
+walk is real, so this falls out for free from `biu_mmu_if.sv`'s already-unconditional
+`mmusr_r` computation). New `eu_pload_req`/`eu_pload_va`/`eu_pload_fc`/`eu_pload_rw`/
+`eu_pload_ack`/`eu_pload_mmusr` ports threaded through `m68030_eu.sv` and `m68030_top.sv`,
+mirroring the PTEST port set exactly. `rtl/m68030_mmu.sv`: new `pload_req`/`pload_va`/
+`pload_fc`/`pload_rw`/`pload_ack` ports; a new `MM_IDLE` dispatch branch driving
+`biu_is_ptest=1'b0` (a REAL walk, unlike PTEST — U/M write-back and ATC installation
+happen exactly like an ordinary access, using the caller-supplied `rw` rather than PTEST's
+hardcoded read) and `biu_rw=pload_rw`; a `pload_req && !tc_e` immediate no-op completion
+branch (PLOAD with the MMU disabled has nothing to load) that PTEST's own dispatch
+notably lacks; a new `pload_pending_r` flag mirroring `ptest_pending_r` throughout
+(`MM_DONE`, `ack_out`'s exclusion, the new `pload_ack` output). No `m68030_seq.sv` change
+needed — PFLUSH/PTEST/PMOVE have no dedicated `ext_count` table entry either (their
+common single-extension-word baseline is served by the same default `ifu_ext_valid`
+gating every other `dec_needs_ext` consumer with `ext_count<3` already uses), so PLOAD,
+needing the identical single word, inherits the same default correctly.
+
+### Test
+
+`tb/mmu_tb.sv` (per the plan's own literal test spec — mirroring the file's existing
+`translate()`/`do_pflush()` pattern, not a real-IFU-fetched instruction): new `do_pload()`
+task; MMU-15 (PLOAD on a fresh VA, U pre-set to isolate the ATC-install proof from the
+write-back mechanism — an earlier attempt without this saw 3 walk requests instead of the
+expected 2, having forgotten PLOAD's own real walk *also* triggers a U write-back on a
+truly fresh page, exactly like MMU-14's own earlier finding — confirms exactly 2 walk
+requests (level A + level B) for the PLOAD itself, then exactly 0 further requests for a
+subsequent ordinary `translate()` of the same VA, i.e. a genuine ATC hit, plus the correct
+resulting PA); MMU-16 (PLOAD with `rw=0`, write-direction, on a fresh U=0/M=0 page —
+confirms a real write-back cycle occurs with the exact expected wdata bit pattern, both U
+and M set, unlike PTEST which must suppress this entirely). New walk-request counter
+counts `stub_ack` pulses rather than `bm_walk_req`'s own rising edges — a first attempt
+using the request line's own edges undercounted (a 2-level walk never drops the request
+line between levels, only the address changes, so a 2-cycle walk read as 1).
+
+A real end-to-end test (a genuine PLOAD opcode fetched through `m68030_top`'s actual IFU,
+extending `tb/stall_fsm_tb.sv`'s B-19/20/21-style real-instruction decode-holdoff tests)
+was attempted to close the one gap `tb/mmu_tb.sv` can't reach — it drives `m68030_mmu.sv`'s
+ports directly, bypassing `eu_seq.sv`'s own new decode entirely. This did catch one real
+issue before it shipped: the encoding collision described above (PLOAD's first draft
+recognition mask exactly matching `PFLUSHA_EXT=0x2000`, breaking the already-passing
+B-19). After fixing that, a second placement attempt (appending new code directly after
+the file's own highest-addressed test) collided with a *different*, pre-existing hazard —
+`0x2E10`/`0x2E20` turned out to be claimed as scratch **data** by two much earlier tests
+(BERR-mid-ABCD/PACK's own predecrement pointers), not free code space, corrupting decode
+exactly the way `docs/stalls.md`'s own "missing ext_count"-shaped bugs always do (traced
+directly: `rom[0x2E1C/4]` held `0x4EE1`, not the default NOP fill). Moved to a genuinely
+unused address (`0x3FA0`, confirmed unreferenced anywhere in the file) reached via an
+explicit `JMP` (this file's own `claim_park()`-style redirect, since a multi-KB NOP
+fall-through would cross many *other* tests' own scratch-data regions along the way) —
+`dec_is_pload` was confirmed firing correctly on the real fetched opcode (`instr_word=
+0xF010`, `ext_data=0x6200`, both exactly as encoded) at this point, directly validating
+the decode logic itself. But instruction fetch then stalled indefinitely trying to
+retrieve the instruction's own extension word (`q_cnt` stuck at 2, `ifu_req` asserted with
+no `ifu_ack`, the I-cache's own `IC_BURST0` state never completing) — a hang whose
+signature (stuck partway through a burst fetch near the top of the 16KB memory model,
+combined with an unexplained live `CACR` read showing icache disabled despite an earlier
+test explicitly enabling it and nothing in the file ever disabling it again) does not
+obviously implicate PLOAD's own new decode/FSM at all, and would need its own dedicated
+investigation to root-cause rather than being guessed at under this stage's own scope.
+**Reverted** rather than land a half-diagnosed change — `tb/stall_fsm_tb.sv` is byte-for-
+byte unchanged from before this stage. The decode-correctness finding (a real fetched
+PLOAD opcode is recognized correctly) stands on its own from the trace even without a
+landed regression test; `tb/mmu_tb.sv`'s own MMU-15/16 remain the stage's real, permanent
+test coverage, matching the plan's own literal spec. Flagged as a candidate follow-up
+investigation, not a confirmed bug.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (Verilator batch backend) — **PASS 702142, FAIL 2 (same documented ASL.b corpus
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline** — the mandatory gate here
+since this stage's own EX-stage/decode changes to `eu_seq.sv` are widely shared, even
+though Harte has zero coverage of PLOAD itself (68020+-only, absent from the 68000-
+captured corpus). **This closes Stage 5 of the 6-stage MMU-hardening plan.** Stage 6
+(long-format descriptors) remains the only item left — flagged as possibly out of scope,
+per the plan confirm with the user rather than assume.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

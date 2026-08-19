@@ -327,6 +327,11 @@ module m68030_top #(
     logic        eu_ptest_req_w;
     logic [31:0] eu_ptest_va_w;
     logic [2:0]  eu_ptest_fc_w;
+    logic        eu_pload_req_w;      // Phase 150 Stage 5
+    logic [31:0] eu_pload_va_w;
+    logic [2:0]  eu_pload_fc_w;
+    logic        eu_pload_rw_w;
+    logic        mmu_pload_ack_w;
     logic [31:0] eu_tc_w, eu_tt0_w, eu_tt1_w;
     logic [63:0] eu_crp_w, eu_srp_w;
 
@@ -454,6 +459,12 @@ module m68030_top #(
         .eu_ptest_fc     (eu_ptest_fc_w),
         .eu_ptest_ack    (mmu_ptest_ack),
         .eu_ptest_mmusr  (mmu_mmusr),
+        .eu_pload_req    (eu_pload_req_w),
+        .eu_pload_va     (eu_pload_va_w),
+        .eu_pload_fc     (eu_pload_fc_w),
+        .eu_pload_rw     (eu_pload_rw_w),
+        .eu_pload_ack    (mmu_pload_ack_w),
+        .eu_pload_mmusr  (mmu_mmusr),
         .tc_out          (eu_tc_w),
         .tt0_out         (eu_tt0_w),
         .tt1_out         (eu_tt1_w),
@@ -596,6 +607,12 @@ module m68030_top #(
         .ptest_fc       (eu_ptest_fc_w),
         .mmusr_out      (mmu_mmusr),
         .ptest_ack      (mmu_ptest_ack),
+        // EU PLOAD (Phase 150 Stage 5)
+        .pload_req      (eu_pload_req_w),
+        .pload_va       (eu_pload_va_w),
+        .pload_fc       (eu_pload_fc_w),
+        .pload_rw       (eu_pload_rw_w),
+        .pload_ack      (mmu_pload_ack_w),
         // BIU translation port
         .biu_va         (biu_mmu_va_w),
         .biu_fc         (biu_mmu_fc_w),

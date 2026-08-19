@@ -49,6 +49,16 @@ module m68030_mmu (
     output logic [15:0] mmusr_out,     // result (latched at walk completion)
     output logic        ptest_ack,
 
+    // ── PLOAD (Phase 150 Stage 5, plan.md) ──────────────────────────────────
+    // Explicitly loads an ATC entry for a given VA/FC/RW -- unlike PTEST,
+    // this is a REAL (is_ptest=0) walk, so U/M write-back and ATC
+    // installation happen exactly like an ordinary access would.
+    input  logic        pload_req,
+    input  logic [31:0] pload_va,
+    input  logic [2:0]  pload_fc,
+    input  logic        pload_rw,       // 1=read, 0=write access type
+    output logic        pload_ack,
+
     // ── BIU mmu translation port (connects to biu_mmu_if via m68030_biu) ─
     output logic [31:0] biu_va,
     output logic [2:0]  biu_fc,
@@ -99,6 +109,7 @@ module m68030_mmu (
     logic        fault_r, ci_r;
     logic [15:0] mmusr_r;
     logic        ptest_pending_r;  // set when the pending request is a PTEST
+    logic        pload_pending_r;  // set when the pending request is a PLOAD
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -108,6 +119,7 @@ module m68030_mmu (
             ci_r            <= 1'b0;
             mmusr_r         <= 16'h0;
             ptest_pending_r <= 1'b0;
+            pload_pending_r <= 1'b0;
             biu_req         <= 1'b0;
             biu_va          <= 32'h0;
             biu_fc          <= 3'b0;
@@ -145,7 +157,30 @@ module m68030_mmu (
                         biu_rw          <= 1'b1;  // PTEST is always a read walk
                         biu_is_ptest    <= 1'b1;  // Phase 150 Stage 4: no U/M side effects
                         ptest_pending_r <= 1'b1;
+                        pload_pending_r <= 1'b0;
                         mm_state        <= MM_WAIT;
+
+                    end else if (pload_req && tc_e) begin
+                        // PLOAD (Phase 150 Stage 5): a REAL walk (is_ptest=0),
+                        // unlike PTEST -- U/M write-back and ATC installation
+                        // happen exactly like an ordinary access, using the
+                        // caller-supplied rw direction (real PLOAD syntax
+                        // specifies read vs. write access type explicitly).
+                        biu_req         <= 1'b1;
+                        biu_va          <= pload_va;
+                        biu_fc          <= pload_fc;
+                        biu_rw          <= pload_rw;
+                        biu_is_ptest    <= 1'b0;
+                        ptest_pending_r <= 1'b0;
+                        pload_pending_r <= 1'b1;
+                        mm_state        <= MM_WAIT;
+
+                    end else if (pload_req && !tc_e) begin
+                        // MMU disabled: nothing to load, matches req_in's own
+                        // !tc_e handling below -- immediate no-op completion.
+                        ptest_pending_r <= 1'b0;
+                        pload_pending_r <= 1'b1;
+                        mm_state        <= MM_DONE;
 
                     end else if (req_in) begin
                         if (!tc_e) begin
@@ -154,6 +189,7 @@ module m68030_mmu (
                             fault_r         <= 1'b0;
                             ci_r            <= 1'b0;
                             ptest_pending_r <= 1'b0;
+                            pload_pending_r <= 1'b0;
                             mm_state        <= MM_DONE;
                         end else begin
                             // MMU enabled: forward to biu_mmu_if for one cycle
@@ -163,6 +199,7 @@ module m68030_mmu (
                             biu_rw          <= rw_in;
                             biu_is_ptest    <= 1'b0;  // Phase 150 Stage 4: a real access
                             ptest_pending_r <= 1'b0;
+                            pload_pending_r <= 1'b0;
                             mm_state        <= MM_WAIT;
                         end
                     end
@@ -197,6 +234,7 @@ module m68030_mmu (
                 // ── Emit ack (one cycle) ──────────────────────────────────
                 MM_DONE: begin
                     ptest_pending_r <= 1'b0;
+                    pload_pending_r <= 1'b0;
                     mm_state        <= MM_IDLE;
                 end
 
@@ -216,13 +254,14 @@ module m68030_mmu (
     // Combinational outputs
     // -----------------------------------------------------------------------
     assign pa_out    = pa_r;
-    assign ack_out   = (mm_state == MM_DONE) && !ptest_pending_r;
+    assign ack_out   = (mm_state == MM_DONE) && !ptest_pending_r && !pload_pending_r;
     assign fault_out = fault_r && (mm_state == MM_DONE);
     assign ci_out    = ci_r    && (mm_state == MM_DONE);
     assign mmu_active = (mm_state != MM_IDLE);
 
     // ptest_ack: fires one cycle (MM_DONE with ptest_pending_r)
     assign ptest_ack  = (mm_state == MM_DONE) && ptest_pending_r;
+    assign pload_ack  = (mm_state == MM_DONE) && pload_pending_r;
     assign mmusr_out  = mmusr_r;
 
     // pflush_ack:

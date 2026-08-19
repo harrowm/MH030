@@ -21,6 +21,9 @@
 //   MMU-12: PTEST hitting a genuine bus error mid-walk — MMUSR==0x8000
 //   MMU-13: PTEST must NOT write U/M back (no write cycle on walk bus)
 //   MMU-14: control — a real (non-PTEST) read DOES write U back
+//   MMU-15: PLOAD populates the ATC (exact walk-request-count proof);
+//           a subsequent access then hits with 0 additional requests
+//   MMU-16: PLOAD rw=0 (write direction) drives a real U+M write-back
 
 // Walk memory layout (4KB pages, TIA=8, TIB=8, CRP base=0x00010000):
 //   VA = 0x1234_5678, FC=001
@@ -64,6 +67,28 @@ module mmu_tb;
     localparam logic [31:0] ADDR_B5    = 32'h0000_6088;
     localparam logic [31:0] DESC_A5    = 32'h0000_6002;
     localparam logic [31:0] DESC_B5    = 32'hFACE_5001; // page, WP=0,U=0,M=0
+
+    // Phase 150 Stage 5: fresh routes for PLOAD tests (MMU-15..17).
+    localparam logic [31:0] VA6        = 32'h3333_3333; // PLOAD ATC-install target
+    localparam logic [31:0] ADDR_A6    = 32'h0001_00CC;
+    localparam logic [31:0] ADDR_B6    = 32'h0000_70CC;
+    localparam logic [31:0] DESC_A6    = 32'h0000_7002;
+    localparam logic [31:0] DESC_B6    = 32'hBABE_6009; // page, WP=0,U=1,M=0 (U
+                                                          // pre-set so a fresh
+                                                          // read-direction PLOAD
+                                                          // doesn't also trigger
+                                                          // a 3rd write-back
+                                                          // cycle -- keeps this
+                                                          // test's own walk-count
+                                                          // isolated to ATC
+                                                          // install; MMU-16
+                                                          // covers write-back)
+
+    localparam logic [31:0] VA7        = 32'h4444_4444; // PLOAD write-direction U/M target
+    localparam logic [31:0] ADDR_A7    = 32'h0001_0110;
+    localparam logic [31:0] ADDR_B7    = 32'h0000_8110;
+    localparam logic [31:0] DESC_A7    = 32'h0000_8002;
+    localparam logic [31:0] DESC_B7    = 32'hF00D_7001; // page, WP=0,U=0,M=0
 
     // -----------------------------------------------------------------------
     // Clock + reset
@@ -136,6 +161,13 @@ module mmu_tb;
     logic        ptest_ack;
     logic        mmu_active;
 
+    // Phase 150 Stage 5
+    logic        pload_req = 0;
+    logic [31:0] pload_va  = 0;
+    logic [2:0]  pload_fc  = 3'b001;
+    logic        pload_rw  = 1'b1;
+    logic        pload_ack;
+
     // -----------------------------------------------------------------------
     // DUT: m68030_mmu
     // -----------------------------------------------------------------------
@@ -161,6 +193,11 @@ module mmu_tb;
         .ptest_fc       (ptest_fc),
         .mmusr_out      (mmusr_out),
         .ptest_ack      (ptest_ack),
+        .pload_req      (pload_req),
+        .pload_va       (pload_va),
+        .pload_fc       (pload_fc),
+        .pload_rw       (pload_rw),
+        .pload_ack      (pload_ack),
         // BIU translation port → wired to biu_mmu_if
         .biu_va         (mm_biu_va),
         .biu_fc         (mm_biu_fc),
@@ -242,6 +279,10 @@ module mmu_tb;
             ADDR_B4: stub_rdata = DESC_B4;
             ADDR_A5: stub_rdata = DESC_A5;
             ADDR_B5: stub_rdata = DESC_B5;
+            ADDR_A6: stub_rdata = DESC_A6;
+            ADDR_B6: stub_rdata = DESC_B6;
+            ADDR_A7: stub_rdata = DESC_A7;
+            ADDR_B7: stub_rdata = DESC_B7;
             default: stub_rdata = 32'h0;    // invalid DT=00 → fault
         endcase
     end
@@ -258,6 +299,33 @@ module mmu_tb;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) saw_write_r <= 1'b0;
         else if (bm_walk_req && !bm_walk_rw) saw_write_r <= 1'b1;
+    end
+
+    // Phase 150 Stage 5 test: captures the write cycle's own wdata (the
+    // first one in each cleared window, same convention as saw_write_r),
+    // to check PLOAD's U/M write-back bit pattern directly rather than
+    // just "a write happened somewhere".
+    logic [31:0] write_wdata_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) write_wdata_r <= 32'h0;
+        else if (bm_walk_req && !bm_walk_rw && !saw_write_r) write_wdata_r <= bm_walk_wdata;
+    end
+
+    // Phase 150 Stage 5 test: walk-completion counter, for proving "PLOAD
+    // populates the ATC, a subsequent access hits with 0 additional bus
+    // cycles" precisely (same convention as the exact-cycle-count proofs
+    // elsewhere in this project, e.g. tb/cache_tb.sv's own T-1/T-2).
+    // Counts stub_ack pulses, not bm_walk_req's own rising edges -- a
+    // 2-level walk (A then B) never drops bm_walk_req in between (only
+    // the requested address changes, ms_state goes MS_WALK_A->MS_WALK_B
+    // directly, both satisfy biu_mmu_if.sv's own mmu_req OR-condition), so
+    // an edge detector on the request line itself undercounts; stub_ack
+    // genuinely pulses once per level (confirmed via a first attempt that
+    // undercounted: got 1, not 2, for a real 2-level walk).
+    int walk_req_count_r = 0;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) walk_req_count_r <= 0;
+        else if (stub_ack) walk_req_count_r <= walk_req_count_r + 1;
     end
 
     typedef enum logic [1:0] {WS_IDLE, WS_WAIT, WS_ACK} ws_t;
@@ -356,6 +424,24 @@ module mmu_tb;
             @(posedge clk_4x); #1;
         end
         check("PFLUSH ack received", pflush_ack);
+    endtask
+
+    // Phase 150 Stage 5: issue one PLOAD; poll for pload_ack up to 200 cycles.
+    task do_pload(
+        input logic [31:0] va,
+        input logic [2:0]  fc,
+        input logic        rw
+    );
+        int t;
+        @(posedge clk_4x); #1;
+        pload_req = 1; pload_va = va; pload_fc = fc; pload_rw = rw;
+        @(posedge clk_4x); #1;
+        pload_req = 0;
+        for (t = 0; t < 200; t++) begin
+            if (pload_ack) break;
+            @(posedge clk_4x); #1;
+        end
+        check("PLOAD ack received", pload_ack);
     endtask
 
     // -----------------------------------------------------------------------
@@ -605,6 +691,56 @@ module mmu_tb;
             translate(VA5, 3'b001, 1'b1, pa, fault, ci);
             check("MMU-14: no fault",                        !fault);
             check("MMU-14: write cycle seen (U write-back)", saw_write_r);
+        end
+        repeat(4) @(posedge clk_4x);
+
+        // ----------------------------------------------------------------
+        // MMU-15 (Phase 150 Stage 5): PLOAD populates the ATC entry for a
+        // fresh VA (VA6, never touched before) -- confirmed by an exact
+        // walk-request-count proof, the same rigor as tb/cache_tb.sv's own
+        // T-1/T-2: the PLOAD itself must cause exactly 2 walk requests
+        // (level A + level B, this file's own 2-level layout), and a
+        // SUBSEQUENT ordinary translate() of the same VA must cause
+        // exactly 0 further requests (a real ATC hit, ack via MS_ATC_HIT)
+        // — matching the plan's own literal test spec.
+        // ----------------------------------------------------------------
+        $display("--- MMU-15: PLOAD populates ATC, subsequent access hits ---");
+        begin
+            int before_pload, after_pload, after_translate;
+            logic [31:0] pa; logic fault, ci;
+            before_pload = walk_req_count_r;
+            do_pload(VA6, 3'b001, 1'b1);   // read-direction PLOAD
+            after_pload = walk_req_count_r;
+            check32("MMU-15: PLOAD caused exactly 2 walk requests (A+B)",
+                    after_pload - before_pload, 32'd2);
+
+            translate(VA6, 3'b001, 1'b1, pa, fault, ci);
+            after_translate = walk_req_count_r;
+            check("MMU-15: no fault on subsequent access", !fault);
+            check32("MMU-15: PA matches the loaded entry", pa,
+                    (DESC_B6 & 32'hFFFF_F000) | (VA6 & 32'h0000_0FFF));
+            check32("MMU-15: subsequent access caused 0 additional walk requests",
+                    after_translate - after_pload, 32'd0);
+        end
+        repeat(4) @(posedge clk_4x);
+
+        // ----------------------------------------------------------------
+        // MMU-16 (Phase 150 Stage 5): PLOAD with rw=0 (write access type)
+        // on a fresh U=0,M=0 page (VA7) drives a REAL U/M write-back --
+        // unlike PTEST (MMU-13), PLOAD is not is_ptest-gated, and its own
+        // rw argument (not derived from an actual access) reaches
+        // biu_mmu_if.sv's walk_rw_r directly. Checks the exact write-back
+        // wdata bit pattern (both U=1 and M=1 set, matching the write
+        // path's own formula), not just "a write happened".
+        // ----------------------------------------------------------------
+        $display("--- MMU-16: PLOAD write-direction sets both U and M ---");
+        begin
+            saw_write_r   = 1'b0;
+            write_wdata_r = 32'h0;
+            do_pload(VA7, 3'b001, 1'b0);   // write-direction PLOAD
+            check("MMU-16: write-back cycle occurred", saw_write_r);
+            check32("MMU-16: write-back sets U and M (DESC_B7 | 0x18)",
+                    write_wdata_r, DESC_B7 | 32'h0000_0018);
         end
 
         $display("=== %0d failure(s) ===", fail_count);

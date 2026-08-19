@@ -248,6 +248,15 @@ module eu_seq (
     output logic [2:0]  eu_ptest_fc,     // FC for PTEST
     input  logic        eu_ptest_ack,    // MMU one-cycle ack
     input  logic [15:0] eu_ptest_mmusr,  // MMUSR result (valid when ptest_ack)
+    // Phase 150 Stage 5: PLOAD -- explicitly load an ATC entry for a given
+    // VA/FC, performing a real (non-PTEST) walk so U/M write-back and ATC
+    // installation happen exactly like an ordinary access would.
+    output logic        eu_pload_req,    // asserted while PLOAD pending MMU ack
+    output logic [31:0] eu_pload_va,     // VA to load
+    output logic [2:0]  eu_pload_fc,     // FC for PLOAD
+    output logic        eu_pload_rw,     // 1=read, 0=write access type (68030 rw convention)
+    input  logic        eu_pload_ack,    // MMU one-cycle ack
+    input  logic [15:0] eu_pload_mmusr,  // MMUSR result (valid when pload_ack; BIU-088)
     output logic [31:0] tc_out,          // TC register → MMU
     output logic [31:0] tt0_out,         // TT0 register → MMU
     output logic [31:0] tt1_out,         // TT1 register → MMU
@@ -451,7 +460,7 @@ module eu_seq (
     assign ext_bit_num  = ext_data[4:0];
 
     // MMU instruction second-word field pre-extractions from ext_data[15:0]
-    logic [2:0]  mmu_op_type;    assign mmu_op_type    = ext_data[15:13]; // 001=PFLUSH,100=PTEST,010=PMOVE
+    logic [2:0]  mmu_op_type;    assign mmu_op_type    = ext_data[15:13]; // 001=PFLUSH,010=PMOVE,011=PLOAD(Stage 5),100=PTEST
     logic [2:0]  mmu_sub_mode;   assign mmu_sub_mode   = ext_data[11:9];  // flush mode / PMOVE preg
     logic        mmu_dr;         assign mmu_dr         = ext_data[8];     // PMOVE direction
     logic [1:0]  mmu_fc_mode;    assign mmu_fc_mode    = ext_data[4:3];   // FC selection (PFLUSH)
@@ -644,6 +653,9 @@ module eu_seq (
     logic [2:0]  dec_pflush_fc;
     logic        dec_is_ptest;
     logic [2:0]  dec_ptest_fc;
+    logic        dec_is_pload;       // Phase 150 Stage 5
+    logic [2:0]  dec_pload_fc;
+    logic        dec_pload_rw;
     logic        dec_is_pmove;
     logic        dec_is_pmove64;     // 64-bit PMOVE (CRP/SRP)
     logic        dec_is_mem_src;     // memory source + register accumulator → register result
@@ -921,6 +933,9 @@ module eu_seq (
         dec_pflush_fc    = 3'b0;
         dec_is_ptest     = 1'b0;
         dec_ptest_fc     = 3'b0;
+        dec_is_pload     = 1'b0;
+        dec_pload_fc     = 3'b0;
+        dec_pload_rw     = 1'b1;
         dec_is_pmove     = 1'b0;
         dec_is_pmove64   = 1'b0;
         dec_pmove_preg   = 3'b0;
@@ -5820,6 +5835,53 @@ module eu_seq (
                                     dec_reads_src = 1'b1;
                                 end
                             end
+                            3'b011: begin
+                                // PLOAD (Phase 150 Stage 5, plan.md): explicitly
+                                // loads an ATC entry for a given VA/FC, performing
+                                // a real (non-PTEST) walk so U/M write-back and
+                                // ATC installation happen exactly like an ordinary
+                                // access would.
+                                //
+                                // NOTE on encoding: real Motorola silicon actually
+                                // overlaps PLOAD's bit pattern with PFLUSH's own
+                                // ext_data[15:13]==001 prefix (confirmed both by
+                                // reverse-deriving it from Musashi's m68kdasm.c
+                                // d68851_p000() disassembler AND by direct
+                                // collision: an early attempt at that literal
+                                // encoding matched this file's own already-
+                                // established PFLUSHA encoding, 16'h2000, exactly
+                                // -- breaking real PFLUSHA). Since mmu_op_type is
+                                // already this file's own CLEAN, non-overlapping
+                                // 3-bit reinterpretation of Motorola's genuinely
+                                // context-dependent bit scheme (not a literal
+                                // silicon encoding for PFLUSH/PTEST/PMOVE either),
+                                // PLOAD is assigned the same way: an otherwise-
+                                // unused mmu_op_type value (011; only 001/010/100
+                                // are used by PFLUSH/PMOVE/PTEST), guaranteeing no
+                                // collision with any existing MMU instruction.
+                                // Harte has zero coverage of this 68020+-only
+                                // instruction and Musashi doesn't functionally
+                                // implement it either, so there is no external
+                                // oracle to verify a literal encoding against in
+                                // the first place -- internal self-consistency
+                                // with this file's own established convention is
+                                // the achievable, honest bar here. VA is taken
+                                // from an An-indirect EA (same restriction as
+                                // PTEST/PFLUSH); FC-selector reuses PTEST's own
+                                // mmu_pt_fc_mode/mmu_pt_fc_val fields; bit 9
+                                // (otherwise unused for this op_type) selects the
+                                // R/W access-type direction real PLOAD specifies.
+                                if (f_mode == 3'b010) begin
+                                    dec_valid     = 1'b1;
+                                    dec_unit      = UNIT_NONE;
+                                    dec_is_pload  = 1'b1;
+                                    dec_pload_rw  = ext_data[9];
+                                    dec_pload_fc  = (mmu_pt_fc_mode == 2'b10)
+                                                     ? {1'b0, mmu_pt_fc_val} : sfc_in;
+                                    dec_src_reg   = {1'b1, f_reg};
+                                    dec_reads_src = 1'b1;
+                                end
+                            end
                             3'b100: begin
                                 // PTEST: VA from An-indirect EA
                                 if (f_mode == 3'b010) begin
@@ -5996,6 +6058,9 @@ module eu_seq (
     logic [2:0]  ex_pflush_fc;
     logic        ex_is_ptest;
     logic [2:0]  ex_ptest_fc;
+    logic        ex_is_pload;      // Phase 150 Stage 5
+    logic [2:0]  ex_pload_fc;
+    logic        ex_pload_rw;
     logic        ex_is_pmove;
     logic        ex_is_pmove64;   // 64-bit PMOVE (CRP/SRP)
     logic        ex_is_mem_src;   // memory source + register accumulator → register result
@@ -6405,6 +6470,10 @@ module eu_seq (
     logic        ptest_start_r, ptest_run_r;
     logic [31:0] ptest_va_r;
     logic [2:0]  ptest_fc_r;
+    logic        pload_start_r, pload_run_r;   // Phase 150 Stage 5
+    logic [31:0] pload_va_r;
+    logic [2:0]  pload_fc_r;
+    logic        pload_rw_r;
     // MMU control registers (internal to EU)
     logic [31:0] tc_r   = 32'h0;
     logic [31:0] tt0_r  = 32'h0;
@@ -6520,6 +6589,7 @@ module eu_seq (
                           memind_start_r || memind_inner_r || memind_outer_r ||
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
+                          pload_start_r  || pload_run_r  ||
                           cmp2_run_r || cmp2_first_ack ||
                           mem_rmw_run_r || mem_rmw_read_ack ||
                           move_mm_run_r || move_mm_read_ack ||
@@ -6952,6 +7022,9 @@ module eu_seq (
             ex_pflush_fc      <= 3'b0;
             ex_is_ptest       <= 1'b0;
             ex_ptest_fc       <= 3'b0;
+            ex_is_pload       <= 1'b0;
+            ex_pload_fc       <= 3'b0;
+            ex_pload_rw       <= 1'b1;
             ex_is_pmove       <= 1'b0;
             ex_is_pmove64     <= 1'b0;
             ex_pmove_preg     <= 3'b0;
@@ -7074,6 +7147,9 @@ module eu_seq (
             ex_pflush_fc      <= 3'b0;
             ex_is_ptest       <= 1'b0;
             ex_ptest_fc       <= 3'b0;
+            ex_is_pload       <= 1'b0;
+            ex_pload_fc       <= 3'b0;
+            ex_pload_rw       <= 1'b1;
             ex_is_pmove       <= 1'b0;
             ex_is_pmove64     <= 1'b0;
             ex_pmove_preg     <= 3'b0;
@@ -7220,6 +7296,9 @@ module eu_seq (
             ex_pflush_fc      <= dec_pflush_fc;
             ex_is_ptest       <= dec_is_ptest;
             ex_ptest_fc       <= dec_ptest_fc;
+            ex_is_pload       <= dec_is_pload;
+            ex_pload_fc       <= dec_pload_fc;
+            ex_pload_rw       <= dec_pload_rw;
             ex_is_pmove       <= dec_is_pmove;
             ex_is_pmove64     <= dec_is_pmove64;
             ex_pmove_preg     <= dec_pmove_preg;
@@ -7976,6 +8055,9 @@ module eu_seq (
             pflush_va_r    <= 32'h0;
             ptest_start_r  <= 1'b0; ptest_run_r  <= 1'b0;
             ptest_va_r     <= 32'h0; ptest_fc_r  <= 3'b0;
+            pload_start_r  <= 1'b0; pload_run_r  <= 1'b0;
+            pload_va_r     <= 32'h0; pload_fc_r  <= 3'b0;
+            pload_rw_r     <= 1'b1;
             tc_r           <= 32'h0;
             tt0_r          <= 32'h0;
             tt1_r          <= 32'h0;
@@ -8005,6 +8087,26 @@ module eu_seq (
             end else if (ptest_run_r && eu_ptest_ack) begin
                 ptest_run_r   <= 1'b0;
                 mmusr_r       <= eu_ptest_mmusr;
+            end
+
+            // ── PLOAD FSM (Phase 150 Stage 5) ─────────────────────────────────
+            // Same shape as PTEST, but a real (non-PTEST) walk -- U/M
+            // write-back and ATC installation happen exactly like an
+            // ordinary access would (biu_mmu_if.sv's is_ptest gating is
+            // driven false for this request, see m68030_mmu.sv's own
+            // pload_req dispatch). No destination register: PLOAD is a
+            // pure side-effecting instruction, like PFLUSH.
+            if (!pload_start_r && !pload_run_r && instr_ack && dec_is_pload) begin
+                pload_start_r <= 1'b1;
+                pload_fc_r    <= dec_pload_fc;
+                pload_rw_r    <= dec_pload_rw;
+            end else if (pload_start_r) begin
+                pload_start_r <= 1'b0;
+                pload_run_r   <= 1'b1;
+                pload_va_r    <= ex_ea;
+            end else if (pload_run_r && eu_pload_ack) begin
+                pload_run_r   <= 1'b0;
+                mmusr_r       <= eu_pload_mmusr;
             end
 
             // ── PMOVE register capture (EA→MMU register direction) ───────────
@@ -9410,6 +9512,10 @@ module eu_seq (
     assign eu_ptest_req  = ptest_run_r;
     assign eu_ptest_va   = ptest_va_r;
     assign eu_ptest_fc   = ptest_fc_r;
+    assign eu_pload_req  = pload_run_r;
+    assign eu_pload_va   = pload_va_r;
+    assign eu_pload_fc   = pload_fc_r;
+    assign eu_pload_rw   = pload_rw_r;
     assign tc_out        = tc_r;
     assign tt0_out       = tt0_r;
     assign tt1_out       = tt1_r;
