@@ -6439,6 +6439,63 @@ structurally-guaranteed-zero-cost result, not a lucky one. **This closes Stage 6
 
 ---
 
+## Phase 157 Stage 1 — gap-closure plan: documentation fixes (BIU-058, coprocessor bus description)
+
+### Goal
+
+The user asked for a comparison against an external web guide to spot implementation
+gaps. That guide turned out unreliable — it conflates x86 paging terminology (a "CR0"
+register, PTE fields "P/RW/U-S/A/D" — literally Intel's own page-table-entry field
+names) and 68000-era bus signals (UDS/LDS, DTACK) with 68030 architecture, both of which
+this project's own CLAUDE.md already documents as wrong for the 68030 (single DS, not
+LDS/UDS; DSACK, not DTACK). It wasn't used as a source for anything. Instead, the actual
+MC68030UM.pdf (3rd edition, the user's own local copy, already used for Phase 150 Stage
+6) was read directly to separate genuine gaps from false ones.
+
+### Finding: CPUSH/CINVA/CINVL are not MC68030 instructions — a pre-existing error in our own biu_spec.md
+
+Checking the complete alphabetized MC68030 instruction table (Table 3-14, every entry
+ABCD→UNPK) found no CPUSH or CINV entry anywhere. These are MC68040-only instructions
+(the '040 has larger, separately-managed caches needing explicit push/invalidate
+opcodes). `biu_spec.md`'s own BIU-058 had described them as MC68030 instructions — the
+identical class of chip-generation-conflation error as the bad web guide, just
+pre-existing in this project's own docs rather than introduced by the comparison. Real
+MC68030 cache maintenance is entirely CACR-register-bit-based (no dedicated cache
+instructions at all: CD/CI/CEI/FD/ED-style bits, written via MOVEC, CAAR supplying the
+target index) — already correctly implemented (Phase 130). **Zero RTL gap — pure
+documentation fix.** A second, related mention (Section 14 "Silicon Errata," a
+community-sourced "CINVA followed immediately by a cache-touching instruction" erratum)
+was flagged as likely spurious for the same reason, without further investigation —
+that whole section is explicitly speculative/deferred ("implementation decision
+required," not yet acted on) and out of this stage's own scope to fully audit.
+
+### Finding (confirmed, not a gap): PLOAD is real
+
+Table 3-14 lists it in full: `PLOADR (fc),(ea)` / `PLOADW (fc),(ea)`, "If supervisor
+state then entry→ATC else TRAP" — Table 3-10's own MMU-instruction summary table had
+simply omitted it by editorial oversight. Confirms Phase 150 Stage 5's implementation
+was targeting a real instruction. Real hardware uses two distinct mnemonics (PLOADR/
+PLOADW) rather than a shared bit — noted, doesn't invalidate the existing R/W bit.
+
+### Fixes applied
+
+`biu_spec.md` BIU-058: rewritten to state CPUSH/CINVA/CINVL are not MC68030
+instructions and describe the real CACR-bit-based mechanism instead, cross-referencing
+the already-implemented Phase 130 work; the Section 14 erratum mention flagged inline
+as likely spurious. `CLAUDE.md`'s own coprocessor-bus description corrected: "A[15:13]
+encoding the primitive type" → A[15:13] is CpID (which of up to 7 coprocessors,
+confirmed against Figure 10-3/10-1), not primitive type — the response primitive code
+is a *data value* read back from the Response CIR (offset 0x00 in the per-coprocessor
+register block, Figure 10-5), never encoded in the address at all.
+
+### Results
+
+No RTL changed — pure documentation. No test/Harte re-run needed. **Closes Stage 1 of
+the gap-closure plan.** See `~/.claude/plans/compressed-hopping-cocoa.md` for the full
+5-stage plan. Stage 2 (SRP selection) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

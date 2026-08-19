@@ -443,12 +443,27 @@ CAS2 atomically tests and conditionally updates two memory locations. The bus is
 across all four constituent sub-cycles (BIU-036). This is the most complex bus cycle
 in the 68030 instruction set and requires dedicated FSM states in the BIU.
 
-**BIU-058** — CPUSH / CINVA / CINVL (Cache Maintenance)
-Since the D-cache is write-through, there is no modified data to write back. Cache
-maintenance instructions operate as follows:
-- CPUSH: invalidates specified cache lines (no write-back bus cycles needed)
-- CINVA: invalidates all I-cache and D-cache entries (no external bus cycles)
-- CINVL: invalidates a single cache line; the CAAR register holds the target address
+**BIU-058** — Cache Maintenance (CACR-based, not CPUSH/CINVA/CINVL)
+CPUSH/CINVA/CINVL are **not MC68030 instructions** — confirmed by checking the complete
+alphabetized instruction table (MC68030 User's Manual, 3rd ed., Table 3-14, every entry
+ABCD→UNPK) and finding no CPUSH/CINV entry anywhere. Those opcodes are MC68040-only,
+introduced because the '040 has larger, separately-managed caches needing explicit
+push/invalidate instructions. This entry originally described them as if they were part
+of the MC68030, the same class of chip-generation-conflation error documented elsewhere
+in this project (`docs/mmu.md`-adjacent notes on 68000-vs-68030 divergence apply to the
+"which chip generation is this actually" axis too, not just instruction *behavior*).
+
+This entry originally described them as if they were part of the MC68030 — the same
+class of chip-generation-conflation error found (independently) in an external web
+guide during a later comparison pass; see `plan.md §Phase 157 Stage 1` for that
+writeup.
+
+Real MC68030 cache maintenance is entirely CACR-register-bit-based (no dedicated cache
+instructions at all): CD/CI/CEI (data cache clear-all/clear-one-index), FD (freeze
+data), ED (enable data), and the matching I-cache bits, written via MOVEC. CAAR supplies
+the target index for a CEI-style single-entry clear. This is already implemented
+(`rtl/eu_seq.sv`'s CACR/CAAR MOVEC decode, verified in Phase 130's own I-cache work) —
+no RTL gap here, just a documentation correction.
 
 **BIU-059** — PFLUSH / PFLUSHA Family (MMU TLB Flush)
 PFLUSH flushes TLB entries matching address/FC criteria. PFLUSHA flushes all TLB
@@ -975,6 +990,10 @@ bugs. Confirmed examples from community sources:
   timing conditions (manifests during Macintosh Classic II boot)
 - Certain cache invalidation sequences (CINVA followed immediately by a
   cache-touching instruction) can fail to invalidate under specific pipeline conditions
+  — **likely spurious**: CINVA is not an MC68030 instruction at all (see BIU-058's own
+  correction); this erratum, sourced from unspecified "community sources" rather than
+  the primary manual, was probably conflated from MC68040 errata the same way BIU-058
+  itself originally was
 - Some instruction sequences cause pipeline state corruption under specific cache
   miss/hit interaction patterns
 
