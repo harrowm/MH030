@@ -101,6 +101,18 @@ module m68030_eu (
     input  logic        eu_coproc_ack,
     input  logic        eu_coproc_berr,
 
+    // ── BKPT breakpoint-acknowledge interface (FC=111 CPU Space, Phase 157 Stage 3) ──
+    output logic        eu_bkpt_req,
+    output logic        eu_bkpt_rw,
+    output logic [1:0]  eu_bkpt_siz,
+    output logic [2:0]  eu_bkpt_fc,
+    output logic [31:0] eu_bkpt_addr,
+    output logic [31:0] eu_bkpt_wdata,
+    input  logic [31:0] eu_bkpt_rdata,
+    input  logic        eu_bkpt_ack,
+    input  logic        eu_bkpt_berr,
+    output logic        eu_bkpt_illegal_req,
+
     // ── MMU instruction interface ──────────────────────────────
     output logic        eu_pflush_req,
     output logic        eu_pflush_all,
@@ -341,6 +353,17 @@ module m68030_eu (
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
+        // BKPT breakpoint-acknowledge (Phase 157 Stage 3)
+        .eu_bkpt_req         (eu_bkpt_req),
+        .eu_bkpt_rw          (eu_bkpt_rw),
+        .eu_bkpt_siz         (eu_bkpt_siz),
+        .eu_bkpt_fc          (eu_bkpt_fc),
+        .eu_bkpt_addr        (eu_bkpt_addr),
+        .eu_bkpt_wdata       (eu_bkpt_wdata),
+        .eu_bkpt_rdata       (eu_bkpt_rdata),
+        .eu_bkpt_ack         (eu_bkpt_ack),
+        .eu_bkpt_berr        (eu_bkpt_berr),
+        .eu_bkpt_illegal_req (eu_bkpt_illegal_req),
         // MMU instruction interface
         .eu_pflush_req   (eu_pflush_req),
         .eu_pflush_all   (eu_pflush_all),

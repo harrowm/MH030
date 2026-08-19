@@ -124,6 +124,13 @@ module m68030_top #(
     logic [31:0] eu_coproc_addr, eu_coproc_wdata;
     logic [31:0] eu_coproc_rdata;
     logic        eu_coproc_ack, eu_coproc_berr;
+    logic        eu_bkpt_req, eu_bkpt_rw;
+    logic [1:0]  eu_bkpt_siz;
+    logic [2:0]  eu_bkpt_fc;
+    logic [31:0] eu_bkpt_addr, eu_bkpt_wdata;
+    logic [31:0] eu_bkpt_rdata;
+    logic        eu_bkpt_ack, eu_bkpt_berr;
+    logic        eu_bkpt_illegal_req_w;
     logic [31:0] eu_mo_rdata0, eu_mo_rdata1;
     logic [31:0] eu_mo_rdata2, eu_mo_rdata3;
     logic        eu_mo_ack, eu_mo_berr;
@@ -448,6 +455,16 @@ module m68030_top #(
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
+        .eu_bkpt_req         (eu_bkpt_req),
+        .eu_bkpt_rw          (eu_bkpt_rw),
+        .eu_bkpt_siz         (eu_bkpt_siz),
+        .eu_bkpt_fc          (eu_bkpt_fc),
+        .eu_bkpt_addr        (eu_bkpt_addr),
+        .eu_bkpt_wdata       (eu_bkpt_wdata),
+        .eu_bkpt_rdata       (eu_bkpt_rdata),
+        .eu_bkpt_ack         (eu_bkpt_ack),
+        .eu_bkpt_berr        (eu_bkpt_berr),
+        .eu_bkpt_illegal_req (eu_bkpt_illegal_req_w),
         // MMU instruction interface
         .eu_pflush_req   (eu_pflush_req_w),
         .eu_pflush_all   (eu_pflush_all_w),
@@ -520,7 +537,7 @@ module m68030_top #(
         .ipl_mask     (eu_ipl_mask),
         .int_pending_out(exc_int_pending_w),
         .int_ready    (eu_int_ready_w),
-        .illegal_req  (eu_illegal_req_w),
+        .illegal_req  (eu_illegal_req_w | eu_bkpt_illegal_req_w),
         .priv_req     (eu_priv_req_w),
         .trace_req    (eu_trace_req_w),
         .linea_req    (eu_linea_req_w),
@@ -738,6 +755,16 @@ module m68030_top #(
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
+        // BKPT breakpoint-acknowledge (Phase 157 Stage 3)
+        .eu_bkpt_req     (eu_bkpt_req),
+        .eu_bkpt_rw      (eu_bkpt_rw),
+        .eu_bkpt_addr    (eu_bkpt_addr),
+        .eu_bkpt_fc      (eu_bkpt_fc),
+        .eu_bkpt_siz     (eu_bkpt_siz),
+        .eu_bkpt_wdata   (eu_bkpt_wdata),
+        .eu_bkpt_rdata   (eu_bkpt_rdata),
+        .eu_bkpt_ack     (eu_bkpt_ack),
+        .eu_bkpt_berr    (eu_bkpt_berr),
         // Address error outputs
         .eu_addr_err     (eu_addr_err),
         .ifu_addr_err    (ifu_addr_err),

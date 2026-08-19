@@ -199,6 +199,18 @@ module eu_seq (
     input  logic        eu_coproc_ack,
     input  logic        eu_coproc_berr,
 
+    // ── BKPT breakpoint-acknowledge interface (FC=111 CPU Space, Phase 157 Stage 3) ──
+    output logic        eu_bkpt_req,
+    output logic        eu_bkpt_rw,
+    output logic [1:0]  eu_bkpt_siz,
+    output logic [2:0]  eu_bkpt_fc,
+    output logic [31:0] eu_bkpt_addr,
+    output logic [31:0] eu_bkpt_wdata,
+    input  logic [31:0] eu_bkpt_rdata,
+    input  logic        eu_bkpt_ack,
+    input  logic        eu_bkpt_berr,
+    output logic        eu_bkpt_illegal_req,  // one-cycle pulse: BERR'd BKPT -> illegal instr
+
     // ── Address register update port (for (An)+ and -(An)) ──────────────────
     output logic        an_wr_en,
     output logic [2:0]  an_wr_sel,
@@ -680,6 +692,7 @@ module eu_seq (
     logic [3:0]  dec_trap_num;       // trap number (0–15)
     logic        dec_is_trapv;       // TRAPV
     logic        dec_is_illegal;     // ILLEGAL
+    logic        dec_is_bkpt;        // BKPT #n (Phase 157 Stage 3)
     logic        dec_is_move_sr_r;   // MOVE SR,Dn  (read SR → register)
     logic        dec_is_move_ccr_r;  // MOVE CCR,Dn (read CCR → register)
     logic        dec_is_move_sr_w;   // MOVE Dn,SR  (write register → full SR)
@@ -946,6 +959,7 @@ module eu_seq (
         dec_is_linea     = 1'b0;
         dec_is_linef     = 1'b0;
         dec_is_illegal   = 1'b0;
+        dec_is_bkpt      = 1'b0;
         dec_is_rte       = 1'b0;
         dec_is_stop      = 1'b0;
         dec_stop_sr      = 16'h0;
@@ -3927,6 +3941,11 @@ module eu_seq (
                         // ILLEGAL: 0100 1010 1111 1100 — always traps
                         dec_valid         = 1'b1;
                         dec_is_illegal    = 1'b1;
+                    end else if ((instr_word & 16'hFFF8) == 16'h4848) begin
+                        // BKPT #n: 0100 1000 0100 1nnn (Phase 157 Stage 3).
+                        // Breakpoint number in bits[2:0] (already f_reg).
+                        dec_valid         = 1'b1;
+                        dec_is_bkpt       = 1'b1;
                     // ── MOVEM extended EA ─────────────────────────────
                     end else if (!f_dir && f_ss[1] &&
                                  (f_dn == 3'b100 || f_dn == 3'b110)) begin
@@ -6462,6 +6481,12 @@ module eu_seq (
     logic        fpu_run_r;        // eu_coproc_req active, waiting for ack
     logic [2:0]  fpu_prim_r;       // captured ppp = {f_dir, f_ss} for address generation
 
+    // BKPT breakpoint-acknowledge FSM (Phase 157 Stage 3) — declared early for ex_mem_stall
+    logic        bkpt_start_r;     // one-cycle setup after instr_ack
+    logic        bkpt_run_r;       // eu_bkpt_req active, waiting for ack/berr
+    logic [2:0]  bkpt_num_r;       // captured breakpoint number (f_reg)
+    logic [15:0] bkpt_replacement_r; // captured replacement opcode word (DSACK'd outcome)
+
     // MMU instruction FSM state — declared early for ex_mem_stall
     logic        pflush_start_r, pflush_req_r;
     logic        pflush_all_r;
@@ -6586,6 +6611,7 @@ module eu_seq (
                           movep_start_r || movep_pre_r || movep_run_r ||
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
+                          bkpt_start_r || bkpt_run_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
@@ -6834,10 +6860,18 @@ module eu_seq (
     // !ex_mem_stall and, being genuinely post-instruction-retirement by
     // design, is a different hazard shape not reproduced here -- left for
     // a dedicated follow-up rather than bundled in speculatively).
+    // BKPT's BERR outcome (Phase 157 Stage 3) is decided later than decode
+    // time -- only once eu_bkpt_berr arrives, mid-FSM -- same shape as
+    // chk_trap/div_trap immediately below, not the plain ex_is_illegal
+    // decode-time case. Per the manual (Section 7.4.2): a BERR'd
+    // breakpoint-acknowledge cycle takes an illegal instruction exception.
+    wire bkpt_trap_w = bkpt_run_r && eu_bkpt_berr;
+    assign eu_bkpt_illegal_req = bkpt_trap_w;
+
     logic ex_will_except;
     assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
                                           ex_is_priv || ex_is_linea || ex_is_linef) ||
-                             chk_trap || div_trap || eu_fmt_err_req;
+                             chk_trap || div_trap || eu_fmt_err_req || bkpt_trap_w;
 
     // Phase 150 Stage 1 (plan.md): mem_berr-driven dispatch race, the same
     // hazard class as ex_will_except's own gap above but for a BUS ERROR
@@ -7988,6 +8022,48 @@ module eu_seq (
                 fpu_run_r   <= 1'b1;
             end else if (fpu_run_r && (eu_coproc_ack || eu_coproc_berr)) begin
                 fpu_run_r   <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3)
+    // On instr_ack of a BKPT instruction, issue one CPU-space read via
+    // eu_bkpt_req -- address per manual Figure 7-42 (type field 0, breakpoint
+    // number on A[4:2]). Two outcomes (Section 7.4.2):
+    //   DSACK'd/STERM'd: data word is a replacement opcode, captured here.
+    //   Real live re-decode/substitution of that word into the pipeline is
+    //   NOT implemented -- instr_word is a plain combinational alias of the
+    //   IFU's own prefetch-queue head (m68030_ifu.sv) with no override mux
+    //   anywhere, and correctly interacting with the IFU's own ext_count/
+    //   drain logic for whatever the replacement opcode turns out to need
+    //   is a substantial separate undertaking (confirmed via direct
+    //   investigation before implementing this stage). This mirrors the
+    //   FPU coprocessor stub's own scope boundary (Phase 55: "issues one
+    //   CPI CPU Space bus cycle; full protocol in later phases") --
+    //   bkpt_replacement_r proves the bus protocol/data-lane extraction are
+    //   correct; PC simply advances past BKPT normally, same as any other
+    //   1-word instruction.
+    //   BERR'd: illegal instruction exception (bkpt_trap_w above).
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            bkpt_start_r       <= 1'b0;
+            bkpt_run_r         <= 1'b0;
+            bkpt_num_r         <= 3'h0;
+            bkpt_replacement_r <= 16'h0;
+        end else begin
+            if (!bkpt_start_r && !bkpt_run_r && instr_ack && dec_is_bkpt) begin
+                bkpt_start_r <= 1'b1;
+                bkpt_num_r   <= f_reg;   // breakpoint number, opcode bits [2:0]
+            end else if (bkpt_start_r) begin
+                bkpt_start_r <= 1'b0;
+                bkpt_run_r   <= 1'b1;
+            end else if (bkpt_run_r && eu_bkpt_ack) begin
+                bkpt_run_r         <= 1'b0;
+                bkpt_replacement_r <= eu_bkpt_rdata[31:16]; // word-aligned read: word lands top-justified
+            end else if (bkpt_run_r && eu_bkpt_berr) begin
+                bkpt_run_r <= 1'b0;
             end
         end
     end
@@ -9480,6 +9556,19 @@ module eu_seq (
     assign eu_coproc_siz   = 2'b00;         // longword
     assign eu_coproc_wdata = 32'h0;
     assign eu_coproc_addr  = {12'h000, 4'b0010, fpu_prim_r, 2'b01, 11'h000};
+
+    // -----------------------------------------------------------------------
+    // BKPT bus interface outputs (Phase 157 Stage 3)
+    // eu_bkpt_req asserted while bkpt_run_r; always a read.
+    // Address per manual Figure 7-42: A[31:5]=0, breakpoint type field
+    // (A[19:16]) is 0, breakpoint number on A[4:2], A[1:0]=0.
+    // -----------------------------------------------------------------------
+    assign eu_bkpt_req   = bkpt_run_r;
+    assign eu_bkpt_rw    = 1'b1;
+    assign eu_bkpt_fc    = 3'b111;        // CPU Space
+    assign eu_bkpt_siz   = 2'b10;         // word
+    assign eu_bkpt_wdata = 32'h0;
+    assign eu_bkpt_addr  = {27'h0, bkpt_num_r, 2'b00};
 
     // -----------------------------------------------------------------------
     // MOVEC Rn→Rc write outputs — fire from WB stage

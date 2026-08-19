@@ -137,6 +137,16 @@ module m68030_biu #(
     output logic        eu_coproc_ack,
     output logic        eu_coproc_berr,
 
+    input  logic        eu_bkpt_req,
+    input  logic        eu_bkpt_rw,
+    input  logic [31:0] eu_bkpt_addr,
+    input  logic [2:0]  eu_bkpt_fc,
+    input  logic [1:0]  eu_bkpt_siz,
+    input  logic [31:0] eu_bkpt_wdata,
+    output logic [31:0] eu_bkpt_rdata,
+    output logic        eu_bkpt_ack,
+    output logic        eu_bkpt_berr,
+
     // Address error outputs 
     output logic        eu_addr_err,    // word access to odd address
     output logic        ifu_addr_err,   // instruction fetch to odd address
@@ -950,6 +960,16 @@ module m68030_biu #(
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
+        // BKPT breakpoint-acknowledge (Phase 157 Stage 3)
+        .eu_bkpt_req     (eu_bkpt_req),
+        .eu_bkpt_rw      (eu_bkpt_rw),
+        .eu_bkpt_addr    (eu_bkpt_addr),
+        .eu_bkpt_fc      (eu_bkpt_fc),
+        .eu_bkpt_siz     (eu_bkpt_siz),
+        .eu_bkpt_wdata   (eu_bkpt_wdata),
+        .eu_bkpt_rdata   (eu_bkpt_rdata),
+        .eu_bkpt_ack     (eu_bkpt_ack),
+        .eu_bkpt_berr    (eu_bkpt_berr),
         .eu_addr_err     (eu_addr_err),
         .ifu_addr_err    (ifu_addr_err)
     );

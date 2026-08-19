@@ -154,6 +154,17 @@ module biu_tb;
     logic        eu_coproc_ack_tb;
     logic        eu_coproc_berr_tb;
 
+    // BKPT breakpoint-acknowledge CPU Space cycle signals (Phase 157 Stage 3)
+    logic        eu_bkpt_req_tb   = 1'b0;
+    logic        eu_bkpt_rw_tb    = 1'b1;
+    logic [31:0] eu_bkpt_addr_tb  = 32'h0;
+    logic [2:0]  eu_bkpt_fc_tb    = 3'b111;
+    logic [1:0]  eu_bkpt_siz_tb   = 2'b10;
+    logic [31:0] eu_bkpt_wdata_tb = 32'h0;
+    logic [31:0] eu_bkpt_rdata_tb;
+    logic        eu_bkpt_ack_tb;
+    logic        eu_bkpt_berr_tb;
+
     // biu_config test signals (raw pin inputs)
     logic        cfg_dsack0_n = 1'b1;  // deasserted
     logic        cfg_dsack1_n = 1'b1;
@@ -508,6 +519,16 @@ module biu_tb;
         .eu_coproc_rdata    (eu_coproc_rdata_tb),
         .eu_coproc_ack      (eu_coproc_ack_tb),
         .eu_coproc_berr     (eu_coproc_berr_tb),
+        // BKPT breakpoint-acknowledge CPU Space cycle ports (Phase 157 Stage 3)
+        .eu_bkpt_req        (eu_bkpt_req_tb),
+        .eu_bkpt_rw         (eu_bkpt_rw_tb),
+        .eu_bkpt_addr       (eu_bkpt_addr_tb),
+        .eu_bkpt_fc         (eu_bkpt_fc_tb),
+        .eu_bkpt_siz        (eu_bkpt_siz_tb),
+        .eu_bkpt_wdata      (eu_bkpt_wdata_tb),
+        .eu_bkpt_rdata      (eu_bkpt_rdata_tb),
+        .eu_bkpt_ack        (eu_bkpt_ack_tb),
+        .eu_bkpt_berr       (eu_bkpt_berr_tb),
         // Address error outputs
         .eu_addr_err        (eu_addr_err),
         .ifu_addr_err       (ifu_addr_err)
@@ -2467,6 +2488,79 @@ module biu_tb;
             check("iack vec",    eu_iack_vec_tb === 8'd33);
             check("no coproc",   !eu_coproc_ack_tb);
             while (!bus_idle) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // ===================================================================
+        // BKPT breakpoint-acknowledge CPU Space cycle tests (Phase 157 Stage 3)
+        // Address per manual Figure 7-42: A[31:5]=0, breakpoint type field
+        // (A[19:16])=0, breakpoint number on A[4:2], A[1:0]=0. Word transfer.
+        // ===================================================================
+        $display("=== BIU: BKPT breakpoint-acknowledge CPU Space cycles ===");
+        wait_bus_idle;
+
+        // --- BKPT DSACK'd: replacement opcode captured, bus protocol correct ---
+        begin
+            $display("--- BKPT DSACK'd: replacement opcode word ---");
+            // Breakpoint #3 -> addr = 0x0000000C -> word_addr = 3 (well within
+            // u_mem's small range, unlike coprocessor's own high-address case).
+            u_mem.mem[3] = 32'hABCD_1234;  // "replacement opcode" the real
+                                            // hardware would supply on D[31:16]
+            eu_bkpt_req_tb  = 1'b0;
+            eu_bkpt_rw_tb   = 1'b1;
+            eu_bkpt_fc_tb   = 3'b111;
+            eu_bkpt_siz_tb  = 2'b10;        // word
+            eu_bkpt_addr_tb = 32'h0000_000C;
+            wait_bus_idle;
+            eu_bkpt_req_tb = 1'b1;
+            // Sample bus signals at S2 (AS asserts) and S3 (DS asserts)
+            wait_for_state(7'd20, 50);   // ST_READ_S2
+            check("FC=111",         ext_fc     === 3'b111);
+            check("AS low",         ext_as_n   === 1'b0);
+            check("A[19:16]=0000",  ext_a[19:16] === 4'b0000);
+            check("A[4:2]=bkpt#3",  ext_a[4:2] === 3'b011);
+            check("A[1:0]=00",      ext_a[1:0] === 2'b00);
+            wait_for_state(7'd21, 20);   // ST_READ_S3
+            check("DS low",  ext_ds_n === 1'b0);
+            check("RW=1",    ext_rw   === 1'b1);
+            check("SIZ=word", ext_siz === 2'b10);
+            for (int t = 0; t < 100; t++) begin
+                @(posedge clk_4x);
+                if (eu_bkpt_ack_tb || eu_bkpt_berr_tb) break;
+            end
+            eu_bkpt_req_tb = 1'b0;
+            check("no berr",  !eu_bkpt_berr_tb);
+            check("ack",       eu_bkpt_ack_tb);
+            check32("replacement opcode word captured",
+                    eu_bkpt_rdata_tb, 32'hABCD_1234);
+            while (!bus_idle) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // --- BKPT BERR'd: no ack, berr fires (illegal instruction outcome) ---
+        begin
+            int t; logic saw_bkpt_berr;
+            $display("--- BKPT BERR'd: no ack, berr fires ---");
+            // Breakpoint #5 -> addr = 0x00000014
+            eu_bkpt_req_tb  = 1'b0;
+            eu_bkpt_rw_tb   = 1'b1;
+            eu_bkpt_fc_tb   = 3'b111;
+            eu_bkpt_siz_tb  = 2'b10;
+            eu_bkpt_addr_tb = 32'h0000_0014;
+            wait_bus_idle;
+            eu_bkpt_req_tb = 1'b1;
+            wait_for_state(7'd22, 50);   // ST_READ_S4
+            berr_tb = 1;
+            saw_bkpt_berr = 0;
+            for (t = 0; t < 30; t++) begin
+                @(posedge clk_4x);
+                if (eu_bkpt_berr_tb) begin saw_bkpt_berr = 1; break; end
+            end
+            berr_tb        = 0;
+            eu_bkpt_req_tb = 0;
+            while (!bus_idle) @(posedge clk_4x);
+            check("bkpt berr fired", saw_bkpt_berr);
+            check("no bkpt ack",     !eu_bkpt_ack_tb);
             repeat(4) @(posedge clk_4x);
         end
 

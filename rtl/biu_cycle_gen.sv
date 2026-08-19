@@ -176,7 +176,20 @@ module biu_cycle_gen #(
     output logic        eu_coproc_ack,
     output logic        eu_coproc_berr,
 
-    // Address error detection 
+    // BKPT breakpoint-acknowledge CPU Space interface (Phase 157 Stage 3)
+    // FC=111, A[19:16]=0000 (breakpoint type field), A[4:2]=breakpoint number.
+    // Rides the ordinary ST_READ states via cyc_is_bkpt_r, same shape as coprocessor.
+    input  logic        eu_bkpt_req,
+    input  logic        eu_bkpt_rw,       // always 1=read
+    input  logic [31:0] eu_bkpt_addr,
+    input  logic [2:0]  eu_bkpt_fc,       // must be 3'b111
+    input  logic [1:0]  eu_bkpt_siz,      // word
+    input  logic [31:0] eu_bkpt_wdata,    // unused (read only)
+    output logic [31:0] eu_bkpt_rdata,
+    output logic        eu_bkpt_ack,
+    output logic        eu_bkpt_berr,
+
+    // Address error detection
     // Asserted combinationally for one cycle when a request is rejected at IDLE.
     // EU/IFU must deassert their req on the next cycle after seeing this.
     output logic        eu_addr_err,    // 1 = word access to odd address
@@ -490,6 +503,14 @@ module biu_cycle_gen #(
     logic [31:0] coproc_wdata_r;
     logic        cyc_is_coproc_r;   // 1 while ST_READ/WRITE serves a coproc req
 
+    // BKPT cycle parameter latches and discriminator flag (Phase 157 Stage 3)
+    logic [31:0] bkpt_addr_r;
+    logic [2:0]  bkpt_fc_r;
+    logic [1:0]  bkpt_siz_r;
+    logic        bkpt_rw_r;
+    logic [31:0] bkpt_wdata_r;
+    logic        cyc_is_bkpt_r;     // 1 while ST_READ serves a bkpt req
+
     // Cycle parameter mux (declared here; needed by BERR capture block)
     logic [31:0] cyc_addr;
     logic [2:0]  cyc_fc;
@@ -601,6 +622,10 @@ module biu_cycle_gen #(
             cyc_addr  = coproc_addr_r; cyc_fc    = coproc_fc_r;
             cyc_siz   = coproc_siz_r;  cyc_rw    = coproc_rw_r;
             cyc_wdata = coproc_wdata_r;
+        end else if (cyc_is_bkpt_r) begin
+            cyc_addr  = bkpt_addr_r; cyc_fc  = bkpt_fc_r;
+            cyc_siz   = bkpt_siz_r;  cyc_rw  = bkpt_rw_r;
+            cyc_wdata = bkpt_wdata_r;
         end else if (is_burst_read) begin
             cyc_addr  = bc_burst_addr; cyc_fc = bc_burst_fc;
             cyc_siz   = 2'b11; cyc_rw = 1'b1;
@@ -742,6 +767,9 @@ module biu_cycle_gen #(
             coproc_addr_r   <= 32'h0; coproc_fc_r    <= 3'b0;
             coproc_siz_r    <= 2'b0;  coproc_rw_r    <= 1'b1;
             coproc_wdata_r  <= 32'h0; cyc_is_coproc_r <= 1'b0;
+            bkpt_addr_r     <= 32'h0; bkpt_fc_r      <= 3'b0;
+            bkpt_siz_r      <= 2'b0;  bkpt_rw_r      <= 1'b1;
+            bkpt_wdata_r    <= 32'h0; cyc_is_bkpt_r   <= 1'b0;
         end else if (phase_r == 2'd3) begin
             if (!dsack_wait) begin
                 if (state == ST_READ_S4  || state == ST_READ_S5  ||
@@ -767,6 +795,16 @@ module biu_cycle_gen #(
                 cyc_is_coproc_r <= 1'b1;
             end
             if (is_S7) cyc_is_coproc_r <= 1'b0;
+            // Latch BKPT parameters and set discriminator at IDLE→bkpt
+            if (state == ST_IDLE && eu_bkpt_req && init_done_r && !retry_r) begin
+                bkpt_addr_r   <= eu_bkpt_addr;
+                bkpt_fc_r     <= eu_bkpt_fc;
+                bkpt_siz_r    <= eu_bkpt_siz;
+                bkpt_rw_r     <= eu_bkpt_rw;
+                bkpt_wdata_r  <= eu_bkpt_wdata;
+                cyc_is_bkpt_r <= 1'b1;
+            end
+            if (is_S7) cyc_is_bkpt_r <= 1'b0;
         end
     end
 
@@ -860,6 +898,8 @@ module biu_cycle_gen #(
                 end else if (eu_coproc_req) begin
                     if (eu_coproc_rw) state_nxt = ST_READ_S0;
                     else              state_nxt = ST_WRITE_S0;
+                end else if (eu_bkpt_req) begin
+                    state_nxt = ST_READ_S0;   // always a read
                 end else if (!dma_active) begin
                     if (grant_mmu && mmu_req) begin
                         state_nxt = ST_READ_S0;
@@ -1165,6 +1205,7 @@ module biu_cycle_gen #(
         mmu_rdata    = 32'h0; mmu_ack  = 1'b0; mmu_berr = 1'b0;
         eu_iack_vec  = 8'h00; eu_iack_avec = 1'b0; eu_iack_ack = 1'b0;
         eu_coproc_rdata = 32'h0; eu_coproc_ack = 1'b0; eu_coproc_berr = 1'b0;
+        eu_bkpt_rdata   = 32'h0; eu_bkpt_ack   = 1'b0; eu_bkpt_berr   = 1'b0;
         eu_cas2_rdata1 = cas2_rdata1_r;
         eu_cas2_rdata2 = cas2_rdata2_r;
         eu_cas2_ack    = 1'b0;
@@ -1252,6 +1293,11 @@ module biu_cycle_gen #(
                         eu_coproc_rdata = captured_rdata;
                         if (berr_abort_r) eu_coproc_berr = 1'b1;
                         else              eu_coproc_ack  = 1'b1;
+                    end else if (cyc_is_bkpt_r) begin
+                        // BKPT breakpoint-acknowledge cycle complete (FC=111, A[19:16]=0000)
+                        eu_bkpt_rdata = captured_rdata;
+                        if (berr_abort_r) eu_bkpt_berr = 1'b1;
+                        else              eu_bkpt_ack  = 1'b1;
                     end else if (is_burst) begin
                         // Burst read (ST_BURST_*) / MOVE16 burst write
                         // (ST_BWRITE_*) own S7 completion is handled entirely

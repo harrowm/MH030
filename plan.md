@@ -6559,6 +6559,100 @@ is next.
 
 ---
 
+## Phase 157 Stage 3 — BKPT instruction
+
+### Goal
+
+`BKPT #n` (opcode `0100100001001nnn`, breakpoint number 0-7 in bits[2:0]) had zero RTL
+— never decoded, no bus cycle, nothing. Per the real manual (Section 7.4.2, read directly
+before implementing, per this rollout's own established discipline): BKPT issues a CPU
+Space read (FC=111, breakpoint type field `A[19:16]=0`, breakpoint number on `A[4:2]`,
+word transfer). Two outcomes: DSACK'd/STERM'd — the returned word is a *replacement
+opcode*, spliced into the instruction pipeline in place of BKPT and executed; BERR'd —
+illegal instruction exception (vector 4).
+
+### Investigation
+
+A dedicated research pass (comparing IACK's own dedicated-8-state-block implementation
+against the FPU coprocessor stub's lighter discriminator-flag pattern) found the
+coprocessor cycle a much closer structural template: decode-driven (not
+exception-controller-driven like IACK), fully caller-computed address/fc/siz/rw, rides
+the ordinary `ST_READ_S0` states via a `cyc_is_X_r` discriminator flag rather than a
+dedicated state block. Confirmed via direct trace: `instr_word` is a plain combinational
+alias of the IFU's own prefetch-queue head (`m68030_ifu.sv`, `assign instr_word = q[0]`)
+with **no override mux anywhere in the codebase** — genuinely substituting a
+BIU-captured replacement word into live decode, correctly interacting with the IFU's own
+`ext_count`/drain logic for whatever that replacement opcode turns out to need, is a
+separate, substantial undertaking (comparable in scope to the memory-indirect-EA
+rollout, Phases 115-122), not something to fold into this stage.
+
+### Scope decision
+
+Implemented the pin-accurate breakpoint-acknowledge bus cycle in full (address
+construction, FC/SIZ, DSACK-vs-BERR distinction) and the BERR'd illegal-instruction
+outcome in full (reuses the existing `illegal_req` mechanism, vector 4). The DSACK'd
+outcome captures the replacement opcode word correctly (proving the bus
+protocol/data-lane extraction) but does **not** attempt live re-decode/substitution —
+PC simply advances past BKPT normally, same as any other 1-word instruction. This
+mirrors the FPU coprocessor stub's own precedent (Phase 55: "issues one CPI CPU Space
+bus cycle; full protocol in later phases") — documented explicitly, not silently
+dropped.
+
+### Implementation
+
+`rtl/eu_seq.sv`: new `dec_is_bkpt` decode, `(instr_word & 16'hFFF8) == 16'h4848`, placed
+directly after the existing `ILLEGAL` (`16'h4AFC`) check in the same `instr_word`-match
+if-else chain. **Verified this placement is safe against the recurring "earlier branch
+in the chain swallows a narrower opcode" bug class** (`feedback_elseif_priority_chain`):
+BKPT's own fixed encoding (`f_dn=100, f_dir=0, f_ss=01, f_mode=001`) shares its
+`f_dn`/`f_dir`/`f_ss` fingerprint with the pre-existing PEA decode block one branch
+earlier in the same chain — but that block's own outer condition requires
+`f_mode>=3'b010`, correctly excluding BKPT's `f_mode=001` (a reserved/invalid EA mode
+for PEA, which is exactly the hole real 68030 silicon uses for BKPT) — confirmed via
+direct bit-level derivation before relying on it, not by trial and error.
+
+New `bkpt_start_r`/`bkpt_run_r`/`bkpt_num_r`/`bkpt_replacement_r` FSM, modeled directly
+on the FPU coprocessor dispatch FSM (`fpu_start_r`/`fpu_run_r`), folded into
+`ex_mem_stall`. New `eu_bkpt_req/rw/siz/fc/addr/wdata` (out) / `eu_bkpt_rdata/ack/berr`
+(in) ports mirroring `eu_coproc_*` exactly, threaded through `m68030_eu.sv` →
+`m68030_top.sv` → `m68030_biu.sv` → `biu_cycle_gen.sv`. Address:
+`{27'h0, bkpt_num_r, 2'b00}` (type field 0, breakpoint number on A[4:2], per Figure
+7-42). On `eu_bkpt_ack`: `bkpt_replacement_r <= eu_bkpt_rdata[31:16]` (word-aligned read
+lands top-justified, confirmed against `biu_cache_if.sv`'s own `extract_rd()`
+convention). The BERR'd outcome is a *late* exception decision (only known once
+`eu_bkpt_berr` arrives, mid-FSM) — same shape as `chk_trap`/`div_trap`, not the
+decode-time `ex_is_illegal` case — added a new `bkpt_trap_w = bkpt_run_r &&
+eu_bkpt_berr` wire folded into `ex_will_except`'s existing OR-list (alongside
+`chk_trap`/`div_trap`) and exported as `eu_bkpt_illegal_req`, OR'd into `illegal_req` at
+`m68030_top.sv` (`eu_illegal_req_w | eu_bkpt_illegal_req_w`) — reuses the existing,
+already-hazard-protected illegal-instruction dispatch path unchanged.
+
+`rtl/biu_cycle_gen.sv`: new `bkpt_addr_r/fc_r/siz_r/rw_r/wdata_r` + `cyc_is_bkpt_r`
+discriminator, mirroring `cyc_is_coproc_r` in the cycle-parameter mux, the `ST_IDLE`
+dispatch priority chain (`eu_bkpt_req` → `ST_READ_S0`, always a read), the latch/clear
+block, and the `SP_S7` completion block (`eu_bkpt_rdata = captured_rdata`; berr vs ack).
+
+### Tests
+
+`tb/biu_tb.sv`: two new BIU-level tests (mirroring the coprocessor cycle's own test
+pair) — **DSACK'd**: breakpoint #3 (addr `0x0000000C`), preloads `u_mem.mem[3]` with a
+marker replacement-opcode word, checks the full bus protocol at S2/S3 (FC=111,
+A[19:16]=0000, A[4:2]=3, A[1:0]=00, DS/RW/SIZ=word) plus the captured raw `rdata`.
+**BERR'd**: breakpoint #5, injects `berr_tb=1` at `ST_READ_S4` (same pattern as the
+existing P4-2 ordinary-read BERR test), confirms `eu_bkpt_berr` fires and no ack. All 14
+new checks passed on the first run.
+
+### Results
+
+`make test` 36/36, `tb/biu_tb.sv` standalone 0 failures (all 14 new BKPT checks pass),
+`make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep (mandatory —
+`eu_seq.sv`/`biu_cycle_gen.sv` changed) — PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected: Harte's own
+68000-captured corpus has no BKPT coverage — a 68020+-only instruction). **Closes Stage
+3 of the gap-closure plan.** Stage 4 (cpSAVE/cpRESTORE) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
