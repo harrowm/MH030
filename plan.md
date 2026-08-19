@@ -6318,6 +6318,127 @@ per the plan confirm with the user rather than assume.
 
 ---
 
+## Phase 150 Stage 6 — long-format (8-byte) MMU descriptors
+
+### Goal
+
+The walker's own header comment admitted the gap outright: `11=long-table(treat as table)`
+— DT=11 was silently mistreated as if it were DT=10 (short-format table), which would
+misread real long-format page-table data rather than fault or (better) actually parse it.
+The plan itself flagged this as possibly out of scope, since real-world Linux/m68k kernels
+typically use short-format descriptors only — the user was asked and chose to implement it.
+
+### The verification problem, and how it was actually resolved
+
+This stage carried a real risk the rest of the MMU-hardening plan didn't: for PFLUSH/
+PTEST/PLOAD's own encoding uncertainty, a wrong guess just makes one rarely-used
+instruction misbehave. A wrong long-format bit layout would make the walker *silently
+misinterpret real page-table data* — passing this project's own self-referential tests
+while being incompatible with actual 68030 silicon. Getting this from a "confident guess"
+was explicitly rejected as worse than not implementing it at all.
+
+Multiple independent research attempts (WebSearch/WebFetch against archive.org's OCR'd
+68851 PMMU manual in two editions, the MC68030 manual via NXP, a Motorola patent via
+freepatentsonline.com, Google Patents) either 403'd, or returned only table-of-contents
+matter — large scanned technical manuals' actual bit-diagram figures don't survive OCR
+well enough for a small summarizer model to locate reliably. The one source that DID
+yield real prose (patent 4763250) confirmed two structural facts but not the full bit
+layout: DT occupies the same position regardless of descriptor format, and the table/
+page address fields are 28/24 bits (matching short-format's own field widths) — enough to
+form a *reasoned hypothesis*, not enough to implement with confidence.
+
+The user, engaged directly in this back-and-forth, supplied additional detail that
+initially contained a real, load-bearing self-contradiction (the same DT value listed for
+both "short-format table" and "long-format table," with nothing to tell a walker how many
+bytes to read) — flagged directly rather than implemented, since resolving it wrong would
+have meant guessing at exactly the thing this whole investigation was trying to avoid
+guessing at. The user then supplied a local copy of the actual MC68030UM.pdf (third
+edition, Motorola/Prentice-Hall 1990), read directly via this session's own PDF tool —
+Figures 9-8 through 9-19, Section 9.5.1 "Descriptor Details" and 9.5.2 "General Table
+Search," verbatim, resolving everything with high confidence: **DT=2 ("valid 4 byte") /
+DT=3 ("valid 8 byte") mean "the descriptors at the NEXT level are short/long format" —
+set by the PARENT descriptor (or CRP/SRP's own DT for level A), never self-describing.**
+DT=1 (page) can legitimately appear in a descriptor of either format, since the format
+was already fixed by whichever ancestor pointed here — this is *why* the same DT value
+appeared in both of the earlier, seemingly-contradictory tables; they just hadn't
+separated "format" from "type" as two independent questions.
+
+### Bit layout (confirmed directly against MC68030UM.pdf Figures 9-9 through 9-14)
+
+A long descriptor's **first longword** mirrors the short-format status **byte** exactly —
+bit6=CI, bit4=M, bit3=U, bit2=WP, bits1:0=DT — just shifted up 32 bits, with L/U+LIMIT+S
+occupying the bits above it (none of which this project's own short-format walker checks
+either, so Stage 6 stays consistent by not checking them here — Limit-bounds-checking and
+S/supervisor-only enforcement are separate, pre-existing simplifications, not something
+this stage narrows). The **second longword** is a pure address field mirroring
+short-format's own field widths exactly: table address at bits[31:4] (28 bits), page
+address at bits[31:8] (24 bits). CRP's own DT lives at `crp[33:32]` (Figure 9-9, same
+relative position) — only CRP is used, since SRP selection is a separate, pre-existing gap
+(the walker has never implemented supervisor-root-pointer selection at all) unrelated to
+this stage. The practical consequence: **DT/WP/U/M/CI are always read from `mmu_rdata` at
+the same bit positions regardless of short vs. long format** — only the ADDRESS source
+(this word, or a second one fetched from `addr+4`) differs, which is what made the actual
+RTL change far smaller than the encoding investigation that preceded it.
+
+Genuine MMU-level indirect descriptors (DT=2/3 appearing at the final configured table
+level, where no next level exists) are explicitly out of scope — the existing "no level
+configured, treat this table-shaped descriptor as the leaf directly" shortcut (a
+documented, pre-existing short-format simplification, itself a stand-in for real
+indirection) is preserved unchanged for long format too, rather than implementing genuine
+indirect-descriptor chasing as a second new feature bundled into this stage.
+
+### Implementation
+
+`rtl/biu_mmu_if.sv`: new `MS_WALK_LONG2` state (fetch the 2nd longword), plus new
+registers `walk_long_r` (is the descriptor at the CURRENT level long-format — set from
+`crp[33:32]` when dispatching level A, or from the parent's own `mmu_rdata[0]`/
+`walk_word1_r[0]` when continuing to B/C, since DT's LSB directly encodes short(0)/long(1)
+within the "valid table" family), `walk_level_r` (which level — A/B/C — `MS_WALK_LONG2`
+should resume as), `walk_word1_r`/`walk_word1_addr_r` (the first longword's own value and
+bus address, saved since `mmu_rdata` will hold the second longword's value by the time
+`MS_WALK_LONG2` needs them), and `walk_long_is_page_r` (page vs. table, decided by the
+first longword's own DT, before the second longword is even requested). `MS_WALK_A/B/C`'s
+existing `2'b01` (page) and `default` (table) case arms each gained one `if (walk_long_r)`
+branch routing into `MS_WALK_LONG2` instead of finalizing immediately — the short-format
+branches are otherwise byte-for-byte unchanged. `MS_WALK_LONG2` itself mirrors each level's
+own page-leaf and table-continuation logic, just reading the address from `mmu_rdata`
+(now the second longword) and WP/U/M/CI from the saved `walk_word1_r` instead of directly
+from `mmu_rdata`. The existing U/M write-back mechanism (Stage 3) is reused unchanged for
+long-format pages too — same formula, same `MS_UPDATE` target state, just fed from
+`walk_word1_r ` instead of `mmu_rdata`. `mmu_req`'s own gating list gained `MS_WALK_LONG2`
+(the only place a completely new bus cycle needed enabling — everywhere else reuses
+existing machinery unmodified).
+
+### Test
+
+`tb/mmu_tb.sv` MMU-18: a full long-format 2-level walk — `CRP`'s own DT temporarily set to
+3 (long) for level A, and level A's own first longword ALSO sets DT=3, making level B
+long-format too, exercising the complete long-table → long-page chain in one test rather
+than just one level of it. Checks: the resulting PA (`0xCAFE5777`, proving both the
+table-continuation and page-leaf long-format address extraction are correct); exactly 5
+walk-bus cycles (2 reads for level A's own descriptor + 2 for level B's + 1 write for the
+U write-back, deliberately not pre-setting U this time — unlike Stage 5's own MMU-15,
+which specifically avoided this confound — so the same `translate()` call could also
+prove the write-back fires through the genuinely new `walk_word1_r`-based path, distinct
+from the short-format inline path Stage 3/4 already proved); and the exact write-back
+wdata bit pattern. All 5 checks passed on the first real attempt, directly validating the
+bit-layout derivation above. One test-authoring mistake (not RTL) found along the way:
+`int before, after;` as local variable names triggered a genuine Icarus parser error
+(`before`/`after` collide with reserved SVA-sequence-operator keywords) — renamed to
+`cnt_before`/`cnt_after`.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (Verilator batch backend) — **PASS 702142, FAIL 2 (same documented ASL.b corpus
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline** — long-format never activates
+unless `crp[33:32]==3`, which no existing test (Harte's own corpus included, captured on
+real 68000 hardware that has no PMMU concept at all) ever sets, so this is the expected,
+structurally-guaranteed-zero-cost result, not a lucky one. **This closes Stage 6 — the
+6-stage MMU-hardening plan (Phase 150) is now complete in full.**
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

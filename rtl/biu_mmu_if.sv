@@ -31,6 +31,33 @@
 //   [31:4] = base address (next table base or page frame base, 16B aligned)
 //   [3]    = CI (cache inhibit bit in page descriptor)
 //   [1:0]  = DT: 00=invalid, 01=page(leaf), 10=table, 11=long-table(treat as table)
+//
+// Phase 150 Stage 6 (plan.md): long-format (8-byte) descriptor, per the real
+// MC68030 User's Manual (Figures 9-9 through 9-19) -- confirmed directly
+// against the manual, not guessed at. Two key facts that resolve what would
+// otherwise look like an ambiguous encoding:
+//   1. DT=2 ("valid 4 byte") / DT=3 ("valid 8 byte") mean "the NEXT level's
+//      descriptors are short/long format" -- set by the PARENT descriptor
+//      (or CRP/SRP's own DT for level A), never by the descriptor itself.
+//      DT=1 (page) can appear in a descriptor of EITHER format, since the
+//      format was already fixed by whichever ancestor pointed here.
+//   2. A long descriptor's first longword mirrors the short-format status
+//      BYTE exactly (bit6=CI, bit4=M, bit3=U, bit2=WP, bits1:0=DT), just
+//      shifted up 32 bits with L/U+LIMIT+S occupying the bits above it (none
+//      of which this project's own short-format walker checks either, so
+//      staying consistent by not checking them here); the second longword
+//      is a pure address field mirroring short-format's own field widths
+//      (table: bits[31:4], page: bits[31:8]). This means DT/WP/U/M/CI are
+//      ALWAYS read from mmu_rdata at the same bit positions regardless of
+//      short vs. long -- only the ADDRESS source (this word vs. a second
+//      one) differs. CRP/SRP's own DT lives at crp[33:32]/srp[33:32] (same
+//      relative position, Figure 9-9) -- only CRP is used (SRP selection is
+//      a separate, pre-existing gap, unrelated to this stage).
+// Genuine MMU-level indirect descriptors (DT=2/3 appearing at the final
+// configured table level, where no next level exists) are explicitly out of
+// scope -- the existing "no level configured, treat this table-shaped
+// descriptor as the leaf directly" shortcut (a documented, pre-existing
+// short-format simplification) is preserved unchanged for long format too.
 
 module biu_mmu_if (
     input  logic        clk_4x,
@@ -197,7 +224,8 @@ module biu_mmu_if (
         MS_WALK_C    = 4'd5,
         MS_WALK_DONE = 4'd6,
         MS_FAULT     = 4'd7,
-        MS_UPDATE    = 4'd8   // Phase 150 Stage 3 (plan.md): U/M bit write-back
+        MS_UPDATE    = 4'd8,  // Phase 150 Stage 3 (plan.md): U/M bit write-back
+        MS_WALK_LONG2 = 4'd9  // Phase 150 Stage 6: 2nd longword of a long-format descriptor
     } ms_state_t;
 
     ms_state_t ms_state;
@@ -213,6 +241,24 @@ module biu_mmu_if (
     logic [31:0] walk_pa_r;
     logic        walk_ci_r;
     logic        walk_wp_r;
+
+    // Phase 150 Stage 6 (plan.md): long-format (8-byte) descriptor state.
+    // walk_long_r: is the descriptor about to be / currently being fetched
+    // at the CURRENT level long-format? Set when dispatching into a level
+    // (from CRP's own DT for level A, or the parent's DT for B/C).
+    logic        walk_long_r;
+    // Which level MS_WALK_LONG2 should resume as, once the 2nd longword
+    // arrives (0=A, 1=B, 2=C) -- selects tib/tic/no-next-level and the
+    // matching next-index formula, mirroring MS_WALK_A/B/C's own default
+    // case exactly.
+    logic [1:0]  walk_level_r;
+    // The first longword of a long descriptor already carries DT/WP/U/M/CI
+    // at the same bit positions short-format uses (see this file's own
+    // header comment) -- saved here since mmu_rdata will hold the SECOND
+    // longword's own value by the time MS_WALK_LONG2 needs them.
+    logic [31:0] walk_word1_r;
+    logic [31:0] walk_word1_addr_r; // the first longword's own bus address
+    logic        walk_long_is_page_r; // 1=page (DT=1), 0=table (DT=2/3)
 
     // Phase 150 Stage 3 (plan.md): U (Accessed, descriptor bit 3) / M
     // (Modified, descriptor bit 4) hardware write-back (BIU-086). Real
@@ -305,6 +351,11 @@ module biu_mmu_if (
             atc_m_update_idx_r <= 5'd0;
             walk_is_ptest_r    <= 1'b0;
             mmusr_r            <= 16'h0;
+            walk_long_r         <= 1'b0;
+            walk_level_r        <= 2'd0;
+            walk_word1_r        <= 32'h0;
+            walk_word1_addr_r   <= 32'h0;
+            walk_long_is_page_r <= 1'b0;
             for (m = 0; m < ATC_SIZE; m++) begin
                 atc_valid[m]     <= 1'b0;
                 atc_ci[m]        <= 1'b0;
@@ -384,6 +435,9 @@ module biu_mmu_if (
                             // ATC miss → start table walk level A
                             walk_req_addr_r <= walk_a_addr_w;
                             fa_lo_r         <= fa_lo_w;
+                            // Phase 150 Stage 6: CRP's own DT (bits[33:32],
+                            // Figure 9-9) selects level A's format.
+                            walk_long_r     <= (crp[33:32] == 2'b11);
                             ms_state        <= MS_WALK_A;
                         end
                     end
@@ -419,6 +473,19 @@ module biu_mmu_if (
                                 ms_state <= MS_FAULT;
                             end
                             2'b01: begin  // page descriptor (leaf at level A)
+                                if (walk_long_r) begin
+                                    // Phase 150 Stage 6: address is in a
+                                    // second longword -- WP/U/M/CI/DT are
+                                    // already correctly readable from THIS
+                                    // word (see this file's own header
+                                    // comment), saved for MS_WALK_LONG2.
+                                    walk_word1_r        <= mmu_rdata;
+                                    walk_word1_addr_r   <= walk_req_addr_r;
+                                    walk_long_is_page_r <= 1'b1;
+                                    walk_level_r         <= 2'd0;
+                                    walk_req_addr_r      <= walk_req_addr_r + 32'd4;
+                                    ms_state              <= MS_WALK_LONG2;
+                                end else begin
                                 walk_pa_r  <= (mmu_rdata & page_mask) |
                                               (walk_va_r & ~page_mask);
                                 walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6 (see walk_desc_addr_r's own comment)
@@ -438,9 +505,19 @@ module biu_mmu_if (
                                     walk_m_r <= mmu_rdata[4];
                                     ms_state <= MS_WALK_DONE;
                                 end
+                                end
                             end
                             default: begin  // 2'b10 or 2'b11: table descriptor
-                                if (tib == 4'h0) begin
+                                if (walk_long_r) begin
+                                    // Phase 150 Stage 6: next-table address
+                                    // is in a second longword too.
+                                    walk_word1_r        <= mmu_rdata;
+                                    walk_word1_addr_r   <= walk_req_addr_r;
+                                    walk_long_is_page_r <= 1'b0;
+                                    walk_level_r         <= 2'd0;
+                                    walk_req_addr_r      <= walk_req_addr_r + 32'd4;
+                                    ms_state              <= MS_WALK_LONG2;
+                                end else if (tib == 4'h0) begin
                                     // No level B defined → use current descriptor as leaf
                                     walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
                                                   (walk_va_r & ~page_mask);
@@ -459,6 +536,8 @@ module biu_mmu_if (
                                         next_base = {mmu_rdata[31:4], 4'h0};
                                         walk_req_addr_r <= next_base + (idx_b << 2);
                                     end
+                                    // Phase 150 Stage 6: DT=11 -> level B is long-format
+                                    walk_long_r <= mmu_rdata[0];
                                     ms_state <= MS_WALK_B;
                                 end
                             end
@@ -478,6 +557,14 @@ module biu_mmu_if (
                                 ms_state <= MS_FAULT;
                             end
                             2'b01: begin  // page descriptor (leaf at level B)
+                                if (walk_long_r) begin
+                                    walk_word1_r        <= mmu_rdata;
+                                    walk_word1_addr_r   <= walk_req_addr_r;
+                                    walk_long_is_page_r <= 1'b1;
+                                    walk_level_r         <= 2'd1;
+                                    walk_req_addr_r      <= walk_req_addr_r + 32'd4;
+                                    ms_state              <= MS_WALK_LONG2;
+                                end else begin
                                 walk_pa_r  <= (mmu_rdata & page_mask) |
                                               (walk_va_r & ~page_mask);
                                 walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6
@@ -495,9 +582,17 @@ module biu_mmu_if (
                                     walk_m_r <= mmu_rdata[4];
                                     ms_state <= MS_WALK_DONE;
                                 end
+                                end
                             end
                             default: begin  // table descriptor → level C
-                                if (tic == 4'h0) begin
+                                if (walk_long_r) begin
+                                    walk_word1_r        <= mmu_rdata;
+                                    walk_word1_addr_r   <= walk_req_addr_r;
+                                    walk_long_is_page_r <= 1'b0;
+                                    walk_level_r         <= 2'd1;
+                                    walk_req_addr_r      <= walk_req_addr_r + 32'd4;
+                                    ms_state              <= MS_WALK_LONG2;
+                                end else if (tic == 4'h0) begin
                                     walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
                                                   (walk_va_r & ~page_mask);
                                     walk_ci_r  <= 1'b0;
@@ -514,6 +609,8 @@ module biu_mmu_if (
                                         next_base = {mmu_rdata[31:4], 4'h0};
                                         walk_req_addr_r <= next_base + (idx_c << 2);
                                     end
+                                    // Phase 150 Stage 6: DT=11 -> level C is long-format
+                                    walk_long_r <= mmu_rdata[0];
                                     ms_state <= MS_WALK_C;
                                 end
                             end
@@ -528,6 +625,14 @@ module biu_mmu_if (
                     end else if (mmu_ack_rise) begin
                         // Must be a page descriptor
                         if (mmu_rdata[1:0] == 2'b01) begin
+                            if (walk_long_r) begin
+                                walk_word1_r        <= mmu_rdata;
+                                walk_word1_addr_r   <= walk_req_addr_r;
+                                walk_long_is_page_r <= 1'b1;
+                                walk_level_r         <= 2'd2;
+                                walk_req_addr_r      <= walk_req_addr_r + 32'd4;
+                                ms_state              <= MS_WALK_LONG2;
+                            end else begin
                             walk_pa_r  <= (mmu_rdata & page_mask) |
                                           (walk_va_r & ~page_mask);
                             walk_ci_r  <= mmu_rdata[6];  // Phase 150 Stage 3: CI is bit 6
@@ -545,9 +650,85 @@ module biu_mmu_if (
                                 walk_m_r <= mmu_rdata[4];
                                 ms_state <= MS_WALK_DONE;
                             end
+                            end
                         end else begin
                             fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                             ms_state <= MS_FAULT;
+                        end
+                    end
+                end
+
+                MS_WALK_LONG2: begin
+                    // Phase 150 Stage 6: fetch the second longword of a
+                    // long-format descriptor. DT/WP/U/M/CI were already
+                    // extracted from walk_word1_r (the first longword, read
+                    // in MS_WALK_A/B/C) -- this word supplies only the
+                    // address (Figures 9-11/9-13/9-14, MC68030UM: table
+                    // address at bits[31:4], page address at bits[31:8],
+                    // mirroring short-format's own field widths exactly).
+                    if (mmu_berr) begin
+                        fault_is_berr_r <= 1'b1;
+                        ms_state <= MS_FAULT;
+                    end else if (mmu_ack_rise) begin
+                        if (walk_long_is_page_r) begin
+                            walk_pa_r  <= (mmu_rdata & page_mask) |
+                                          (walk_va_r & ~page_mask);
+                            walk_ci_r  <= walk_word1_r[6];
+                            walk_wp_r  <= walk_word1_r[2];
+                            if (!walk_is_ptest_r && (!walk_word1_r[3] || (!walk_rw_r && !walk_word1_r[4]))) begin
+                                walk_desc_addr_r  <= walk_word1_addr_r;
+                                update_wdata_r     <= walk_word1_r |
+                                                       (!walk_word1_r[3] ? 32'h8 : 32'h0) |
+                                                       ((!walk_rw_r && !walk_word1_r[4]) ? 32'h10 : 32'h0);
+                                walk_m_r           <= walk_rw_r ? walk_word1_r[4] : 1'b1;
+                                update_from_atc_r  <= 1'b0;
+                                ms_state <= MS_UPDATE;
+                            end else begin
+                                walk_desc_addr_r <= walk_word1_addr_r;
+                                walk_m_r <= walk_word1_r[4];
+                                ms_state <= MS_WALK_DONE;
+                            end
+                        end else begin
+                            // Table descriptor -- continue to the next
+                            // level, or (no next level configured) fall
+                            // back to the same "treat as leaf" shortcut the
+                            // short-format path already uses (a genuine
+                            // indirect descriptor, out of scope -- see this
+                            // file's own header comment).
+                            logic no_next_level;
+                            case (walk_level_r)
+                                2'd0:    no_next_level = (tib == 4'h0);
+                                2'd1:    no_next_level = (tic == 4'h0);
+                                default: no_next_level = 1'b1; // level C: no level D modeled
+                            endcase
+                            if (no_next_level) begin
+                                walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
+                                              (walk_va_r & ~page_mask);
+                                walk_ci_r  <= 1'b0;
+                                walk_wp_r  <= 1'b0;
+                                ms_state   <= MS_WALK_DONE;
+                            end else begin
+                                logic [31:0] next_base;
+                                next_base = {mmu_rdata[31:4], 4'h0};
+                                walk_long_r <= walk_word1_r[0]; // DT=11 -> next level is long
+                                if (walk_level_r == 2'd0) begin
+                                    logic [4:0]  fb_lo;
+                                    logic [31:0] idx_b;
+                                    fb_lo = fa_lo_r - {1'b0, tib};
+                                    idx_b = (walk_va_r >> fb_lo) &
+                                            ((32'h1 << {1'b0, tib}) - 32'h1);
+                                    walk_req_addr_r <= next_base + (idx_b << 2);
+                                    ms_state <= MS_WALK_B;
+                                end else begin
+                                    logic [4:0]  fc_lo;
+                                    logic [31:0] idx_c;
+                                    fc_lo = fa_lo_r - {1'b0, tib} - {1'b0, tic};
+                                    idx_c = (walk_va_r >> fc_lo) &
+                                            ((32'h1 << {1'b0, tic}) - 32'h1);
+                                    walk_req_addr_r <= next_base + (idx_c << 2);
+                                    ms_state <= MS_WALK_C;
+                                end
+                            end
                         end
                     end
                 end
@@ -668,6 +849,7 @@ module biu_mmu_if (
     assign mmu_req      = (ms_state == MS_WALK_A) ||
                           (ms_state == MS_WALK_B) ||
                           (ms_state == MS_WALK_C) ||
+                          (ms_state == MS_WALK_LONG2) || // Phase 150 Stage 6
                           (ms_state == MS_UPDATE);
     assign mmu_req_addr = (ms_state == MS_UPDATE) ? walk_desc_addr_r : walk_req_addr_r;
     assign mmu_req_fc   = 3'b101;  // supervisor data space for all walk/update cycles

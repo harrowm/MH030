@@ -24,6 +24,8 @@
 //   MMU-15: PLOAD populates the ATC (exact walk-request-count proof);
 //           a subsequent access then hits with 0 additional requests
 //   MMU-16: PLOAD rw=0 (write direction) drives a real U+M write-back
+//   MMU-18: long-format (8-byte descriptor) 2-level walk, PA + exact
+//           bus-cycle count + U write-back through the new code path
 
 // Walk memory layout (4KB pages, TIA=8, TIB=8, CRP base=0x00010000):
 //   VA = 0x1234_5678, FC=001
@@ -89,6 +91,22 @@ module mmu_tb;
     localparam logic [31:0] ADDR_B7    = 32'h0000_8110;
     localparam logic [31:0] DESC_A7    = 32'h0000_8002;
     localparam logic [31:0] DESC_B7    = 32'hF00D_7001; // page, WP=0,U=0,M=0
+
+    // Phase 150 Stage 6: long-format (8-byte) descriptor test (MMU-18).
+    // CRP's own DT (bits[33:32]) selects level A's format -- set to long
+    // (3) only for this one test via CRP_LONG below. Level A's own first
+    // longword sets DT=3 too, so level B is ALSO long-format, exercising
+    // the full long-table -> long-page chain in one test.
+    localparam logic [31:0] VA_LF      = 32'h7777_7777;
+    localparam logic [63:0] CRP_LONG   = 64'h0000_0003_0001_0000; // base=0x10000, DT=3(long)
+    localparam logic [31:0] ADDR_A_LF   = 32'h0001_01DC; // crp_base + 0x77*4
+    localparam logic [31:0] ADDR_A_LF_2 = ADDR_A_LF + 32'd4;
+    localparam logic [31:0] DESC_A_LF_1 = 32'h0000_0003; // 1st longword: DT=3 (level B is long)
+    localparam logic [31:0] DESC_A_LF_2 = 32'h0000_9000; // 2nd longword: next table base=0x9000
+    localparam logic [31:0] ADDR_B_LF   = 32'h0000_91DC; // 0x9000 + 0x77*4
+    localparam logic [31:0] ADDR_B_LF_2 = ADDR_B_LF + 32'd4;
+    localparam logic [31:0] DESC_B_LF_1 = 32'h0000_0001; // 1st longword: DT=1 (page), WP=U=M=CI=0
+    localparam logic [31:0] DESC_B_LF_2 = 32'hCAFE_5000; // 2nd longword: page address
 
     // -----------------------------------------------------------------------
     // Clock + reset
@@ -283,6 +301,10 @@ module mmu_tb;
             ADDR_B6: stub_rdata = DESC_B6;
             ADDR_A7: stub_rdata = DESC_A7;
             ADDR_B7: stub_rdata = DESC_B7;
+            ADDR_A_LF:   stub_rdata = DESC_A_LF_1;
+            ADDR_A_LF_2: stub_rdata = DESC_A_LF_2;
+            ADDR_B_LF:   stub_rdata = DESC_B_LF_1;
+            ADDR_B_LF_2: stub_rdata = DESC_B_LF_2;
             default: stub_rdata = 32'h0;    // invalid DT=00 → fault
         endcase
     end
@@ -741,6 +763,45 @@ module mmu_tb;
             check("MMU-16: write-back cycle occurred", saw_write_r);
             check32("MMU-16: write-back sets U and M (DESC_B7 | 0x18)",
                     write_wdata_r, DESC_B7 | 32'h0000_0018);
+        end
+        repeat(4) @(posedge clk_4x);
+
+        // ----------------------------------------------------------------
+        // MMU-18 (Phase 150 Stage 6): a full long-format (8-byte descriptor)
+        // 2-level walk -- CRP's own DT=3 makes level A long-format; level
+        // A's own first longword also sets DT=3, making level B long-format
+        // too, so this exercises the complete long-table -> long-page
+        // chain, not just one level of it. Checks: (a) the resulting PA
+        // (proves both the table-continuation and page-leaf long-format
+        // address extraction, from the SECOND longword of each descriptor,
+        // are correct); (b) exactly 5 walk-bus cycles occurred (2 reads for
+        // level A's own long descriptor + 2 reads for level B's + 1 write
+        // for the U write-back below -- the exact-count proof this file's
+        // own MMU-15 already established the convention for, deliberately
+        // NOT pre-setting U here this time so the same translate() call can
+        // also prove (c) the fresh long-format page (U=0,M=0) triggers a
+        // real U write-back, exercising the NEW walk_word1_r-based
+        // write-back path -- genuinely different code from the
+        // short-format inline path -- for the first time.
+        // ----------------------------------------------------------------
+        $display("--- MMU-18: long-format (8-byte descriptor) 2-level walk ---");
+        begin
+            logic [31:0] pa; logic fault, ci;
+            int cnt_before, cnt_after;
+            crp = CRP_LONG;
+            saw_write_r   = 1'b0;
+            write_wdata_r = 32'h0;
+            cnt_before = walk_req_count_r;
+            translate(VA_LF, 3'b001, 1'b1, pa, fault, ci);
+            cnt_after = walk_req_count_r;
+            check  ("MMU-18: no fault",                     !fault);
+            check32("MMU-18: PA from long-format chain",     pa, 32'hCAFE_5777);
+            check32("MMU-18: exactly 5 walk bus cycles (2+2 reads, 1 U write-back)",
+                    cnt_after - cnt_before, 32'd5);
+            check("MMU-18: fresh long-format page triggers U write-back",
+                  saw_write_r);
+            check32("MMU-18: write-back sets U (DESC_B_LF_1 | 0x8)",
+                    write_wdata_r, DESC_B_LF_1 | 32'h0000_0008);
         end
 
         $display("=== %0d failure(s) ===", fail_count);
