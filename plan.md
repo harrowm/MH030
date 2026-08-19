@@ -6653,6 +6653,91 @@ anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected: Harte's o
 
 ---
 
+## Phase 157 Stage 4 — cpSAVE/cpRESTORE instructions
+
+### Goal
+
+cpSAVE (context save) and cpRESTORE (context restore) had zero RTL. Per the manual
+(Section 10.2.3, read directly before implementing): both are F-line, privileged,
+CpID=1 (this project's only modeled coprocessor, matching the FPU stub's own scope),
+distinguished from the FPU/MOVE16 forms sharing the same `f_group`/`f_dn` fingerprint
+by their TYPE field (`{f_dir,f_ss}`, bits[8:6] of the opcode) — cpSAVE=100 (Figure
+10-15), cpRESTORE=101 (Figure 10-17). Both carry an EA field at bits[5:0] (same
+position as ordinary `f_mode`/`f_reg`) naming where the coprocessor's own state frame
+lives in memory. The real protocol (Section 10.2.3.2/10.2.3.4.2) is genuinely complex:
+read a format-word CIR, branch on not-ready/invalid/valid-with-length, transfer N bytes
+via a separate operand CIR in a loop. Matching the plan's own explicit scope
+("not a full Format-Word-driven multi-cycle protocol") and the existing FPU stub's own
+precedent, implemented a one-CIR-read stub: issues a single read to the Save CIR
+(offset 0x04) or Restore CIR (offset 0x06, per Figure 10-5) and completes, capturing the
+returned format word without acting on it.
+
+### Implementation
+
+`rtl/eu_seq.sv`: new `dec_is_cpsave`/`dec_is_cprestore`, inserted as two new `else if`
+branches ahead of the existing generic `f_dn==3'b001` FPU catch-all in the F-line
+(`4'hf`) decode block (the generic FPU branch would otherwise swallow cpSAVE/
+cpRESTORE's own TYPE=100/101 opcodes first, since it matches any `{f_dir,f_ss}` for
+CpID=1). Both follow the existing `MOVE.W#,SR`-style privilege-check pattern (`if
+(!sr_live[13]) dec_is_priv=1; else dec_is_cpsave/cprestore=1;`) — supervisor-only per
+the manual. `dec_needs_ext` set for any EA mode needing an extension word
+(`f_mode∈{101,110,111}`); a new `cpsr_start_r`/`cpsr_run_r`/`cpsr_is_restore_r`/
+`cpsr_fmt_r` FSM mirrors the FPU dispatch FSM exactly, **sharing `eu_coproc_req`/`ack`/
+`berr` with the FPU stub** (architecturally correct — both are "coprocessor CPU space"
+cycles, and only one instruction ever occupies EX at a time, so mutual exclusion is
+free). `eu_coproc_addr` is now a mux: `cpsr_run_r` selects a fresh, **manual-Figure-10-3-
+correct** address layout (`A[19:16]=0010`, `A[15:13]=CpID`, `A[4:0]=CIR register
+select`) computed directly since this is new code, vs. the pre-existing FPU branch
+unchanged. **Found, documented, did not fix**: the existing FPU stub's own address
+layout (`A[15:13]=ppp`, `A[12:11]=01(cpid)`) doesn't actually match Figure 10-3 either
+(ppp/cpid are in the wrong relative positions) — a pre-existing inconsistency from Phase
+55, unrelated to this stage, flagged inline in the RTL comment rather than silently
+fixed (no test in this project exercises it against a real coprocessor, so nothing
+currently depends on the exact bit positions being correct).
+
+`rtl/m68030_seq.sv`: new `is_cpsave`/`is_cprestore` classifiers (same `f_group=4'hf`
+fingerprint as the eu_seq.sv decode), added to the existing 1-word (`(d16,An)`/
+`(d8,An,Xn)`/abs.W/`(d16,PC)`/`(d8,PC,Xn)`) and 2-word (abs.L) `ext_count` OR-chains,
+mirroring PEA's own established table-entry style — since the ext_count classification
+is purely a word-count question (0/1/2), it needed no register/scale decode at all,
+just the addressing-mode field match.
+
+### Tests
+
+New `tb/eu_seq_tb.sv` test (the coprocessor bus mechanism is shared/reused rather than
+new BIU-level plumbing, so `tb/biu_tb.sv` wouldn't exercise anything new — the eu_seq.sv
+decode+FSM+address-mux is the only genuinely new code, and only a harness instantiating
+`eu_seq` directly can observe it): drives `cpSAVE (A0)` (`0xF310`) and `cpRESTORE (A0)`
+(`0xF350`) directly, checks `eu_coproc_req` asserts, the address matches the expected
+Save/Restore CIR value, and `cpsr_is_restore_r` reads correctly for each.
+
+**Found and fixed a real, previously-latent testbench bug** while debugging the first
+failing run: `tb/eu_seq_tb.sv`'s own `eu_seq` instantiation never connected `mem_berr`
+at all (this minimal harness never needed real memory responses before) — `X`-poisoning
+`ex_exc_dispatch_hazard` (`... || mem_berr || ...`, no gating flag) and therefore `stall`
+and `instr_ack` for **every** instruction in the file, not just the new ones. Invisible
+for the file's entire prior history since every existing test uses fixed-cycle-count
+waits (`drain()`/`run()`) rather than actually reading `instr_ack`'s value — my own new
+test was the first to poll `seq_busy`/depend on clean dispatch timing, immediately
+exposing it. Fixed by tying `.mem_berr(1'b0)` in the instantiation, matching the existing
+convention for `.exc_active(1'b0)`. Also wired a new `cp_ack_tb` testbench signal to
+`eu_coproc_ack` (previously fully unconnected) so `cpsr_run_r` can clear cleanly between
+the two test blocks, avoiding a hang.
+
+### Results
+
+`make test` 36/36 (confirms the `mem_berr` tie-off didn't perturb any of this file's
+other ~700 lines of pre-existing checks), `tb/eu_seq_tb.sv` standalone 0 failures (all 6
+new checks pass), `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (mandatory — `eu_seq.sv`/`m68030_seq.sv` changed) — PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected:
+cpSAVE/cpRESTORE are 68020+-only coprocessor-interface instructions, zero Harte
+coverage). **Closes Stage 4 — the 4 required stages of the gap-closure plan are now all
+complete.** Stage 5 (MMU LIMIT/S bit + genuine indirect descriptors) remains optional,
+confirm before starting.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

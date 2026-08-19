@@ -68,6 +68,13 @@ module eu_seq_tb;
     // seq outputs
     logic        instr_ack, seq_busy, div_trap;
 
+    // Coprocessor CPU Space wires (Phase 157 Stage 4: cpSAVE/cpRESTORE
+    // decode/dispatch observability -- rdata/ack/berr left unconnected,
+    // this test only checks request/address correctness, not completion).
+    logic        cp_req_tb;
+    logic [31:0] cp_addr_tb;
+    logic        cp_ack_tb = 1'b0;
+
     // BCD ↔ seq wires
     logic [7:0]  bcd_src, bcd_dst, bcd_result;
     logic [1:0]  bcd_op;
@@ -157,7 +164,12 @@ module eu_seq_tb;
         .div_trap       (div_trap),
         .int_pending    (1'b0),
         .eu_int_ready   (),
-        .exc_active     (1'b0)
+        .exc_active     (1'b0),
+        .mem_berr       (1'b0),
+        .eu_coproc_req  (cp_req_tb),
+        .eu_coproc_addr (cp_addr_tb),
+        .eu_coproc_ack  (cp_ack_tb),
+        .eu_coproc_berr (1'b0)
     );
 
     eu_regfile u_rf (
@@ -732,6 +744,70 @@ module eu_seq_tb;
         run(16'h0605,   32'hA,    1'b1);  // ADDI.B #10, D5 → D5=10
         run(16'h0BC0,   32'h0,    1'b0);  // BSET D5,D0 → D0[10]=1
         check32("I5: BSET D5,D0 → 0x400", u_rf.d_reg[0], 32'h400);
+
+        // ================================================================
+        // cpSAVE / cpRESTORE decode + dispatch (Phase 157 Stage 4)
+        // Checks request/address correctness only (eu_coproc_ack/berr left
+        // unconnected -- the completion path is already proven generically
+        // by the shared FPU-stub bus mechanism at the BIU level).
+        // ================================================================
+        $display("--- cpSAVE / cpRESTORE decode + dispatch ---");
+        begin
+            int t;
+            logic saw_req;
+            // Let the prior instruction (I5) fully retire before starting.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+
+            // cpSAVE (A0): F-line, CpID=1, TYPE=100, EA=(An) mode=010,reg=000
+            // -> 0xF310. Address = {12'h0,4'b0010,CpID=001,8'h0,SaveCIR=5'h04}
+            //   = 0x00022004.
+            instr_word  = 16'hF310;
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+            saw_req = 1'b0;
+            for (t = 0; t < 20; t++) begin
+                if (cp_req_tb) begin saw_req = 1'b1; break; end
+                @(posedge clk_4x); #1;
+            end
+            check("cpSAVE: eu_coproc_req asserted", saw_req);
+            check32("cpSAVE: address = Save CIR", cp_addr_tb, 32'h0002_2004);
+            check("cpSAVE: cpsr_is_restore_r=0", u_seq.cpsr_is_restore_r === 1'b0);
+            // Ack it so cpsr_run_r clears cleanly before the next test.
+            cp_ack_tb = 1'b1;
+            @(posedge clk_4x); #1;
+            cp_ack_tb = 1'b0;
+            repeat(4) @(posedge clk_4x);
+        end
+
+        begin
+            int t;
+            logic saw_req;
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+
+            // cpRESTORE (A0): TYPE=101 -> 0xF350. Address = Restore CIR
+            // (5'h06) = 0x00022006.
+            instr_word  = 16'hF350;
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+            saw_req = 1'b0;
+            for (t = 0; t < 20; t++) begin
+                if (cp_req_tb) begin saw_req = 1'b1; break; end
+                @(posedge clk_4x); #1;
+            end
+            check("cpRESTORE: eu_coproc_req asserted", saw_req);
+            check32("cpRESTORE: address = Restore CIR", cp_addr_tb, 32'h0002_2006);
+            check("cpRESTORE: cpsr_is_restore_r=1", u_seq.cpsr_is_restore_r === 1'b1);
+            cp_ack_tb = 1'b1;
+            @(posedge clk_4x); #1;
+            cp_ack_tb = 1'b0;
+            repeat(4) @(posedge clk_4x);
+        end
 
         // ================================================================
         $display("=== %0d failure(s) ===", fail_count);

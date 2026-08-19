@@ -546,6 +546,17 @@ module m68030_seq (
     assign is_pea = (f_group == 4'h4) && !f_dir && (f_dn == 3'b100) &&
                     (f_ss == 2'b01) && (f_mode >= 3'b010);
 
+    // cpSAVE/cpRESTORE (Phase 157 Stage 4) — same EA-field shape as PEA
+    // (f_mode/f_reg at bits[5:0]), but F-line (f_group=4'hf), cpid=1
+    // (f_dn=001), disambiguated from FPU/MOVE16 by TYPE={f_dir,f_ss}.
+    // 0 ext words for An/predec/postinc, 1 for d16An/d8AnXn/absW/d16PC/
+    // d8PCXn, 2 for abs.L — same table shape as is_pea's own below.
+    logic is_cpsave, is_cprestore;
+    assign is_cpsave    = (f_group == 4'hf) && (f_dn == 3'b001) &&
+                           (f_dir == 1'b1) && (f_ss == 2'b00);   // {f_dir,f_ss}=100
+    assign is_cprestore = (f_group == 4'hf) && (f_dn == 3'b001) &&
+                           (f_dir == 1'b1) && (f_ss == 2'b01);   // {f_dir,f_ss}=101
+
     // RTD — exactly 1 extension word (displacement)
     logic is_rtd;
     assign is_rtd = (instr_word == 16'h4E74);
@@ -824,7 +835,8 @@ module m68030_seq (
             ext_count = 3'd3;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long ||
-                 is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10))
+                 is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10) ||
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b001))) // abs.L
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
@@ -839,6 +851,12 @@ module m68030_seq (
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b000)) || // abs.W
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b010)) || // (d16,PC)
                  (is_pea && (f_mode == 3'b111) && (instr_word[2:0] == 3'b011)) || // (d8,PC,Xn)
+                 // cpSAVE/cpRESTORE: (d16,An)/(d8,An,Xn)/abs.W/(d16,PC)/(d8,PC,Xn) — 1 ext word
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b101)) ||
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b110)) ||
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b000)) ||
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b010)) ||
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b011)) ||
                  // TRAPcc.W (reg=010), CAS, BTST/BCHG/BCLR/BSET #n mem — all 1 ext word
                  // (Scc abs.W, reg=000, is handled earlier in the priority chain)
                  ((f_group == 4'h5) && (f_ss == 2'b11) && (f_mode == 3'b111) && (f_reg == 3'b010)) ||

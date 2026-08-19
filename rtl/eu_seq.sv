@@ -654,6 +654,8 @@ module eu_seq (
     logic [1:0]  dec_move16_form;   // 00=(An)+/(Am)+, 01=(An)+/abs, 10=abs/(An)+, 11=(An)/(An)
     // FPU coprocessor dispatch stub
     logic        dec_is_fpu;        // Group F FPU instruction (cpid=1)
+    logic        dec_is_cpsave;     // cpSAVE (Phase 157 Stage 4)
+    logic        dec_is_cprestore;  // cpRESTORE (Phase 157 Stage 4)
     // memory-indirect EA ([bd,An],Xn,od)
     logic        dec_is_memind;       // instruction uses memory-indirect EA (full ext, fi_iis != 0)
     logic        dec_memind_is_post;  // 1=post-indexed (IS=1: Xn to outer), 0=pre-indexed
@@ -936,6 +938,8 @@ module eu_seq (
 
         // ── FPU / memory-indirect ──────────────────────────────────────────────
         dec_is_fpu       = 1'b0;
+        dec_is_cpsave    = 1'b0;
+        dec_is_cprestore = 1'b0;
         dec_is_memind    = 1'b0;
         dec_memind_is_post = 1'b0;
         dec_memind_od    = 32'h0;
@@ -5829,6 +5833,37 @@ module eu_seq (
                             end
                             default: ;
                         endcase
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b100) begin
+                        // cpSAVE: cpid=1, TYPE=100 (manual Figure 10-15). Privileged.
+                        // EA field is bits[5:0] (f_mode/f_reg, same positions as any
+                        // ordinary EA). Stub scope (Phase 157 Stage 4): issues one
+                        // CIR read to the Save CIR; does not implement the real
+                        // format-word-driven multi-longword transfer protocol --
+                        // same "one CPI cycle, full protocol later" scope as the
+                        // existing FPU stub (Phase 55).
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
+                            dec_valid     = 1'b1;
+                            dec_is_cpsave = 1'b1;
+                            dec_unit      = UNIT_NONE;
+                            dec_needs_ext = (f_mode == 3'b101 || f_mode == 3'b110 ||
+                                             f_mode == 3'b111);
+                        end
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b101) begin
+                        // cpRESTORE: cpid=1, TYPE=101 (manual Figure 10-17). Same
+                        // privilege check and stub scope as cpSAVE above.
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
+                            dec_valid        = 1'b1;
+                            dec_is_cprestore = 1'b1;
+                            dec_unit         = UNIT_NONE;
+                            dec_needs_ext    = (f_mode == 3'b101 || f_mode == 3'b110 ||
+                                                f_mode == 3'b111);
+                        end
                     end else if (f_dn == 3'b001) begin
                         // FPU coprocessor: cpid=1, any ppp or EA mode 4-7.
                         // Issues one CPI CPU Space bus cycle; full protocol in later phases.
@@ -6487,6 +6522,12 @@ module eu_seq (
     logic [2:0]  bkpt_num_r;       // captured breakpoint number (f_reg)
     logic [15:0] bkpt_replacement_r; // captured replacement opcode word (DSACK'd outcome)
 
+    // cpSAVE/cpRESTORE dispatch FSM (Phase 157 Stage 4) — declared early for ex_mem_stall
+    logic        cpsr_start_r;     // one-cycle setup after instr_ack
+    logic        cpsr_run_r;       // eu_coproc_req active, waiting for ack (shared w/ FPU)
+    logic        cpsr_is_restore_r; // 0=cpSAVE (Save CIR), 1=cpRESTORE (Restore CIR)
+    logic [15:0] cpsr_fmt_r;       // captured format word (not acted upon -- stub scope)
+
     // MMU instruction FSM state — declared early for ex_mem_stall
     logic        pflush_start_r, pflush_req_r;
     logic        pflush_all_r;
@@ -6612,6 +6653,7 @@ module eu_seq (
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
                           bkpt_start_r || bkpt_run_r ||
+                          cpsr_start_r || cpsr_run_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
@@ -8022,6 +8064,39 @@ module eu_seq (
                 fpu_run_r   <= 1'b1;
             end else if (fpu_run_r && (eu_coproc_ack || eu_coproc_berr)) begin
                 fpu_run_r   <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // cpSAVE/cpRESTORE dispatch FSM (Phase 157 Stage 4)
+    // Shares eu_coproc_req/ack/berr with the FPU FSM above -- at most one
+    // EU-issued CPU-space cycle is ever in flight, since only one instruction
+    // occupies EX at a time. Issues one CIR read (Save CIR=0x04, Restore
+    // CIR=0x06 per Figure 10-5) and completes -- does not implement the real
+    // format-word-driven multi-longword transfer protocol (same stub scope
+    // as the FPU FSM's own "one CPI cycle" comment above).
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            cpsr_start_r      <= 1'b0;
+            cpsr_run_r        <= 1'b0;
+            cpsr_is_restore_r <= 1'b0;
+            cpsr_fmt_r        <= 16'h0;
+        end else begin
+            if (!cpsr_start_r && !cpsr_run_r && instr_ack &&
+                (dec_is_cpsave || dec_is_cprestore)) begin
+                cpsr_start_r      <= 1'b1;
+                cpsr_is_restore_r <= dec_is_cprestore;
+            end else if (cpsr_start_r) begin
+                cpsr_start_r <= 1'b0;
+                cpsr_run_r   <= 1'b1;
+            end else if (cpsr_run_r && eu_coproc_ack) begin
+                cpsr_run_r <= 1'b0;
+                // Format word, not acted upon -- stub scope (see header comment).
+                cpsr_fmt_r <= eu_coproc_rdata[31:16];
+            end else if (cpsr_run_r && eu_coproc_berr) begin
+                cpsr_run_r <= 1'b0;
             end
         end
     end
@@ -9546,16 +9621,28 @@ module eu_seq (
     assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
 
     // -----------------------------------------------------------------------
-    // FPU coprocessor bus interface outputs
-    // eu_coproc_req asserted while fpu_run_r; CPI read (rw=1) of cpid=1 register 0.
-    // Address: A[31:20]=0, A[19:16]=0010, A[15:13]=ppp, A[12:11]=01 (cpid=1), A[10:0]=0.
+    // FPU coprocessor / cpSAVE / cpRESTORE bus interface outputs
+    // eu_coproc_req asserted while fpu_run_r (CPI read, cpid=1 register 0)
+    // or cpsr_run_r (Phase 157 Stage 4: cpSAVE/cpRESTORE, one CIR read) --
+    // mutually exclusive, only one instruction occupies EX at a time.
+    // FPU address: A[31:20]=0, A[19:16]=0010, A[15:13]=ppp, A[12:11]=01
+    // (cpid=1), A[10:0]=0. NOTE (found while implementing Stage 4, out of
+    // scope to fix here): per the real manual's Figure 10-3, A[15:13]
+    // should be CpID (not ppp) with the CIR register selector at A[4:0] --
+    // this pre-existing FPU stub address layout (Phase 55) doesn't match
+    // that, but nothing in this project exercises it against a real
+    // coprocessor, so it's flagged, not touched, matching this rollout's
+    // own "found but out of scope" convention. cpSAVE/cpRESTORE below use
+    // the real Figure 10-3 layout directly, since this is fresh code.
     // -----------------------------------------------------------------------
-    assign eu_coproc_req   = fpu_run_r;
+    assign eu_coproc_req   = fpu_run_r || cpsr_run_r;
     assign eu_coproc_rw    = 1'b1;
     assign eu_coproc_fc    = 3'b111;        // CPU Space
     assign eu_coproc_siz   = 2'b00;         // longword
     assign eu_coproc_wdata = 32'h0;
-    assign eu_coproc_addr  = {12'h000, 4'b0010, fpu_prim_r, 2'b01, 11'h000};
+    assign eu_coproc_addr  = cpsr_run_r
+        ? {12'h000, 4'b0010, 3'b001, 8'h00, cpsr_is_restore_r ? 5'h06 : 5'h04}
+        : {12'h000, 4'b0010, fpu_prim_r, 2'b01, 11'h000};
 
     // -----------------------------------------------------------------------
     // BKPT bus interface outputs (Phase 157 Stage 3)
