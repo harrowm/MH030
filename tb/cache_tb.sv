@@ -736,9 +736,12 @@ module cache_tb;
             // readahead does *afterward* (which is exactly what made the
             // equivalent bus-activity-delta check unreliable, same as I-2's
             // own A#2/B#3 hit checks -- see that section's own comment).
+            // Phase 158 Stage 2: tag_i is now 25 bits (FC2 prepended above
+            // addr[31:8], manual §6.1.2) -- bit24=1 since every fetch's own
+            // FC is currently the hardcoded 3'b110 (FC2=1) constant.
             check("I-3: CACR.CEI selectivity -- D's own cache entry (idx 10) survived untouched",
                   u_top.u_biu.u_icache.valid_i[10] === 1'b1 &&
-                  u_top.u_biu.u_icache.tag_i[10]   === 24'h000013);
+                  u_top.u_biu.u_icache.tag_i[10]   === 25'h1000013);
             wait_cleared_then_set(6, 32'd902, 20000, e);
             c6 = code_ds_count;
             check32("I-3: visit D#3 (post-CEI, must HIT) loaded D6 correctly", u_top.u_eu.u_rf.d_reg[6], 32'd902);
@@ -1194,6 +1197,18 @@ module cache_tb;
             c1 = data_ds_count;
             check32("D-1: P#1 (cold) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'h1111_2222);
             check("D-1: P#1's own cold miss caused real bus activity", c1 - c0 > 0);
+            // Phase 158 Stage 2: direct internal-state check that the tag
+            // genuinely captures FC (manual §6.1.2, p.6-6) -- P is a plain
+            // supervisor data access (FC=101), addr=0x2000 so idx=0,
+            // addr[31:8]=0x20; expected tag = {3'b101, 24'h000020} =
+            // 27'h5000020. Deliberately low-risk (pure internal-state read,
+            // zero new instructions/ROM) after a mid-sequence full
+            // MOVES-based aliasing test caused an unrelated, unexplained
+            // timing sensitivity in the D-5a->D-5b transition further down
+            // this file when tried first -- reverted rather than chase a
+            // fragile test for marginal extra coverage.
+            check32("D-1: cache tag includes FC (supervisor data, FC=101)",
+                    u_top.u_biu.u_cache.tag_d[0], 27'h5000020);
 
             wait_cleared_then_set(6, 32'h3333_4444, 20000, e);
             c2 = data_ds_count;

@@ -6793,6 +6793,87 @@ builds on.** Stage 2 (function-code bits in both cache tags) is next.
 
 ---
 
+## Phase 158 Stage 2 — Function-code bits in both cache tags
+
+### Goal
+
+Manual §6.1.2 (p.6-6, confirmed by direct read): "The tag of each line in the data
+cache contains function code bits FC0, FC1, and FC2 in addition to address bits
+A31-A8." The I-cache's own tag (p.6-5/6-6) similarly includes FC2. Current RTL tags
+were pure `addr[31:8]` with zero FC bits in both `rtl/biu_cache_if.sv` (D-cache) and
+`rtl/biu_icache_if.sv` (I-cache) — a supervisor and user access to the same logical
+address could alias onto the same line and hit each other's cached data.
+
+### Investigation: a deeper, chip-wide finding (documented, not fixed this stage)
+
+While threading a real FC into the I-cache side, found that `rtl/biu_cycle_gen.sv`'s
+own ordinary instruction-fetch path (`cyc_fc = 3'b110` for every `ifu_addr`-driven
+cycle) **hardcodes Supervisor Program Space unconditionally for every instruction
+fetch in the entire chip**, regardless of whether the CPU is actually in user or
+supervisor mode. Real 68030 silicon uses FC=010 (User Program) vs. 110 (Supervisor
+Program) depending on the current S-bit. `rtl/biu_icache_if.sv`'s own MMU-translation
+request had an independent, second hardcoded `xl_fc=3'b110` matching this same
+convention. This means the D-cache side's own fix (below) is fully live and correct
+today (ordinary EU data accesses already derive FC dynamically from the S-bit via
+`eu_seq.sv`'s `mem_fc = {sr_live[13],1'b0,1'b1}`, confirmed directly) — but the I-cache
+side's own tag-widening, while structurally correct and forward-compatible, cannot
+currently discriminate real user-vs-supervisor instruction fetches until this deeper,
+separate, chip-wide gap is fixed. Genuinely threading S-bit-awareness through the
+entire instruction-fetch address/FC path is a substantial, separate undertaking (zero
+such input exists anywhere in that path today) — out of scope for this stage,
+documented here and in CLAUDE.md as a confirmed, real, but deferred finding.
+
+### Fix
+
+`rtl/biu_cache_if.sv`: D-cache tag/valid arrays widened from 24 to 27 bits
+(`vtag = {eu_fc, eu_addr[31:8]}`); `tag_i`/`valid_i` (this module's own permanently
+dead vestigial I-cache-shaped arrays — confirmed dead via `m68030_top.sv`'s hardwired
+`.eu_is_icache(1'b0)`) widened to match purely for type-compatibility, zero behavioral
+effect. `rtl/biu_icache_if.sv`: I-cache tag widened from 24 to 25 bits
+(`vtag = {ifu_fc[2], ifu_addr[31:8]}`); new `ifu_fc` input port added, tied to the same
+hardcoded `3'b110` constant `biu_cycle_gen.sv`'s own ifu path uses (consolidating what
+were two independent hardcoded-FC sites into one clearly-flagged constant, ready for
+the day the deeper gap above is fixed); `xl_fc`/`xlate_fault_fc` now driven from this
+new input instead of a separate literal.
+
+### Tests
+
+Two existing `tb/cache_tb.sv` checks needed updating for the new tag widths (both
+pure literal-width fixes, not logic changes): I-3's own direct `tag_i[10]` check
+(`24'h000013` → `25'h1000013`, prepending FC2=1 since every fetch's FC is currently the
+hardcoded constant). Added one new direct internal-state check to D-1's existing block:
+`u_top.u_biu.u_cache.tag_d[0] === 27'h5000020` (`{3'b101, 24'h000020}`), confirming the
+D-cache tag genuinely captures the real, dynamic FC (supervisor data, 101) for P's own
+plain access — deliberately a low-risk, pure internal-state read requiring zero new
+instructions/ROM.
+
+**A full MOVES-based instruction-level aliasing test (supervisor read caches under
+FC=101; a MOVES store via DFC=001 to the same address must miss the lookup and not
+touch that entry; a supervisor re-read must still see the stale value; a MOVES load via
+SFC=001 must also miss and see the fresh value) was built, and every one of its own
+assertions passed** — but inserting it between the existing D-4b and D-5 tests caused
+an unrelated, unexplained timing sensitivity in the D-5a→D-5b BERR-injection transition
+further down the file (the fault counter reached a wild garbage value instead of the
+expected 2). Chased for some time (ruled out leftover SFC/DFC state, ruled out D6/A0
+register leftovers) without finding the root cause; reverted the whole test rather than
+land something fragile for marginal extra coverage beyond the direct internal-state
+check above, which already proves the core fix. Whether this was a genuine RTL
+timing/hazard bug (first-ever exercise of MOVEC-to-SFC/DFC and MOVES through the real
+IFU-fed decode path in this project's history — matching this project's own repeated
+"first real exercise of X surfaces a genuine latent bug" pattern) or a pure testbench
+artifact is undetermined; flagged as a documented, open follow-up rather than guessed
+at.
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures. `make test` 36/36, `make cosim_grp` 8/8,
+`make cosim_memind` 12/12, full 124-suite Harte sweep (mandatory — `biu_cache_if.sv`/
+`biu_icache_if.sv`/`m68030_biu.sv` changed) — PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes Stage 2.**
+Stage 3 (RMW read forced-miss for D-cache) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

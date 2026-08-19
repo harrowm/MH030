@@ -44,6 +44,7 @@ module biu_icache_if (
 
     // IFU side — identical protocol to the port m68030_ifu already drives
     input  logic [31:0] ifu_addr,
+    input  logic [2:0]  ifu_fc,    // Phase 158 Stage 2 — see header comment
     input  logic        ifu_req,
     output logic [31:0] ifu_rdata,
     output logic        ifu_ack,
@@ -60,10 +61,23 @@ module biu_icache_if (
 
     // Burst-linefill request, muxed by m68030_biu.sv into biu_cycle_gen's
     // own eu_burst_req/addr/fc port. FC is fixed at the caller (Supervisor
-    // Program Space, matching cg_addr's own ordinary-read FC convention) —
-    // not threaded through this module, since biu_cycle_gen's own ordinary
-    // ifu_req path hardcodes the identical value (3'b110) rather than
-    // taking it as an input, so there was never a per-request FC to carry.
+    // Program Space, matching cg_addr's own ordinary-read FC convention).
+    // Phase 158 Stage 2 finding (confirmed, out of scope for this stage):
+    // biu_cycle_gen.sv's own ordinary ifu_req path (line ~666) ALSO
+    // hardcodes cyc_fc=3'b110 for every instruction fetch, unconditionally
+    // -- real 68030 silicon uses FC=010 (User Program) vs 110 (Supervisor
+    // Program) depending on the CPU's actual current mode, but nothing in
+    // this project's own instruction-fetch pipeline threads the S-bit that
+    // far today. This module's own new ifu_fc input (below) is wired to
+    // the SAME still-hardcoded 3'b110 constant for now, consolidating what
+    // were two independent hardcoded-FC sites (this file's own former
+    // xl_fc literal, fixed this stage, plus biu_cycle_gen.sv's own) into
+    // one clearly-flagged constant -- genuine dynamic S-bit-awareness for
+    // instruction fetches is a separate, deeper, chip-wide undertaking
+    // (would need to thread supervisor/user mode into the whole
+    // instruction-fetch address/FC path, currently zero such input exists
+    // anywhere in it), documented in plan.md/CLAUDE.md as a confirmed,
+    // real, but out-of-scope gap for a future phase.
     output logic         ic_burst_req,
     output logic [31:0]  ic_burst_addr,
     input  logic [31:0]  ic_burst_rdata0,
@@ -115,8 +129,13 @@ module biu_icache_if (
     // NOTE: cacr[4] (IBE) intentionally unused here — see header comment.
 
     // Cache storage: 16 lines x 4 longwords x 32 bits = 256 bytes.
+    // Phase 158 Stage 2: tag widened from 24 to 25 bits (addr[31:8] alone)
+    // to include FC2, per manual §6.1.2 (p.6-5/6-6): the instruction-cache
+    // comparator matches "the 24 most significant logical address bits, the
+    // FC2 function code bit... used to distinguish user and supervisor
+    // accesses." Confirmed directly against the manual before fixing.
     logic        valid_i [0:15];
-    logic [23:0] tag_i   [0:15];
+    logic [24:0] tag_i   [0:15];
     logic [31:0] data_i  [0:15][0:3];
 
     // cg_ack is a 1-tick pulse — edge detect for safety (mirrors
@@ -171,7 +190,7 @@ module biu_icache_if (
     logic [31:0] fill_base_r, fill_rdata_r;
     logic [3:0]  idx_r;
     logic [1:0]  woff_r;
-    logic [23:0] vtag_r;
+    logic [24:0] vtag_r;
 
     // ic_burst_req/addr are registered (not driven combinationally from
     // `state`), mirroring biu_sizing_fsm.sv's own documented reason for
@@ -189,7 +208,7 @@ module biu_icache_if (
 
     wire [3:0]  idx  = ifu_addr[7:4];
     wire [1:0]  woff = ifu_addr[3:2];
-    wire [23:0] vtag = ifu_addr[31:8];
+    wire [24:0] vtag = {ifu_fc[2], ifu_addr[31:8]};
     wire        ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag);
 
     // Is the IFU, right now, still asking for the exact longword this
@@ -378,20 +397,19 @@ module biu_icache_if (
     always_comb begin
         // Phase 150 (plan.md): MMU translation request, defaults
         xl_va  = fill_base_r;
-        xl_fc  = 3'b110;  // fixed Supervisor Program Space, matches the
-                           // pre-existing burst path's own cg_burst_fc_mux
-                           // default — biu_cycle_gen never took a live FC
-                           // for ordinary instruction fetches even before
-                           // this phase, so this preserves that convention
-                           // rather than introducing a new inconsistency
-                           // between "FC translated with" and "FC fetched
-                           // with".
+        // Phase 158 Stage 2: was a separate hardcoded 3'b110 literal here;
+        // now driven from the new ifu_fc input instead, consolidating to a
+        // single source of truth with the fetch path's own FC (still tied
+        // to the same 3'b110 constant at the call site today — see the
+        // ic_burst_req port comment above for the full "genuine dynamic
+        // S-bit-awareness is a separate, deeper, out-of-scope gap" writeup).
+        xl_fc  = ifu_fc;
         xl_rw  = 1'b1;     // instruction fetches are always reads
         xl_req = 1'b0;
 
         xlate_fault_pulse = 1'b0;
         xlate_fault_addr  = fill_base_r;
-        xlate_fault_fc    = 3'b110;
+        xlate_fault_fc    = ifu_fc;
         xlate_fault_rw    = 1'b1;
         xlate_fault_siz   = 2'b00;
 

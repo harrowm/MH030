@@ -101,8 +101,20 @@ module biu_cache_if (
     wire dcache_en = cacr[8];
 
     // Cache storage arrays
+    // Phase 158 Stage 2: tag width widened from 24 to 27 bits (was
+    // addr[31:8] alone) to include FC0-2, per manual §6.1.2 (p.6-6): "The
+    // tag of each line in the data cache contains function code bits FC0,
+    // FC1, and FC2 in addition to address bits A31-A8." Without this, a
+    // supervisor and user access to the same logical address alias onto
+    // the same cache line and can hit each other's data -- a real
+    // correctness bug, confirmed against the manual before fixing (not
+    // guessed at). tag_i/valid_i (this module's own vestigial I-cache-shaped
+    // arrays) are permanently dead -- m68030_top.sv hardwires
+    // eu_is_icache=1'b0 -- widened only for type-compatibility with the
+    // shared vtag/vtag_r below, zero behavioral effect on dead code. The
+    // REAL I-cache is rtl/biu_icache_if.sv, fixed separately this stage.
     logic        valid_i [0:15];
-    logic [23:0] tag_i   [0:15];
+    logic [26:0] tag_i   [0:15];
     logic [31:0] data_i  [0:15][0:3];
 
     // valid_d is per-WORD, not per-line, unlike valid_i -- a D-cache miss
@@ -115,7 +127,7 @@ module biu_cache_if (
     // offset D-cache read returned uninitialized garbage, reported as a
     // cache HIT).
     logic        valid_d [0:15][0:3];
-    logic [23:0] tag_d   [0:15];
+    logic [26:0] tag_d   [0:15];
     logic [31:0] data_d  [0:15][0:3];
 
     // Extract byte/word from raw longword into EU-convention LSB position.
@@ -212,7 +224,7 @@ module biu_cache_if (
     logic        is_icache_r;
     logic [3:0]  idx_r;
     logic [1:0]  woff_r;
-    logic [23:0] vtag_r;
+    logic [26:0] vtag_r;
     logic [31:0] fill_rdata_r;  // captured rdata for CI_DONE return
     logic        xlate_fault_r; // Phase 150: distinguishes a CI_BERR entered
                                  // from CI_XLATE (pure translation/WP fault,
@@ -222,7 +234,7 @@ module biu_cache_if (
     // Combinatorial hit detection (in CI_IDLE, before latching)
     wire [3:0]  idx  = eu_addr[7:4];
     wire [1:0]  woff = eu_addr[3:2];
-    wire [23:0] vtag = eu_addr[31:8];
+    wire [26:0] vtag = {eu_fc, eu_addr[31:8]};
     wire ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag) && !mmu_ci;
 
     // d_size_ok: this single-slot cache model (one valid_d/data_d entry per

@@ -716,6 +716,12 @@ module m68030_biu #(
         .clk_4x         (clk_4x),
         .rst_n          (rst_n),
         .ifu_addr       (ifu_addr),
+        // Phase 158 Stage 2: tied to the same hardcoded Supervisor Program
+        // Space constant biu_cycle_gen.sv's own ordinary ifu_req path uses
+        // (3'b110) -- see biu_icache_if.sv's own header comment for why
+        // genuine dynamic S-bit-awareness for instruction fetches is a
+        // separate, deeper, out-of-scope gap, not fixed this stage.
+        .ifu_fc         (3'b110),
         .ifu_req        (ifu_req),
         .ifu_rdata      (ifu_rdata),
         .ifu_ack        (ifu_ack),
