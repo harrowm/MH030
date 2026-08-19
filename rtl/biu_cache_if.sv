@@ -90,10 +90,15 @@ module biu_cache_if (
     // a pure behavioral addition, not new plumbing.
     wire tc_e = tc[31];
 
-    // CACR bit aliases
+    // CACR bit aliases (Figure 6-14: 13=WA,12=DBE,11=CD,10=CED,9=FD,8=ED,
+    // 4=IBE,3=CI,2=CEI,1=FI,0=EI — confirmed directly against the manual).
+    // Phase 158 Stage 1: dcache_en previously read cacr[9] (FD, freeze) instead
+    // of cacr[8] (ED, enable) -- a real, previously-undiscovered bug meaning
+    // software that set ED the textbook-correct way got a D-cache that never
+    // activated. See plan.md Phase 158 Stage 1 for the full derivation.
     wire icache_en = cacr[0];
     wire iburst_en = cacr[4];
-    wire dcache_en = cacr[9];
+    wire dcache_en = cacr[8];
 
     // Cache storage arrays
     logic        valid_i [0:15];
@@ -264,10 +269,12 @@ module biu_cache_if (
             end
         end else begin
             // CACR cache-clear operations (level-sensitive while bit asserted)
+            // Phase 158 Stage 1: CD/CED were off by one bit (cacr[12]/cacr[11]
+            // are really DBE/CD, not CD/CED) — fixed to cacr[11]/cacr[10].
             if (cacr[3])  for (k = 0; k < 16; k++) valid_i[k] <= 1'b0; // CI
-            if (cacr[12]) for (k = 0; k < 16; k++) for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0; // CD
+            if (cacr[11]) for (k = 0; k < 16; k++) for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0; // CD
             if (cacr[2])  valid_i[caar[7:4]] <= 1'b0;  // CEI
-            if (cacr[11]) for (m = 0; m < 4; m++) valid_d[caar[7:4]][m] <= 1'b0;  // CED
+            if (cacr[10]) for (m = 0; m < 4; m++) valid_d[caar[7:4]][m] <= 1'b0;  // CED
 
             case (state)
                 CI_IDLE: begin

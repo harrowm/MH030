@@ -6738,6 +6738,61 @@ confirm before starting.
 
 ---
 
+## Phase 158 Stage 1 — CACR bit-position fix (D-cache enable/CD/CED)
+
+### Goal
+
+The user asked for a comparison of the cache implementation against the real MC68030
+manual (Section 6, "ON-CHIP CACHE MEMORIES"). A research fork read the section in full
+and cross-checked it against `rtl/biu_cache_if.sv`/`rtl/biu_icache_if.sv`, finding 6
+confirmed gaps; every one was independently re-verified directly against the manual
+(Figures 6-2/6-3/6-4/6-14, §6.1.2/6.1.2.1/6.1.2.2/6.1.3/6.1.3.2/6.2/6.3.1.x, all
+personally re-read) and the actual RTL before planning — a 7th item (CIIN/CIOUT pins)
+was found to be a bigger gap than originally scoped ("not yet verified" turned out to
+be "doesn't exist anywhere in the RTL," confirmed via `grep -rln "ciin\|ciout" rtl/` →
+zero hits) and the user chose to implement it as a full stage. This is the first of an
+8-stage plan (`~/.claude/plans/compressed-hopping-cocoa.md`) closing all 6 confirmed
+gaps plus CIIN/CIOUT and a BERR-during-fill investigation.
+
+### Finding
+
+Figure 6-14 (CACR bit layout, confirmed by direct read): bit 13=WA, 12=DBE, 11=CD,
+10=CED, 9=FD, 8=ED, 4=IBE, 3=CI, 2=CEI, 1=FI, 0=EI. The I-cache bits in
+`rtl/biu_cache_if.sv` (EI=cacr[0], IBE=cacr[4], CI=cacr[3], CEI=cacr[2]) were already
+correct. **Every D-cache bit was wrong, all off by exactly one real-bit-vs-comment
+mismatch**: `dcache_en = cacr[9]` read FD (freeze) instead of ED (enable, cacr[8]);
+`cacr[12]` was labeled `// CD` in a comment (that's really DBE, real CD is cacr[11]);
+`cacr[11]` was labeled `// CED` (that's really CD, real CED is cacr[10]). Consequence:
+software that sets ED the textbook-correct way (0x100) gets a D-cache that silently
+never activates — a real, previously-undiscovered correctness bug, invisible for the
+entire life of this project's D-cache work (Phase 133 onward) because `tb/cache_tb.sv`
+encoded the *identical* wrong-bit assumption (`emit_set_cacr(a, 32'h0000_0201)` believed
+this meant "icache_en=1, dcache_en=1" using bit 9, the same wrong bit the RTL checked) —
+every D-cache test in the suite was self-consistently validating a fiction rather than
+real ED/CD/CED semantics.
+
+### Fix
+
+`rtl/biu_cache_if.sv`: `dcache_en = cacr[8]` (was `cacr[9]`); the CD clear-trigger moved
+from `cacr[12]` to `cacr[11]`; the CED clear-trigger moved from `cacr[11]` to `cacr[10]`.
+`tb/cache_tb.sv`: every D-cache-relevant `emit_set_cacr()` call updated to the corrected
+bit positions (5 call sites: the initial `icache_en=1,dcache_en=1` setup at D-1, and the
+CD-pulse/CED-pulse pairs at D-3) — `0x201`→`0x101` (EI|ED), `0x1201`→`0x901`
+(EI|ED|CD), `0xA01`→`0x501` (EI|ED|CED).
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures — every existing D-cache check (D-1 through D-6,
+~68 checks) still passes with the corrected bit positions, confirming the D-cache's own
+underlying logic was already correct; only the CACR bit gating it was wrong. `make test`
+36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep
+(mandatory — `biu_cache_if.sv` changed) — PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected: Harte never sets
+these CACR bits). **Closes Stage 1 — the foundational fix every later stage in this plan
+builds on.** Stage 2 (function-code bits in both cache tags) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

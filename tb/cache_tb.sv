@@ -1071,7 +1071,11 @@ module cache_tb;
             a = 32'h0000_0900;
 
             // ---- D-1: miss/hit + partial-word-fill correctness ----
-            a = emit_set_cacr(a, 32'h0000_0201);  // icache_en=1, dcache_en=1
+            // Phase 158 Stage 1: dcache_en is really cacr[8] (ED), not cacr[9]
+            // (FD, freeze) -- this file previously encoded the identical bug
+            // the RTL had, so every D-cache test below was self-consistently
+            // validating the wrong bit. 0x101 = EI(bit0) | ED(bit8).
+            a = emit_set_cacr(a, 32'h0000_0101);  // icache_en=1, dcache_en=1
             rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
             a4 = a + 32'd4; a8 = a + 32'd8;
             rom[a4[31:2]] = {16'h2000, CLR_L_D5};
@@ -1110,8 +1114,10 @@ module cache_tb;
             rom[a4[31:2]] = {CLR_L_D6, MOVE_L_A0_D6};        // S#1 (cold miss)
             a = a + 32'd8;
 
-            a = emit_set_cacr(a, 32'h0000_1201);  // dcache_en|CD pulse
-            a = emit_set_cacr(a, 32'h0000_0201);  // back to just dcache_en
+            // 0x901 = EI|ED|CD(bit11); 0x101 = EI|ED (CD is bit11, was
+            // mislabeled cacr[12]=DBE before Phase 158 Stage 1).
+            a = emit_set_cacr(a, 32'h0000_0901);  // dcache_en|CD pulse
+            a = emit_set_cacr(a, 32'h0000_0101);  // back to just dcache_en
 
             rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
             a4 = a + 32'd4; a8 = a + 32'd8;
@@ -1124,8 +1130,10 @@ module cache_tb;
             a = a + 32'd8;
 
             a = emit_set_caar(a, 32'h0000_0000);  // CAAR = idx(R)<<4 = 0<<4 (R's own real index)
-            a = emit_set_cacr(a, 32'h0000_0A01);  // dcache_en|CED pulse
-            a = emit_set_cacr(a, 32'h0000_0201);  // back to just dcache_en
+            // 0x501 = EI|ED|CED(bit10); CED was mislabeled cacr[11]=CD before
+            // Phase 158 Stage 1.
+            a = emit_set_cacr(a, 32'h0000_0501);  // dcache_en|CED pulse
+            a = emit_set_cacr(a, 32'h0000_0101);  // back to just dcache_en
 
             rom[a[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
             a4 = a + 32'd4; a8 = a + 32'd8;
