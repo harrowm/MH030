@@ -7360,6 +7360,60 @@ expected to be the smallest remaining stage.
 
 ---
 
+## Phase 158 Stage 6 — CACR self-clearing bit readback masking
+
+### Goal
+
+Manual §6.3.1.3/6.3.1.4/6.3.1.8/6.3.1.9, all re-read directly: "The CD bit is
+always read as a zero" (and identically worded for CED/CI/CEI). §6.3.1 itself,
+also re-read for this stage: "Bits 31-14 and 7-5 are reserved for Motorola
+definition. They are currently read as zeros and are ignored when written" —
+a broader requirement than the plan's own original CD/CED/CI/CEI scope,
+found while re-confirming Figure 6-14's bit layout for this stage and folded
+in since it's the exact same masking mechanism. `rtl/eu_regfile.sv`'s
+`cacr_r`/`cacr_out` stored and returned the raw last-written value
+unconditionally — a `MOVEC CACR,Rn` read could observe a `1` in a
+self-clearing pulse bit, or in a reserved bit, neither of which real hardware
+ever shows.
+
+### Fix
+
+Deliberately **not** applied at `eu_regfile.sv`'s own `cacr_out` — that same
+signal is also `biu_cache_if.sv`/`biu_icache_if.sv`'s own live `cacr` input,
+which needs to observe the real, momentary `1` software just wrote into
+CD/CED/CI/CEI to fire the clear-trigger logic those two modules already
+implement (confirmed via `grep` before touching anything: masking `cacr_out`
+itself would have permanently broken cache-clearing, a real regression this
+stage's own re-grounding caught before it shipped). Instead, masked at the
+one and only consumption site of the MOVEC-readback value: `eu_seq.sv`'s
+`ctrl_reg_rd_val` mux (`12'h002` case, feeding `MOVEC CACR,Dn`), confirmed via
+`grep` to be `cacr_in`'s sole use in the file. `{18'h0, cacr_in[13:12], 2'b00,
+cacr_in[9:8], 3'h0, cacr_in[4], 2'b00, cacr_in[1:0]}` passes through only the
+real bits (WA/DBE/FD/ED/IBE/FI/EI) and forces everything else — bits 31-14,
+11, 10, 7-5, 3, 2 — to 0.
+
+### Tests
+
+New "D-12" test (`tb/cache_tb.sv`, appended after I-6, continuing the same
+placement convention): writes CACR with every one of bits 13:0 set to 1
+(`0x3FFF`), then reads it back via a new `MOVEC CACR,D6` (the read-direction
+form of the existing `emit_set_cacr()` helper's own write-direction opcode,
+`0x4E7A` vs `0x4E7B` — same extension-word format either way, confirmed
+before use) — expects `0x3313`, hand-derived (`write_val & keep_mask`,
+`keep_mask` = bits 13,12,9,8,4,1,0) and cross-checked with a standalone
+Python one-liner before writing the test, rather than trusted by eye. Passed
+cleanly on the first attempt, confirming the derivation.
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures (118 checks total at runtime, +1 this
+stage). `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12,
+full 124-suite Harte sweep (mandatory — `eu_seq.sv` changed) — PASS 702142,
+FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline. **Closes Stage 6.** Stage 7 (CIIN/CIOUT pins) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

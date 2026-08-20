@@ -218,6 +218,12 @@ module cache_tb;
     localparam MOVEC_D7_CACR  = 16'h7002;
     // MOVEC D7,CAAR: same opcode, ext word rc=0x802 (da=0,rn=7,rc=0x802).
     localparam MOVEC_D7_CAAR  = 16'h7802;
+    // MOVEC Rc,Dn (read control register into Dn): same shape as MOVEC_OP
+    // above with the direction bit flipped (0x4E7A vs 0x4E7B); the
+    // extension word format is identical either way (Phase 158 Stage 6).
+    localparam MOVEC_READ_OP  = 16'h4E7A;
+    // MOVEC CACR,D6: ext word = (da=0<<15)|(rn=6<<12)|rc(0x002).
+    localparam MOVEC_CACR_D6  = 16'h6002;
     // MOVE.W #imm,(A0): 00_11_ddd_mmm_MMM_rrr, size=11(word), dst
     // reg=A0(000), dst mode=(An)=010, src mode=111(imm), src reg=100(word
     // imm) -> 0011_000_010_111_100 = 0x30BC. One extension word (the
@@ -667,6 +673,23 @@ module cache_tb;
             rom[p[31:2]] = {JSR_A0_IND, NOP_OP};             // visit#1 (genuine miss, FI=1 -- never cached anyway)
             p = p + 32'd4;
             rom[p[31:2]] = {CLR_L_D5, JSR_A0_IND};           // clear D5 (settle before visit#2) ; visit#2
+            p = p + 32'd4;
+            rom[p[31:2]] = {NOP_OP, NOP_OP};
+            p = p + 32'd4;
+
+            // ---- D-12: CACR self-clearing bit readback masking, manual
+            // §6.3.1.3/6.3.1.4/6.3.1.8/6.3.1.9 + §6.3.1 itself (confirmed
+            // by direct re-read): "the CD/CED/CI/CEI bit is always read as
+            // a zero," and bits 31-14 + 7-5 are reserved, "currently read
+            // as zeros." Write every one of bits 13:0 to 1 (0x3FFF), then
+            // read CACR back via MOVEC CACR,D6 -- only the real bits
+            // (WA/DBE/FD/ED/IBE/FI/EI) should survive; expected 0x3313,
+            // hand-derived and cross-checked directly before writing this
+            // test (write_val & keep_mask where keep_mask has bits
+            // 13,12,9,8,4,1,0 set).
+            // ----
+            p = emit_set_cacr(p, 32'h0000_3FFF);
+            rom[p[31:2]] = {MOVEC_READ_OP, MOVEC_CACR_D6};   // MOVEC CACR,D6 -- read it back
             p = p + 32'd4;
             rom[p[31:2]] = {NOP_OP, NOP_OP};
             p = p + 32'd4;
@@ -1747,6 +1770,15 @@ module cache_tb;
             check32("I-6: G visit#2 (FI=1) executed correctly", u_top.u_eu.u_rf.d_reg[5], 32'd701);
             check("I-6: FI=1 -- visit#2 ALSO needed real bus activity (never cached, unlike I-1's own hit)",
                   c1 - c0 > 0);
+
+            // D-12: CACR self-clearing bit readback masking. D6 currently
+            // holds 701 (from I-6's own visit#2) -- unambiguous, never
+            // coincidentally 0x3313, so a direct single-phase wait is safe
+            // (no placeholder needed).
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'h0000_3313; t++)
+                @(posedge clk_4x);
+            check32("D-12: MOVEC CACR,D6 masks CD/CED/CI/CEI + reserved bits to 0",
+                    u_top.u_eu.u_rf.d_reg[6], 32'h0000_3313);
         end
 
         // ===================================================================

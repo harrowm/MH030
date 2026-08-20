@@ -772,7 +772,20 @@ module eu_seq (
         case (ext_data[11:0])
             12'h000: ctrl_reg_rd_val = {29'h0, sfc_in};
             12'h001: ctrl_reg_rd_val = {29'h0, dfc_in};
-            12'h002: ctrl_reg_rd_val = cacr_in;
+            // Phase 158 Stage 6: manual §6.3.1.3/6.3.1.4/6.3.1.8/6.3.1.9 +
+            // §6.3.1 itself (confirmed by direct re-read) -- CD/CED/CI/CEI
+            // (bits 11/10/3/2, the self-clearing "pulse" trigger bits) "are
+            // always read as a zero", and bits 31-14 + 7-5 are reserved,
+            // "currently read as zeros." This masks only the MOVEC-readback
+            // path -- cacr_in feeds *only* this mux (confirmed via grep,
+            // eu_seq.sv's only other CACR-shaped signal is the separate,
+            // deliberately-unmasked `cacr` input biu_cache_if.sv/
+            // biu_icache_if.sv read directly for their own CD/CED/CI/CEI
+            // clear-trigger detection -- masking that one instead would
+            // break the clear mechanism entirely, since it needs to
+            // observe the momentary 1 software just wrote).
+            12'h002: ctrl_reg_rd_val = {18'h0, cacr_in[13:12], 2'b00, cacr_in[9:8],
+                                         3'h0, cacr_in[4], 2'b00, cacr_in[1:0]};
             12'h800: ctrl_reg_rd_val = usp_in;
             12'h801: ctrl_reg_rd_val = vbr_in;
             12'h802: ctrl_reg_rd_val = caar_in;
