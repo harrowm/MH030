@@ -6942,6 +6942,95 @@ D-cache burst) is next.
 
 ---
 
+## Phase 158 Stage 4a — I-cache burst-enable (IBE) gating fix
+
+### Goal
+
+Manual §6.1.3.2 (p.6-15/6-16) + Figure 6-13's own bulleted list, confirmed by direct
+re-read: "Burst mode filling is enabled by bits in the cache control register... When
+burst filling is enabled *and the corresponding cache is enabled*..." and CBREQ# is
+explicitly *not* asserted when "Burst filling for the cache is not enabled." A prior
+version of `rtl/biu_icache_if.sv`'s own header comment claimed "IBE only ever meant
+'use burst pin protocol', not 'whether the cache fills'" — found during this plan's own
+re-verification pass (not from the original research fork) to directly contradict the
+manual. The real I-cache burst-filled unconditionally regardless of IBE (CACR bit 4)
+before this stage.
+
+### Fix
+
+`iburst_en = cacr[4]` gates the miss-dispatch decision in both `IC_IDLE` and `IC_XLATE`:
+`iburst_en=1` takes the existing `IC_BURST0` path (CBREQ# genuinely asserted) unchanged;
+`iburst_en=0` takes a **reinstated** `IC_SINGLE_0..3` sequence — 4 genuinely separate
+ordinary reads via the same `cg_req`/`cg_addr` port the disabled-cache bypass already
+uses, CBREQ# never asserted at all (distinct from the hardware-degraded case,
+`IC_FILL_1B/2B/3B`, where CBACK# was never asserted but CBREQ# still was — the manual's
+own distinction between "burst not requested" and "burst requested but unsupported").
+`IC_SINGLE_0..3` existed in an earlier version of this file (Steps 1-7 of the original
+cache-verification plan) before being replaced by the unconditional burst path; this
+stage reinstates the same shape.
+
+### Debugging: two real, previously-latent bugs found building this
+
+**Bug 1 (combinational-loop hazard)**: an initial draft drove `cg_req`/`cg_addr`
+combinationally from `case(state)` in the output block (matching how `IC_SINGLE_0..3`'s
+predecessor worked before the burst rewrite). This hung the simulator outright (30+s at
+100% CPU, zero output) on the very first I-cache miss — IBE resets to 0, so every
+existing test's first miss now routes through this path. Root cause: the exact Phase 128
+combinational-loop hazard already documented on `ic_burst_req_r`'s own declaration
+comment (`biu_sizing_fsm.sv`'s own header: "one cycle of latency, registered to break
+combinatorial loops with cycle_gen") — a state-machine-driven request into
+`biu_cycle_gen`'s ordinary `ifu_req`/`ifu_addr` port needs to come from a register, not
+a live `case(state)` computation. Fixed with new `cg_single_req_r`/`cg_single_addr_r`
+registers, mirroring `ic_burst_req_r`/`ic_burst_addr_r`'s own pattern exactly.
+
+**Bug 2 (stale-ack race, found after Bug 1's fix)**: with the hang gone, all four reads
+completed but returned wrong/stale data (`D5=00000000` instead of real values; `I-2`'s
+loaded registers all zero). Root-caused via direct cycle-counted signal tracing
+(`biu_cycle_gen.sv`'s own `state <= state_nxt` update is gated `if (phase_r==2'd3)` —
+i.e. its internal FSM only advances on 1 of every 4 `clk_4x` edges, the "4 ticks per
+external bus cycle" design from CLAUDE.md's own clock-strategy section): a combinational
+`ifu_ack` tied to `state==ST_READ_S7` genuinely reads high for 4 consecutive `clk_4x`
+edges, not 1. Reacting to raw `cg_ack` (as the first working draft did) re-triggered on
+every one of those 4 edges, racing through all 4 words within a single real S7 window
+with 3 of the 4 "acks" reading stale, repeated data — confirmed directly: `cg_rdata`
+stayed byte-identical across 3-4 consecutive state transitions before finally advancing
+to genuinely new data. `cg_ack_rise` — already declared in this file (`cg_ack &&
+!cg_ack_prev_r`), with a comment explicitly noting it "mirrors `biu_cache_if.sv`'s own
+`sf_ack_rise` technique" for exactly this reason — was already the intended tool for
+this, just not yet wired into `IC_SINGLE_0..3`'s own `cg_ack` checks. Switching all four
+states to `cg_ack_rise` fixed it with zero gap states needed, restoring the same
+continuous-hold-req-and-advance-address shape `IC_FILL_1B/2B/3B`'s own `ic_burst_addr_r`
+already uses successfully (which never hit this bug because `ic_burst_ack` is already a
+registered, genuinely-one-tick pulse from `biu_burst_ctrl.sv` itself, unlike raw
+`cg_ack`). An intermediate design using explicit 1-cycle gap states (deasserting
+`cg_single_req_r` between each of the 4 reads) was tried and also worked, but was
+reverted in favor of the simpler `cg_ack_rise` fix once the real root cause was
+understood.
+
+### Tests
+
+New sticky `ic_burst_req_seen_r` monitor in `tb/cache_tb.sv`, cleared at the start of
+I-1's own existing test block and checked after its cold-miss warm-up completes —
+proves the IBE=0 gating fix genuinely suppresses CBREQ# (I-1's own CACR value already
+sets `icache_en=1` with IBE left at 0, so this reuses its existing warm-up window rather
+than needing a new dedicated test). I-1 through I-5's own pre-existing checks (miss/hit
+correctness, aliasing/eviction, CACR flush, self-modifying code, BERR-mid-linefill) all
+continue to exercise the IBE=0 path unchanged, since none of them ever set IBE=1 — this
+stage's fix is what makes that path *correct* for the first time (previously silently
+bypassed by the always-burst behavior).
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures (69 checks, up from 68 — the one new
+`ic_burst_req_seen_r` check). `make test` 36/36, `make cosim_grp` 8/8, `make
+cosim_memind` 12/12, full 124-suite Harte sweep (mandatory — `biu_icache_if.sv`
+changed) — PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0, bit-identical to baseline (expected: Harte's own boot sequence never sets
+IBE=1, so its execution was already exercising the — now finally correct — IBE=0 path
+throughout). **Closes Stage 4a.** Stage 4b (write-allocate, WA) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

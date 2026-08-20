@@ -155,6 +155,14 @@ module cache_tb;
     int sim_ticks = 0;
     always_ff @(posedge clk_4x) sim_ticks <= sim_ticks + 1;
 
+    // Phase 158 Stage 4a: sticky CBREQ# monitor -- proves the IBE=0 gating
+    // fix genuinely suppresses burst requests (not just "happens to degrade
+    // to individual reads anyway"). Cleared at the start of I-1's own test
+    // block below, checked after its cold-miss warm-up completes.
+    logic ic_burst_req_seen_r = 1'b0;
+    always_ff @(posedge clk_4x)
+        if (u_top.u_biu.u_icache.ic_burst_req) ic_burst_req_seen_r <= 1'b1;
+
     // Data-space (fc=101) DS# assertion counter -- Step 5's own D-cache
     // counterpart of code_ds_count. Unlike the I-cache's IFU-driven
     // readahead, EU data accesses are purely demand-driven (issued exactly
@@ -492,7 +500,8 @@ module cache_tb;
         begin
             logic [31:0] next, n4, n8, n12;
             int c0, c1, c2, t;
-            next = emit_set_cacr(32'h0000_0100, 32'h0000_0001); // icache_en=1
+            ic_burst_req_seen_r = 1'b0;
+            next = emit_set_cacr(32'h0000_0100, 32'h0000_0001); // icache_en=1, IBE=0
             n4 = next + 32'd4; n8 = next + 32'd8; n12 = next + 32'd12;
             // D0 = 19 -> 20 total passes through the DBF instruction below
             // (falls straight through from the CACR setup, no jump needed).
@@ -523,6 +532,8 @@ module cache_tb;
                     c2 - c1, 32'd0);
             check("I-1: warm-up itself needed real bus activity (not a vacuously-true check)",
                   c1 > c0);
+            check("I-1: IBE=0 -- CBREQ#/ic_burst_req was never asserted for the cold-miss warm-up",
+                  !ic_burst_req_seen_r);
         end
 
         // ===================================================================

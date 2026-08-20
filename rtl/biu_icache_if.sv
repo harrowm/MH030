@@ -29,14 +29,20 @@
 // fetch the single word it's asking for). Earlier versions (Steps 1-7)
 // used 4 separate ordinary read cycles (IC_FILL_0..3 via cg_req) instead —
 // correct, but not pin-level-accurate to CLAUDE.md's own documented burst
-// cycle type; this closes that gap. The line is still marked valid
-// regardless of CACR's IBE (burst-enable) bit, same as before — IBE only
-// ever meant "use burst pin protocol", not "whether the cache fills", and
-// the degraded-fallback path above already handles the "no burst support"
-// case correctly regardless of IBE. This deliberately does NOT reproduce
-// biu_cache_if.sv's own D-cache-side quirk, where an I-cache miss with
-// IBE=0 falls through to a single-word fetch that never updates the I$
-// array at all.
+// cycle type; this closes that gap.
+//
+// Phase 158 Stage 4a: IBE (CACR bit 4) now genuinely gates whether CBREQ#
+// is ever asserted at all, per manual Figure 6-13 ("The processor does not
+// assert CBREQ if... burst filling for the cache is not enabled") — a
+// prior version of this comment claimed "IBE only ever meant 'use burst
+// pin protocol'", which does not match the manual and was corrected. When
+// IBE=0, a miss dispatches into a REINSTATED IC_SINGLE_0..3 sequence (4
+// separate ordinary reads via the same cg_req/cg_addr port the fully-
+// disabled bypass above already uses, otherwise idle whenever the cache is
+// enabled) instead of IC_BURST0 — genuinely never asserting CBREQ#, unlike
+// the hardware-degraded case (CBACK# never asserted, IC_FILL_1B/2B/3B),
+// which still asserts CBREQ# throughout per the manual's own distinction
+// between "burst not requested" and "burst requested but not supported".
 
 module biu_icache_if (
     input  logic        clk_4x,
@@ -126,7 +132,13 @@ module biu_icache_if (
 
     // CACR bit aliases (shared encoding with biu_cache_if.sv)
     wire icache_en = cacr[0];
-    // NOTE: cacr[4] (IBE) intentionally unused here — see header comment.
+    // Phase 158 Stage 4a: IBE now genuinely gates whether a burst is ever
+    // requested at all, per manual Figure 6-13's own CBREQ-suppression
+    // rule ("The processor does not assert CBREQ if... burst filling for
+    // the cache is not enabled") -- the header comment's own prior
+    // reasoning ("IBE only ever meant 'use burst pin protocol'") did not
+    // match the manual and has been corrected; see IC_SINGLE_0..3 below.
+    wire iburst_en = cacr[4];
 
     // Cache storage: 16 lines x 4 longwords x 32 bits = 256 bytes.
     // Phase 158 Stage 2: tag widened from 24 to 25 bits (addr[31:8] alone)
@@ -159,7 +171,14 @@ module biu_icache_if (
         IC_FILL_2B = 4'd4,   // degraded-fallback: word 2 individually
         IC_FILL_3B = 4'd5,   // degraded-fallback: word 3 individually
         IC_DONE    = 4'd6,
-        IC_XLATE   = 4'd7    // Phase 150, plan.md
+        IC_XLATE   = 4'd7,   // Phase 150, plan.md
+        // Phase 158 Stage 4a: IBE=0 path -- 4 genuinely separate ordinary
+        // reads via cg_req/cg_addr, CBREQ# never asserted at all (see
+        // header comment for the distinction from IC_FILL_1B/2B/3B above).
+        IC_SINGLE_0 = 4'd8,
+        IC_SINGLE_1 = 4'd9,
+        IC_SINGLE_2 = 4'd10,
+        IC_SINGLE_3 = 4'd11
     } ic_state_t;
     // BERR is signalled via a dedicated flag rather than a separate state,
     // since a BERR-vs-normal IC_DONE would otherwise be identical except
@@ -205,6 +224,16 @@ module biu_icache_if (
     // the burst request port, so it gets the same registered treatment.
     logic        ic_burst_req_r;
     logic [31:0] ic_burst_addr_r;
+    // Phase 158 Stage 4a: same reasoning applies identically to cg_req/
+    // cg_addr when driven from IC_SINGLE_0..3 -- the disabled-bypass case
+    // (cg_req=ifu_req directly) is safe because ifu_req is itself already
+    // registered at the IFU; a state-machine-driven cg_req here needs the
+    // same registered treatment as ic_burst_req_r above (found via a real
+    // hang: 30+ seconds of 100% CPU with zero output on the very first
+    // I-cache miss, since IBE resets to 0 so every existing test's own
+    // first miss now routes through this path).
+    logic        cg_single_req_r;
+    logic [31:0] cg_single_addr_r;
 
     wire [3:0]  idx  = ifu_addr[7:4];
     wire [1:0]  woff = ifu_addr[3:2];
@@ -226,6 +255,8 @@ module biu_icache_if (
             xlate_fault_r   <= 1'b0;
             ic_burst_req_r  <= 1'b0;
             ic_burst_addr_r <= 32'h0;
+            cg_single_req_r  <= 1'b0;
+            cg_single_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) valid_i[k] <= 1'b0;
         end else begin
             // CACR cache-clear operations (level-sensitive while asserted,
@@ -255,10 +286,16 @@ module biu_icache_if (
                             state <= IC_HIT;
                         end else if (tc_e) begin
                             state <= IC_XLATE;
-                        end else begin
+                        end else if (iburst_en) begin
                             state           <= IC_BURST0;
                             ic_burst_req_r  <= 1'b1;
                             ic_burst_addr_r <= {ifu_addr[31:4], 4'h0};
+                        end else begin
+                            // Phase 158 Stage 4a: IBE=0 -- never assert
+                            // CBREQ# at all.
+                            state            <= IC_SINGLE_0;
+                            cg_single_req_r  <= 1'b1;
+                            cg_single_addr_r <= {ifu_addr[31:4], 4'h0};
                         end
                     end
                 end
@@ -282,9 +319,15 @@ module biu_icache_if (
                         state         <= IC_DONE;
                     end else if (xl_hit || xl_walk_done) begin
                         fill_base_r     <= {xl_pa[31:4], 4'h0};
-                        ic_burst_req_r  <= 1'b1;
-                        ic_burst_addr_r <= {xl_pa[31:4], 4'h0};
-                        state           <= IC_BURST0;
+                        if (iburst_en) begin
+                            ic_burst_req_r  <= 1'b1;
+                            ic_burst_addr_r <= {xl_pa[31:4], 4'h0};
+                            state           <= IC_BURST0;
+                        end else begin
+                            state            <= IC_SINGLE_0;
+                            cg_single_req_r  <= 1'b1;
+                            cg_single_addr_r <= {xl_pa[31:4], 4'h0};
+                        end
                     end
                 end
 
@@ -375,6 +418,89 @@ module biu_icache_if (
                     end
                 end
 
+                // Phase 158 Stage 4a: IBE=0 path -- 4 genuinely separate
+                // ordinary reads via cg_req/cg_addr (driven in the output
+                // block below), CBREQ# never asserted. Same per-word data
+                // capture and tag/valid-on-last-word shape as
+                // IC_BURST0/IC_FILL_1B/2B/3B above, just addressed off
+                // fill_base_r directly instead of ic_burst_addr_r.
+                // Root cause of the earlier stale-repeat bug (found via
+                // direct cycle-counted tracing, see the "phase_r==2'd3"
+                // discovery below): biu_cycle_gen only advances its own
+                // internal state on 1 of every 4 clk_4x edges (the "4 ticks
+                // per external bus cycle" design), so a combinational
+                // ifu_ack tied to state==ST_READ_S7 genuinely reads high for
+                // 4 consecutive clk_4x edges, not 1 -- reacting to raw
+                // cg_ack (as an earlier draft did) re-triggered on every one
+                // of those 4 edges, racing ahead through all 4 words in a
+                // single real S7 window with 3 of the 4 "acks" reading
+                // stale/repeated data. cg_ack_rise (declared above,
+                // mirroring biu_cache_if.sv's own sf_ack_rise for the
+                // identical reason) fixes it with no gap states needed --
+                // same continuous-hold-req-and-advance-address shape as
+                // IC_FILL_1B/2B/3B's own ic_burst_addr_r above, which never
+                // hit this because ic_burst_ack is already a registered,
+                // genuinely-one-tick pulse from biu_burst_ctrl.sv itself.
+                IC_SINGLE_0: begin
+                    if (!same_req) abandoned_r <= 1'b1;
+                    if (cg_ack_rise) begin
+                        data_i[idx_r][0] <= cg_rdata;
+                        if (woff_r == 2'd0) fill_rdata_r <= cg_rdata;
+                        state            <= IC_SINGLE_1;
+                        cg_single_addr_r <= fill_base_r + 32'd4;
+                        // cg_single_req_r stays asserted for the next request.
+                    end else if (cg_berr) begin
+                        berr_r           <= 1'b1;
+                        xlate_fault_r    <= 1'b0;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end
+                end
+                IC_SINGLE_1: begin
+                    if (!same_req) abandoned_r <= 1'b1;
+                    if (cg_ack_rise) begin
+                        data_i[idx_r][1] <= cg_rdata;
+                        if (woff_r == 2'd1) fill_rdata_r <= cg_rdata;
+                        state            <= IC_SINGLE_2;
+                        cg_single_addr_r <= fill_base_r + 32'd8;
+                    end else if (cg_berr) begin
+                        berr_r           <= 1'b1;
+                        xlate_fault_r    <= 1'b0;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end
+                end
+                IC_SINGLE_2: begin
+                    if (!same_req) abandoned_r <= 1'b1;
+                    if (cg_ack_rise) begin
+                        data_i[idx_r][2] <= cg_rdata;
+                        if (woff_r == 2'd2) fill_rdata_r <= cg_rdata;
+                        state            <= IC_SINGLE_3;
+                        cg_single_addr_r <= fill_base_r + 32'd12;
+                    end else if (cg_berr) begin
+                        berr_r           <= 1'b1;
+                        xlate_fault_r    <= 1'b0;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end
+                end
+                IC_SINGLE_3: begin
+                    if (!same_req) abandoned_r <= 1'b1;
+                    if (cg_ack_rise) begin
+                        data_i[idx_r][3] <= cg_rdata;
+                        if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
+                        tag_i[idx_r]     <= vtag_r;
+                        valid_i[idx_r]   <= 1'b1;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end else if (cg_berr) begin
+                        berr_r           <= 1'b1;
+                        xlate_fault_r    <= 1'b0;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end
+                end
+
                 IC_DONE: begin
                     berr_r        <= 1'b0;
                     abandoned_r   <= 1'b0;
@@ -422,8 +548,19 @@ module biu_icache_if (
             ic_burst_req  = 1'b0;
             ic_burst_addr = 32'h0;
         end else begin
-            cg_addr       = 32'h0;
-            cg_req        = 1'b0;
+            // Phase 158 Stage 4a: cg_req/cg_addr, like ic_burst_req/addr
+            // above, must come from registers (cg_single_req_r/addr_r) while
+            // the cache is enabled -- an earlier draft drove them
+            // combinationally per-state here (case(state): cg_req=1;
+            // cg_addr=fill_base_r+offset), which reproduced the exact Phase
+            // 128 combinational-loop hazard documented on ic_burst_req_r's
+            // own declaration comment (hung biu_cycle_gen's S6->S7
+            // transition on the very first real single-word-fallback fetch).
+            // The disabled-bypass branch above can stay combinational since
+            // there cg_req/addr just mirror the raw ifu_req/addr inputs
+            // directly, not a locally-computed case(state) value.
+            cg_addr       = cg_single_addr_r;
+            cg_req        = cg_single_req_r;
             ic_burst_req  = ic_burst_req_r;
             ic_burst_addr = ic_burst_addr_r;
             ifu_rdata     = 32'h0;
