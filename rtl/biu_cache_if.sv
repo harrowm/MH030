@@ -46,6 +46,25 @@ module biu_cache_if (
     input  logic        sf_ack,    // 1-tick pulse from sizing_fsm SS_DONE
     input  logic        sf_berr,
 
+    // Phase 158 Stage 4c: D-cache burst-linefill request, muxed by
+    // m68030_biu.sv into biu_cycle_gen's own eu_burst_req/addr/fc port --
+    // same mechanism biu_icache_if.sv's own ic_burst_req already uses
+    // (Phase 127 cache plan Step 8), just a second, D-side client sharing
+    // it. FC is fixed at the caller to fc_r (this access's own real FC),
+    // matching sf_fc's own convention above -- unlike the I-side, which
+    // hardcodes Supervisor Program Space, the D-side already threads real
+    // FC through everywhere else in this module.
+    output logic         dc_burst_req,
+    output logic [31:0]  dc_burst_addr,
+    output logic [2:0]   dc_burst_fc,
+    input  logic [31:0]  dc_burst_rdata0,
+    input  logic [31:0]  dc_burst_rdata1,
+    input  logic [31:0]  dc_burst_rdata2,
+    input  logic [31:0]  dc_burst_rdata3,
+    input  logic [1:0]   dc_burst_beat,   // beat reached when dc_burst_ack fires (3=full, 0=degraded)
+    input  logic         dc_burst_ack,
+    input  logic         dc_burst_berr,
+
     // Control registers (written by EU via MOVEC)
     input  logic [31:0] cacr,
     input  logic [31:0] caar,
@@ -107,6 +126,7 @@ module biu_cache_if (
     wire iburst_en = cacr[4];
     wire dcache_en = cacr[8];
     wire wa_en     = cacr[13];
+    wire dburst_en = cacr[12];
 
     // Cache storage arrays
     // Phase 158 Stage 2: tag width widened from 24 to 27 bits (was
@@ -219,7 +239,18 @@ module biu_cache_if (
         CI_WRITE  = 4'd7,
         CI_DONE   = 4'd8,
         CI_BERR   = 4'd9,
-        CI_XLATE  = 4'd10   // Phase 150, plan.md
+        CI_XLATE  = 4'd10,  // Phase 150, plan.md
+        // Phase 158 Stage 4c: DBE=1 D-cache burst linefill -- same
+        // full-burst-vs-degraded-fallback shape as biu_icache_if.sv's own
+        // IC_BURST0/IC_FILL_1B/2B/3B, applied to data_d/tag_d/valid_d
+        // instead of the I-side arrays. Unlike CI_D_MISS (which only ever
+        // fetches and validates the ONE word slot actually requested), a
+        // burst fetches and validates the WHOLE line, matching real 68030
+        // hardware's own line-fill semantics for a burst-capable miss.
+        CI_D_BURST0  = 4'd11,
+        CI_D_FILL_1B = 4'd12,
+        CI_D_FILL_2B = 4'd13,
+        CI_D_FILL_3B = 4'd14
     } ci_state_t;
 
     ci_state_t state;
@@ -238,6 +269,16 @@ module biu_cache_if (
                                  // from CI_XLATE (pure translation/WP fault,
                                  // no real bus error) from one entered via a
                                  // genuine sf_berr elsewhere
+
+    // Phase 158 Stage 4c: dc_burst_req/addr must come from registers, not a
+    // combinational case(state) computation -- the exact Phase 128 hazard
+    // biu_icache_if.sv's own ic_burst_req_r declaration comment documents
+    // (a state-machine-driven request into biu_cycle_gen needs one cycle of
+    // registered latency to avoid a combinatorial loop) applies identically
+    // here, so this is built registered from the start rather than
+    // repeating that discovery.
+    logic        dc_burst_req_r;
+    logic [31:0] dc_burst_addr_r;
 
     // Combinatorial hit detection (in CI_IDLE, before latching)
     wire [3:0]  idx  = eu_addr[7:4];
@@ -290,6 +331,8 @@ module biu_cache_if (
             state       <= CI_IDLE;
             fill_rdata_r <= 32'h0;
             xlate_fault_r <= 1'b0;
+            dc_burst_req_r  <= 1'b0;
+            dc_burst_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) begin
                 valid_i[k] <= 1'b0;
                 for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0;
@@ -335,6 +378,20 @@ module biu_cache_if (
                             state <= CI_WRITE;
                         end else if (eu_is_icache && icache_en && iburst_en) begin
                             state <= CI_FILL_0;
+                        end else if (!eu_is_icache && dcache_en && dburst_en && !mmu_ci && d_size_ok) begin
+                            // Phase 158 Stage 4c: DBE=1 -- genuine burst
+                            // linefill instead of CI_D_MISS's own
+                            // single-longword fill. Gated on d_size_ok (not
+                            // d_size_ok_r -- addr_r isn't latched yet this
+                            // cycle) for the same reason CI_D_MISS's own
+                            // cache-populate branch is: a misaligned
+                            // long-word access already permanently bypasses
+                            // the D-cache entirely (Phase 134's own
+                            // single-slot-model boundary), so it must not
+                            // start a burst either.
+                            state           <= CI_D_BURST0;
+                            dc_burst_req_r  <= 1'b1;
+                            dc_burst_addr_r <= {eu_addr[31:4], 4'h0};
                         end else begin
                             state <= CI_D_MISS;
                         end
@@ -377,6 +434,13 @@ module biu_cache_if (
                             state <= CI_WRITE;
                         end else if (is_icache_r && icache_en && iburst_en) begin
                             state <= CI_FILL_0;
+                        end else if (!is_icache_r && dcache_en && dburst_en && !mmu_ci && d_size_ok_r) begin
+                            // Phase 158 Stage 4c: same DBE-gated burst
+                            // dispatch as CI_IDLE's own branch above, for
+                            // the post-translation case.
+                            state           <= CI_D_BURST0;
+                            dc_burst_req_r  <= 1'b1;
+                            dc_burst_addr_r <= {xl_pa[31:4], 4'h0};
                         end else begin
                             state <= CI_D_MISS;
                         end
@@ -484,6 +548,92 @@ module biu_cache_if (
                     end
                 end
 
+                // Phase 158 Stage 4c: DBE=1 burst linefill -- same shape as
+                // biu_icache_if.sv's own IC_BURST0/IC_FILL_1B/2B/3B (see
+                // that module's own comments for the full CBREQ#/CBACK#
+                // protocol description), applied to data_d/tag_d/valid_d.
+                // Unlike CI_D_MISS, every path through here ends up
+                // fetching and validating the WHOLE line (all 4 words),
+                // matching real hardware's own burst-fill semantics --
+                // tag/valid are replaced unconditionally, not gated on
+                // whether the old tag matched, since a burst always
+                // represents a genuine full-line fill.
+                CI_D_BURST0: begin
+                    if (dc_burst_ack) begin
+                        if (dc_burst_beat == 2'd3) begin
+                            // Full 4-beat burst: CBACK# was asserted, all
+                            // four words arrived in this one request.
+                            data_d[idx_r][0] <= dc_burst_rdata0;
+                            data_d[idx_r][1] <= dc_burst_rdata1;
+                            data_d[idx_r][2] <= dc_burst_rdata2;
+                            data_d[idx_r][3] <= dc_burst_rdata3;
+                            case (woff_r)
+                                2'd0: fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                                2'd1: fill_rdata_r <= extract_rd(dc_burst_rdata1, siz_r, addr_r[1:0]);
+                                2'd2: fill_rdata_r <= extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
+                                2'd3: fill_rdata_r <= extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
+                            endcase
+                            tag_d[idx_r] <= vtag_r;
+                            for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
+                            state          <= CI_DONE;
+                            dc_burst_req_r <= 1'b0;
+                        end else begin
+                            // Degraded: CBACK# never asserted, only word 0
+                            // (this request's own beat 0) actually arrived —
+                            // fall back to individually re-requesting the
+                            // remaining three words.
+                            data_d[idx_r][0] <= dc_burst_rdata0;
+                            if (woff_r == 2'd0) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                            state           <= CI_D_FILL_1B;
+                            dc_burst_addr_r <= fill_base_r + 32'd4;
+                            // dc_burst_req_r stays asserted for the next request.
+                        end
+                    end else if (dc_burst_berr) begin
+                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
+                        state          <= CI_BERR;
+                        dc_burst_req_r <= 1'b0;
+                    end
+                end
+
+                CI_D_FILL_1B: begin
+                    if (dc_burst_ack) begin
+                        data_d[idx_r][1] <= dc_burst_rdata0;
+                        if (woff_r == 2'd1) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        state           <= CI_D_FILL_2B;
+                        dc_burst_addr_r <= fill_base_r + 32'd8;
+                    end else if (dc_burst_berr) begin
+                        xlate_fault_r  <= 1'b0;
+                        state          <= CI_BERR;
+                        dc_burst_req_r <= 1'b0;
+                    end
+                end
+                CI_D_FILL_2B: begin
+                    if (dc_burst_ack) begin
+                        data_d[idx_r][2] <= dc_burst_rdata0;
+                        if (woff_r == 2'd2) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        state           <= CI_D_FILL_3B;
+                        dc_burst_addr_r <= fill_base_r + 32'd12;
+                    end else if (dc_burst_berr) begin
+                        xlate_fault_r  <= 1'b0;
+                        state          <= CI_BERR;
+                        dc_burst_req_r <= 1'b0;
+                    end
+                end
+                CI_D_FILL_3B: begin
+                    if (dc_burst_ack) begin
+                        data_d[idx_r][3] <= dc_burst_rdata0;
+                        if (woff_r == 2'd3) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        tag_d[idx_r] <= vtag_r;
+                        for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
+                        state          <= CI_DONE;
+                        dc_burst_req_r <= 1'b0;
+                    end else if (dc_burst_berr) begin
+                        xlate_fault_r  <= 1'b0;
+                        state          <= CI_BERR;
+                        dc_burst_req_r <= 1'b0;
+                    end
+                end
+
                 CI_WRITE: begin
                     if (sf_ack_rise) begin
                         // Write-through: if D-cache hit, update cache line
@@ -565,6 +715,13 @@ module biu_cache_if (
         sf_wdata = wdata_r;
         sf_is_op = 1'b0;
         sf_req   = 1'b0;
+
+        // Phase 158 Stage 4c: driven unconditionally from the registered
+        // dc_burst_req_r/addr_r (see their own declaration comment for why
+        // this can't be a combinational case(state) computation instead).
+        dc_burst_req  = dc_burst_req_r;
+        dc_burst_addr = dc_burst_addr_r;
+        dc_burst_fc   = fc_r;
 
         // Phase 150 (plan.md): MMU translation request, defaults
         xl_va  = addr_r;

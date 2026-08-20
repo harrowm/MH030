@@ -163,6 +163,14 @@ module cache_tb;
     always_ff @(posedge clk_4x)
         if (u_top.u_biu.u_icache.ic_burst_req) ic_burst_req_seen_r <= 1'b1;
 
+    // Phase 158 Stage 4c: same shape, inverted -- proves D-10's own DBE=1
+    // read genuinely used the real burst port (dc_burst_req), not just
+    // "happened to fill the whole line some other way." Cleared at the
+    // start of D-10's own test, checked after its burst-miss read.
+    logic dc_burst_req_seen_r = 1'b0;
+    always_ff @(posedge clk_4x)
+        if (u_top.u_biu.u_cache.dc_burst_req) dc_burst_req_seen_r <= 1'b1;
+
     // Data-space (fc=101) DS# assertion counter -- Step 5's own D-cache
     // counterpart of code_ds_count. Unlike the I-cache's IFU-driven
     // readahead, EU data accesses are purely demand-driven (issued exactly
@@ -416,6 +424,14 @@ module cache_tb;
         rom[16'h2D00/4] = 32'hDDDD_2222;  // T4  (idx=D, tag=0x2D -- D-6's own BERR-mid-write target)
         rom[16'h2F00/4] = 32'h1111_1111;  // E   (idx=F, tag=0x2F -- Phase 158 Stage 3: RMW forced-miss)
         rom[16'h2E08/4] = 32'h0000_0000;  // W3+8 (Phase 158 Stage 4b: sub-long-word write-allocation target -- must be a known value, not X, so the post-write longword re-read has a well-defined lower half)
+        // W4 (Phase 158 Stage 4c: DBE burst-fill target) -- a fresh 16-byte
+        // line, 4 distinct known values so a wrong-word bug (e.g. off-by-
+        // one beat) would show up as a visibly wrong value, not a
+        // coincidental match.
+        rom[16'h3000/4] = 32'h1111_2222;  // W4   (woff=0, the requested word)
+        rom[16'h3004/4] = 32'h3333_4444;  // W4+4 (woff=1)
+        rom[16'h3008/4] = 32'h5555_6666;  // W4+8 (woff=2)
+        rom[16'h300C/4] = 32'h7777_8888;  // W4+C (woff=3, the whole-line-fill proof target)
 
         // D-5's own two independent handlers, one per fault -- an earlier
         // draft used ONE shared handler plus a register-indirect
@@ -549,6 +565,45 @@ module cache_tb;
             p = p + 32'd12;
             rom[p[31:2]] = {NOP_OP, NOP_OP};                 // re-read W3+8 (must MISS again)
             p = p + 32'd4;
+
+            // ---- D-10: DBE-gated D-cache burst fill (manual §6.1.3.2,
+            // Phase 158 Stage 4c). W4=0x3000, a genuinely fresh 16-byte
+            // line never touched before. The distinguishing proof vs.
+            // CI_D_MISS's own single-word-only fill: a *different* word
+            // offset within the *same* line, never independently fetched,
+            // must also come back a HIT afterward -- only a real
+            // whole-line burst (or its degraded individual-refetch
+            // fallback, not reachable in this testbench since cback_n is
+            // hardwired asserted, see its own module-level comment) fills
+            // all four words at once. Same D6/D7-placeholder pattern as
+            // D-9's own check for the identical "testbench check code can
+            // start polling before hardware reaches this test's own ROM"
+            // hazard that test found -- placed AFTER emit_set_cacr this
+            // time (unlike D-9's own, which places it before): emit_set_cacr
+            // always uses D7 as its own internal scratch, so a D7 placeholder
+            // written before it would be immediately clobbered by the
+            // MOVEC sequence's own MOVE.L #value,D7 and never actually seen
+            // by this test's own D7 checkpoint -- D-9's own D6 checkpoint
+            // never hit this because emit_set_cacr never touches D6.
+            // ----
+            p = emit_set_cacr(p, 32'h0000_1100);             // DBE=1 | dcache_en=1
+            rom[p[31:2]]  = {MOVE_L_IMM_D6, 16'hFFFF};
+            p4 = p + 32'd4; p8 = p + 32'd8;
+            rom[p4[31:2]] = {16'hFFFF, MOVE_L_IMM_D7};
+            rom[p8[31:2]] = {16'hFFFF, 16'hFFFF};            // D6=D7=0xFFFFFFFF placeholder
+            p = p + 32'd12;
+            rom[p[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            p4 = p + 32'd4; p8 = p + 32'd8;
+            rom[p4[31:2]] = {16'h3000, CLR_L_D6};
+            rom[p8[31:2]] = {MOVE_L_A0_D6, MOVEA_L_IMM_A0};  // burst-miss read W4 ; A0 = W4+12 (woff=3)
+            p = p + 32'd12;
+            rom[p[31:2]] = {16'h0000, 16'h300C};
+            p4 = p + 32'd4;
+            rom[p4[31:2]] = {CLR_L_D7, MOVE_L_A0_D7};        // re-read at a DIFFERENT offset (must HIT)
+            p = p + 32'd8;
+            rom[p[31:2]] = {NOP_OP, NOP_OP};
+            p = p + 32'd4;
+
             p = emit_set_cacr(p, 32'h0000_0100);             // back to WA=0 | dcache_en=1
             rom[p[31:2]] = {JMP_ABS_L_OP, 16'h0000};
             p4 = p + 32'd4;
@@ -1527,6 +1582,38 @@ module cache_tb;
                     u_top.u_eu.u_rf.d_reg[7], 32'hCCDD_0000);
             check("D-9: sub-long-word write-miss (WA=1) did NOT allocate -- re-read needed a real bus cycle",
                   c1 - c0 > 0);
+
+            // D-10: DBE-gated D-cache burst fill (manual §6.1.3.2). Same
+            // 3-phase placeholder-synchronized wait pattern as D-9's own
+            // check, for the identical "testbench check code can start
+            // polling before hardware reaches this test's own ROM" hazard.
+            dc_burst_req_seen_r = 1'b0;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hFFFF_FFFF; t++)
+                @(posedge clk_4x);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'h1111_2222; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-10: W4 burst-miss read landed the correct value",
+                    u_top.u_eu.u_rf.d_reg[6], 32'h1111_2222);
+            check("D-10: W4 burst-miss read needed real bus activity",
+                  c1 - c0 > 0);
+            check("D-10: the read genuinely used the real burst port (dc_burst_req)",
+                  dc_burst_req_seen_r);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'hFFFF_FFFF; t++)
+                @(posedge clk_4x);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'h7777_8888; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-10: W4+C (different offset, same line, never independently fetched) loaded correctly",
+                    u_top.u_eu.u_rf.d_reg[7], 32'h7777_8888);
+            check32("D-10: W4+C came from the SAME burst fill -- re-read at a different offset cost 0 bus cycles",
+                    c1 - c0, 32'd0);
         end
 
         // ===================================================================

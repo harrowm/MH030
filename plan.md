@@ -7150,6 +7150,122 @@ largest remaining implementation stage in this plan.
 
 ---
 
+## Phase 158 Stage 4c — DBE-gated D-cache burst fill
+
+### Goal
+
+Manual §6.1.3.2 BURST MODE FILLING (p.6-15/6-16, re-read directly): "The data
+burst enable bit must be set to enable burst filling of the data cache...
+When burst filling is enabled and the corresponding cache is enabled, the bus
+controller requests a burst mode fill operation" on a read-cycle miss (tag
+mismatch, or tag matches but all four words are invalid). CBACK# causes the
+processor to "continue driving the address and control signals and to latch a
+new data value for the next cache entry... for a total of up to four cycles
+(until four long words have been read)" — i.e. a successful burst fills and
+validates the *entire line*, not just the requested word. Before this stage,
+every D-cache read-miss (`CI_D_MISS`) fetched and validated only the single
+word slot actually requested (correct per-instance, matching real hardware's
+own *non-burst* single-entry-mode behavior, but never the burst path itself) —
+`cacr[12]` (DBE) was a pure no-op.
+
+### Fix
+
+New `dburst_en = cacr[12]` alias; new `dc_burst_req`/`dc_burst_addr`/
+`dc_burst_fc` output ports and `dc_burst_rdata0..3`/`dc_burst_beat`/
+`dc_burst_ack`/`dc_burst_berr` input ports on `biu_cache_if.sv`, mirroring
+`biu_icache_if.sv`'s own already-proven `ic_burst_*` shape (Phase 127 Step 8/
+Phase 136) exactly — including building `dc_burst_req`/`addr` as *registered*
+outputs from the start (`dc_burst_req_r`/`dc_burst_addr_r`), rather than
+rediscovering the Phase 128 combinational-loop hazard Stage 4a's own I-cache
+work hit and fixed for the identical shape. Four new states — `CI_D_BURST0`/
+`CI_D_FILL_1B`/`CI_D_FILL_2B`/`CI_D_FILL_3B` — mirror `IC_BURST0`/
+`IC_FILL_1B/2B/3B` precisely: a full 4-beat burst (CBACK# asserted) validates
+all four `data_d`/`valid_d[idx_r]` slots and replaces `tag_d[idx_r]`
+unconditionally in one shot; a degraded fallback (CBACK# never asserted)
+individually re-requests the remaining three words but still ends up
+validating the whole line by the time `CI_D_FILL_3B` completes. `CI_IDLE`'s
+and `CI_XLATE`'s own dispatch logic each gained one new `else if` branch
+(`dcache_en && dburst_en && !mmu_ci && d_size_ok[_r]`) selecting `CI_D_BURST0`
+over the existing `CI_D_MISS` fallback — deliberately reusing the exact same
+three-way gate (`dcache_en`/`!mmu_ci`/`d_size_ok[_r]`) `CI_D_MISS`'s own
+cache-populate branch already uses, so a misaligned long-word access (already
+permanently excluded from the D-cache by Phase 134's single-slot-model
+boundary) never starts a burst either.
+
+`rtl/m68030_biu.sv`: `dc_burst_req` joins the existing `cg_burst_req_mux`
+(shared with the external `eu_burst_req` port and `ic_burst_req`) as a third
+tier — `eu_burst_req` (highest) > `dc_burst_req` (gated on `grant_eu`) >
+`ic_burst_req` (gated on `grant_ifu`) — matching this project's own documented
+EU>IFU arbiter priority, since the D-cache is part of the EU's own data path.
+`u_arb`'s own `eu_req` input widened to `sf_cyc_req | dc_burst_req`, mirroring
+exactly why `ifu_req` already needed `ic_cg_req | ic_burst_req` (Phase 127's
+own real, found-by-tracing bug: an unarbitrated burst request can silently
+starve a simultaneously-pending, genuinely higher-priority ordinary access).
+`dc_burst_rdata0..3`/`dc_burst_beat`/`dc_burst_ack`/`dc_burst_berr` are wired
+to the exact same shared bus-level response signals `ic_burst_*` already
+uses — safe since only one client is ever actually active at a time (mutual
+exclusion via the arbiter/mux above), not per-client demuxing.
+
+Found a genuine `dc_burst_fc` gap while wiring the mux: unlike the I-side
+(which hardcodes Supervisor Program Space FC for every fetch, a known,
+documented, separate chip-wide limitation — see Stage 2's own writeup),
+`biu_cache_if.sv` already threads real FC (`fc_r`) through everywhere else —
+added `dc_burst_fc = fc_r` so the burst cycle uses the access's own genuine
+FC rather than a hardcoded constant, avoiding a *new* regression the I-side's
+own existing limitation doesn't excuse.
+
+`tb/biu_tb.sv`'s own direct `biu_cache_if` instantiation needed the new ports
+tied off (unused outputs left unconnected, inputs tied to 0/constants) —
+found and fixed a **pre-existing, unrelated gap** while touching this same
+instantiation: Stage 3's own `mem_rmw_lookup` input had never been connected
+here at all, left floating (a real X-propagation risk into `dhit`'s own
+`!mem_rmw_lookup` term, apparently never manifesting since this testbench's
+own RMW-shaped tests don't exercise the D-cache lookup path) — tied to `1'b0`
+alongside the new Stage 4c ports.
+
+### Tests
+
+New "D-10" test (`tb/cache_tb.sv`, appended after D-9 at the same relocated
+fixed ROM address, sharing its own established reasoning for avoiding the
+fragile D-4b/D-5 insertion zone): a genuinely fresh 16-byte line (W4=0x3000)
+with 4 distinct pre-populated values, CACR set to DBE=1|dcache_en=1. The
+decisive proof, matching the I-cache's own equivalent tests: after a burst-miss
+read of the first word, a read at a *different* word offset in the *same*
+line — never independently fetched — must also come back a HIT (0 bus
+cycles), which only a genuine whole-line fill (burst, or its degraded
+fallback) can produce; `CI_D_MISS`'s own single-word-only fill could not pass
+this check. A new sticky `dc_burst_req_seen_r` monitor additionally confirms
+the real burst port was genuinely used, not just "happened to fill the whole
+line some other way." The degraded (CBACK#-never-asserted) fallback path
+isn't reachable in this testbench (`cback_n` is hardwired asserted, matching
+the same pre-existing limitation the I-cache's own tests inherited) —
+documented, not fixed, since the fallback states mirror the I-cache's own
+already-validated shape exactly.
+
+Found and fixed **one real testbench bug** while building this — the same
+"testbench check code can start polling before hardware reaches this test's
+own ROM" class D-9 already hit, but with a new twist: D-10's own D6/D7
+placeholder-preload (0xFFFFFFFF, written to synchronize the check code before
+trusting a later "==0" transition) was initially placed *before*
+`emit_set_cacr`'s own call — but `emit_set_cacr` always uses D7 as its own
+internal scratch register (`MOVE.L #value,D7 ; MOVEC D7,CACR`), so a D7
+placeholder written before it is immediately clobbered and never actually
+observed by this test's own D7 checkpoint, which then hung for its full
+20000-cycle budget waiting for a value that would never reappear (D-9's own
+D6 placeholder never hit this, since `emit_set_cacr` never touches D6). Fixed
+by moving the placeholder writes to *after* `emit_set_cacr`.
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures (78 checks, up from 73). `make test`
+36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (mandatory — `biu_cache_if.sv`/`m68030_biu.sv` changed) — PASS 702142,
+FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline (expected: Harte never sets DBE). **Closes Stage 4c — the entire
+Stage 4 (IBE/WA/DBE) is now complete.** Stage 5 (Freeze, FD/FI) is next.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

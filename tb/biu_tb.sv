@@ -582,10 +582,32 @@ module biu_tb;
         .eu_wdata    (eu_wdata_tb),
         .eu_req      (use_cache ? eu_req_tb : 1'b0),
         .eu_is_icache(eu_is_icache_tb),
+        // Phase 158 Stage 3: was left unconnected (pre-existing gap, found
+        // and fixed while touching this same instantiation for Stage 4c) --
+        // an unconnected input floats X, risking X-propagation into dhit's
+        // own !mem_rmw_lookup term; this testbench's own RMW-shaped tests
+        // (TAS etc.) don't exercise the D-cache lookup path, which is
+        // presumably why this went unnoticed, but it should still be tied
+        // off like every other unused input here.
+        .mem_rmw_lookup(1'b0),
         .eu_rdata    (cache_eu_rdata),
         .eu_ack      (cache_eu_ack),
         .eu_berr     (cache_eu_berr),
         .mmu_ci      (mmu_ci_out),
+        // Phase 158 Stage 4c: new D-cache burst-linefill port. This
+        // testbench never sets DBE (CACR bit 12), so CI_D_BURST0 is never
+        // reached -- tied off the same way the pre-existing MMU xl_*
+        // ports above are for tests that don't exercise them.
+        .dc_burst_req    (),
+        .dc_burst_addr   (),
+        .dc_burst_fc     (),
+        .dc_burst_rdata0 (32'h0),
+        .dc_burst_rdata1 (32'h0),
+        .dc_burst_rdata2 (32'h0),
+        .dc_burst_rdata3 (32'h0),
+        .dc_burst_beat   (2'b00),
+        .dc_burst_ack    (1'b0),
+        .dc_burst_berr   (1'b0),
         .sf_addr     (ca_sf_addr),
         .sf_fc       (ca_sf_fc),
         .sf_rw       (ca_sf_rw),

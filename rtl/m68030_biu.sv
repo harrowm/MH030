@@ -327,6 +327,15 @@ module m68030_biu #(
     // in this file, which tolerate forward references).
     logic        ic_burst_req;
     logic [31:0] ic_burst_addr;
+    // Phase 158 Stage 4c: biu_cache_if's own D-side burst-linefill request,
+    // same declared-early-for-arbiter-port-refs reasoning as ic_burst_req
+    // above.
+    logic        dc_burst_req;
+    logic [31:0] dc_burst_addr;
+    logic [2:0]  dc_burst_fc;
+    // cg_eu_burst_beat also needs early declaration -- both u_cache (below)
+    // and u_icache (later) reference it in their own port connections.
+    logic [1:0]  cg_eu_burst_beat;
     // Sizing FSM → cycle_gen EU port (also drives arbiter eu_req)
     logic sf_cyc_req;
     logic [31:0] sf_cyc_addr, sf_cyc_wdata;
@@ -385,7 +394,15 @@ module m68030_biu #(
         .clk_4x    (clk_4x),
         .rst_n     (rst_n),
         .mmu_req   (mmu_walk_req),
-        .eu_req    (sf_cyc_req),
+        // sf_cyc_req | dc_burst_req: same reasoning as ifu_req's own
+        // ic_cg_req | ic_burst_req below, applied to the D-side -- biu_cache_if
+        // now has two distinct downstream request paths too (sf_cyc_req for
+        // its ordinary sizing_fsm-routed accesses, dc_burst_req for a DBE=1
+        // miss's own genuine burst linefill, Phase 158 Stage 4c). Omitting
+        // dc_burst_req here would let a D-cache burst bypass normal
+        // mmu>eu>ifu arbitration the exact same way the original ic_burst_req
+        // bug did (see that bug's own writeup in the ifu_req comment below).
+        .eu_req    (sf_cyc_req | dc_burst_req),
         // downstream request from biu_icache_if, not the raw IFU-side ifu_req
         // (which stays asserted on a cache hit that never reaches the bus).
         // ic_cg_req | ic_burst_req: biu_icache_if now has TWO distinct
@@ -643,6 +660,22 @@ module m68030_biu #(
         .sf_rdata    (sf_eu_rdata),
         .sf_ack      (sf_eu_ack),
         .sf_berr     (cg_eu_berr_raw),
+        // Phase 158 Stage 4c: same shared bus-level burst-response signals
+        // biu_icache_if's own ic_burst_* input ports already wire below --
+        // mutual exclusion between the two clients is via the arbiter
+        // (grant_eu vs. grant_ifu) and cg_burst_req_mux above, not any
+        // per-client response demuxing, so both modules can safely receive
+        // the same physical wires.
+        .dc_burst_req   (dc_burst_req),
+        .dc_burst_addr  (dc_burst_addr),
+        .dc_burst_fc    (dc_burst_fc),
+        .dc_burst_rdata0(eu_burst_rdata0),
+        .dc_burst_rdata1(eu_burst_rdata1),
+        .dc_burst_rdata2(eu_burst_rdata2),
+        .dc_burst_rdata3(eu_burst_rdata3),
+        .dc_burst_beat  (cg_eu_burst_beat),
+        .dc_burst_ack   (eu_burst_ack),
+        .dc_burst_berr  (eu_burst_berr),
         .cacr        (cacr),
         .caar        (caar),
         .tc          (tc),
@@ -709,10 +742,21 @@ module m68030_biu #(
     // infinite JSR/RTS loop. u_arb's own ifu_req input is fed
     // ic_cg_req|ic_burst_req (see its own instantiation above) so grant_ifu
     // correctly reflects either downstream request path.
-    logic [1:0]  cg_eu_burst_beat;
-    wire         cg_burst_req_mux  = eu_burst_req | (ic_burst_req && grant_ifu);
-    wire [31:0]  cg_burst_addr_mux = eu_burst_req ? eu_burst_addr : ic_burst_addr;
-    wire [2:0]   cg_burst_fc_mux   = eu_burst_req ? eu_burst_fc   : 3'b110; // Supervisor Program Space, matches ordinary ifu_req's own fixed FC
+    // Phase 158 Stage 4c: dc_burst_req (biu_cache_if's own D-side burst
+    // request) joins this same mux as a third tier, between the external
+    // eu_burst_req port (highest) and ic_burst_req (lowest) -- matching
+    // this project's own documented EU>IFU arbiter priority (CLAUDE.md),
+    // since the D-cache is part of the EU's own data path. Gated on
+    // grant_eu, mirroring exactly why ic_burst_req is gated on grant_ifu
+    // above (a burst request must go through normal mmu>eu>ifu arbitration,
+    // not bypass it) -- u_arb's own eu_req input is fed sf_cyc_req|
+    // dc_burst_req (see its own instantiation above) so grant_eu correctly
+    // reflects either downstream request path.
+    wire         cg_burst_req_mux  = eu_burst_req | (dc_burst_req && grant_eu) | (ic_burst_req && grant_ifu);
+    wire [31:0]  cg_burst_addr_mux = eu_burst_req ? eu_burst_addr :
+                                     (dc_burst_req && grant_eu) ? dc_burst_addr : ic_burst_addr;
+    wire [2:0]   cg_burst_fc_mux   = eu_burst_req ? eu_burst_fc :
+                                     (dc_burst_req && grant_eu) ? dc_burst_fc : 3'b110; // Supervisor Program Space, matches ordinary ifu_req's own fixed FC
 
     biu_icache_if u_icache (
         .clk_4x         (clk_4x),
