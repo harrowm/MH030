@@ -56,6 +56,7 @@ module stall_fsm_tb;
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     // 16KB unified instruction+data memory, matching cosim_grp_tb.sv.
     localparam int MEM_WORDS = 4096;
@@ -144,7 +145,9 @@ module stall_fsm_tb;
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),
-        .cback_n      (cback_n)
+        .cback_n      (cback_n),
+        .ciin_n       (ciin_n),
+        .ciout_n      ()
     );
 
     // Free-running counter of data-space (fc=101, supervisor data) DS#

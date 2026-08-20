@@ -65,6 +65,14 @@ module m68030_biu #(
     input  logic        br_n,
     input  logic        bgack_n,
     input  logic        cback_n,
+    // Phase 158 Stage 7: CIIN# (peripheral says "this data isn't
+    // cacheable") -- async, synchronized like every other pin above.
+    input  logic        ciin_n,
+    // CIOUT# (CPU says "this access is definitely non-cacheable") --
+    // driven combinationally from the cache-if modules' own already-live
+    // non-cacheable conditions (mmu_ci/RMW-lookup/CPU-space/cache-disabled),
+    // not a synchronized input.
+    output logic        ciout_n,
 
     // -----------------------------------------------------------------------
     // EU normal data-access interface (goes through cache + sizing layers)
@@ -247,6 +255,8 @@ module m68030_biu #(
     logic halt_s, avec_s, vpa_s;
     logic [2:0] ipl_s;
     logic br_s, bgack_s, cback_s;
+    logic ciin_s;  // Phase 158 Stage 7
+    logic ciout_w; // biu_cache_if's own CIOUT determination (active-high internal)
     logic pins_released;
     logic cfg_poweron_rstout_n;  // power-on RSTOUT from biu_config
 
@@ -264,6 +274,7 @@ module m68030_biu #(
         .br_n              (br_n),
         .bgack_n           (bgack_n),
         .cback_n           (cback_n),
+        .ciin_n            (ciin_n),
         .dsack0_s          (dsack0_s),
         .dsack1_s          (dsack1_s),
         .sterm_s           (sterm_s),
@@ -275,6 +286,7 @@ module m68030_biu #(
         .br_s              (br_s),
         .bgack_s           (bgack_s),
         .cback_s           (cback_s),
+        .ciin_s            (ciin_s),
         .pins_released     (pins_released),
         .poweron_rstout_n  (cfg_poweron_rstout_n)
     );
@@ -650,6 +662,8 @@ module m68030_biu #(
         .eu_ack      (ca_eu_ack),
         .eu_berr     (ca_eu_berr),
         .mmu_ci      (mmu_ci),
+        .ciin        (ciin_s),    // Phase 158 Stage 7
+        .ciout       (ciout_w),
         .sf_addr     (ca_sf_addr),
         .sf_fc       (ca_sf_fc),
         .sf_rw       (ca_sf_rw),
@@ -779,6 +793,7 @@ module m68030_biu #(
         .cg_berr        (ic_cg_berr),
         .cacr           (cacr),
         .caar           (caar),
+        .ciin           (ciin_s),    // Phase 158 Stage 7
         .ic_burst_req   (ic_burst_req),
         .ic_burst_addr  (ic_burst_addr),
         .ic_burst_rdata0(eu_burst_rdata0),
@@ -1121,6 +1136,10 @@ module m68030_biu #(
     // Active-low: both sources must be deasserted (high) for the pin to be high.
     // -----------------------------------------------------------------------
     assign ext_rstout_n = cg_rstout_n & cfg_poweron_rstout_n;
+
+    // Phase 158 Stage 7: CIOUT# -- active-low pin, inverted from
+    // biu_cache_if's own active-high ciout determination.
+    assign ciout_n = !ciout_w;
 
 endmodule
 

@@ -49,6 +49,7 @@ module biu_int_tb;
     logic        br_n     = 1'b1;   // no DMA request
     logic        bgack_n  = 1'b1;   // DMA not acknowledged
     logic        cback_n  = 1'b1;   // no burst acknowledge
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     // -----------------------------------------------------------------------
     // EU interface (driven by testbench tasks)
@@ -129,6 +130,8 @@ module biu_int_tb;
         .br_n            (br_n),
         .bgack_n         (bgack_n),
         .cback_n         (cback_n),
+        .ciin_n          (ciin_n),   // Phase 158 Stage 7
+        .ciout_n         (),
         .eu_addr         (eu_addr),
         .eu_wdata        (eu_wdata),
         .eu_rdata        (eu_rdata),

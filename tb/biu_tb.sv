@@ -594,6 +594,11 @@ module biu_tb;
         .eu_ack      (cache_eu_ack),
         .eu_berr     (cache_eu_berr),
         .mmu_ci      (mmu_ci_out),
+        // Phase 158 Stage 7: tied inactive/left unconnected -- this
+        // testbench's own tests don't exercise CIIN, matching the same
+        // convention every other unused input port above already uses.
+        .ciin        (1'b0),
+        .ciout       (),
         // Phase 158 Stage 4c: new D-cache burst-linefill port. This
         // testbench never sets DBE (CACR bit 12), so CI_D_BURST0 is never
         // reached -- tied off the same way the pre-existing MMU xl_*
@@ -741,6 +746,7 @@ module biu_tb;
         .br_n          (cfg_br_n),
         .bgack_n       (cfg_bgack_n),
         .cback_n       (cfg_cback_n),
+        .ciin_n        (1'b1),   // Phase 158 Stage 7: inactive, unused by this testbench
         .dsack0_s      (cfg_dsack0_s),
         .dsack1_s      (cfg_dsack1_s),
         .sterm_s       (cfg_sterm_s),
@@ -752,6 +758,7 @@ module biu_tb;
         .br_s          (cfg_br_s),
         .bgack_s       (cfg_bgack_s),
         .cback_s       (cfg_cback_s),
+        .ciin_s        (),
         .pins_released     (cfg_pins_released),
         .poweron_rstout_n  (cfg_poweron_rstout_n)
     );
@@ -777,12 +784,14 @@ module biu_tb;
         .berr_n           (1'b1), .halt_n  (1'b1), .avec_n  (1'b1),
         .vpa_n            (1'b1), .ipl_n   (3'b111),
         .br_n             (1'b1), .bgack_n (1'b1),  .cback_n (1'b1),
+        .ciin_n           (1'b1), // Phase 158 Stage 7: inactive, unused by this testbench
         .dsack0_s         (cfg51_dsack0_s),  .dsack1_s (cfg51_dsack1_s),
         .sterm_s          (cfg51_sterm_s),   .berr_s   (cfg51_berr_s),
         .halt_s           (cfg51_halt_s),    .avec_s   (cfg51_avec_s),
         .vpa_s            (cfg51_vpa_s),     .ipl_s    (cfg51_ipl_s),
         .br_s             (cfg51_br_s),      .bgack_s  (cfg51_bgack_s),
         .cback_s          (cfg51_cback_s),
+        .ciin_s           (),
         .pins_released    (cfg51_pins_released),
         .poweron_rstout_n (cfg51_poweron_rstout_n)
     );

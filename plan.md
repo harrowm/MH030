@@ -7414,6 +7414,131 @@ to baseline. **Closes Stage 6.** Stage 7 (CIIN/CIOUT pins) is next.
 
 ---
 
+## Phase 158 Stage 7 — CIIN/CIOUT pins
+
+### Goal
+
+Confirmed via `grep -rln "ciin\|CIIN\|ciout\|CIOUT" rtl/` at planning time: neither
+pin existed anywhere in the RTL. Manual citations, all re-read directly before
+implementing: §6.1.3.1 (p.6-10, single-entry mode) — "If a device cannot supply
+its entire port width of data... it must assert CIIN for all bus cycles
+corresponding to a cache entry," preventing that entry from being loaded.
+§6.1.3.2 (p.6-15/6-16, burst mode) — "the responding device may sequentially
+supply one to four long words of cachable data, or it may assert [CIIN] when
+the data in a long word is not cachable" (a per-beat granularity). p.6-9
+(Figure 6-3 context, already read during Stage 4b's own research) — "when CIOUT
+is asserted, the data cache is completely ignored, even on write cycles
+operating in write-allocation mode," and "CIIN is ignored on write cycles."
+
+### Fix — synchronizer + pin plumbing
+
+New `ciin_n` input on `biu_config.sv`, 2-stage-synchronized exactly like every
+other async pin (BERR/DSACKx/STERM/AVEC's own active-high-inverted group),
+output `ciin_s`. New `ciin_n` input + `ciout_n` output on `m68030_top.sv` and
+`m68030_biu.sv`, threaded through to both cache-if modules.
+
+### Fix — D-cache (`biu_cache_if.sv`)
+
+New `ciout` output, computed combinationally as `mmu_ci || mem_rmw_lookup ||
+(fc_r==3'b111) || !dcache_en` — the manual's own listed CIOUT trigger
+conditions (MMU CI-page, RMW-forced-miss read, CPU space, cache disabled).
+**Found and deliberately did not fix a related, already-documented gap while
+researching this**: `mmu_ci` (this module's own pre-existing input, used for
+CIOUT here) is fed from `biu_mmu_arb`'s EXT/PTEST port, not `xl_ci`/`ca_xl_ci`
+(the *real*, live, per-access MMU translation's own CI result) — confirmed via
+`grep` that `ca_xl_ci` is a separate signal, already flagged in this project's
+own Phase 150-era comments as "threaded through but not yet acted on." Wiring
+`xl_ci` into real cache-inhibit behavior (not just CIOUT reporting) would be a
+separate, deeper, riskier MMU-integration fix; CIOUT here uses the existing
+`mmu_ci` input as-is, matching its own current (already-imperfect) semantics
+rather than silently expanding this stage's scope.
+
+New `ciin` input, gating whether a completed read-fill also updates the cache
+array (never gating the fetched *value* itself, which is always correctly
+extracted and returned to the CPU regardless) — applied at `CI_D_MISS`'s own
+fill completion, and at `CI_D_BURST0`/`CI_D_FILL_3B`'s own final completion
+points. This needed restructuring `CI_D_MISS`'s own if/else (previously a
+straight two-way split between "cache and extract" vs. "disabled, plain
+passthrough"): the bus request itself (forced to a longword, output block)
+is already committed *before* CIIN's own value is knowable — it only arrives
+alongside the peripheral's own DSACK/ack — so a CIIN-blocked would-have-cached
+fetch still needs `extract_rd()` for its own return value (unlike the
+genuinely-disabled case, where the request was already sized to the CPU's own
+real size and a raw passthrough is correct). Getting this wrong would have
+silently returned the *wrong-sized* data to the CPU on a byte/word read
+whenever CIIN happened to be asserted — caught by reasoning through the
+existing code's own structure before writing the fix, not by a failing test.
+
+**Scope boundary, documented not fixed**: the manual's own CIIN-during-burst
+text describes true per-beat granularity (CIIN can differ across all 4 words
+of one burst); this project's burst mechanism (`biu_burst_ctrl.sv`) captures
+a full 4-beat burst via one combined ack, not separate per-beat acks, so CIIN
+is checked once, for the whole line, at final completion — replicating true
+per-beat CIIN would need reworking that beat-tracking mechanism, out of scope
+for this stage.
+
+### Fix — I-cache (`biu_icache_if.sv`)
+
+New `ciin` input only (no CIOUT — the manual's own CIOUT description is
+specifically about the *data* cache's write-allocation interaction; the one
+CIOUT this project implements lives on the D-side). Applied at
+`IC_BURST0`/`IC_FILL_3B`'s own final completion (same "checked once, per
+line" burst simplification as the D-side) and at `IC_SINGLE_0..3`'s own
+`IC_SINGLE_3` completion — for the I-cache specifically, checking once at the
+final word is not a simplification at all: `valid_i` is one bit per whole
+line (unlike the D-cache's per-word `valid_d`), so there was only ever one
+real decision point regardless of any per-word CIIN nuance across the 4
+individual single-entry-mode reads.
+
+### Blast radius
+
+Adding `ciin_n`/`ciout_n` to `m68030_top.sv`'s own port list touches every
+testbench that instantiates it directly — confirmed via `grep -rl "m68030_top "
+tb/*.sv` to be 12 files (`cosim_smoke_tb.sv`, `cosim_boot_tb.sv`,
+`cosim_dat_tb.sv`, `cache_tb.sv`, `cosim_grp_tb.sv`, `harte_tb.sv`,
+`mustest_tb.sv`, `mmu_xlate_tb.sv`, `harte_batch_tb.sv`,
+`harte_verilator_tb.sv`, `stall_fsm_tb.sv`, `top_tb.sv`) — by far the largest
+blast radius of any stage in this plan. Every one of them already declares a
+local `cback_n` tie-off in the exact same shape (`logic cback_n = 1'b0;` +
+`.cback_n(cback_n)` as the instantiation's own last, no-trailing-comma port),
+consistent enough to apply mechanically: a `logic ciin_n = 1'b1;` declaration
+alongside each file's own `cback_n`, and `.cback_n(cback_n), .ciin_n(ciin_n),
+.ciout_n()` replacing each file's own former last port line. Also found and
+fixed two related, pre-existing-shaped gaps while touching `tb/biu_tb.sv`
+(which instantiates `biu_config`/`biu_cache_if` directly, not `m68030_top`):
+both of its own `biu_config` instantiations needed `ciin_n` tied inactive
+(mirroring how every other unused async input there already is), and its own
+`biu_cache_if` instantiation needed `ciin`/`ciout` tied off the same way
+Stage 4c found `mem_rmw_lookup` had been left floating there. `tb/biu_int_tb.sv`
+(instantiates `m68030_biu` directly) needed the same tie-off pattern too.
+
+### Tests
+
+Deliberately no new dedicated CIIN/CIOUT test this stage: every one of the 12
+`m68030_top`-instantiating testbenches ties `ciin_n` permanently inactive
+(`1'b1`), so the existing regression suite's own unchanged pass results are
+themselves the correctness gate for "the new pins don't disturb anything when
+inactive" — the primary risk this stage's own large blast radius actually
+carried. A dedicated CIIN-asserted-mid-fill test (proving the array
+genuinely stays unwritten while the returned value stays correct) is a
+reasonable follow-up, not attempted here given the stage's own already-large
+scope.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, `make
+dat-synth` 50/50, a `run_harte.py` spot-check (`ADD.b.json.bin`, 2500/2500)
+before the full sweep given `harte_tb.sv`/`harte_batch_tb.sv`/
+`harte_verilator_tb.sv` were all mechanically edited, full 124-suite Harte
+sweep (mandatory — `biu_cache_if.sv`/`biu_icache_if.sv`/`biu_config.sv`/
+`m68030_biu.sv`/`m68030_top.sv` all changed) — PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline
+(expected: `ciin_n` stays permanently inactive everywhere in this corpus).
+**Closes Stage 7.** Stage 8 (BERR-during-fill entry-invalidation
+investigation) is next — the last stage in this plan.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

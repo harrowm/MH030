@@ -39,6 +39,7 @@ module cosim_boot_tb;
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     // ── Inline memory model (32-bit port, 0 wait states, 4KB) ────────────────
     localparam int MEM_WORDS = 1024;   // 1024 × 32 bit = 4096 bytes
@@ -116,7 +117,9 @@ module cosim_boot_tb;
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),
-        .cback_n      (cback_n)
+        .cback_n      (cback_n),
+        .ciin_n       (ciin_n),
+        .ciout_n      ()
     );
 
     // ── Bus transaction logger ────────────────────────────────────────────────

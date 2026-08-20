@@ -58,7 +58,11 @@ module m68030_top #(
     input  logic [2:0]  ipl_n,
     input  logic        br_n,
     input  logic        bgack_n,
-    input  logic        cback_n
+    input  logic        cback_n,
+    // Phase 158 Stage 7: CIIN#/CIOUT# -- confirmed via grep neither pin
+    // existed anywhere in the RTL before this stage.
+    input  logic        ciin_n,
+    output logic        ciout_n
 );
 
     // ─── Control register stubs (caches disabled; MMU wired to m68030_mmu) ──
@@ -690,6 +694,8 @@ module m68030_top #(
         .br_n            (br_n),
         .bgack_n         (bgack_n),
         .cback_n         (cback_n),
+        .ciin_n          (ciin_n),    // Phase 158 Stage 7
+        .ciout_n         (ciout_n),
         // EU normal data interface (EXC mux)
         .eu_addr         (biu_eu_addr),
         .eu_wdata        (biu_eu_wdata),

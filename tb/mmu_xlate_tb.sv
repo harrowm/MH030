@@ -43,6 +43,7 @@ module mmu_xlate_tb;
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     // 16KB unified instruction+data memory, matching stall_fsm_tb.sv /
     // cosim_grp_tb.sv exactly.
@@ -114,7 +115,9 @@ module mmu_xlate_tb;
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),
-        .cback_n      (cback_n)
+        .cback_n      (cback_n),
+        .ciin_n       (ciin_n),
+        .ciout_n      ()
     );
 
     // Pin-level monitors: did a real FC=101 (supervisor data) bus cycle ever

@@ -39,6 +39,9 @@ module biu_config #(
     input  logic        br_n,       // BR#   (bus request from DMA)
     input  logic        bgack_n,    // BGACK# (bus grant acknowledge)
     input  logic        cback_n,    // CBACK# (cache burst acknowledge)
+    // Phase 158 Stage 7: CIIN# (cache inhibit in) -- peripheral-driven,
+    // async, same 2-stage-synchronizer treatment as every other pin above.
+    input  logic        ciin_n,     // CIIN# (cache inhibit input)
 
     // Synchronised outputs — to biu_cycle_gen and biu_arbiter
     output logic        dsack0_s,   // 1 = DSACK0 asserted (active-high)
@@ -46,6 +49,7 @@ module biu_config #(
     output logic        sterm_s,    // 1 = STERM  asserted
     output logic        berr_s,     // 1 = BERR   asserted
     output logic        avec_s,     // 1 = AVEC   asserted
+    output logic        ciin_s,     // 1 = CIIN   asserted (active-high)
     output logic        halt_s,     // 0 = HALT   asserted (active-low retained)
     output logic        vpa_s,      // 0 = VPA    asserted (active-low retained)
     output logic [2:0]  ipl_s,      // pin value — all-ones = no interrupt
@@ -67,6 +71,7 @@ module biu_config #(
     logic sterm_m,  sterm_q;
     logic berr_m,   berr_q;
     logic avec_m,   avec_q;
+    logic ciin_m,   ciin_q;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -75,12 +80,14 @@ module biu_config #(
             sterm_m  <= 1'b0; sterm_q  <= 1'b0;
             berr_m   <= 1'b0; berr_q   <= 1'b0;
             avec_m   <= 1'b0; avec_q   <= 1'b0;
+            ciin_m   <= 1'b0; ciin_q   <= 1'b0;
         end else begin
             dsack0_m <= !dsack0_n;  dsack0_q <= dsack0_m;
             dsack1_m <= !dsack1_n;  dsack1_q <= dsack1_m;
             sterm_m  <= !sterm_n;   sterm_q  <= sterm_m;
             berr_m   <= !berr_n;    berr_q   <= berr_m;
             avec_m   <= !avec_n;    avec_q   <= avec_m;
+            ciin_m   <= !ciin_n;    ciin_q   <= ciin_m;
         end
     end
 
@@ -89,6 +96,7 @@ module biu_config #(
     assign sterm_s  = sterm_q;
     assign berr_s   = berr_q;
     assign avec_s   = avec_q;
+    assign ciin_s   = ciin_q;
 
     // -----------------------------------------------------------------------
     // Active-low / pin-polarity-retained outputs: sample pin value directly

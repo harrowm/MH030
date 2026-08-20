@@ -34,6 +34,7 @@ module cosim_grp_tb;
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     localparam int MEM_WORDS = 4096;
     logic [31:0] rom [0:MEM_WORDS-1];
@@ -108,7 +109,9 @@ module cosim_grp_tb;
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),
-        .cback_n      (cback_n)
+        .cback_n      (cback_n),
+        .ciin_n       (ciin_n),
+        .ciout_n      ()
     );
 
     // ── Bus logger (same format as cosim73) ──────────────────────────────────

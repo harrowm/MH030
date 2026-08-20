@@ -41,6 +41,7 @@ module mustest_tb (
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     // ── Memory arrays (initialised by C++ main after model construction) ──────
     localparam int MAIN_WORDS = 32768;
@@ -141,7 +142,9 @@ module mustest_tb (
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),
-        .cback_n      (cback_n)
+        .cback_n      (cback_n),
+        .ciin_n       (ciin_n),
+        .ciout_n      ()
     );
 
     // ── STOP detection ────────────────────────────────────────────────────────

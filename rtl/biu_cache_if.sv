@@ -34,6 +34,22 @@ module biu_cache_if (
     // Cache Inhibit from MMU
     input  logic        mmu_ci,
 
+    // Phase 158 Stage 7: CIIN (peripheral says "this data isn't
+    // cacheable" -- already synchronized by biu_config.sv). Manual
+    // §6.1.3.1/6.1.3.2 (confirmed by direct re-read): ignored on write
+    // cycles, so this only ever suppresses caching on a fill/read-miss.
+    input  logic         ciin,
+    // CIOUT (CPU says "this access is definitely non-cacheable") --
+    // combinational, reflects the currently-dispatched access, manual
+    // Figure 6-3/p.6-9's own listed conditions: MMU CI-page (mmu_ci, this
+    // module's own pre-existing input -- see its own header note on why
+    // this doesn't yet reflect a live per-access MMU translation result,
+    // a separate, already-documented Phase 150 deferral this stage
+    // deliberately doesn't also fix), the forced-miss RMW read
+    // (mem_rmw_lookup), CPU space (FC=111), or the D-cache simply
+    // disabled.
+    output logic          ciout,
+
     // Sizing-FSM side (for miss / write cycles)
     output logic [31:0] sf_addr,
     output logic [2:0]  sf_fc,
@@ -508,6 +524,26 @@ module biu_cache_if (
                         // else branch a disabled/inhibited cache already
                         // uses (plain passthrough at the CPU's own requested
                         // size, cache array untouched).
+                        //
+                        // Phase 158 Stage 7: ciin (sampled live at the
+                        // fill's own completion -- this is a read-only
+                        // state, CI_WRITE handles writes separately,
+                        // matching the manual's own "CIIN is ignored on
+                        // write cycles") is checked *separately* from the
+                        // would-cache decision below, not folded into the
+                        // same if/else as dfreeze_en etc: the bus request
+                        // itself (output block, sf_addr/sf_siz forced to a
+                        // longword) is already committed before CIIN's own
+                        // value is even knowable (it only arrives alongside
+                        // the peripheral's own DSACK/ack), so sf_rdata here
+                        // still genuinely holds a full longword regardless
+                        // of whether CIIN ends up asserted -- unlike the
+                        // genuinely-disabled/inhibited case below (where
+                        // the output block requests siz_r, the CPU's own
+                        // real size, and a raw passthrough is correct),
+                        // a CIIN-blocked would-have-cached fetch still needs
+                        // extract_rd() for its own return value, just
+                        // without the array-population side effects.
                         if (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
                             // Cache-enabled miss: the combinational output
                             // block below forces sf_siz=2'b00 (longword) and
@@ -517,38 +553,45 @@ module biu_cache_if (
                             // CPU's own request was -- extract its specific
                             // sub-portion for the return value (same
                             // extract_rd() CI_HIT already uses for a cache
-                            // hit) while caching the complete, correctly-
-                            // fetched longword. A prior version cached
-                            // sf_rdata directly-as-fetched at the CPU's own
-                            // (possibly sub-longword) size and still marked
-                            // the whole word-slot valid -- silently caching
-                            // only PART of the slot as if the rest were also
-                            // freshly fetched, when sizing_fsm's own
-                            // normalization for a byte/word request has no
-                            // obligation to reflect the other bytes' real
-                            // memory content at all. A later access to a
-                            // DIFFERENT byte range within that same 4-byte
-                            // slot (e.g. RTR's own back-to-back CCR-word +
-                            // PC-longword pop, both landing in one slot)
-                            // would then hit and be served that bogus
-                            // data -- root-caused via Step 6's D-cache-only
-                            // Harte sweep (RTR index 0: both reads returned
-                            // the identical raw CCR word, one of them
-                            // silently wrong) before this fix.
+                            // hit) whether or not it also ends up cached.
+                            // A prior version cached sf_rdata directly-as-
+                            // fetched at the CPU's own (possibly sub-
+                            // longword) size and still marked the whole
+                            // word-slot valid -- silently caching only PART
+                            // of the slot as if the rest were also freshly
+                            // fetched, when sizing_fsm's own normalization
+                            // for a byte/word request has no obligation to
+                            // reflect the other bytes' real memory content
+                            // at all. A later access to a DIFFERENT byte
+                            // range within that same 4-byte slot (e.g.
+                            // RTR's own back-to-back CCR-word + PC-longword
+                            // pop, both landing in one slot) would then hit
+                            // and be served that bogus data -- root-caused
+                            // via Step 6's D-cache-only Harte sweep (RTR
+                            // index 0: both reads returned the identical
+                            // raw CCR word, one of them silently wrong)
+                            // before this fix.
                             fill_rdata_r <= extract_rd(sf_rdata, siz_r, addr_r[1:0]);
-                            data_d[idx_r][woff_r] <= sf_rdata; // full, genuinely-fetched longword
-                            // A tag mismatch means this line's other 3
-                            // word slots belong to a completely different,
-                            // now-replaced address -- invalidate them too,
-                            // not just the one word this fill actually
-                            // populates. If the tag already matches (same
-                            // line, just a different word offset that was
-                            // never independently fetched before), leave
-                            // the other slots' own validity untouched.
-                            if (tag_d[idx_r] != vtag_r)
-                                for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b0;
-                            tag_d[idx_r]            <= vtag_r;
-                            valid_d[idx_r][woff_r]  <= 1'b1;
+                            if (!ciin) begin
+                                data_d[idx_r][woff_r] <= sf_rdata; // full, genuinely-fetched longword
+                                // A tag mismatch means this line's other 3
+                                // word slots belong to a completely
+                                // different, now-replaced address --
+                                // invalidate them too, not just the one
+                                // word this fill actually populates. If the
+                                // tag already matches (same line, just a
+                                // different word offset that was never
+                                // independently fetched before), leave the
+                                // other slots' own validity untouched.
+                                if (tag_d[idx_r] != vtag_r)
+                                    for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b0;
+                                tag_d[idx_r]            <= vtag_r;
+                                valid_d[idx_r][woff_r]  <= 1'b1;
+                            end
+                            // ciin=1: peripheral says this data isn't
+                            // cacheable -- fill_rdata_r above still returns
+                            // it to the CPU, but the array is left
+                            // completely untouched (Phase 158 Stage 7).
                         end else begin
                             // Cache disabled (or MMU-inhibited): unchanged
                             // passthrough -- sizing_fsm already normalizes
@@ -589,8 +632,26 @@ module biu_cache_if (
                                 2'd2: fill_rdata_r <= extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
                                 2'd3: fill_rdata_r <= extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
                             endcase
-                            tag_d[idx_r] <= vtag_r;
-                            for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
+                            // Phase 158 Stage 7: ciin checked once, for the
+                            // whole line, at this final completion point --
+                            // the manual's own CIIN-during-burst text
+                            // describes a per-beat granularity ("assert
+                            // CIIN when the data in a long word is not
+                            // cachable"), but this project's own burst
+                            // mechanism captures all four words via one
+                            // combined ack (biu_burst_ctrl.sv), not
+                            // separate per-beat acks -- replicating true
+                            // per-beat CIIN would need reworking that beat-
+                            // tracking mechanism, out of scope for this
+                            // stage; documented, not a silent gap.
+                            // data_d above is written unconditionally
+                            // (harmless -- invalid entries are never read)
+                            // so only the validating tag_d/valid_d writes
+                            // need gating.
+                            if (!ciin) begin
+                                tag_d[idx_r] <= vtag_r;
+                                for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
+                            end
                             state          <= CI_DONE;
                             dc_burst_req_r <= 1'b0;
                         end else begin
@@ -639,8 +700,13 @@ module biu_cache_if (
                     if (dc_burst_ack) begin
                         data_d[idx_r][3] <= dc_burst_rdata0;
                         if (woff_r == 2'd3) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
-                        tag_d[idx_r] <= vtag_r;
-                        for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
+                        // Phase 158 Stage 7: same "checked once, at final
+                        // completion" ciin gate as CI_D_BURST0's own full-
+                        // burst branch above.
+                        if (!ciin) begin
+                            tag_d[idx_r] <= vtag_r;
+                            for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
+                        end
                         state          <= CI_DONE;
                         dc_burst_req_r <= 1'b0;
                     end else if (dc_burst_berr) begin
@@ -736,6 +802,12 @@ module biu_cache_if (
         sf_wdata = wdata_r;
         sf_is_op = 1'b0;
         sf_req   = 1'b0;
+
+        // Phase 158 Stage 7: CIOUT, reflecting the latched (dispatched)
+        // transaction's own FC alongside the live mmu_ci/mem_rmw_lookup/
+        // dcache_en inputs, same convention dhit_r's own use of live
+        // mmu_ci already established.
+        ciout = mmu_ci || mem_rmw_lookup || (fc_r == 3'b111) || !dcache_en;
 
         // Phase 158 Stage 4c: driven unconditionally from the registered
         // dc_burst_req_r/addr_r (see their own declaration comment for why

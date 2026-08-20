@@ -42,6 +42,7 @@ module harte_verilator_tb (
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
+    logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
 
     // Same dense model as harte_tb.sv/harte_batch_tb.sv (full 24-bit space).
     localparam int MEM_WORDS = 1 << 22;   // 4M words = 16 MB
@@ -122,7 +123,9 @@ module harte_verilator_tb (
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),
-        .cback_n      (cback_n)
+        .cback_n      (cback_n),
+        .ciin_n       (ciin_n),
+        .ciout_n      ()
     );
 
     logic stop_seen;

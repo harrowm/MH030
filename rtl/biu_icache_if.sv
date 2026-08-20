@@ -98,6 +98,13 @@ module biu_icache_if (
     input  logic [31:0] cacr,
     input  logic [31:0] caar,
 
+    // Phase 158 Stage 7: CIIN (already synchronized by biu_config.sv) --
+    // see biu_cache_if.sv's own identical port for the manual citation.
+    // No CIOUT here: the manual's own CIOUT description (p.6-9) is
+    // specifically about the *data* cache's write-allocation interaction;
+    // biu_cache_if.sv computes the one CIOUT this project implements.
+    input  logic         ciin,
+
     // MMU translation control (Phase 150, plan.md)
     input  logic [31:0] tc,
 
@@ -380,8 +387,14 @@ module biu_icache_if (
                                 2'd2: fill_rdata_r <= ic_burst_rdata2;
                                 2'd3: fill_rdata_r <= ic_burst_rdata3;
                             endcase
-                            tag_i[idx_r]   <= vtag_r;
-                            valid_i[idx_r] <= 1'b1;
+                            // Phase 158 Stage 7: ciin checked once, for the
+                            // whole line -- same "not true per-beat CIIN"
+                            // documented simplification as biu_cache_if.sv's
+                            // own identical burst-completion gate.
+                            if (!ciin) begin
+                                tag_i[idx_r]   <= vtag_r;
+                                valid_i[idx_r] <= 1'b1;
+                            end
                             state          <= IC_DONE;
                             ic_burst_req_r <= 1'b0;
                         end else begin
@@ -436,8 +449,13 @@ module biu_icache_if (
                     if (ic_burst_ack) begin
                         data_i[idx_r][3] <= ic_burst_rdata0;
                         if (woff_r == 2'd3) fill_rdata_r <= ic_burst_rdata0;
-                        tag_i[idx_r]   <= vtag_r;
-                        valid_i[idx_r] <= 1'b1;
+                        // Phase 158 Stage 7: same "checked once, at final
+                        // completion" ciin gate as IC_BURST0's own full-
+                        // burst branch above.
+                        if (!ciin) begin
+                            tag_i[idx_r]   <= vtag_r;
+                            valid_i[idx_r] <= 1'b1;
+                        end
                         state          <= IC_DONE;
                         ic_burst_req_r <= 1'b0;
                     end else if (ic_burst_berr) begin
@@ -519,8 +537,17 @@ module biu_icache_if (
                     if (cg_ack_rise) begin
                         data_i[idx_r][3] <= cg_rdata;
                         if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
-                        tag_i[idx_r]     <= vtag_r;
-                        valid_i[idx_r]   <= 1'b1;
+                        // Phase 158 Stage 7: ciin, checked once at the
+                        // line's final word -- the I-cache's own valid_i is
+                        // one bit per whole line (not per word like the
+                        // D-cache's valid_d), so there was only ever one
+                        // real decision point to gate regardless of any
+                        // per-word CIIN nuance across the 4 individual
+                        // single-entry-mode reads.
+                        if (!ciin) begin
+                            tag_i[idx_r]     <= vtag_r;
+                            valid_i[idx_r]   <= 1'b1;
+                        end
                         state            <= IC_DONE;
                         cg_single_req_r  <= 1'b0;
                     end else if (cg_berr) begin
