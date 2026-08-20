@@ -7539,6 +7539,112 @@ investigation) is next — the last stage in this plan.
 
 ---
 
+## Phase 158 Stage 8 — BERR-during-fill entry-invalidation investigation
+
+### Goal
+
+Manual p.6-19 (re-read in full, alongside Figures 6-11/6-12/6-13 on p.6-17/
+6-18 for the burst-addressing context they depend on): "A bus error occurring
+during a burst operation also causes the burst operation to abort. If the bus
+error occurs during the *first cycle* of a burst..., the data read from the
+bus is ignored, and the entire associated cache line is marked 'invalid'. If
+the access is a data cycle, exception processing proceeds immediately. If the
+cycle is for an instruction fetch, a bus error exception is made pending...
+processed only if the execution unit attempts to use either instruction
+word." Continuing: "For either cache, when a bus error occurs *after* the
+burst mode has been entered (that is, on the second cycle or later), the
+cache entry corresponding to that cycle is marked invalid, but the processor
+does *not* take an exception (the microsequencer has not yet requested the
+data)."
+
+### Finding: confirmed, real, and larger than "first-cycle-vs-later-cycle" alone
+
+Traced every `dc_burst_berr`/`sf_berr` branch in `biu_cache_if.sv` and every
+`ic_burst_berr`/`cg_berr` branch in `biu_icache_if.sv` (`grep` confirms there
+are 9 and 10 respectively) — **every single one, in both modules,
+unconditionally transitions to `CI_BERR`/faults**, with no distinction of
+which beat failed. This is a real, confirmed divergence from the manual.
+
+However, the manual's own "cycle 1 vs. cycle 2+" framing is inseparable from
+a fact about *real hardware's own burst addressing* that this project's
+implementation does not replicate: per Figure 6-11's own caption ("CYCLE 1 =
+FIRST ACCESS OF BURST OPERATION — REQUIRED OPERAND OR PREFETCH") and Figure
+6-12's own worked example (a request at address $06 bursts $04→$08→$0C→$00,
+*wrapping around so the requested word is always fetched first*), real
+68030 hardware's burst mechanism always fetches the actually-requested word
+on cycle 1, with the other three words following via address wraparound —
+meaning "cycle 2+" always means "cache-filling-ahead words the CPU doesn't
+need yet," and by the time one of those can fail, the real operand is already
+safely in hand. This project's own burst implementation (`CI_D_BURST0`/
+`IC_BURST0`, `fill_base_r = {addr[31:4],4'h0}`) always starts at word offset
+0 regardless of which word (`woff_r`) was actually requested — no address
+wraparound. So the manual's "cycle 1" concept, translated faithfully into
+this project's own non-wraparound implementation, is not "the first bus
+request issued" — it's "whichever beat's own word offset equals `woff_r`,"
+which could be *any* of the four beats depending on where in the line the
+access landed.
+
+A correct fix therefore needs, at minimum: (1) per-beat comparison against
+`woff_r` (straightforward) *and* (2) a genuine retry mechanism for the case
+where the beat that fails is *not* `woff_r`'s own word and `woff_r`'s word
+hasn't been fetched yet — the burst still has to abort on any BERR (per "A
+bus error occurring during a burst operation also causes the burst operation
+to abort," unconditionally), but the *requested* word then needs a fresh,
+independent re-fetch attempt (mirroring the manual's own separately-described
+misaligned-operand retry: "the microsequencer requests a read cycle for the
+second portion... If BERR is again asserted, the MC68030 then takes an
+exception") before a real exception is warranted. This is substantially more
+than a "check `woff_r`, else stay silent" patch — it's a second-chance
+fetch state layered on top of the already-intricate BERR-abort machinery
+Phases 108-114 spent multiple phases hardening (mid-fill BERR recovery,
+interrupt-dispatch races, double-fault reporting, and more), for both cache
+modules across all their own burst/degraded/single-entry fill paths.
+
+### Decision: document, do not implement this session
+
+Given the scale and the delicacy of the existing, extensively-tested
+BERR-abort machinery this would need to interact with — and that a rushed
+implementation risks silently reintroducing exactly the class of race this
+project's own Phase 108-114 history had to debug carefully, one hazard at a
+time, to get right the first time — this finding is documented here as
+**confirmed and real, not a false alarm, but out of scope for a single-session
+fix**. This is the same "confirmed, real, but substantial — deferred to a
+dedicated future phase" pattern already used elsewhere in this project (e.g.
+CAS/CAS2's own missing bus-level lock, Stage 3's own finding).
+
+**A related, lower-confidence, not-separately-verified observation**: the
+manual's own "instruction fetch → pending, only faults if the EU tries to use
+the word" exception is very plausibly *already* satisfied for free by this
+project's existing architecture — `ifu_berr` (asserted at `IC_BERR`) feeds
+the IFU's own prefetch/decode pipeline, which only "uses" a fetched word when
+decode actually consumes it, naturally deferring the effective fault point.
+This was not independently traced end-to-end this stage (the investigation's
+own focus was the woff_r/cycle-1 finding above), so it's noted as a plausible
+existing correctness, not a confirmed one.
+
+### Proposed shape for a future fix (not implemented)
+
+For each fill path (D-cache: `CI_D_BURST0`/`CI_D_FILL_1B/2B/3B`, `CI_D_MISS`'s
+own single-longword case; I-cache: `IC_BURST0`/`IC_FILL_1B/2B/3B`,
+`IC_SINGLE_0..3`): on a BERR, check whether the failing beat's own word
+offset equals `woff_r`. If yes, existing behavior is already correct (fault).
+If no, mark only that one word invalid (already implicit — the line was
+never going to be validated by this fill attempt anyway), abort the current
+fill/burst attempt, and issue one independent re-fetch of `woff_r`'s own word
+specifically; only fault if *that* second attempt also BERRs. `CI_D_MISS`'s
+own single-longword case is actually simplest (it always fetches exactly
+`woff_r`'s own containing longword already, so "cycle 1" and "the requested
+word" already coincide there with zero change needed) — the real work is
+entirely in the multi-beat burst/degraded/single-entry paths.
+
+### Results
+
+No RTL changed. `make test` 36/36 (unaffected, confirming the working tree is
+clean going into this documentation-only close). **Closes Stage 8 — the
+8-stage cache-correctness plan (Phase 158) is now complete in full.**
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
