@@ -127,6 +127,16 @@ module biu_cache_if (
     wire dcache_en = cacr[8];
     wire wa_en     = cacr[13];
     wire dburst_en = cacr[12];
+    // Phase 158 Stage 5: manual §6.3.1.5 (confirmed by direct re-read):
+    // "When the FD bit is set and a miss occurs during a read or write of
+    // the data cache, the indexed entry is not replaced. However, write
+    // cycles that hit in the data cache cause the entry to be updated even
+    // when the cache is frozen." -- gates every miss-side allocate/replace
+    // path below (CI_D_MISS/CI_D_BURST0 dispatch, CI_WRITE's own WA-driven
+    // allocate); CI_WRITE's write-*hit* update (`if (dhit_r)`) is
+    // deliberately left completely ungated, matching that exception
+    // exactly.
+    wire dfreeze_en = cacr[9];
 
     // Cache storage arrays
     // Phase 158 Stage 2: tag width widened from 24 to 27 bits (was
@@ -378,7 +388,7 @@ module biu_cache_if (
                             state <= CI_WRITE;
                         end else if (eu_is_icache && icache_en && iburst_en) begin
                             state <= CI_FILL_0;
-                        end else if (!eu_is_icache && dcache_en && dburst_en && !mmu_ci && d_size_ok) begin
+                        end else if (!eu_is_icache && dcache_en && dburst_en && !mmu_ci && d_size_ok && !dfreeze_en) begin
                             // Phase 158 Stage 4c: DBE=1 -- genuine burst
                             // linefill instead of CI_D_MISS's own
                             // single-longword fill. Gated on d_size_ok (not
@@ -434,7 +444,7 @@ module biu_cache_if (
                             state <= CI_WRITE;
                         end else if (is_icache_r && icache_en && iburst_en) begin
                             state <= CI_FILL_0;
-                        end else if (!is_icache_r && dcache_en && dburst_en && !mmu_ci && d_size_ok_r) begin
+                        end else if (!is_icache_r && dcache_en && dburst_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
                             // Phase 158 Stage 4c: same DBE-gated burst
                             // dispatch as CI_IDLE's own branch above, for
                             // the post-translation case.
@@ -492,7 +502,13 @@ module biu_cache_if (
 
                 CI_D_MISS: begin
                     if (sf_ack_rise) begin
-                        if (dcache_en && !mmu_ci && d_size_ok_r) begin
+                        // Phase 158 Stage 5: !dfreeze_en added -- FD=1 means
+                        // "a miss does not replace the indexed entry" (manual
+                        // §6.3.1.5), so a frozen miss falls into the same
+                        // else branch a disabled/inhibited cache already
+                        // uses (plain passthrough at the CPU's own requested
+                        // size, cache array untouched).
+                        if (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
                             // Cache-enabled miss: the combinational output
                             // block below forces sf_siz=2'b00 (longword) and
                             // sf_addr to the 4-byte-aligned slot address for
@@ -643,8 +659,13 @@ module biu_cache_if (
                         // preserves the slot's other, unrelated bytes for a
                         // sub-longword write.
                         if (dhit_r) begin
+                            // Phase 158 Stage 5: deliberately ungated by
+                            // dfreeze_en -- manual §6.3.1.5's own explicit
+                            // exception, "write cycles that hit... cause the
+                            // entry to be updated even when the cache is
+                            // frozen."
                             data_d[idx_r][woff_r] <= merge_wr(data_d[idx_r][woff_r], wdata_r, siz_r, addr_r[1:0]);
-                        end else if (wa_en) begin
+                        end else if (wa_en && !dfreeze_en) begin
                             // Phase 158 Stage 4b: write-allocation on a
                             // write MISS, manual §6.1.2.1/Figure 6-4
                             // (confirmed by direct re-read). Aligned
@@ -775,7 +796,7 @@ module biu_cache_if (
             end
 
             CI_D_MISS: begin
-                if (dcache_en && !mmu_ci && d_size_ok_r) begin
+                if (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
                     // Cache-enabled miss: always fill at longword
                     // granularity from the bus (the D-cache's own per-word
                     // valid_d tracking unit), regardless of the CPU's own
@@ -784,6 +805,8 @@ module biu_cache_if (
                     // the sequential CI_D_MISS block's own comment for the
                     // bug this fixes (a sub-longword fetch silently cached
                     // as if the whole 4-byte slot were freshly fetched).
+                    // Phase 158 Stage 5: !dfreeze_en matches the sequential
+                    // block's own identical addition.
                     sf_addr = {addr_r[31:2], 2'b00};
                     sf_siz  = 2'b00;
                 end else begin

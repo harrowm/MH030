@@ -405,6 +405,13 @@ module cache_tb;
         rom[16'h15C4/4] = {16'h0000, 16'd801};
         rom[16'h15C8/4] = {RTS_OP, NOP_OP};
 
+        // I-6's own subroutine G (Phase 158 Stage 5: I-cache freeze) --
+        // same shape as I-2's own A/B and I-5's own F, written up front
+        // for the same reason.
+        rom[16'h1700/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h1704/4] = {16'h0000, 16'd701};
+        rom[16'h1708/4] = {RTS_OP, NOP_OP};
+
         rom[16'h0600/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
         rom[16'h0604/4] = {16'h0000, 16'h15C0};
         rom[16'h0608/4] = {JSR_A0_IND, NOP_OP};   // JSR F -- triggers the cold miss/linefill to fault
@@ -432,6 +439,8 @@ module cache_tb;
         rom[16'h3004/4] = 32'h3333_4444;  // W4+4 (woff=1)
         rom[16'h3008/4] = 32'h5555_6666;  // W4+8 (woff=2)
         rom[16'h300C/4] = 32'h7777_8888;  // W4+C (woff=3, the whole-line-fill proof target)
+        rom[16'h3200/4] = 32'hDEAD_1234;  // W6 (Phase 158 Stage 5: D-cache freeze write-hit-still-updates target)
+        rom[16'h3300/4] = 32'h0000_0000;  // W7 (Phase 158 Stage 5: D-cache freeze write-miss-must-not-allocate target)
 
         // D-5's own two independent handlers, one per fault -- an earlier
         // draft used ONE shared handler plus a register-indirect
@@ -604,7 +613,72 @@ module cache_tb;
             rom[p[31:2]] = {NOP_OP, NOP_OP};
             p = p + 32'd4;
 
-            p = emit_set_cacr(p, 32'h0000_0100);             // back to WA=0 | dcache_en=1
+            // ---- D-11: D-cache freeze (FD), manual §6.3.1.5 (confirmed by
+            // direct re-read). Two proofs in one sequence: (a) a write that
+            // HITS still updates the entry even while frozen (the manual's
+            // own explicit exception); (b) a write that MISSES does NOT
+            // allocate even with WA=1 also set, i.e. FD overrides WA. W6=
+            // 0x3200 primed into the cache first with FD=0 (an ordinary,
+            // unfrozen read-miss); W7=0x3300 is a fresh, never-touched
+            // address for the miss-suppression half.
+            // ----
+            p = emit_set_cacr(p, 32'h0000_0100);             // dcache_en=1, FD=0 -- prime step
+            rom[p[31:2]]  = {MOVE_L_IMM_D6, 16'hFFFF};
+            p4 = p + 32'd4; p8 = p + 32'd8;
+            rom[p4[31:2]] = {16'hFFFF, MOVEA_L_IMM_A0};
+            rom[p8[31:2]] = {16'h0000, 16'h3200};            // D6 placeholder ; A0 = W6
+            p = p + 32'd12;
+            rom[p[31:2]] = {CLR_L_D6, MOVE_L_A0_D6};         // prime-read W6 (cold miss, caches it -- FD=0)
+            p = p + 32'd4;
+            rom[p[31:2]] = {NOP_OP, NOP_OP};
+            p = p + 32'd4;
+
+            p = emit_set_cacr(p, 32'h0000_2300);             // dcache_en=1 | FD=1 | WA=1
+            rom[p[31:2]]  = {MOVE_L_IMM_D4, 16'h1357};
+            p4 = p + 32'd4;
+            rom[p4[31:2]] = {16'h2468, MOVE_L_D4_A0};        // D4 = 0x13572468 ; write D4->W6 (hit -- must still update)
+            p = p + 32'd8;
+            rom[p[31:2]] = {CLR_L_D6, MOVE_L_A0_D6};         // re-read W6 (must HIT with the new value, 0 bus cost)
+            p = p + 32'd4;
+            rom[p[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            p4 = p + 32'd4; p8 = p + 32'd8;
+            rom[p4[31:2]] = {16'h3300, MOVE_L_IMM_D4};
+            rom[p8[31:2]] = {16'h9999, 16'h8888};            // A0 = W7 ; D4 = 0x99998888
+            p = p + 32'd12;
+            rom[p[31:2]] = {MOVE_L_D4_A0, CLR_L_D7};         // write D4->W7 (miss, WA=1 but FD=1 -- must NOT allocate)
+            p = p + 32'd4;
+            rom[p[31:2]] = {MOVE_L_A0_D7, NOP_OP};           // re-read W7 (must STILL miss -- real bus cost)
+            p = p + 32'd4;
+
+            // ---- I-6: I-cache freeze (FI), manual §6.3.1.10 (confirmed by
+            // direct re-read): "the entry (or line) is not replaced" on a
+            // miss -- unlike D-cache freeze, no write-hit exception to
+            // preserve (I-cache is read-only). G=0x1700, visited twice via
+            // JSR; both visits must show real bus activity (code_ds_count),
+            // proving neither one cached -- contrasting directly with I-1's
+            // own test, where the second visit is the whole point of being
+            // a cache HIT.
+            // ----
+            p = emit_set_cacr(p, 32'h0000_0003);             // icache_en=1 | FI=1
+            rom[p[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            p4 = p + 32'd4;
+            rom[p4[31:2]] = {16'h1700, CLR_L_D5};            // A0 = G ; clear D5 (settle before visit#1)
+            p = p + 32'd8;
+            rom[p[31:2]] = {JSR_A0_IND, NOP_OP};             // visit#1 (genuine miss, FI=1 -- never cached anyway)
+            p = p + 32'd4;
+            rom[p[31:2]] = {CLR_L_D5, JSR_A0_IND};           // clear D5 (settle before visit#2) ; visit#2
+            p = p + 32'd4;
+            rom[p[31:2]] = {NOP_OP, NOP_OP};
+            p = p + 32'd4;
+
+            p = emit_set_cacr(p, 32'h0000_0100);             // back to icache_en=0 | dcache_en=1 -- matches
+                                                               // what I-5 (next) has always relied on: I-5's
+                                                               // own code (0x0600) never sets CACR itself, so
+                                                               // it inherits whatever the D-cache tests before
+                                                               // it last left CACR at -- unrelated to this
+                                                               // stage, a pre-existing condition confirmed by
+                                                               // reading I-5's own ROM setup before assuming
+                                                               // anything here.
             rom[p[31:2]] = {JMP_ABS_L_OP, 16'h0000};
             p4 = p + 32'd4;
             rom[p4[31:2]] = {16'h0600, NOP_OP};              // on to I-5
@@ -1614,6 +1688,65 @@ module cache_tb;
                     u_top.u_eu.u_rf.d_reg[7], 32'h7777_8888);
             check32("D-10: W4+C came from the SAME burst fill -- re-read at a different offset cost 0 bus cycles",
                     c1 - c0, 32'd0);
+
+            // D-11: D-cache freeze (FD), manual §6.3.1.5. Same
+            // placeholder-synchronized wait pattern as D-9/D-10's own
+            // checks.
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hFFFF_FFFF; t++)
+                @(posedge clk_4x);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hDEAD_1234; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-11: W6 prime-read (FD=0) landed the correct value", u_top.u_eu.u_rf.d_reg[6], 32'hDEAD_1234);
+            check("D-11: W6 prime-read needed real bus activity (genuine cold miss)", c1 - c0 > 0);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'h1357_2468; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-11: W6 write-HIT while frozen (FD=1) still landed the new value",
+                    u_top.u_eu.u_rf.d_reg[6], 32'h1357_2468);
+            check32("D-11: the updated entry was still cached -- re-read cost 0 bus cycles",
+                    c1 - c0, 32'd0);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'h9999_8888; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-11: W7 write-MISS while frozen (FD=1, WA=1) still landed the write-through value",
+                    u_top.u_eu.u_rf.d_reg[7], 32'h9999_8888);
+            check("D-11: FD=1 overrode WA=1 -- W7 did NOT allocate, re-read needed a real bus cycle",
+                  c1 - c0 > 0);
+
+            // I-6: I-cache freeze (FI), manual §6.3.1.10. D5 still reads
+            // "2" from D-6's own earlier test at this point (nothing
+            // between D-6 and here touches D5), so waiting for it to
+            // genuinely clear to 0 (this test's own CLR_L_D5) is
+            // unambiguous -- no placeholder needed, unlike D-9/D-10/D-11's
+            // own D6/D7 checks, which had to guard against a coincidental
+            // stale 0.
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = code_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd701; t++)
+                @(posedge clk_4x);
+            c1 = code_ds_count;
+            check32("I-6: G visit#1 (FI=1) executed correctly", u_top.u_eu.u_rf.d_reg[5], 32'd701);
+            check("I-6: G visit#1 needed real bus activity (genuine miss)", c1 - c0 > 0);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = code_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd701; t++)
+                @(posedge clk_4x);
+            c1 = code_ds_count;
+            check32("I-6: G visit#2 (FI=1) executed correctly", u_top.u_eu.u_rf.d_reg[5], 32'd701);
+            check("I-6: FI=1 -- visit#2 ALSO needed real bus activity (never cached, unlike I-1's own hit)",
+                  c1 - c0 > 0);
         end
 
         // ===================================================================

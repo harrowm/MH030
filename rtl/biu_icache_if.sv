@@ -139,6 +139,13 @@ module biu_icache_if (
     // reasoning ("IBE only ever meant 'use burst pin protocol'") did not
     // match the manual and has been corrected; see IC_SINGLE_0..3 below.
     wire iburst_en = cacr[4];
+    // Phase 158 Stage 5: manual §6.3.1.10 (confirmed by direct re-read):
+    // "When the FI bit is set and a miss occurs in the instruction cache,
+    // the entry (or line) is not replaced." Unlike the D-cache, the I-cache
+    // has no write-hit exception to preserve (reads only) -- a frozen miss
+    // just needs a single ordinary fetch (IC_FROZEN_MISS below) with the
+    // cache array left untouched.
+    wire ifreeze_en = cacr[1];
 
     // Cache storage: 16 lines x 4 longwords x 32 bits = 256 bytes.
     // Phase 158 Stage 2: tag widened from 24 to 25 bits (addr[31:8] alone)
@@ -178,7 +185,12 @@ module biu_icache_if (
         IC_SINGLE_0 = 4'd8,
         IC_SINGLE_1 = 4'd9,
         IC_SINGLE_2 = 4'd10,
-        IC_SINGLE_3 = 4'd11
+        IC_SINGLE_3 = 4'd11,
+        // Phase 158 Stage 5: FI=1 miss -- a single ordinary fetch (reusing
+        // cg_single_req_r/addr_r, same registered-request shape IC_SINGLE_0
+        // uses) that returns data to the IFU without touching
+        // data_i/tag_i/valid_i at all, matching "the entry is not replaced."
+        IC_FROZEN_MISS = 4'd12
     } ic_state_t;
     // BERR is signalled via a dedicated flag rather than a separate state,
     // since a BERR-vs-normal IC_DONE would otherwise be identical except
@@ -286,6 +298,16 @@ module biu_icache_if (
                             state <= IC_HIT;
                         end else if (tc_e) begin
                             state <= IC_XLATE;
+                        end else if (ifreeze_en) begin
+                            // Phase 158 Stage 5: FI=1 -- never replace the
+                            // entry on a miss, regardless of IBE. Fetches
+                            // the exact requested word (not the line base --
+                            // there's no line-fill happening here), matching
+                            // "the entry is not replaced" rather than the
+                            // burst/single-fill paths' own whole-line intent.
+                            state            <= IC_FROZEN_MISS;
+                            cg_single_req_r  <= 1'b1;
+                            cg_single_addr_r <= {ifu_addr[31:2], 2'b00};
                         end else if (iburst_en) begin
                             state           <= IC_BURST0;
                             ic_burst_req_r  <= 1'b1;
@@ -319,7 +341,15 @@ module biu_icache_if (
                         state         <= IC_DONE;
                     end else if (xl_hit || xl_walk_done) begin
                         fill_base_r     <= {xl_pa[31:4], 4'h0};
-                        if (iburst_en) begin
+                        if (ifreeze_en) begin
+                            // Phase 158 Stage 5: same FI=1 gate as IC_IDLE's
+                            // own branch above, for the post-translation
+                            // case -- fetches the translated word address
+                            // directly, not the line base.
+                            state            <= IC_FROZEN_MISS;
+                            cg_single_req_r  <= 1'b1;
+                            cg_single_addr_r <= {xl_pa[31:2], 2'b00};
+                        end else if (iburst_en) begin
                             ic_burst_req_r  <= 1'b1;
                             ic_burst_addr_r <= {xl_pa[31:4], 4'h0};
                             state           <= IC_BURST0;
@@ -491,6 +521,24 @@ module biu_icache_if (
                         if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
                         tag_i[idx_r]     <= vtag_r;
                         valid_i[idx_r]   <= 1'b1;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end else if (cg_berr) begin
+                        berr_r           <= 1'b1;
+                        xlate_fault_r    <= 1'b0;
+                        state            <= IC_DONE;
+                        cg_single_req_r  <= 1'b0;
+                    end
+                end
+
+                // Phase 158 Stage 5: FI=1 -- a single ordinary fetch,
+                // deliberately never touching data_i/tag_i/valid_i at all
+                // ("the entry is not replaced"), unlike every other miss
+                // path above which all end up validating the full line.
+                IC_FROZEN_MISS: begin
+                    if (!same_req) abandoned_r <= 1'b1;
+                    if (cg_ack_rise) begin
+                        fill_rdata_r     <= cg_rdata;
                         state            <= IC_DONE;
                         cg_single_req_r  <= 1'b0;
                     end else if (cg_berr) begin

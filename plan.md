@@ -7266,6 +7266,100 @@ Stage 4 (IBE/WA/DBE) is now complete.** Stage 5 (Freeze, FD/FI) is next.
 
 ---
 
+## Phase 158 Stage 5 — Freeze (FD/FI) for both caches
+
+### Goal
+
+Manual §6.3.1.5 (D-cache, FD) + §6.3.1.10 (I-cache, FI), both re-read directly
+before implementing. **FD** (p.6-22): "When the FD bit is set and a miss
+occurs during a read or write of the data cache, the indexed entry is not
+replaced. However, write cycles that hit in the data cache cause the entry to
+be updated even when the cache is frozen. When the FD bit is clear, a miss in
+the data cache during a read cycle causes the entry (or line) to be filled,
+and the filling of entries on writes that miss are then controlled by the WA
+bit." **FI** (p.6-23): "When the FI bit is set and a miss occurs in the
+instruction cache, the entry (or line) is not replaced." — no write-hit
+exception to state, since the I-cache is read-only. `cacr[9]` (FD) was
+misused as the enable bit before Stage 1; `cacr[1]` (FI) was never referenced
+at all — no freeze suppression logic existed in either cache-if module.
+
+### Fix — D-cache (`biu_cache_if.sv`)
+
+New `dfreeze_en = cacr[9]` alias. Every miss-side allocate/replace path
+gained a `&& !dfreeze_en` gate, added onto conditions that already existed
+for other reasons rather than new standalone checks: `CI_IDLE`'s and
+`CI_XLATE`'s own `CI_D_BURST0` dispatch condition; `CI_D_MISS`'s own
+cache-populate branch (both the sequential block and its matching
+output-block `sf_addr`/`sf_siz` forcing logic — a frozen miss falls through
+to the exact same "plain passthrough at the CPU's own requested size" branch
+a disabled/inhibited cache already uses, since there's no cache entry being
+populated either way); `CI_WRITE`'s own WA-driven write-miss-allocate branch
+(`wa_en` → `wa_en && !dfreeze_en`). `CI_WRITE`'s write-*hit* update
+(`if (dhit_r)`) is deliberately left completely ungated, matching the
+manual's own explicit exception verbatim.
+
+### Fix — I-cache (`biu_icache_if.sv`)
+
+New `ifreeze_en = cacr[1]` alias. Unlike the D-side, this needed a genuinely
+new state (`IC_FROZEN_MISS`) rather than gating existing allocate logic — a
+frozen miss still needs to fetch and return data to the IFU, just without
+touching `data_i`/`tag_i`/`valid_i` at all. `IC_FROZEN_MISS` reuses the same
+registered `cg_single_req_r`/`cg_single_addr_r` request pair `IC_SINGLE_0..3`
+(Stage 4a) already established — a single ordinary fetch via `cg_ack_rise`,
+returning `fill_rdata_r <= cg_rdata` straight to `IC_DONE` with zero array
+writes. `IC_IDLE`'s and `IC_XLATE`'s own dispatch each gained a new
+`else if (ifreeze_en)` branch, checked *before* the `iburst_en`/`IC_SINGLE_0`
+fallback (freeze takes precedence over burst-vs-single regardless of IBE) but
+*after* the `tc_e`/`IC_XLATE` check (address translation still applies to a
+frozen access — only the cache-array behavior changes). Addressed via the
+*specific requested word* (`{ifu_addr[31:2],2'b00}` / `{xl_pa[31:2],2'b00}`),
+not the line base `fill_base_r` used everywhere else in this file — there's
+no line-fill happening here, only a single-word fetch.
+
+### Tests
+
+New "D-11" test (`tb/cache_tb.sv`, appended after D-10 at the same fixed ROM
+address, continuing that region's own established "avoid the fragile D-4b/D-5
+insertion zone" placement): two proofs in one sequence. (a) W6=0x3200 primed
+into the cache with FD=0 (an ordinary unfrozen read-miss), then FD=1|WA=1 set
+and a write to the now-cached W6 — the write-hit-still-updates exception —
+confirmed both by the new value landing and a 0-cost re-read (still cached,
+untouched by freeze). (b) W7=0x3300, a fresh address never touched, written
+to under FD=1|WA=1 — confirms FD overrides WA: the write-through value still
+lands in backing memory, but the re-read still needs a real bus cycle
+(genuinely never allocated). Passed cleanly on the first real attempt (no new
+testbench bugs this time — the placeholder-synchronization lesson from
+D-9/D-10 was applied proactively from the start).
+
+New "I-6" test (appended after D-11, redirecting D-11's own tail before I-5):
+G=0x1700, a fresh subroutine, visited twice via JSR under FI=1|icache_en=1.
+The decisive proof: *both* visits show real bus activity (`code_ds_count`),
+directly contrasting with I-1's own test, where the second visit being a
+cache HIT (zero bus activity) is the whole point. D5 (used as the completion
+marker) reliably reads a stale, unambiguous "2" from D-6's own earlier test
+at this point in the file — confirmed safe to wait on directly without the
+0xFFFFFFFF-placeholder trick D-9/D-10/D-11's own D6/D7 checks needed, since
+"2" can never coincidentally match either 0 or the target value 701. Also
+passed cleanly on the first attempt. In writing I-6's own tail, confirmed
+(by reading I-5's own ROM setup, not assumed) that I-5's code at 0x0600 never
+sets CACR itself — it inherits whatever the D-cache tests immediately before
+it last left CACR at, a pre-existing condition unrelated to this stage — so
+I-6's own final restore matches D-11's own (`icache_en=0|dcache_en=1`)
+exactly, to avoid disturbing I-5's own already-passing behavior.
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures (117 checks total at runtime, +10 new
+this stage — D-11's own 6 plus I-6's own 4). `make test`
+36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (mandatory — `biu_cache_if.sv`/`biu_icache_if.sv` changed) — PASS
+702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline (expected: Harte never sets FD/FI). **Closes
+Stage 5.** Stage 6 (CACR self-clearing bit readback masking) is next —
+expected to be the smallest remaining stage.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —
