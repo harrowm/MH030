@@ -7031,6 +7031,125 @@ throughout). **Closes Stage 4a.** Stage 4b (write-allocate, WA) is next.
 
 ---
 
+## Phase 158 Stage 4b — Write-allocate (WA) for the D-cache
+
+### Goal
+
+Manual §6.1.2.1 (p.6-8/6-9) + Figure 6-4's five worked examples, re-read directly
+(PDF pages 145-146, manual pages 6-8/6-9) before implementing: WA=0 → a write that
+misses never alters the cache (only a write-*hit* updates it). WA=1 → the processor
+"always updates the data cache on cachable write cycles, but only validates an
+updated entry that hits or an entry that is updated with long-word data that is
+long-word aligned." Concretely, from the five examples: **Example 1** (any write,
+cache hit) — identical for both WA modes, always update cache+memory (already
+correctly implemented, not a gap). **Example 2** (tag match, cache miss, long-word
+data, *misaligned* — spans two word slots, one already-valid one not) — even under
+WA=1, the still-invalid slot's own portion is *not* written; only the
+already-valid slot's own portion updates (same as an ordinary hit). **Example 3**
+(tag match, cache miss, long-word data, *aligned*) — WA=1 validates the entry
+(the previously-invalid word slot). **Example 4** (no tag match, long-word data,
+aligned) — WA=1 replaces the tag, writes the data, validates only that one word
+slot, and explicitly invalidates the other three. **Example 5** (no tag match,
+long-word data, *misaligned*) — WA=1 does *not* write data at all, only clears
+one word slot's own valid bit (V2←0) as a stale-prevention measure. `cacr[13]`
+(WA) was never referenced anywhere in the RTL (`grep "cacr\[13\]" rtl/` → nothing)
+— a pure no-op before this stage.
+
+### Scope boundary (deliberate, reusing an existing Phase 134 simplification)
+
+Example 2's own "misaligned long-word write spans two word slots" shape is
+already excluded from `dhit`/`dhit_r`'s own hit detection by Phase 134's
+`d_size_ok`/`d_size_ok_r` gate (`!(eu_siz==2'b00 && eu_addr[1:0]!=2'b00)`) — a
+misaligned longword access falls through to the disabled-cache passthrough
+entirely, never touching the cache array at all, on both the read and write
+sides. This stage's own `siz_r==2'b00 && addr_r[1:0]==2'b00` check for "aligned
+long-word write" naturally reuses that exact same boundary as its own
+"else" branch (any write that isn't a perfectly-aligned longword, including a
+cross-slot misaligned longword), so Example 2's own specific dual-entry
+behavior is not separately replicated — the simpler "don't write data, just
+clear this one word slot's own valid bit" fallback (Example 5's own behavior)
+covers it safely, since `d_size_ok`/`d_size_ok_r` already ensures a genuinely
+cross-slot write never reaches this code path in the first place.
+
+### Fix
+
+New `wa_en = cacr[13]` alias. `rtl/biu_cache_if.sv`'s `CI_WRITE` state gained an
+`else if (wa_en)` branch (alongside the existing `if (dhit_r)` hit-update path):
+aligned long-word write (`siz_r==2'b00 && addr_r[1:0]==2'b00`) → `tag_d[idx_r] <=
+vtag_r; data_d[idx_r][woff_r] <= wdata_r;` plus a `for` loop setting only
+`woff_r`'s own valid bit and clearing the other three (Example 4's own full
+"replace and invalidate the rest" shape) — deliberately unconditional on whether
+the old tag matched, matching Example 4's own behavior exactly. Anything else
+(misaligned or sub-long-word write miss) → `valid_d[idx_r][woff_r] <= 1'b0;` only
+(Example 5's own behavior, a no-op if that slot was already invalid, matching
+Example 2's own b6-b7 sub-case).
+
+### Tests
+
+New "D-9" test (`tb/cache_tb.sv`): a fresh line (W3=0x2E00) never touched before,
+CACR set to WA=1|dcache_en. An aligned long-word write-miss followed by a
+re-read, checked via the same "isolate the re-read's own cost from the write's
+own mandatory write-through cycle" two-phase inline-poll shape D-4a already
+uses (write-through's own +1 cycle would otherwise be silently folded into the
+delta) — confirms the correct value lands *and* the re-read costs exactly 0 bus
+cycles (genuine allocation). Then a sub-long-word (word-size) write-miss at a
+different word offset in the *same* line, followed by a re-read — confirms the
+write-through value still lands correctly in backing memory, but the re-read
+still needs a real bus cycle (no allocation), per Example 5.
+
+Found and fixed **three real testbench bugs** while building this, all timing/
+addressing artifacts, not RTL correctness issues (confirmed throughout via
+direct internal-state tracing showing `dhit=1`, a genuine zero-cost hit, at
+every point the *measured* delta disagreed):
+
+1. **Missing backing-memory pre-population**: `rom[0x2E08/4]` (the sub-long-word
+   target) was never explicitly initialized like every other test address in
+   this file's own data block, defaulting to Verilog's `X` — the word-write's own
+   untouched lower half then read back as `X`, which `!==` never matches,
+   silently exhausting the poll budget and returning a stale, unrelated later
+   value. Fixed by adding an explicit `rom[16'h2E08/4] = 32'h0;` initializer.
+2. **Checkpoint omission**: an early draft measured the re-read's own bus cost
+   from *before* the aligned write to *after* the re-read in one step, silently
+   folding the write's own mandatory write-through cycle into the delta (always
+   showing 1, never 0). Fixed by splitting into the same explicit two-phase
+   inline poll D-4a's own check already uses, with an intermediate checkpoint
+   the moment D6 is observed cleared (the write has retired) before measuring
+   the re-read alone — this is the same lesson as D-4a's own check, just missed
+   on the first pass.
+3. **Unexplained cross-test timing sensitivity**: with the above two fixes, this
+   test passed *in isolation* but its original insertion point (between D-4b and
+   D-5) desynced D-6's own later chained-fault counter (D5 read 0x321 instead of
+   2), despite this test's own checks and D-5/D-6a's own checks all passing —
+   the exact same "unexplained timing sensitivity from inserting new code before
+   D-5" symptom already documented and left unresolved in Stage 2's own
+   postmortem (a different, abandoned MOVES-based test hit the identical
+   downstream symptom). Rather than re-investigate the same open question,
+   relocated this test to a fixed ROM address (0x0C00) reached via an explicit
+   jump from D-6's own tail (previously "on to I-5", now "on to D-9" → D-9's own
+   tail → "on to I-5"), sidestepping the fragile insertion point entirely — and
+   this uncovered a **fourth**, genuinely new testbench bug once relocated: D-6's
+   own coincidental leftover state left D6 already reading 0 by the time this
+   test's own check code started polling (hardware hadn't even reached this
+   test's own ROM yet), so a naive "wait for D6==0" phase-1 checkpoint matched
+   immediately (0 elapsed cycles) on that stale value, sampling the bus-cost
+   baseline long before the aligned write even executed. Fixed with a genuinely
+   3-phase wait: first synchronize on a 0xFFFFFFFF placeholder this test's own
+   code writes to D6 before anything else (a value only this test ever sets, so
+   observing it proves hardware has truly reached this test's own code) before
+   trusting a later "D6==0" as this test's own `CLR_L_D6`.
+
+### Results
+
+`tb/cache_tb.sv` standalone: 0 failures (73 checks, up from 69). `make test`
+36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (mandatory — `biu_cache_if.sv` changed) — PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline
+(expected: Harte never sets `TC.E`/CACR bits beyond plain enable). **Closes
+Stage 4b.** Stage 4c (DBE-gated D-cache burst fill) is next — likely the
+largest remaining implementation stage in this plan.
+
+---
+
 ## Phase 83 — Bucket C fully resolved: BCHG/BCLR/BSET root-cause was a test-harness bug (Phase 0.75)
 
 **Goal**: root-cause BCHG/BCLR/BSET's indexed-dst failure (`port3.md`'s Phase 0.75) —

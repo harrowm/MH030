@@ -190,6 +190,8 @@ module cache_tb;
     localparam ADDI_L_D5      = 16'h0685;
     localparam CLR_L_D6       = 16'h4286;
     localparam ADDI_L_D6      = 16'h0686;
+    // CLR.L D7 = 0x4280+7 (same +1-per-register pattern as D5/D6 above).
+    localparam CLR_L_D7       = 16'h4287;
     localparam NOP_OP         = 16'h4E71;
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
@@ -224,13 +226,22 @@ module cache_tb;
     // TAS_A0 constant) -- Phase 158 Stage 3.
     localparam TAS_A0         = 16'h4AD0;
     localparam MOVE_L_A0_D6   = 16'h2C10;  // MOVE.L (A0),D6
+    // MOVE.L (A0),D7: same +0x200-per-register pattern as D5->D6 above.
+    localparam MOVE_L_A0_D7   = 16'h2E10;  // MOVE.L (A0),D7
     // MOVE.L (d16,A0),D6: src mode=101 ((d16,An)) instead of 010 ((An)) --
     // needs one extension word (the 16-bit displacement).
     localparam MOVE_L_D16A0_D6 = 16'h2C28;
     localparam MOVE_L_D5_A0   = 16'h2085;  // MOVE.L D5,(A0)
     localparam MOVE_L_D6_A0   = 16'h2086;  // MOVE.L D6,(A0)
     localparam MOVE_L_D4_A0   = 16'h2084;  // MOVE.L D4,(A0)
+    // MOVE.W D4,(A0): same derivation as MOVE_L_D4_A0 (0x2084) with the
+    // size field (bits13-12) changed from 10(long) to 11(word) -- only the
+    // top nibble's low bit differs (0x3084 vs 0x2084), same confidence
+    // basis as MOVE_L_IMM_A0_IND's own derivation above.
+    localparam MOVE_W_D4_A0   = 16'h3084;
     localparam MOVE_L_IMM_D4  = 16'h283C;  // MOVE.L #imm,D4
+    // MOVE.L #imm,D6 = 0x203C + (6<<9), same derivation as MOVE_L_IMM_D4/D7.
+    localparam MOVE_L_IMM_D6  = 16'h2C3C;
     // MOVE.L #imm,(A0): same shape as MOVE_W_IMM_A0 with SS=10(long)
     // instead of 11(word) -- only the size field differs (0x20BC vs
     // 0x30BC), giving high confidence in the derivation since
@@ -404,6 +415,7 @@ module cache_tb;
         rom[16'h2C00/4] = 32'hCCCC_1111;  // T3  (idx=C, tag=0x2C -- D-6's own BERR-mid-read-miss target)
         rom[16'h2D00/4] = 32'hDDDD_2222;  // T4  (idx=D, tag=0x2D -- D-6's own BERR-mid-write target)
         rom[16'h2F00/4] = 32'h1111_1111;  // E   (idx=F, tag=0x2F -- Phase 158 Stage 3: RMW forced-miss)
+        rom[16'h2E08/4] = 32'h0000_0000;  // W3+8 (Phase 158 Stage 4b: sub-long-word write-allocation target -- must be a known value, not X, so the post-write longword re-read has a well-defined lower half)
 
         // D-5's own two independent handlers, one per fault -- an earlier
         // draft used ONE shared handler plus a register-indirect
@@ -485,7 +497,63 @@ module cache_tb;
         rom[16'h0B84/4] = {16'h0008, MOVE_L_IMM_A0_IND};
         rom[16'h0B88/4] = {16'h0000, 16'h0700};
         rom[16'h0B8C/4] = {JMP_ABS_L_OP, 16'h0000};
-        rom[16'h0B90/4] = {16'h0600, NOP_OP};            // on to I-5
+        rom[16'h0B90/4] = {16'h0C00, NOP_OP};            // on to D-9
+
+        // ---- D-9: write-allocation (WA=1), manual Figure 6-4 Examples
+        // 3/4/5 (W3=0x2E00, idx=0 -- every existing XX00-style address in
+        // this file's own backing-data block, e.g. R/S/W1/W2 above despite
+        // their own comments' stale "idxN" labels, shares real index 0 too;
+        // harmless, each test's own distinct tag simply evicts/replaces
+        // whatever was there). Aligned long-word write on a genuine miss
+        // must allocate (validate the entry, re-read hits with 0 bus
+        // cycles); a sub-long-word write on a genuine miss must NOT
+        // allocate (re-read still misses) even with WA=1. Deliberately
+        // placed here (fixed address, after D-6, jumped to explicitly)
+        // rather than its own original position between D-4b and D-5 -- an
+        // earlier attempt there desynced D-6's own later fault counter
+        // (D5 read 0x321 instead of 2) despite every one of THIS test's own
+        // checks passing and D-5/D-6a's own checks passing too, the exact
+        // same "unexplained timing sensitivity inserting new code before
+        // D-5" symptom already documented (and left unresolved, reverted
+        // rather than chased) in Stage 2's own postmortem -- relocated here
+        // rather than re-investigating the same open question.
+        // ----
+        begin
+            logic [31:0] p, p4, p8;
+            // D-6's own coincidental leftover state can leave D6 already
+            // reading 0 -- the check code's own "wait for D6==0 (write
+            // retired) then wait for D6==target" checkpoint pattern
+            // (matching D-4a's own proven shape) silently fires its first
+            // phase immediately in that case, sampling the bus-cost
+            // baseline *before* the aligned write even executes instead of
+            // after it. Force D6 to a known-nonzero placeholder first so
+            // the "wait for 0" phase always genuinely waits for this test's
+            // own CLR_L_D6 below.
+            rom[16'h0C00/4] = {MOVE_L_IMM_D6, 16'hFFFF};
+            rom[16'h0C04/4] = {16'hFFFF, MOVE_L_IMM_D7};
+            rom[16'h0C08/4] = {16'hFFFF, 16'hFFFF};          // D6=D7=0xFFFFFFFF placeholder
+            p = emit_set_cacr(32'h0000_0C0C, 32'h0000_2100); // WA=1 | dcache_en=1
+            rom[p[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            p4 = p + 32'd4; p8 = p + 32'd8;
+            rom[p4[31:2]] = {16'h2E00, MOVE_L_IMM_D4};
+            rom[p8[31:2]] = {16'hAABB, 16'hCCDD};            // D4 = 0xAABBCCDD
+            p = p + 32'd12;
+            rom[p[31:2]] = {MOVE_L_D4_A0, CLR_L_D6};         // aligned long write -> must allocate (W3#1)
+            p4 = p + 32'd4;
+            rom[p4[31:2]] = {MOVE_L_A0_D6, NOP_OP};          // re-read W3 (must HIT, 0 bus cycles)
+            p = p + 32'd8;
+            rom[p[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            p4 = p + 32'd4; p8 = p + 32'd8;
+            rom[p4[31:2]] = {16'h2E08, MOVE_W_D4_A0};        // A0 = W3+8 (woff=2, same line, still invalid)
+            rom[p8[31:2]] = {CLR_L_D7, MOVE_L_A0_D7};        // sub-long word write (miss) -> must NOT allocate
+            p = p + 32'd12;
+            rom[p[31:2]] = {NOP_OP, NOP_OP};                 // re-read W3+8 (must MISS again)
+            p = p + 32'd4;
+            p = emit_set_cacr(p, 32'h0000_0100);             // back to WA=0 | dcache_en=1
+            rom[p[31:2]] = {JMP_ABS_L_OP, 16'h0000};
+            p4 = p + 32'd4;
+            rom[p4[31:2]] = {16'h0600, NOP_OP};              // on to I-5
+        end
 
         // ===================================================================
         // I-1: miss-then-hit tight loop. A DBF D0,-2 self-loop re-fetches
@@ -1417,6 +1485,48 @@ module cache_tb;
             // and robust.
             check32("D-6: fault counter settled at exactly 2 (no extra/garbage faults from a stale A1)",
                     u_top.u_eu.u_rf.d_reg[5], 32'd2);
+
+            // D-9: write-allocation (WA=1), manual Figure 6-4 Examples 3/4/5
+            // (ROM at 0x0C00, jumped to from D-6's own tail -- see that ROM
+            // block's own comment for why this runs here rather than its
+            // original position between D-4b and D-5). Same "isolate the
+            // re-read's own cost from the write's own mandatory
+            // write-through cycle" shape as D-4a's own check, via an
+            // explicit two-phase inline poll with an intermediate
+            // checkpoint the moment D6/D7 is observed cleared (write
+            // retired) before measuring the re-read alone.
+            // D-6's own tail can coincidentally leave D6 already reading 0
+            // at the exact moment this check code starts (testbench check
+            // code races ahead of hardware, which hasn't even reached this
+            // test's own ROM yet) -- a plain "wait for D6==0" phase found
+            // that stale 0 immediately (0 elapsed cycles) and captured c0
+            // long before the aligned write even happened. Fixed with a
+            // genuinely 3-phase wait: first synchronize on the placeholder
+            // (0xFFFFFFFF, a value only this test's own code ever sets, so
+            // seeing it proves hardware has truly reached this test) before
+            // trusting a later "==0" as this test's own CLR_L_D6.
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hFFFF_FFFF; t++)
+                @(posedge clk_4x);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'hAABB_CCDD; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-9: W3 aligned long-word write-miss (WA=1) landed the correct value",
+                    u_top.u_eu.u_rf.d_reg[6], 32'hAABB_CCDD);
+            check32("D-9: aligned long-word write-miss (WA=1) genuinely allocated -- re-read cost 0 bus cycles",
+                    c1 - c0, 32'd0);
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'd0; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[7] !== 32'hCCDD_0000; t++)
+                @(posedge clk_4x);
+            c1 = data_ds_count;
+            check32("D-9: W3+8 sub-long-word write-miss (WA=1) still landed the correct (write-through) value",
+                    u_top.u_eu.u_rf.d_reg[7], 32'hCCDD_0000);
+            check("D-9: sub-long-word write-miss (WA=1) did NOT allocate -- re-read needed a real bus cycle",
+                  c1 - c0 > 0);
         end
 
         // ===================================================================

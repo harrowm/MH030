@@ -106,6 +106,7 @@ module biu_cache_if (
     wire icache_en = cacr[0];
     wire iburst_en = cacr[4];
     wire dcache_en = cacr[8];
+    wire wa_en     = cacr[13];
 
     // Cache storage arrays
     // Phase 158 Stage 2: tag width widened from 24 to 27 bits (was
@@ -493,6 +494,37 @@ module biu_cache_if (
                         // sub-longword write.
                         if (dhit_r) begin
                             data_d[idx_r][woff_r] <= merge_wr(data_d[idx_r][woff_r], wdata_r, siz_r, addr_r[1:0]);
+                        end else if (wa_en) begin
+                            // Phase 158 Stage 4b: write-allocation on a
+                            // write MISS, manual §6.1.2.1/Figure 6-4
+                            // (confirmed by direct re-read). Aligned
+                            // long-word write (Example 3/4): always allocate
+                            // -- replace the tag, write the data, validate
+                            // only this word slot, invalidate the other 3
+                            // (whether the old tag matched or not; Example 4
+                            // shows a full tag replacement clearing all four
+                            // V-bits before setting the one just written).
+                            // Misaligned or sub-long-word write (Example 5):
+                            // never write data -- only clear this word
+                            // slot's own valid bit (a no-op if it was
+                            // already invalid, matching Example 2's b6-b7
+                            // sub-case). d_size_ok_r already excludes a
+                            // longword write that spans two word slots from
+                            // ever reaching dhit_r/this cache-array logic
+                            // at all (Phase 134's own single-slot-model
+                            // boundary) -- this stage doesn't attempt to
+                            // widen that, so a genuinely cross-slot
+                            // misaligned long write's write-allocation
+                            // behavior (Example 2's own dual-entry shape)
+                            // is intentionally not replicated.
+                            if (siz_r == 2'b00 && addr_r[1:0] == 2'b00) begin
+                                tag_d[idx_r]           <= vtag_r;
+                                data_d[idx_r][woff_r]  <= wdata_r;
+                                for (m = 0; m < 4; m++)
+                                    valid_d[idx_r][m] <= (m == woff_r);
+                            end else begin
+                                valid_d[idx_r][woff_r] <= 1'b0;
+                            end
                         end
                         state <= CI_DONE;
                     end else if (sf_berr) begin
