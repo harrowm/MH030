@@ -165,6 +165,9 @@ $(SIM)/stall_fsm:     $(TOP_SRCS) tb/stall_fsm_tb.sv | $(SIM)
 $(SIM)/mmu_xlate:     $(TOP_SRCS) tb/mmu_xlate_tb.sv | $(SIM)
 	$(IVCOMP)
 
+$(SIM)/timing:        $(TOP_SRCS) tb/timing_tb.sv | $(SIM)
+	$(IVCOMP)
+
 $(SIM)/cosim_smoke:   $(TOP_SRCS) tb/cosim_smoke_tb.sv | $(SIM)
 	$(IVCOMP)
 

@@ -8178,3 +8178,104 @@ Priority 1 read fix. LEA is address-only, no memory write.
 
 Commit and push after every improvement to the pass rate. Each commit message should
 include the new pass count (e.g., "mustest 41/60 — byte read lane routing fix").
+
+## Phase 159 Stage 0 — Instruction Execution Timing plan: measurement infrastructure + protocol validation (FINDING: BLOCKED, needs user direction)
+
+### Goal
+
+Build the core measurement mechanism for comparing this RTL's actual instruction
+timing against MC68030UM.pdf Section 11's published CC/NCC clock-count tables, and
+validate it end-to-end against the one hand-verified worked example from the manual
+itself before trusting it for the planned Stages 1-7 sweep: `MOVE.L
+($1000,A0,D1.L),D2` (full-format indexed source EA, register destination) —
+fea "(d16,An,Xn)" NCC=7(1/1/0) + MOVE "EA,Dn" op-table NCC=2(0/1/0) = 9(1/2/0) total.
+
+### What was built
+
+- `tests/timing0.s` — isolated calibration program. `A0=$2000, D1=4`; a preceding
+  block writes `$DEADBEEF` at the target EA (`$3004`), then `BRA.W` jumps to
+  `target:`, physically placed 0x200 bytes away (well outside the IFU's own
+  prefetch-queue readahead distance) so the instruction under test cannot have
+  been speculatively fetched before the branch redirects PC there — matching NCC's
+  own "no overlap with the preceding instruction" definition.
+- `tb/timing_tb.sv` (new, full-chip wiring reusing `cosim_grp_tb.sv`'s own proven
+  pattern) — measures elapsed `clk_4x` ticks (÷4 = external bus clocks, per this
+  project's own 4x-oversampling convention) from the first bus request for the
+  target instruction's own opcode word to a caller-specified register reaching a
+  caller-specified value (its retirement marker), plus a tally of (r/p/w) bus
+  cycles in that window by FC+R/W categorization. Driven via plusargs
+  (`+target_pc=`, `+watch_reg=`, `+watch_val=`, `+expect_clocks=`) so later stages
+  can reuse the same binary for many generated test programs.
+- `Makefile`: new `sim/timing` target, mirroring the existing `sim/cosim_grp`
+  pattern.
+
+### Result: the measured total does not match, by a large and structurally-explained margin
+
+Measured: **84 ticks = 21 clocks**, r=1, p=2 (after correcting an off-by-one in the
+window-counting logic caught while reading the debug trace), w=0. Manual: **9
+clocks**, r=1, p=2, w=0. The **r/p/w bus-cycle-count breakdown matches exactly** —
+this RTL issues the same number and category of bus transactions the manual's own
+resource model predicts. The **total clock count is ~2.3x too high**, and a
+follow-up trace (logging AS-fall/AS-rise plus inter-cycle gaps with tick
+resolution) explains why:
+
+- Each of this project's own named S-states (`ST_READ_S0` … `ST_READ_S7`, 8 distinct
+  enum values in `biu_cycle_gen.sv`) advances only on `phase_r==2'd3` — i.e. every
+  *individually-named* S-state consumes a full 4-tick ("1 external clock") period.
+  A 0-wait-state read visits S0,S1,S2,S3,S4,(S5 skipped),S6,S7 = 7 states × 4 ticks
+  = 28 ticks of state machine time, plus idle/setup overhead, measured directly as
+  a clean **32-tick (8-clock) round trip per ordinary bus cycle** (AS-fall to
+  next AS-fall, back-to-back prefetches, confirmed via two consecutive instances).
+- Real 68030 silicon (confirmed by directly re-reading MC68030UM.pdf Figures 7-64/
+  7-65, Section 7, this session) uses S-states as **half-clock phases**: S0+S1
+  share clock 1, S2+S3 share clock 2, S4+S5 share clock 3, S6+S7 share clock 4 —
+  a minimum 0-wait-state bus cycle is **4 real clocks**, not 7-8. Figure 7-64's own
+  diagram literally labels a "4 CLOCKS" span across the S0-S7 sequence. This
+  matches CLAUDE.md's own S-state table structure (`S0/S1`, `S3/S4`, `S4/S5` given
+  as *shared* rows, not 8 independent single-state rows) — i.e. the project's own
+  design documentation describes the half-clock pairing correctly; the RTL's
+  `phase_r`-gated state machine just doesn't implement that pairing, giving each
+  named state its own full clock instead of sharing 2-per-clock.
+- This is not specific to this one instruction or addressing mode — it is a
+  structural property of `biu_cycle_gen.sv`'s core S-state advance logic, meaning
+  **every external bus cycle in the entire project takes roughly 2x as many real
+  clocks as true 68030 silicon**, uniformly. Confirmed this is why the manual's
+  own "2-clock bus cycle" assumption (§11.6's blanket assumptions) doesn't hold
+  here even with 0 wait states and immediate DSACK — investigated and ruled out an
+  alternate hypothesis (STERM vs. DSACK termination path length) first: both
+  converge to the same `ST_READ_S4 → ST_READ_S6` transition in this RTL, so
+  driving STERM instead of DSACK would not change the result.
+
+### Why this wasn't caught in 158 prior phases
+
+No prior verification method in this project checks an *absolute* real-clock
+duration against an external ground truth. Tom Harte SingleStepTests check only
+final register/memory state (no timing at all). Musashi bus-trace comparison
+(`buscmp.py`) diffs the *sequence* of bus addresses/data/FC/SIZ, not the tick gap
+between them — Musashi itself has no cycle-accurate timing model to compare
+against. The entire pipeline-stall/hazard rollout (Phases 103-136, `docs/stalls.md`)
+only ever checks *relative* deltas within this RTL's own model (e.g. "N wait
+states add M more ticks," "a cache hit costs exactly 0 bus cycles") — internally
+self-consistent, but never anchored to an externally-sourced absolute clock count.
+This Section 11 comparison is the first time in the project's history that an
+absolute clock count from real silicon's own documentation has been checked
+against this RTL at all.
+
+### Status: blocked pending user direction, not resolved this stage
+
+This is a foundational, extremely high-blast-radius finding — `biu_cycle_gen.sv`'s
+S-state advance logic is the single most heavily-tested, most central module in
+the entire 161-phase project (every Harte suite, every cosim comparison, the full
+cache-correctness and MMU-hardening rollouts, and the entire stall/hazard test
+suite are all built and tuned against its current pacing). Given the ambiguity in
+how to interpret CLAUDE.md's own stated goal ("pin-level cycle accuracy: every
+external bus signal must assert/deassert on the exact S-state cycle real silicon
+does" — read literally, this could mean either "the correct S-state, in the
+correct relative order" or "the correct S-state at the correct absolute clock,"
+and the whole codebase's own self-consistent-but-not-externally-anchored test
+history is compatible with either reading), and given that "fixing" this (halving
+every bus cycle's real-clock duration to match true silicon) would be an
+enormous, delicate undertaking with its own dedicated verification needs — this
+is not something to decide or act on unilaterally. Presented to the user directly
+rather than guessed at. See conversation for the options discussed.
+
