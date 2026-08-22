@@ -2195,6 +2195,34 @@ module stall_fsm_tb;
         rom[16'h2C84/4] = {CAS_EXT, CLR_L_D5};
         rom[16'h2C88/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h2C8C/4] = {16'd4001, NOP_OP};
+        // Phase 160 Stage 1: T4d's own rom[] writes (below) are staged here,
+        // BEFORE T4c's own wait-loop/checks, rather than at the top of T4d's
+        // own block further down. Under the corrected (faster) S-state
+        // pacing, decode can reach T4d's own code (0x2C90+, right after
+        // T4c's own trailing NOP at 0x2C8E) close enough to when T4c's own
+        // run_and_check/check32/check8 calls finish that T4d's own writes --
+        // previously placed at the top of T4d's own block -- landed AFTER
+        // decode had already consumed stale (pre-write) content there.
+        // Confirmed via trace: at the moment those writes previously
+        // executed, ifu_decode_pc already read 0x2c92 (past CLR.L D5 at
+        // 0x2C90, mid-decode of MOVEA.L's own extension words), explaining
+        // MOVEA.L's own 32-bit immediate reading back wrong. Same fix shape
+        // as Phase 131's "write all affected ROM content up front, before
+        // any time-advancing wait" precedent -- moving the writes earlier in
+        // program order (not adding a wait) is what actually closes a
+        // CPU-races-ahead-of-testbench-writes race, since the CPU can only
+        // reach 0x2C90 after this whole `initial` block's own program order
+        // reaches at least this point.
+        rom[16'h36A0/4] = 32'h0011_2233;  // TAS target (A0 itself); top byte 0 -> TAS sets bit7 -> 0x80
+        rom[16'h36B0/4] = 32'h0000_3730;  // pointer stored at outer read addr (A0+bd)
+        rom[16'h3830/4] = 32'hDEAD_F00D;  // final value (pointer + D1)
+        rom[16'h2C90/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2C94/4] = {16'h0000, 16'h36A0};
+        rom[16'h2C98/4] = {16'h223C, 16'h0000};  // MOVE.L #$100,D1 opcode ; imm hi
+        rom[16'h2C9C/4] = {16'h0100, 16'h2430};  // imm lo=$100 ; MOVE.L (memind),D2 opcode
+        rom[16'h2CA0/4] = {16'h1925, 16'h0010};  // ext1 ; bd
+        rom[16'h2CA4/4] = {TAS_A0, ADDI_L_D5};
+        rom[16'h2CA8/4] = {16'h0000, 16'd4002};
         begin
             int c0, c1, t;
             // Unlike T4a (which ran directly after B-21 with nothing async
@@ -2234,17 +2262,9 @@ module stall_fsm_tb;
         // (not B-22/BERR-mid-Memind/INT-mid-Memind's $3900 chain), since
         // TAS here actually mutates the byte at A0, and this pair runs
         // last so nothing downstream depends on that byte staying pristine.
+        // (rom[] writes for this test are staged earlier, alongside T4c's
+        // own -- see the comment there.)
         // -------------------------------------------------------------
-        rom[16'h36A0/4] = 32'h0011_2233;  // TAS target (A0 itself); top byte 0 -> TAS sets bit7 -> 0x80
-        rom[16'h36B0/4] = 32'h0000_3730;  // pointer stored at outer read addr (A0+bd)
-        rom[16'h3830/4] = 32'hDEAD_F00D;  // final value (pointer + D1)
-        rom[16'h2C90/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
-        rom[16'h2C94/4] = {16'h0000, 16'h36A0};
-        rom[16'h2C98/4] = {16'h223C, 16'h0000};  // MOVE.L #$100,D1 opcode ; imm hi
-        rom[16'h2C9C/4] = {16'h0100, 16'h2430};  // imm lo=$100 ; MOVE.L (memind),D2 opcode
-        rom[16'h2CA0/4] = {16'h1925, 16'h0010};  // ext1 ; bd
-        rom[16'h2CA4/4] = {TAS_A0, ADDI_L_D5};
-        rom[16'h2CA8/4] = {16'h0000, 16'd4002};
         begin
             int c0, c1, t;
             for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2C90; t++)

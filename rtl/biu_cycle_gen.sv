@@ -315,9 +315,29 @@ module biu_cycle_gen #(
     assign phase   = phase_r;
     assign s_state = 7'(state);
 
+    // Phase 160 Stage 1: real 68030 silicon pairs 2 named S-states per external
+    // clock (S0+S1, S2+S3, S4+S5, S6+S7 -- confirmed against MC68030UM.pdf
+    // Figures 7-64/7-65, Section 7), so a minimum 0-wait-state bus cycle is 4
+    // real clocks (8 half-states), not 8 (each state getting its own full
+    // clock, this design's original behavior). state_adv fires twice per real
+    // clock (phase_r==2'd1 and 2'd3) so each named state now holds for exactly
+    // 2 ticks. NOTE: because phase_r is a free-running, state-independent
+    // counter, a single specific state's own ABSOLUTE phase_r parity is
+    // data-dependent (depends on how many ticks of prior, variable-length
+    // execution preceded it) -- any block that needs to fire reliably once
+    // during one particular named state's own dwell must gate on state_adv
+    // (which always coincides with that state's own last tick, regardless of
+    // parity), NOT on a fixed phase_r==2'dN comparison. Blocks that check an
+    // OR of two states that are always visited back-to-back (e.g. "in S4 or
+    // S5") remain safe on the old phase_r==2'd3 cadence -- the pair spans one
+    // whole real clock either way -- and blocks that hold a single state for
+    // many consecutive real clocks (ST_IDLE, ST_RESET_INST self-loops) are
+    // also unaffected. See plan.md Phase 160 Stage 1 for the full derivation.
+    wire state_adv = phase_r[0];
+
     always_ff @(posedge clk_4x or negedge rst_n) begin
-        if (!rst_n)              state <= ST_RESET;
-        else if (phase_r == 2'd3) state <= state_nxt;
+        if (!rst_n)         state <= ST_RESET;
+        else if (state_adv) state <= state_nxt;
     end
 
     logic dsack_wait;
@@ -443,7 +463,9 @@ module biu_cycle_gen #(
                 if (state == ST_INIT_SSP_S4 || state == ST_INIT_SSP_S5) init_ssp_r <= ext_d_in;
                 if (state == ST_INIT_PC_S4  || state == ST_INIT_PC_S5)  init_pc_r  <= ext_d_in;
             end
-            if (state == ST_INIT_PC_S7 && phase_r == 2'd3) init_done_r <= 1'b1;
+            // ST_INIT_PC_S7 is a single transient (now 2-tick) state -- must
+            // gate on state_adv, not a fixed phase_r value (Phase 160 Stage 1).
+            if (state == ST_INIT_PC_S7 && state_adv) init_done_r <= 1'b1;
         end
     end
 
@@ -455,9 +477,12 @@ module biu_cycle_gen #(
     logic sterm_latched_r;
     wire  sterm_active = sterm_latched_r;
 
+    // Phase 160 Stage 1: every condition below tests a single transient state
+    // (ST_RMW_READ_S7 alone, or one specific cycle-type's own S2), so this
+    // block must gate on state_adv rather than a fixed phase_r value.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) sterm_latched_r <= 1'b0;
-        else if (phase_r == 2'd3) begin
+        else if (state_adv) begin
             if (state == ST_IDLE || state == ST_RMW_READ_S7)
                 sterm_latched_r <= 1'b0;  // clear between RMW phases too
             else if ((state == ST_READ_S2 || state == ST_WRITE_S2 ||
@@ -668,6 +693,15 @@ module biu_cycle_gen #(
     end
 
     // BERR / retry / fault always_ff
+    // Phase 160 Stage 1: is_S6 (and, further below, is_S7 and the bare
+    // ST_READ_S7/ST_WRITE_S7 pair) are single-transient-state conditions, so
+    // this whole block must gate on state_adv rather than a fixed phase_r
+    // value -- this is the highest-severity site in the pacing fix, since it
+    // gates BERR detection (Phases 108-114's own delicate BERR-abort
+    // machinery). is_S4_or_S5 firing at the (now twice-as-frequent) state_adv
+    // cadence instead of once is harmless: berr_s is an already-synchronized
+    // level signal, so re-asserting the same computed values a second time
+    // within the same real clock is idempotent.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             berr_abort_r        <= 1'b0; berr_is_halt_retry_r <= 1'b0;
@@ -679,7 +713,7 @@ module biu_cycle_gen #(
             retry_addr_r  <= 32'h0; retry_wdata_r <= 32'h0;
             retry_fc_r    <= 3'b0;  retry_rw_r   <= 1'b1;
             retry_siz_r   <= 2'b0;  retry_is_op_r <= 1'b0;
-        end else if (phase_r == 2'd3) begin
+        end else if (state_adv) begin
             if ((is_S4_or_S5 || is_S6) && berr_s) begin
                 berr_abort_r <= 1'b1;
                 if (!halt_s && !in_retry_r) begin
@@ -744,12 +778,26 @@ module biu_cycle_gen #(
     end
 
     // RESET instruction counter
+    // Phase 160 Stage 1: the load condition below fires on ST_IDLE's own
+    // *last* tick (right before the FSM leaves it for ST_RESET_INST) -- a
+    // transition-catching pattern like the is_S7 clears elsewhere, not a
+    // "level stable across a bounded window" one, so it must gate on
+    // state_adv. Checking only at the old phase_r==2'd3 cadence let the FSM
+    // enter ST_RESET_INST (now reachable on either state_adv half) with
+    // rstout_cnt_r never loaded, so it read stale/zero and immediately
+    // satisfied the decrement branch's own "== 0" exit check (empirically:
+    // RSTOUT held low for ~2 ticks instead of the correct 496). The decrement
+    // itself must stay on the OLD phase_r==2'd3 cadence -- it counts real
+    // clocks, not state visits, and ST_RESET_INST self-loops for many
+    // consecutive real clocks while counting down, unrelated to state_adv's
+    // per-state pacing.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) rstout_cnt_r <= 8'h0;
-        else if (phase_r == 2'd3) begin
-            if (state == ST_IDLE && eu_rst_req && init_done_r && !retry_r && !eu_iack_req)
+        else begin
+            if (state_adv && state == ST_IDLE && eu_rst_req && init_done_r &&
+                !retry_r && !eu_iack_req)
                 rstout_cnt_r <= RSTOUT_CLKS[7:0] - 8'd1;
-            else if (state == ST_RESET_INST && rstout_cnt_r != 8'h0)
+            else if (phase_r == 2'd3 && state == ST_RESET_INST && rstout_cnt_r != 8'h0)
                 rstout_cnt_r <= rstout_cnt_r - 8'h1;
         end
     end
@@ -770,7 +818,9 @@ module biu_cycle_gen #(
             bkpt_addr_r     <= 32'h0; bkpt_fc_r      <= 3'b0;
             bkpt_siz_r      <= 2'b0;  bkpt_rw_r      <= 1'b1;
             bkpt_wdata_r    <= 32'h0; cyc_is_bkpt_r   <= 1'b0;
-        end else if (phase_r == 2'd3) begin
+        // Phase 160 Stage 1: the is_S7-gated discriminator clears below are
+        // single-transient-state conditions -- must gate on state_adv.
+        end else if (state_adv) begin
             if (!dsack_wait) begin
                 if (state == ST_READ_S4  || state == ST_READ_S5  ||
                     state == ST_WRITE_S4 || state == ST_WRITE_S5)
@@ -922,11 +972,11 @@ module biu_cycle_gen #(
             ST_INIT_SSP_S1: state_nxt = ST_INIT_SSP_S2;
             ST_INIT_SSP_S2: state_nxt = ST_INIT_SSP_S3;
             ST_INIT_SSP_S3: state_nxt = ST_INIT_SSP_S4;
-            ST_INIT_SSP_S4: begin
-                if (dsack_wait) state_nxt = ST_INIT_SSP_S5; else state_nxt = ST_INIT_SSP_S6;
-            end
+            // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
+            // ST_READ_S4/S5 comment above for the full reasoning).
+            ST_INIT_SSP_S4: state_nxt = ST_INIT_SSP_S5;
             ST_INIT_SSP_S5: begin
-                if (dsack_wait) state_nxt = ST_INIT_SSP_S5; else state_nxt = ST_INIT_SSP_S6;
+                if (dsack_wait) state_nxt = ST_INIT_SSP_S4; else state_nxt = ST_INIT_SSP_S6;
             end
             ST_INIT_SSP_S6: state_nxt = ST_INIT_SSP_S7;
             ST_INIT_SSP_S7: state_nxt = ST_INIT_PC_S0;
@@ -935,11 +985,11 @@ module biu_cycle_gen #(
             ST_INIT_PC_S1: state_nxt = ST_INIT_PC_S2;
             ST_INIT_PC_S2: state_nxt = ST_INIT_PC_S3;
             ST_INIT_PC_S3: state_nxt = ST_INIT_PC_S4;
-            ST_INIT_PC_S4: begin
-                if (dsack_wait) state_nxt = ST_INIT_PC_S5; else state_nxt = ST_INIT_PC_S6;
-            end
+            // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
+            // ST_READ_S4/S5 comment above for the full reasoning).
+            ST_INIT_PC_S4: state_nxt = ST_INIT_PC_S5;
             ST_INIT_PC_S5: begin
-                if (dsack_wait) state_nxt = ST_INIT_PC_S5; else state_nxt = ST_INIT_PC_S6;
+                if (dsack_wait) state_nxt = ST_INIT_PC_S4; else state_nxt = ST_INIT_PC_S6;
             end
             ST_INIT_PC_S6: state_nxt = ST_INIT_PC_S7;
             ST_INIT_PC_S7: state_nxt = ST_IDLE;
@@ -948,17 +998,20 @@ module biu_cycle_gen #(
             ST_READ_S1: state_nxt = ST_READ_S2;
             ST_READ_S2: state_nxt = ST_READ_S3;
             ST_READ_S3: state_nxt = ST_READ_S4;
-            ST_READ_S4: begin
-                if      (berr_s)                         state_nxt = ST_READ_S6;
-                else if (sterm_active || !dsack_wait)    state_nxt = ST_READ_S6;
-                else if (vpa_terminate)                  state_nxt = ST_READ_S6;
-                else                                     state_nxt = ST_READ_S5;
-            end
+            // Phase 160 Stage 1: S4 always proceeds to S5 -- DSACK is sampled
+            // once per full S4+S5 real clock (at S5's own end), never
+            // mid-clock. The old "S4 may skip straight to S6" path gave a
+            // 7-state (odd) 0-wait cycle, which cannot represent a whole
+            // number of real clocks once each state holds exactly half a
+            // clock (2 ticks) -- S4 and S5 must always both be visited so
+            // every cycle's total state count (and therefore duration) stays
+            // an even multiple of the pair. See plan.md Phase 160 Stage 1.
+            ST_READ_S4: state_nxt = ST_READ_S5;
             ST_READ_S5: begin
                 if      (berr_s)                         state_nxt = ST_READ_S6;
                 else if (sterm_active || !dsack_wait)    state_nxt = ST_READ_S6;
                 else if (vpa_terminate)                  state_nxt = ST_READ_S6;
-                else                                     state_nxt = ST_READ_S5;
+                else                                     state_nxt = ST_READ_S4;
             end
             ST_READ_S6: state_nxt = ST_READ_S7;
             ST_READ_S7: state_nxt = ST_IDLE;
@@ -986,17 +1039,18 @@ module biu_cycle_gen #(
             ST_IACK_S1: state_nxt = ST_IACK_S2;
             ST_IACK_S2: state_nxt = ST_IACK_S3;
             ST_IACK_S3: state_nxt = ST_IACK_S4;
-            ST_IACK_S4: begin
-                if      (berr_s)                  state_nxt = ST_IACK_S6;
-                else if (avec_s || !dsack_wait)   state_nxt = ST_IACK_S6;
-                else if (vpa_terminate)            state_nxt = ST_IACK_S6;
-                else                              state_nxt = ST_IACK_S5;
-            end
+            // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
+            // ST_READ_S4/S5 comment above for the full reasoning). Pulled
+            // forward from Stage 4's original scope because biu_tb.sv
+            // exercises IACK early enough that leaving it unfixed cascaded
+            // into unrelated later-test corruption once the global trigger
+            // widened.
+            ST_IACK_S4: state_nxt = ST_IACK_S5;
             ST_IACK_S5: begin
                 if      (berr_s)                  state_nxt = ST_IACK_S6;
                 else if (avec_s || !dsack_wait)   state_nxt = ST_IACK_S6;
                 else if (vpa_terminate)            state_nxt = ST_IACK_S6;
-                else                              state_nxt = ST_IACK_S5;
+                else                              state_nxt = ST_IACK_S4;
             end
             ST_IACK_S6: state_nxt = ST_IACK_S7;
             ST_IACK_S7: state_nxt = ST_IDLE;
@@ -1010,15 +1064,15 @@ module biu_cycle_gen #(
             ST_RMW_READ_S1: state_nxt = ST_RMW_READ_S2;
             ST_RMW_READ_S2: state_nxt = ST_RMW_READ_S3;
             ST_RMW_READ_S3: state_nxt = ST_RMW_READ_S4;
-            ST_RMW_READ_S4: begin
-                if      (berr_s)                       state_nxt = ST_RMW_READ_S6;
-                else if (sterm_active || !dsack_wait)  state_nxt = ST_RMW_READ_S6;
-                else                                   state_nxt = ST_RMW_READ_S5;
-            end
+            // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
+            // ST_READ_S4/S5 comment above). Pulled forward from Stage 3's
+            // original scope because leaving it unfixed hung TAS/CAS-style
+            // RMW sequences under the now-widened global trigger.
+            ST_RMW_READ_S4: state_nxt = ST_RMW_READ_S5;
             ST_RMW_READ_S5: begin
                 if      (berr_s)                       state_nxt = ST_RMW_READ_S6;
                 else if (sterm_active || !dsack_wait)  state_nxt = ST_RMW_READ_S6;
-                else                                   state_nxt = ST_RMW_READ_S5;
+                else                                   state_nxt = ST_RMW_READ_S4;
             end
             ST_RMW_READ_S6: state_nxt = ST_RMW_READ_S7;
             ST_RMW_READ_S7: state_nxt = ST_RMW_WRITE_S0; // no bus release!
@@ -1026,15 +1080,12 @@ module biu_cycle_gen #(
             ST_RMW_WRITE_S1: state_nxt = ST_RMW_WRITE_S2;
             ST_RMW_WRITE_S2: state_nxt = ST_RMW_WRITE_S3;
             ST_RMW_WRITE_S3: state_nxt = ST_RMW_WRITE_S4;
-            ST_RMW_WRITE_S4: begin
-                if      (berr_s)      state_nxt = ST_RMW_WRITE_S6;
-                else if (!dsack_wait) state_nxt = ST_RMW_WRITE_S6;
-                else                  state_nxt = ST_RMW_WRITE_S5;
-            end
+            // Phase 160 Stage 1: S4 always proceeds to S5 (see above).
+            ST_RMW_WRITE_S4: state_nxt = ST_RMW_WRITE_S5;
             ST_RMW_WRITE_S5: begin
                 if      (berr_s)      state_nxt = ST_RMW_WRITE_S6;
                 else if (!dsack_wait) state_nxt = ST_RMW_WRITE_S6;
-                else                  state_nxt = ST_RMW_WRITE_S5;
+                else                  state_nxt = ST_RMW_WRITE_S4;
             end
             ST_RMW_WRITE_S6: state_nxt = ST_RMW_WRITE_S7;
             ST_RMW_WRITE_S7: state_nxt = ST_IDLE;
@@ -1232,15 +1283,21 @@ module biu_cycle_gen #(
                 SP_S0: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw;
-                    // ECS# deasserted at S0; it asserts only in the 2nd half of S1
+                    // ECS# deasserted at S0; it asserts for all of S1 (below).
                     if (bc_cbreq_assert) ext_cbreq_n = 1'b0;
                 end
                 SP_S1: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw;
-                    // ECS# asserts for the 2nd half of S1 (phases 2-3), giving
-                    // exactly 1/2 CLK setup before AS# asserts at S2.
-                    if (phase_r >= 2'd2) ext_ecs_n = 1'b0;
+                    // Phase 160 Stage 1: ECS# asserts for the whole of S1 (now
+                    // correctly 2 ticks = 1/2 real clock on its own, matching
+                    // real silicon's S0+S1 half-clock pairing), giving the same
+                    // 1/2-CLK setup margin before AS# asserts at S2 that the
+                    // pre-fix "2nd half of a 4-tick S1" check gave -- no
+                    // mid-state phase_r threshold is needed anymore since S1's
+                    // own dwell already IS that half-clock. See plan.md
+                    // Phase 160 Stage 1.
+                    ext_ecs_n = 1'b0;
                     // OCS# deasserted here; it asserts coincident with AS# at S2.
                     if (bc_cbreq_assert) ext_cbreq_n = 1'b0;
                 end

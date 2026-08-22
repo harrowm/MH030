@@ -2838,31 +2838,30 @@ module biu_tb;
             eu_is_op_tb = 1'b1;    // operand cycle → OCS# should assert
             eu_req_tb   = 1'b1;
 
-            // --- ECS# is a half-CLK pulse in the 2nd half of S1 ---
-            $display("--- ECS# half-CLK pulse in S1 (clk-phases 2-3) ---");
+            // --- Phase 160 Stage 1: ECS# asserts for the whole of S1 ---
+            // S0 and S1 now each hold for exactly 2 ticks (real 68030 pairs
+            // 2 named S-states per external clock); ECS# fills S1's own
+            // entire (now-correct) 2-tick dwell instead of a sub-tick
+            // fraction of it, giving the same 1/2-CLK setup margin before
+            // AS# at S2 that the old "2nd half of a 4-tick S1" check gave.
+            // See plan.md Phase 160 Stage 1 and the matching RTL comment in
+            // biu_cycle_gen.sv's SP_S1 output arm.
+            $display("--- ECS# asserts for all of S1 ---");
 
-            // S0: ECS# must be deasserted (high)
-            wait_for_state(7'd18, 20);   // ST_READ_S0, phase 0
-            check("ECS_n high S0-ph0", ext_ecs_n === 1'b1);
-            @(posedge clk_4x);  // phase 1
-            check("ECS_n high S0-ph1", ext_ecs_n === 1'b1);
-            @(posedge clk_4x);  // phase 2
-            check("ECS_n high S0-ph2", ext_ecs_n === 1'b1);
-            @(posedge clk_4x);  // phase 3
-            check("ECS_n high S0-ph3", ext_ecs_n === 1'b1);
+            // S0: ECS# must be deasserted (high) for both of its ticks
+            wait_for_state(7'd18, 20);   // ST_READ_S0, first tick
+            check("ECS_n high S0-t0", ext_ecs_n === 1'b1);
+            @(posedge clk_4x);  // S0 second tick
+            check("ECS_n high S0-t1", ext_ecs_n === 1'b1);
 
-            // S1 phases 0-1: still deasserted; phases 2-3: asserted
-            @(posedge clk_4x);  // S1 phase 0
-            check("ECS_n high S1-ph0", ext_ecs_n === 1'b1);
-            @(posedge clk_4x);  // S1 phase 1
-            check("ECS_n high S1-ph1", ext_ecs_n === 1'b1);
-            @(posedge clk_4x);  // S1 phase 2 — ECS# asserts here
-            check("ECS_n low  S1-ph2", ext_ecs_n === 1'b0);
-            @(posedge clk_4x);  // S1 phase 3
-            check("ECS_n low  S1-ph3", ext_ecs_n === 1'b0);
+            // S1: ECS# asserted for both of its ticks
+            @(posedge clk_4x);  // S1 first tick
+            check("ECS_n low  S1-t0", ext_ecs_n === 1'b0);
+            @(posedge clk_4x);  // S1 second tick
+            check("ECS_n low  S1-t1", ext_ecs_n === 1'b0);
 
             // S2: ECS# deasserts; AS# asserts
-            @(posedge clk_4x);  // S2 phase 0
+            @(posedge clk_4x);  // S2
             check("ECS_n high at S2",  ext_ecs_n === 1'b1);
             check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 
@@ -3451,9 +3450,36 @@ module biu_tb;
                 eu_req_tb  = 1'b0;   // original EU access satisfied; walk over
                 use_mmu_tb = 1'b0;
 
+                // Phase 160 Stage 1: let the bus genuinely settle to an
+                // idle, no-requests-pending state (and the arbiter's own
+                // grant registers clear to all-0) before arming phase 2's
+                // contention -- without this, the arbiter's still-registered
+                // grant from the tail of the MMU walk's own last bus cycle
+                // (whatever it happened to be) can still be visible for the
+                // phase-2 loop's very first sampled tick, self-correcting by
+                // the next tick regardless, but reading as a false "IFU won"
+                // to a check with no settle margin. Confirmed via trace this
+                // is a test-timing artifact, not an arbiter priority bug —
+                // grant_eu is asserted correctly from the very next tick
+                // onward every time.
+                while (!bus_idle) @(posedge clk_4x);
+                repeat(2) @(posedge clk_4x);
+
                 // Phase 2: MMU done — now arm EU (p4_direct) and IFU together;
-                // EU must win, IFU must not.
+                // EU must win, IFU must not. p4_eu_req reaches the arbiter's
+                // eu_req input through an extra always_comb mux level
+                // (p4_direct ? p4_eu_req : sf_cyc_req) that ifu_req_tb's own
+                // direct wiring doesn't have; setting both in the same zero-
+                // time delta let the arbiter's registered priority logic
+                // sample a stale (still-0) muxed eu_req on the very same
+                // edge ifu_req_tb's already-settled 1 became visible,
+                // confirmed via trace -- a delta-cycle race in how this
+                // testbench arms the two requests, not an arbiter priority
+                // bug (grant_eu is correct on every subsequent tick). #1
+                // between the two assignments (same convention as
+                // feedback_icarus_timing.md) lets the mux settle first.
                 p4_eu_req  = 1'b1;
+                #1;
                 ifu_req_tb = 1'b1;
                 for (t = 0; t < 100; t++) begin
                     @(posedge clk_4x);

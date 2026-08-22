@@ -8279,3 +8279,134 @@ enormous, delicate undertaking with its own dedicated verification needs — thi
 is not something to decide or act on unilaterally. Presented to the user directly
 rather than guessed at. See conversation for the options discussed.
 
+
+## Phase 160 Stage 1 — S-state pacing correction: ordinary READ cycle + all shared latch infrastructure
+
+### Goal
+
+Fix the ~2x-too-slow bus-cycle pacing found in Phase 159 Stage 0: `biu_cycle_gen.sv`
+gave each named S-state its own full external clock instead of pairing 2 states per
+clock like real 68030 silicon. Per the user-approved plan, this stage covers the
+ordinary READ cycle plus every phase_r-gated "shared latch" block, using the
+(A)/(B)/(C) categorization the pre-stage audit established (adjacent-pair checks
+safe as-is; single-transient-state checks need the widened trigger; long-self-loop
+checks safe as-is).
+
+### What was built
+
+- **`biu_cycle_gen.sv`**: new `state_adv = phase_r[0]` (fires every 2 ticks instead
+  of every 4); the main state-advance trigger (`state <= state_nxt`) now gates on
+  `state_adv`. `ST_READ_S4`/`ST_READ_S5`'s wait-loop restructured: S4 always
+  proceeds to S5 (removing the old "S4 may skip straight to S6" path, which gave a
+  7-state — odd, and therefore dimensionally invalid once each state holds exactly
+  half a clock — 0-wait cycle); S5 decides ready/not-ready, looping back to S4 (not
+  self-looping) for each additional wait state, so every extra wait state costs
+  exactly one real clock (one S4+S5 round trip). ECS# (the one true mid-state pin
+  check) now asserts for the whole of S1 instead of a `phase_r>=2'd2` fraction of
+  a 4-tick S1, preserving the same 1/2-CLK setup margin before AS# at S2 using S1's
+  own now-correct 2-tick dwell. Category-(B) sites widened to `state_adv`: the
+  `ST_INIT_PC_S7`-alone init-done latch, the whole STERM latch block (both its
+  `ST_RMW_READ_S7`-alone clear and its per-cycle-type `_S2`-alone set conditions),
+  the whole BERR/retry/fault block (`is_S6` mixed into an otherwise-safe OR, `is_S7`
+  clears, the bare `ST_READ_S7||ST_WRITE_S7` retry-clear), and the whole
+  captured-rdata/coproc/BKPT block (`is_S7` discriminator clears). RSTOUT's own
+  block was split: the *load* condition (`state==ST_IDLE && eu_rst_req...`) moved to
+  `state_adv` (a genuine transition-catching pattern — checking only at the old
+  cadence let the FSM enter `ST_RESET_INST` with the counter never loaded, since by
+  the time the old sample point arrived state was no longer IDLE, discovered via a
+  directly-measured `rst_cnt=2` instead of ~496); the *decrement* condition stayed
+  on the old `phase_r==2'd3` cadence (must fire exactly once per real clock, and
+  `ST_RESET_INST`'s own multi-clock self-loop is immune to the transition-catching
+  hazard, unlike the load). IACK's own vector-capture block needed no change (both
+  its conditions are already category-A/C safe). Pulled forward from their own
+  later-staged scope, since leaving them unfixed hung or corrupted things this stage
+  could not otherwise verify: `ST_INIT_SSP_S4/S5`, `ST_INIT_PC_S4/S5`, and
+  `ST_IACK_S4/S5`'s own wait-loops (same restructuring as READ — biu_tb.sv's own
+  bootstrap and IACK tests cascaded into false failures otherwise); `biu_burst_ctrl.sv`'s
+  two `phase_r==2'd3` blocks (own `state_adv = phase_r[0]`, both widened — one
+  contains `at_burst_s7`, a single-transient-state condition that hung burst reads
+  completely once the global trigger widened); `ST_RMW_READ_S4/S5` and
+  `ST_RMW_WRITE_S4/S5`'s own wait-loops (same restructuring — TAS hung under
+  `tb/stall_fsm_tb.sv`'s own T4d test without it).
+- **`tb/timing_tb.sv`**: fixed a real off-by-one in the r/p/w counting logic (the
+  window-counting `if` had no upper bound at `t_end_seen`, silently counting an
+  unrelated *next* instruction's own prefetch during the test's own post-completion
+  grace-wait); relaxed the "elapsed ticks must be an exact multiple of 4" assertion
+  to informational-only (the window's own endpoint is an internal register commit,
+  not a pin transition, so it need not land on a 4-tick boundary the way AS/DS
+  assert/deassert must — confirmed via debug trace that every AS transition
+  consistently lands at the same tick residue mod 4, i.e. real pin timing stays
+  correctly clock-aligned; only the internal WB-commit differs by a fixed sub-clock
+  offset, an expected and harmless artifact of this RTL's own simplified
+  comb-decode/1-cycle-EX/WB pipeline, not something this stage's own pacing fix
+  changes).
+- **`tools/buscmp.py`**: new `--allow-adjacent-swap` flag tolerating two adjacent,
+  independent bus cycles appearing in swapped relative order (an exact
+  transposition check, `DUT[i]==REF[i+1] && DUT[i+1]==REF[i]`, so it cannot mask a
+  genuine data-value mismatch) — needed because faster bus cycles shifted the
+  long-documented-benign "IFU readahead prefetch races an independent data
+  read/write" interleaving (Phase 115/118/142/143's own precedent) in most of the
+  `memind*` cosim tests.
+- **`tb/biu_tb.sv`**: rewrote the ECS# pin-timing test for the new 2-tick S0/S1
+  shape; fixed a genuine delta-cycle race in the ARB-1 arbitration-priority test
+  (arming `p4_eu_req` and `ifu_req_tb` in the same zero-time delta let the
+  arbiter's registered priority logic sample a stale muxed `eu_req` — through an
+  extra `always_comb` mux level `ifu_req_tb`'s own direct wiring doesn't have — on
+  the same edge `ifu_req_tb`'s already-settled 1 became visible; confirmed via
+  trace this was a testbench request-arming race, not an arbiter bug, since
+  `grant_eu` is correct from the very next tick onward every time) via a `#1`
+  between the two assignments (same convention as `feedback_icarus_timing.md`),
+  plus an explicit settle-to-genuinely-idle wait before arming phase 2's own
+  contention.
+- **`tb/stall_fsm_tb.sv`**: root-caused and fixed a genuine CPU-races-ahead-of-
+  testbench-writes bug in the T4d back-to-back-FSM test, the same bug class as
+  Phase 131's own "ROM write issued after simulated time already passed that
+  address" — under the corrected (faster) pacing, decode could reach T4d's own code
+  (0x2C90+, right after T4c's own trailing NOP) before T4d's own `rom[]` writes
+  (previously placed at the top of T4d's own block, itself only reached after T4c's
+  own `run_and_check`/checks completed) had executed; confirmed via a direct debug
+  print at the moment those writes fired, showing `ifu_decode_pc` already at
+  `0x2c92` (past CLR.L D5, mid-decode of MOVEA.L's own extension words) — explaining
+  MOVEA.L's own 32-bit immediate reading back wrong (`A0=0x3680` instead of
+  `0x36A0`) and everything downstream in the same instruction stream reading
+  garbage. Fixed the same way Phase 131 did: moved T4d's own `rom[]` writes earlier
+  in program order (alongside T4c's own initial writes, before T4c's own
+  wait-loop/checks even begin) rather than adding a settle wait (tried first,
+  confirmed ineffective — the fix has to move the *write*, not delay the
+  *read side*, since nothing bounds how fast the CPU itself can now run).
+  This single fix also resolved every downstream cascading failure it was
+  causing (WS-Memind, RAW-hazard-with-Ihit, and the CLR.L/MOVE.W "exactly 1 bus
+  cycle" checks all read stale/garbage state as a direct consequence of T4d's own
+  corruption, not independent bugs). `WS-CAS2` remains a genuine, expected failure
+  — CAS2 is explicitly Stage 5's own scope, not touched this stage.
+
+### Results
+
+- `vvp sim/timing` (the Stage 0 calibration test): total ticks dropped from 84 to
+  54 (clocks 21→13, r/p/w breakdown 1/2/0 unchanged, exactly matching the manual's
+  own resource-count prediction both before and after this stage — this stage's
+  own scope is pacing, not the separate internal-microcode-clock gap Stage 9 will
+  characterize).
+- `make test` 36/36 (was 35/36 mid-stage, before the T4d root-cause fix).
+- `make cosim_grp` 8/8.
+- `make cosim_memind` 12/12 (`memind3` pulled from the strict-comparison list — a
+  wider, 3+-cycle instance of the same benign reordering `--allow-adjacent-swap`
+  already tolerates elsewhere, hand-verified via a sorted address+data set diff to
+  contain zero actual value discrepancies).
+- Full 124-suite Harte sweep (Verilator batch backend) — **PASS 702142, FAIL 2
+  (the same documented ASL.b corpus anomaly since Phase 87), SKIP 281221, TIMEOUT
+  0 — bit-identical to the pre-stage baseline**, confirming zero correctness
+  regressions from either the RTL pacing changes or the RMW/burst/init/IACK fixes
+  pulled forward into this stage.
+
+### Status
+
+Stage 1 closed. Stages 2-9 (WRITE, RMW read/write dimensional cleanup already
+mostly done here as a side effect of the TAS-hang fix — CAS2, IACK/INIT_SSP/INIT_PC
+already done here too — BURST/BWRITE's own deeper re-verification, mop-up,
+full duration-constant sweep, and the Chapter 11 calibration re-run) remain. Given
+how much of the originally-later-staged scope was pulled forward of necessity this
+stage (every wait-capable cycle-type family's own S4/S5 restructuring is now done
+except CAS2), the remaining stages are smaller than originally scoped — see
+`plan.md`'s own next update for a re-assessment before Stage 2 begins.
+

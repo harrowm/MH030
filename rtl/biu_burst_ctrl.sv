@@ -76,6 +76,20 @@ module biu_burst_ctrl (
     logic is_burst;
     assign is_burst = is_burst_read | is_burst_write;
 
+    // Phase 160 Stage 1: real 68030 silicon pairs 2 named S-states per
+    // external clock; biu_cycle_gen.sv's own main state-advance trigger was
+    // widened to match (state_adv there == phase_r[0], firing every 2 ticks
+    // instead of every 4). at_burst_s7 below is a single-transient-state
+    // condition (S7 alone, not paired with an adjacent state) -- gating it at
+    // the old phase_r==2'd3 cadence let it silently miss S7's own dwell on
+    // whichever absolute tick-parity it happened to land on (empirically:
+    // burst reads hung completely, waiting for a beat-advance/ack pulse that
+    // never fired). Both blocks in this module widen to the same state_adv
+    // condition; at_idle/at_burst_data are unaffected by widening (a
+    // long-self-looping single state and an always-adjacent-pair check,
+    // respectively -- see plan.md Phase 160 Stage 1 for the full framework).
+    wire state_adv = phase_r[0];
+
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             burst_beat_r     <= 2'd0;
@@ -86,7 +100,7 @@ module biu_burst_ctrl (
             burst_rdata_r[2] <= 32'h0; burst_rdata_r[3] <= 32'h0;
             m16_wdata_r[0]   <= 32'h0; m16_wdata_r[1]   <= 32'h0;
             m16_wdata_r[2]   <= 32'h0; m16_wdata_r[3]   <= 32'h0;
-        end else if (phase_r == 2'd3) begin
+        end else if (state_adv) begin
             // Latch burst read parameters at IDLE
             if (at_idle && eu_burst_req) begin
                 burst_addr_r <= eu_burst_addr;
@@ -166,7 +180,7 @@ module biu_burst_ctrl (
         end else begin
             eu_burst_ack_r  <= 1'b0; eu_burst_berr_r <= 1'b0;
             eu_m16_ack_r    <= 1'b0; eu_m16_berr_r   <= 1'b0;
-            if (phase_r == 2'd3 && at_burst_s7) begin
+            if (state_adv && at_burst_s7) begin
                 if (is_burst_read) begin
                     if (berr_abort_r)
                         eu_burst_berr_r <= 1'b1;

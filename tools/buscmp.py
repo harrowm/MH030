@@ -18,6 +18,18 @@ Options:
                       Allow DUT to have extra cycles beyond the reference end
                       (IFU prefetch after STOP/RTS is expected). Exit 0 when
                       all reference cycles matched, even if DUT has more.
+    --allow-adjacent-swap
+                      Phase 160 Stage 1: tolerate two ADJACENT, INDEPENDENT
+                      bus cycles appearing in swapped relative order (i.e.
+                      DUT[i]==REF[i+1] and DUT[i+1]==REF[i] exactly) without
+                      failing. This is the same benign "prefetch race" this
+                      project has hand-verified many times since Phase 115
+                      (an IFU readahead prefetch and a data read/write that
+                      don't depend on each other can legitimately interleave
+                      either way depending on exact relative bus timing) --
+                      it does not mask a genuine data-value mismatch, since
+                      it only fires on an EXACT transposition of the next
+                      cycle, never a value substitution.
 
 Exit codes:
     0  All compared cycles match.
@@ -79,6 +91,8 @@ def main():
     p.add_argument('--max',       type=int, default=None, metavar='N')
     p.add_argument('--dut-may-continue', action='store_true',
                    help='Allow DUT to have extra trailing cycles (IFU prefetch after halt)')
+    p.add_argument('--allow-adjacent-swap', action='store_true',
+                   help='Tolerate two adjacent cycles appearing in swapped order')
     args = p.parse_args()
 
     dut = parse_log(args.dut, skip=args.skip + args.skip_dut,
@@ -89,9 +103,18 @@ def main():
                     max_cycles=args.max)
 
     ctx = 5  # context lines before/after mismatch
+    n_common = min(len(dut), len(ref))
+    swapped_at = set()
 
-    for i, (d, r) in enumerate(zip(dut, ref)):
+    i = 0
+    while i < n_common:
+        d, r = dut[i], ref[i]
         if d != r:
+            if (args.allow_adjacent_swap and i + 1 < n_common and
+                    dut[i] == ref[i + 1] and dut[i + 1] == ref[i]):
+                swapped_at.add(i + 1)  # 1-indexed cycle number of the pair's first line
+                i += 2
+                continue
             print(f"FAIL  mismatch at cycle {i+1}:")
             lo = max(0, i - ctx)
             hi = min(len(dut), len(ref), i + ctx + 1)
@@ -105,6 +128,11 @@ def main():
                 print(f"  DUT{marker_d} [{j+1:4d}] {fmt(rd)}")
                 print(f"  REF{marker_r} [{j+1:4d}] {fmt(rr)}")
             sys.exit(1)
+        i += 1
+
+    if swapped_at:
+        print(f"NOTE  {len(swapped_at)} adjacent-swap pair(s) tolerated at cycle(s) "
+              f"{sorted(swapped_at)}")
 
     n_dut, n_ref = len(dut), len(ref)
     if n_dut != n_ref:
