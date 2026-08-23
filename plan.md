@@ -62,3 +62,72 @@ confirmed via `git diff --stat rtl/`, no Harte/cosim re-run needed).
 ### Status
 
 Stage D0 closed. Stage D1 (design the stall mechanism) is next.
+
+## Phase 162 Stage D1
+
+Designed and implemented the artificial-internal-stall mechanism as pure,
+inert plumbing (mirroring Phase 148's own "add `rd_c` port — pure
+plumbing, no consumer yet" precedent) -- Stage D2 will populate it for a
+real instruction family.
+
+Studied `ex_mem_stall`'s own existing semantics before designing anything
+new, since it turned out to already be exactly the right shape to reuse
+rather than invent something parallel: `ex_mem_stall=1` freezes every
+`ex_*` EX-stage latch unchanged (`rtl/eu_seq.sv`'s own EX-latch `always_ff`
+has an explicit `else if (ex_mem_stall) begin end` branch — un-driven
+signals retain their value) and bubbles WB (`wb_valid<=0` in the matching
+WB-stage `always_ff`) for as long as it holds, with the *already-computed*
+`ex_*` values committing untouched the instant it clears. That's precisely
+what an artificial stall needs: hold the instruction "in EX" (its result
+already correct, computed combinationally as always) for N extra cycles
+before letting WB observe it.
+
+**`rtl/eu_seq.sv`**: new `dec_internal_stall_ticks` (combinational,
+decode-time, `8'd0` for every instruction until Stage D2+ populates real
+whitelist entries), `internal_stall_cnt_r` (a down-counter, loaded with
+`dec_internal_stall_ticks` on the exact cycle a whitelisted instruction
+dispatches into EX -- gated on `instr_ack`, the same "entering EX right
+now" condition every other one-shot EX-entry latch in this file already
+keys off, e.g. `tas_run_r`'s own trigger), and `ex_internal_stall`
+(`internal_stall_cnt_r != 0`). Wired into the three places `ex_mem_stall`
+itself needed to reach for its own freeze semantics to work: `stall_base`
+(so decode stays frozen while counting down), the EX-latch freeze branch,
+and the WB-bubble branch — plus `eu_trace_req`, which needed the same
+`!ex_internal_stall` guard `!ex_mem_stall` already has (trace shouldn't
+request its own post-instruction exception before an artificially-delayed
+instruction has actually finished). Traced through the cycle-by-cycle
+timing by hand before committing to the load-on-`instr_ack` design: since
+`instr_ack` fires at decode→EX handoff, the counter only becomes visible
+(`ex_internal_stall=1`) the cycle *after* dispatch — exactly matching when
+`ex_mem_stall`-style freezing needs to first take hold, since the
+dispatching cycle itself is decode's own last legal chance to hand off
+before it must stay put.
+
+Deliberately did **not** touch two CAS/CAS2-specific `!ex_mem_stall`
+checks elsewhere in the file (`ex_cas_mem_done_r`/`ex_cas2_done_r`'s own
+"EX advancing to a new instruction" bookkeeping) — reasoned through
+rather than reflexively touched: `ex_internal_stall` and `ex_mem_stall`
+are structurally mutually exclusive per-instruction (single-issue
+pipeline, and Part D's own whitelist only ever targets simple
+register-direct ALU/shift/bit-field-shaped instructions, never the
+memory-FSM instructions `ex_mem_stall` itself covers), so these two
+signals can never simultaneously matter for the same in-flight
+instruction — touching them would add risk to already-proven CAS/CAS2
+logic for zero actual behavioral difference.
+
+### Results
+
+Confirmed fully inert: `git diff --stat rtl/` shows only `rtl/eu_seq.sv`
+touched; `make test` 36/36; `make cosim_grp` 8/8; `make cosim_memind`
+12/12; Stage D0's own 4 tests still pass unchanged (`ticks=` identical to
+before this stage); full 124-suite Harte sweep (mandatory — `eu_seq.sv`
+changed, and this specific change touches `stall_base`/the EX-freeze/WB-
+bubble branches shared by every instruction in the corpus) — PASS 702142,
+FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline, confirming the new mechanism has zero effect
+anywhere it isn't explicitly populated.
+
+### Status
+
+Stage D1 closed. Stage D2 (implement for shift/rotate register forms,
+the first real whitelist entries) is next.

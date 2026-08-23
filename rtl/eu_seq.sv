@@ -6737,6 +6737,50 @@ module eu_seq (
     end
     assign ex_berr_abort_wb = ex_mem_stall_r && mem_abort_r;
 
+    // ex_internal_stall: artificial extra hold cycles for register-only
+    // instructions whose real 68030 microcode genuinely takes longer than
+    // this pipeline's own 1-cycle combinational EX (Phase 162, plan.md).
+    // Confirmed empirically (Stage D0) that the gap for these instructions
+    // is flat per instruction class, not scaling with a runtime shift
+    // count or bit-field width/scan depth -- so this is a fixed-N-ticks
+    // lookup keyed on decode-time classification, not a value-dependent
+    // microsequencer. Reuses ex_mem_stall's own proven freeze semantics
+    // (EX latches held unchanged, WB bubbled) rather than inventing a new
+    // pipeline-control shape -- see the ex_mem_stall/ex_berr_abort_wb
+    // block just above for the pattern this mirrors.
+    //
+    // dec_internal_stall_ticks is in real clk_4x ticks (4 ticks = 1
+    // external/"manual" clock, matching every other timing figure in this
+    // project) and is 0 (inert) for every instruction until Stage D2+
+    // populates real whitelist entries here.
+    logic [7:0] dec_internal_stall_ticks;
+    always_comb begin
+        dec_internal_stall_ticks = 8'd0;
+        // Stage D2+ (plan.md) adds real whitelist entries here, e.g.:
+        //   if (dec_unit == UNIT_SHF && dec_use_reg_cnt)
+        //       dec_internal_stall_ticks = <bucket-dependent N>;
+    end
+
+    logic [7:0] internal_stall_cnt_r;
+    logic       ex_internal_stall;
+    assign ex_internal_stall = (internal_stall_cnt_r != 8'd0);
+
+    // Loaded the exact cycle a whitelisted instruction dispatches into EX
+    // (instr_ack, the same "this instruction is entering EX right now"
+    // condition every other one-shot EX-entry latch in this file keys
+    // off); decrements every cycle thereafter until it reaches 0, at which
+    // point ex_internal_stall drops and the ordinary (non-stalled) EX/WB
+    // path takes over on its own, needing no further changes here.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            internal_stall_cnt_r <= 8'd0;
+        end else if (internal_stall_cnt_r != 8'd0) begin
+            internal_stall_cnt_r <= internal_stall_cnt_r - 8'd1;
+        end else if (instr_ack && (dec_internal_stall_ticks != 8'd0)) begin
+            internal_stall_cnt_r <= dec_internal_stall_ticks;
+        end
+    end
+
     logic hazard_ex, hazard_wb, hazard_ccr, hazard_usp, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
                             (dec_reads_src && ex_dest_reg == dec_src_reg) ||
@@ -7014,6 +7058,7 @@ module eu_seq (
     assign ex_exc_dispatch_hazard = ex_will_except || exc_active || mem_berr || pending_mem_berr_r;
     logic stall_base;
     assign stall_base = ex_mem_stall
+                      || ex_internal_stall
                       || ex_exc_dispatch_hazard
                       || (ex_jmp_taken | ex_jsr_taken | ex_bsr_taken
                          | ex_rts_taken | ex_rtr_taken | ex_rte_taken | ex_dbcc_taken)
@@ -7208,8 +7253,9 @@ module eu_seq (
             ex_cas2_rn2_reg   <= 4'h0;
             ex_cas2_dc2_reg   <= 3'b0;
             ex_cas2_du2_reg   <= 3'b0;
-        end else if (ex_mem_stall) begin
-            // EX holds waiting for BIU ack — keep all EX latch signals unchanged.
+        end else if (ex_mem_stall || ex_internal_stall) begin
+            // EX holds waiting for BIU ack, or for an artificial internal
+            // stall (Phase 162) to expire — keep all EX latch signals unchanged.
             // (SystemVerilog: un-driven signals retain their current value.)
         end else if (stall) begin
             // DECODE holds; insert bubble into EX.
@@ -9153,9 +9199,10 @@ module eu_seq (
             wb_md_hi         <= 32'h0;
             wb_is_exg        <= 1'b0;
             wb_exg_dd        <= 1'b0;
-        end else if (ex_mem_stall || ex_berr_abort_wb) begin
-            // Memory cycle in progress (or just aborted by a berr the
-            // previous cycle — see ex_berr_abort_wb above): drain WB
+        end else if (ex_mem_stall || ex_internal_stall || ex_berr_abort_wb) begin
+            // Memory cycle in progress, an artificial internal stall
+            // (Phase 162) still counting down, or just aborted by a berr
+            // the previous cycle — see ex_berr_abort_wb above: drain WB
             // (bubble), same as the ordinary wait case.
             wb_valid         <= 1'b0;
             wb_writes_reg    <= 1'b0;
@@ -9776,7 +9823,7 @@ module eu_seq (
     assign eu_priv_req  = ex_valid && ex_is_priv;
     assign eu_linea_req = ex_valid && ex_is_linea;
     assign eu_linef_req = ex_valid && ex_is_linef;
-    assign eu_trace_req = ex_valid && ex_is_trace && !ex_mem_stall;
+    assign eu_trace_req = ex_valid && ex_is_trace && !ex_mem_stall && !ex_internal_stall;
 
 endmodule
 
