@@ -8560,3 +8560,42 @@ expected or found).
 Stage 5 closed. Stage 6 (targeted spot-check of the 5 flagged candidates from
 the scoping fork) next.
 
+
+## Phase 160 Stage 6 — S-state pacing correction: targeted spot-check
+
+### Goal
+
+Empirically confirm the 5 "(c) uncertain" candidates the Stage 4 scoping fork
+flagged in `tb/stall_fsm_tb.sv`/`tb/cache_tb.sv` each have comfortable margin
+under the new pacing, not just a pass.
+
+### What was checked
+
+- `stall_fsm_tb.sv:534`, `cache_tb.sv:397` -- `repeat(20)` reset-hold waits,
+  both entirely before `rst_n=1` -- pre-bus-activity by construction,
+  structurally independent of S-state pacing. No margin question applies.
+- `stall_fsm_tb.sv:1691` -- `repeat(8)` post-retirement WB margin, following a
+  real state-polling wait (`decode_pc>=addr && !eu_busy`). The actual pass/fail
+  (line 1692) reads D5's own value directly, not a tick count -- an
+  insufficient margin would show up as a wrong D5 value, not a silent false
+  pass. Confirmed passing.
+- `stall_fsm_tb.sv:2399` -- `check(..., t < 4000)`, a budget used as the
+  pass/fail condition, but in the direction speedup can only help (fewer
+  ticks needed to complete the loop, never more) -- safe by construction, and
+  confirmed passing.
+- `cache_tb.sv:1614` -- a `for` loop with a 2000-tick safety cutoff; the real
+  check (line 1616) reads A1's own value directly. Same reasoning as
+  `stall_fsm_tb.sv:1691` -- confirmed passing.
+
+### Results
+
+`make test` 36/36 (fresh run, all 5 sites' own containing tests included and
+passing with the reasoning above holding for each). No code changes needed --
+this stage closes as a pure verification pass, matching the scoping fork's own
+prediction that none of the 5 looked tuned close to failure.
+
+### Status
+
+Stage 6 closed. Stage 7 (Chapter 11 calibration re-run) is the last stage in
+this plan.
+
