@@ -225,3 +225,58 @@ untouched.
 Stage D2 closed — the first real clock-accuracy fix landed and fully
 verified. Stage D3+ (bit-field ops, then the smaller-gap register-direct
 families) is next.
+
+## Phase 162 Stage D3
+
+Populated the artificial-internal-stall mechanism for bit-field register
+(Dn) forms: BFCHG/BFCLR/BFSET/BFEXTS/BFEXTU/BFINS/BFFFO. Simpler than
+Stage D2's own shift/rotate work in one respect (bit-field offset/width
+come from the already-fetched extension word, not a live register read,
+so every one of these is fully decode-time computable -- no two-stage
+resolving needed, straight into `dec_internal_stall_ticks_fixed`'s
+existing `always_comb`) but needed care in a different place: confirming
+which of the 7 non-`BFTST` ops have a *natural* (not marker-inflated)
+measured baseline to trust. `BFCHG`/`BFCLR`/`BFSET` write back to the same
+`Dn`; `BFEXTS`/`BFEXTU`/`BFINS`/`BFFFO` write a genuinely different
+destination `Dx` (their own real ISA behavior, not an artificial test
+marker) -- all 7 confirmed to share the identical 8-clock (32-tick)
+baseline via Stage A5's own already-existing tests, re-checked against the
+`b_final_clock_survey.py` output before finalizing N. `BFTST` itself
+(read-only, no register write in the real ISA either) already matches the
+manual's own NCC=8 exactly with zero stall needed -- deliberately absent
+from the whitelist, not an oversight.
+
+### One real regression found and fixed, in a pre-existing unit test
+
+`make test` initially failed: `tb/bitfield_tb.sv`'s own `BFSET-01:ccr:Z`
+check. `run_instr`'s own completion-detection uses a **fixed** `repeat(15)
+@(posedge clk)` margin after `instr_ack`, not a real completion signal --
+adequate for every pre-Stage-D3 (unstalled) bit-field instruction, but
+BFFFO alone now needs 48 *extra* ticks beyond that old margin. Same class
+of finding this project has hit repeatedly before when a real timing
+change invalidates a fixed-wait test assumption (e.g. Phase 104's own
+PMOVE CRP budget, 3000→20000 ticks, for an unrelated reason). Fixed by
+widening the shared margin to `repeat(80)`, comfortably covering BFFFO's
+own new worst case.
+
+### Results
+
+Exact match for all 7 real whitelist entries (`scripts/
+b_final_clock_survey.py`'s own gap column, all 0): BFCHG/BFCLR/BFSET
+(14), BFEXTS/BFEXTU (10), BFINS (12), BFFFO (20) -- was -6/-6/-6/-2/-2/
+-4/-12 before this stage. The full 117-test survey's own negative tail
+shrank from min=-12 to min=-3 (the residual -3s are the still-unfixed
+immediate-count shift/rotate forms, explicitly deferred, not new).
+`make test` 36/36 (after the `bitfield_tb.sv` margin fix), `make
+cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep
+(mandatory -- `eu_seq.sv` changed, and bit-field ops themselves have zero
+Harte coverage at all, so `tb/bitfield_tb.sv`'s own 24 checks plus this
+sweep's confirmation that nothing ELSE regressed are the whole
+correctness gate here) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline.
+
+### Status
+
+Stage D3 closed. Stage D4+ (the smaller-gap register-direct families --
+BCD ops, EXG/SWAP/TAS/Scc/MOVE CCR-SR-USP/MOVEC, plus the still-deferred
+immediate-count shift/rotate forms) is next.

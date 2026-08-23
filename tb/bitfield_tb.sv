@@ -226,7 +226,13 @@ module bitfield_tb;
         end
         instr_valid = 1'b0;
         ext_valid   = 1'b0;
-        repeat(15) @(posedge clk);
+        // Phase 162 Stage D3 (plan.md): bit-field register forms now carry
+        // a real, deliberate artificial internal stall (up to 48 extra
+        // ticks for BFFFO) so their own total clock count matches
+        // MC68030UM.pdf Section 11's own timing tables -- widened from the
+        // old fixed margin of 15, which was only ever enough for the
+        // pre-Stage-D3 (unstalled) completion time.
+        repeat(80) @(posedge clk);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);

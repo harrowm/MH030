@@ -6785,6 +6785,32 @@ module eu_seq (
                 default: ;
             endcase
         end
+        // Stage D3 (plan.md): bit-field register (Dn) forms. All confirmed
+        // flat regardless of offset/width/scan-depth (Stage D0's own
+        // BFFFO spot-check) and fully decode-time computable -- offset/
+        // width come from the already-fetched extension word, not a live
+        // register read, unlike shift/rotate's own register-count case
+        // above. Baseline (before any stall) for a 2-word bit-field
+        // register-direct instruction is a uniform 8 clocks (32 ticks),
+        // confirmed across all 7 non-BFTST ops via their own natural
+        // register-write timing (BFEXTS/BFEXTU/BFINS/BFFFO write a real
+        // destination register; BFCHG/BFCLR/BFSET write back to the same
+        // Dn) -- BFTST itself needs no marker-based inference since it
+        // already matches the manual's own NCC=8 exactly with zero extra
+        // stall (only reads/tests, no register write at all in the real
+        // ISA either), so it's deliberately absent from this case below.
+        if (dec_valid && dec_is_bf && dec_bf_reg_ea) begin
+            case (dec_bf_op)
+                3'b010:  dec_internal_stall_ticks_fixed = 8'd24; // BFCHG NCC=14 -8clk=6clk=24t
+                3'b100:  dec_internal_stall_ticks_fixed = 8'd24; // BFCLR NCC=14
+                3'b110:  dec_internal_stall_ticks_fixed = 8'd24; // BFSET NCC=14
+                3'b011:  dec_internal_stall_ticks_fixed = 8'd8;  // BFEXTS NCC=10 -8clk=2clk=8t
+                3'b001:  dec_internal_stall_ticks_fixed = 8'd8;  // BFEXTU NCC=10
+                3'b111:  dec_internal_stall_ticks_fixed = 8'd16; // BFINS NCC=12 -8clk=4clk=16t
+                3'b101:  dec_internal_stall_ticks_fixed = 8'd48; // BFFFO NCC=20 -8clk=12clk=48t
+                default: ; // 3'b000 = BFTST: already exact, no stall needed
+            endcase
+        end
     end
 
     // LSL/LSR/ASR register-count forms: arm a one-cycle "resolving" flag
