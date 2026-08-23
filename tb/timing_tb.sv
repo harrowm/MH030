@@ -14,13 +14,20 @@
 // per-instruction (read/prefetch/write) breakdown.
 //
 // Usage: vvp sim/timing +hexfile=tests/timing0.hex +target_pc=1c
-//        +watch_reg=2 +watch_val=deadbeef [+expect_clocks=9]
+//        +watch_reg=2 +watch_val=deadbeef
+//        [+expect_r=1 +expect_p=2 +expect_w=0] [+expect_clocks=9]
 //
 // The test program itself must isolate the instruction under test with a
 // taken branch landing directly on it (so the IFU has no real prefetch
 // head start), matching NCC's own "no overlap with the preceding
 // instruction" definition -- see tests/timing0.s for the established
 // pattern.
+//
+// Phase 161 Part A Stage A0: +expect_r/+expect_p/+expect_w, when supplied,
+// are asserted (real pass/fail) against the manual's own per-instruction
+// resource-count tables -- this is what the §11.6 sweep actually checks.
+// +expect_clocks remains informational only (see the comment further down):
+// total-clock parity is Part B's own separate, not-yet-attempted goal.
 
 module timing_tb;
 
@@ -212,7 +219,8 @@ module timing_tb;
 
     initial begin
         longint unsigned tpc_arg, wreg_arg, wval_arg, exp_clocks;
-        bit have_exp;
+        int exp_r, exp_p, exp_w;
+        bit have_exp, have_rpw;
 
         rst_n = 0;
         repeat(20) @(posedge clk_4x);
@@ -225,6 +233,14 @@ module timing_tb;
         if (!$value$plusargs("watch_val=%h", wval_arg)) wval_arg = 32'h0;
         watch_val = wval_arg[31:0];
         have_exp = $value$plusargs("expect_clocks=%d", exp_clocks);
+        exp_r = 0; exp_p = 0; exp_w = 0;
+        begin
+            bit got_r, got_p, got_w;
+            got_r = $value$plusargs("expect_r=%d", exp_r);
+            got_p = $value$plusargs("expect_p=%d", exp_p);
+            got_w = $value$plusargs("expect_w=%d", exp_w);
+            have_rpw = got_r || got_p || got_w;
+        end
 
         fork
             begin : blk_timeout
@@ -266,6 +282,11 @@ module timing_tb;
             if (have_exp)
                 $display("  (expected total clocks: %0d -- informational only, not asserted)",
                           exp_clocks);
+            if (have_rpw) begin
+                check($sformatf("r/p/w == %0d/%0d/%0d (MC68030UM.pdf Section 11)",
+                                 exp_r, exp_p, exp_w),
+                      (r_count == exp_r) && (p_count == exp_p) && (w_count == exp_w));
+            end
         end
 
         if (fail_count == 0) $display("PASS  timing");

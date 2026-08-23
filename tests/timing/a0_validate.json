@@ -1,0 +1,24 @@
+[
+  {
+    "name": "a0_validate_move_l_d16anxn_hex",
+    "hex": "tests/timing0.hex",
+    "target_pc": "0x200",
+    "watch_reg": 2,
+    "watch_val": "0xdeadbeef",
+    "expect_r": 1,
+    "expect_p": 2,
+    "expect_w": 0,
+    "desc": "Stage A0 self-check (pre-built .hex path): reuses Phase 159 Stage 0's own hand-verified worked example, MOVE.L ($1000,A0,D1.L),D2 -- fea (d16,An,Xn) NCC=7(1/1/0) + MOVE EA,Dn NCC=2(0/1/0) = r/p/w 1/2/0, MC68030UM.pdf 11-27/11-37"
+  },
+  {
+    "name": "a0_validate_move_l_d16anxn_asm",
+    "asm": "tests/timing/a0_selfcheck.s",
+    "target_pc": "0x200",
+    "watch_reg": 2,
+    "watch_val": "0xdeadbeef",
+    "expect_r": 1,
+    "expect_p": 2,
+    "expect_w": 0,
+    "desc": "Stage A0 self-check (auto-build-via-'asm'-and-make path): identical program to the hex-path check above, confirming run_timing.py's own ensure_hex()/`make` invocation works"
+  }
+]

@@ -8661,3 +8661,57 @@ will structurally never reach exact parity for the reason documented above,
 so any resumed sweep should likely be scoped to r/p/w verification rather than
 total-clock matching, if and when the user wants to pick it back up.
 
+
+## Phase 161 Part A Stage A0 — Generator infrastructure
+
+### Goal
+
+Resume the Chapter 11 (MC68030UM.pdf §11) r/p/w verification sweep, paused at
+Phase 159 Stage 0 pending the S-state pacing fix (now closed, Phase 160).
+Generalize `tb/timing_tb.sv` from a single hardcoded test into a real,
+manifest-driven batch harness so Stages A1-A7 can each just add test-program
+files + a JSON manifest, not new testbench code.
+
+### What was built
+
+- **`tb/timing_tb.sv`**: added `+expect_r=`/`+expect_p=`/`+expect_w=`
+  plusargs, now asserted as a real pass/fail `check()` (previously only
+  `+expect_clocks=` existed, and was deliberately informational-only per
+  Phase 160 Stage 7's own finding that total-clock parity is a separate,
+  harder goal). `+expect_clocks=` stays informational — Part B's own job.
+- **`scripts/run_timing.py`** (new): reads a JSON manifest of test cases
+  (name, target instruction's own `.hex` or `.asm` source, `target_pc`,
+  `watch_reg`/`watch_val` retirement marker, `expect_r`/`p`/`w`, a `desc`
+  string citing the manual page/table row), builds any missing `.hex` via
+  `make` (reusing the existing `tests/%.hex: tests/%.s` pattern rule
+  unchanged — it already matches paths under `tests/timing/` since `%` spans
+  subdirectories), invokes `sim/timing` once per entry, parses PASS/FAIL,
+  aggregates. Mirrors `scripts/run_harte.py`'s own per-test-vvp-invocation
+  shape (the original, not the later batched optimization) — appropriate
+  here since Part A's own scale (dozens of tests, not hundreds of thousands)
+  doesn't need per-process-spawn amortization.
+- **`tests/timing/`** (new directory): holds every Part A test program +
+  manifest going forward. `a0_validate.json` + `a0_selfcheck.s` (an
+  identical copy of `tests/timing0.s`, exercised via BOTH the pre-built-hex
+  path and the auto-build-via-`asm` path) validate the whole harness
+  end-to-end against the one already-hand-verified worked example before
+  trusting it for new content.
+
+### Results
+
+Both A0 self-checks pass (`r/p/w == 1/2/0`, matching
+`tests/timing0.s`'s own already-established fea+MOVE worked example).
+Confirmed the failure-reporting path works correctly too (a deliberately
+wrong `expect_r` correctly failed with a clear message, non-zero exit code
+— checked, then removed, not left in the repo). Confirmed multi-manifest
+invocation (`run_timing.py a.json b.json`) works. `make test` 36/36
+(sanity check — `tb/timing_tb.sv`'s own change is additive/opt-in via new
+plusargs, doesn't touch anything else).
+
+### Status
+
+Stage A0 closed. Stage A1 (fea/fiea/cea/ciea/jea — the foundational EA
+tables, §11.6.1-11.6.5) next — the largest single transcription effort in
+Part A, but highest-leverage since every later stage's own instructions
+reference these tables via footnote.
+
