@@ -386,6 +386,57 @@ BCD_EXT = {
 }
 
 
+# ── 11.6.11 Single Operand Instructions — PDF 507, manual 11-44 ────────────
+# '*' = Add Fetch Effective Address Time. '**' = Add Calculate Effective
+# Address Time (cea, NOT fea/fiea -- this table's own footnote wording
+# differs from every earlier table's '**'=fiea convention; confirmed by
+# direct re-read of the footnote text on this specific page).
+SINGLE_OP = {
+    'CLR Dn':        (2, 0,   2, 0,0,0,   2, 0,1,0),
+    '**CLR Mem':     (0, 1,   3, 0,0,1,   4, 0,1,1),
+    'NEG Dn':        (2, 0,   2, 0,0,0,   2, 0,1,0),
+    '*NEG Mem':      (0, 1,   3, 0,0,1,   4, 0,1,1),
+    'NEGX Dn':       (2, 0,   2, 0,0,0,   2, 0,1,0),
+    '*NEGX Mem':     (0, 1,   3, 0,0,1,   4, 0,1,1),
+    'NOT Dn':        (2, 0,   2, 0,0,0,   2, 0,1,0),
+    '*NOT Mem':      (0, 1,   3, 0,0,1,   4, 0,1,1),
+    'EXT Dn':        (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'NBCD Dn':       (0, 0,   6, 0,0,0,   6, 0,1,0),
+    'Scc Dn':        (4, 0,   4, 0,0,0,   4, 0,1,0),
+    '**Scc Mem':     (0, 1,   5, 0,0,1,   5, 0,1,1),
+    'TAS Dn':        (4, 0,   4, 0,0,0,   4, 0,1,0),
+    '**TAS Mem':     (3, 0,  12, 1,0,1,  12, 1,1,1),
+    'TST Dn':        (0, 0,   2, 0,0,0,   2, 0,1,0),
+    '*TST Mem':      (0, 0,   2, 0,0,0,   2, 0,1,0),
+}
+
+# ── 11.6.12 Shift/Rotate Instructions — PDF 508, manual 11-45 ──────────────
+# Transcribed opportunistically while reading §11.6.11's own pages (Stage
+# A4); reserved for Stage A5, NOT independently re-verified digit-by-digit
+# yet (same caveat as FEA's own deep memory-indirect rows) -- re-confirm
+# against a fresh page read before relying on it in Stage A5.
+# d = direction (L or R). '*'=fea. '%'=shift count <= data size.
+# '+'=shift count > data size.
+SHIFT_ROTATE = {
+    'LSd #(data),Dy':  (4, 0,   4, 0,0,0,   4, 0,1,0),
+    '%LSd Dx,Dy':      (6, 0,   6, 0,0,0,   6, 0,1,0),
+    '+LSd Dx,Dy':      (8, 0,   8, 0,0,0,   8, 0,1,0),
+    '*LSd Mem by 1':   (0, 1,   4, 0,0,1,   4, 0,1,1),
+    'ASL #(data),Dy':  (2, 0,   4, 0,0,0,   4, 0,1,0),
+    'ASL Dx,Dy':       (4, 0,   8, 0,0,0,   8, 0,1,0),
+    '*ASL Mem by 1':   (0, 1,   6, 0,0,1,   6, 0,1,1),
+    'ASR #(data),Dy':  (4, 0,   4, 0,0,0,   4, 0,1,0),
+    '%ASR Dx,Dy':      (6, 0,   6, 0,0,0,   6, 0,1,0),
+    '+ASR Dx,Dy':      (10, 0, 10, 0,0,0,  10, 0,1,0),
+    '*ASR Mem by 1':   (0, 1,   4, 0,0,1,   4, 0,1,1),
+    'ROd #(data),Dy':  (4, 0,   6, 0,0,0,   6, 0,1,0),
+    'ROd Dx,Dy':       (6, 0,   8, 0,0,0,   8, 0,1,0),
+    '*ROd Mem by 1':   (0, 1,   6, 0,0,1,   6, 0,1,1),
+    'ROXd Dn':         (10, 0, 12, 0,0,0,  12, 0,1,0),
+    '*ROXd Mem by 1':  (0, 1,   4, 0,0,0,   4, 0,1,0),
+}
+
+
 def ncc_rpw(table, mode):
     """Return (r, p, w) from the No-Cache-Case column for a table row."""
     row = table[mode]
@@ -401,5 +452,6 @@ if __name__ == '__main__':
     for name, table in [('FEA', FEA), ('FIEA', FIEA), ('CEA', CEA),
                          ('CIEA', CIEA), ('JEA', JEA), ('MOVE', MOVE),
                          ('MOVE_SPECIAL', MOVE_SPECIAL), ('ALU', ALU),
-                         ('ALU_IMM', ALU_IMM), ('BCD_EXT', BCD_EXT)]:
+                         ('ALU_IMM', ALU_IMM), ('BCD_EXT', BCD_EXT),
+                         ('SINGLE_OP', SINGLE_OP), ('SHIFT_ROTATE', SHIFT_ROTATE)]:
         print(f"{name}: {len(table)} rows")

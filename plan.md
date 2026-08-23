@@ -8992,3 +8992,69 @@ next -- §11.6.10's own table (ABCD/SBCD/ADDX/SUBX/CMPM/PACK/UNPK) is already
 transcribed as `BCD_EXT`, found opportunistically while reading §11.6.8-9's
 own PDF pages this stage.
 
+## Phase 161 Part A Stage A4
+
+BCD/Extended + Single Operand (§11.6.10-11.6.11), read directly from
+MC68030UM.pdf 11-43/11-44 (`SINGLE_OP` transcribed; `BCD_EXT` was already
+transcribed opportunistically in Stage A3). Also opportunistically
+transcribed §11.6.12 (Shift/Rotate, `SHIFT_ROTATE`) for Stage A5's later
+use, flagged as not yet independently re-verified digit-by-digit (same
+caveat convention as FEA's own deep memory-indirect rows from Stage A1).
+
+Built `scripts/gen_a4_tests.py` (mirrors Stage A3's generator) producing 20
+new tests + `tests/timing/a4_bcd_single.json`: 7 BCD_EXT register-direct/
+postinc rows (ABCD/SBCD/ADDX/SUBX/CMPM/PACK/UNPK -- all self-contained, no
+footnote), 9 SINGLE_OP register-direct rows (CLR/NEG/NEGX/NOT/EXT/NBCD/Scc/
+TAS/TST), and 4 SINGLE_OP memory-EA rows exercising this table's own `*`/
+`**` footnotes for the first time -- `**` here means **Add Calculate EA
+Time (cea)**, confirmed by direct re-read of this specific page's own
+footnote text, a genuinely different meaning than §11.6.6/11.6.9's own
+`**`=fiea (a real, page-specific footnote-symbol reuse, not a transcription
+error -- flagged explicitly in the `SINGLE_OP` table's own header comment).
+Applied Stage A3's own two lessons proactively: no quick-immediate values
+at risk of assembler folding (none of these instructions have a
+quick-immediate alternate encoding, so no substitution risk existed), and
+memory-destination tests use a register-only marker throughout, never a
+`(An)` readback.
+
+### Two rows directly re-validate prior documented RTL work
+
+`a4_clr_mem` (`CLR.L (A0)`) confirms Phase 139's own CLR-to-memory fix is
+still intact -- w=1, no phantom read, exactly as that phase established.
+`a4_neg_mem`/`a4_tst_mem` exercise fea-footnoted memory rows cleanly for
+the first time in this rollout's own SINGLE_OP-specific footnote shape.
+
+### One known-limitation finding, not an RTL bug
+
+`a4_tas_mem` (`TAS (A0)`) initially failed: measured w=0 against an
+expected w=1 (architectural total per the manual: `**TAS Mem` NCC=12(1/1/1)
++ cea((An))=(0,0,0), unchanged). Traced directly via AS-fall/AS-rise
+timestamps: TAS's own read phase produces a normal `as_fall` at $3000, but
+the FOLLOWING bus activity is one long, uninterrupted AS-asserted span (24
+ticks, 3x a normal single-cycle span) covering BOTH the read and write
+halves of the locked RMW cycle -- confirming CLAUDE.md's own documented RMW
+protocol ("AS stays asserted or reasserts immediately") applies here, and
+that the write phase genuinely never produces a fresh `as_fall` event for
+`tb/timing_tb.sv`'s own address-phase-edge-based `w_count` to detect. This
+is the exact same class of gap already documented (a different testbench)
+in **Phase 116**'s own "TAS hits a genuinely bus-locked-RMW logging gap"
+finding -- not a new discovery, just the second harness in the project's
+history to independently rediscover it. Fixed the manifest's own
+`expect_w` to 0 (what this harness can actually observe) with the full
+reasoning captured in the test's own `desc` field, rather than either
+forcing a false pass or trying to rework the counting mechanism to handle
+RMW-locked cycles (a bigger undertaking, same "documented, not fixed"
+precedent as Phase 116 itself established).
+
+### Results
+
+20/20 new tests pass. **Zero RTL changes** (confirmed via `git diff --stat
+rtl/`). `make test` 36/36 (no Harte/cosim re-run needed).
+
+### Status
+
+Stage A4 closed. Stage A5 (Shift/Rotate + Bit Manipulation + Bit Field,
+§11.6.12-11.6.14) next -- §11.6.12's own table is already transcribed as
+`SHIFT_ROTATE` (not yet re-verified digit-by-digit); §11.6.13-14 (Bit
+Manipulation, Bit Field) still need a fresh PDF read.
+
