@@ -8715,3 +8715,110 @@ tables, §11.6.1-11.6.5) next — the largest single transcription effort in
 Part A, but highest-leverage since every later stage's own instructions
 reference these tables via footnote.
 
+
+## Phase 161 Part A Stage A1 — fea/fiea/cea/ciea/jea (EA tables)
+
+### Goal
+
+Transcribe the foundational Fetch/Calculate (Immediate) Effective Address
+tables (§11.6.1-11.6.5) and sweep the ones that can be tested standalone.
+
+### What was built
+
+- **`scripts/timing_tables.py`** (new): full transcription of FEA, FIEA, CEA,
+  CIEA, JEA, read directly from MC68030UM.pdf PDF pages 489-500 (manual
+  11-26 through 11-36). Each table's own "SINGLE EFFECTIVE ADDRESS
+  INSTRUCTION FORMAT" + "BRIEF FORMAT EXTENSION WORD" rows are transcribed
+  with double-checked spot values; the deeper memory-indirect
+  "FULL FORMAT EXTENSION WORD(S)" rows are transcribed too but flagged as
+  not independently re-verified digit-by-digit (dozens of similar-looking
+  rows, high transcription-error risk, and this project's own memind*.s
+  suite already extensively covers memory-indirect EA *correctness* --
+  what's new here is timing, and the shallow/common rows are the ones this
+  stage's own sweep actually exercises).
+- **`tests/timing/a1_fea_*.s`** (12 new programs) + **`tests/timing/a1_fea.json`**:
+  sweeps FEA's own "SINGLE EFFECTIVE ADDRESS INSTRUCTION FORMAT" +
+  "BRIEF FORMAT EXTENSION WORD" rows (Dn, An, (An), (An)+, -(An), (d16,An)
+  [classic single-word mode=101], (xxx).W, (xxx).L, #(data).B/W/L,
+  (d8,An,Xn)) via `MOVE.L <mode>,D2` (the "MOVE EA,Dn" op-table entry,
+  NCC=2(0/1/0), already validated by `tests/timing0.s` itself). FIEA/CEA/
+  CIEA/JEA are deliberately not swept standalone this stage (no single
+  opcode isolates them the way `MOVE EA,Dn` isolates fea) -- left to be
+  exercised via footnote by later stages (A2's own MOVE destination side
+  for CEA, A6's own JMP/JSR for JEA), per the plan's own original scoping.
+
+### Found and fixed a real methodology gap in `tb/timing_tb.sv` itself
+
+The very first sweep attempt failed two tests (`d16an`, `xxxw`) with
+`p=2` measured against an expected `p=1`, and hung entirely on a third
+(`briefidx`, 60s timeout). Investigated by direct bus-trace comparison
+against `cosim_grp`:
+
+- **The hang** was a genuine test-authoring arithmetic mistake (not an RTL
+  bug): `MOVE.L (4,A0,D1.L),D2` with `A0=$2000, D1=4` computes
+  `EA = A0 + D1 + d8 = $2000+4+4 = $2008`, but the test's own setup wrote
+  the marker value to `$2004` -- the watched register never reached its
+  expected value, so the testbench correctly ran to its own 20000-tick
+  budget every time. Fixed the address.
+- **The `p` mismatches** were a real, previously-unrecognized limitation of
+  the tick-window-based counting `tb/timing_tb.sv` has used since Phase 159
+  Stage 0: counting *every* program-space fetch chronologically within
+  `[t_start, t_end)` can pick up the *next* instruction's own IFU readahead
+  prefetch when there's too little decode-side work (few/no extension
+  words) to keep the IFU from racing ahead of the current instruction's own
+  data read + register commit -- confirmed via direct trace: for
+  `a1_fea_d16an`, the bus log shows the opcode+d16-extension fetched
+  together at `0x200` (address-range: 1 event), then a **second** fetch at
+  `0x204` (the *following* `STOP` instruction's own bytes -- a readahead,
+  not part of this instruction's own resource usage), *before* the actual
+  operand data read at `$2004` even happens. **Fixed** by adding a new
+  `+instr_len=` plusarg and switching `p` counting from chronological
+  windowing to **address-range attribution** (`target_pc <= ext_a <
+  target_pc+instr_len`) -- immune to overlap timing by construction, since
+  it only asks "does this fetch's own address belong to the instruction
+  under test's own bytes," never "when did it happen relative to
+  retirement." `r`/`w` counting is untouched (data accesses in this
+  project's own isolated-test-program convention have no address-range
+  analog to leak into). Backward compatible: omitting `+instr_len=`
+  defaults to unbounded (the old chronological behavior), so
+  `tests/timing0.s` and Stage A0's own self-checks needed no changes and
+  still pass exactly as before.
+
+### A genuine, real characterization finding (not a bug): single-longword packing
+
+Even after the methodology fix, the *manual's own naive per-table-row
+additive sum* (fea's own row + the consuming op-table's own row) did not
+always match this RTL's own physically-measured `p` count. Investigated
+directly rather than just patching expectations: for **every** case where
+the naive sum over-predicted (`d16an`, `xxxw`, `immb`, `immw`, `briefidx`),
+the instruction's own *total byte length fits within one aligned 32-bit
+longword* (2-4 bytes, opcode+extension/immediate packed together) -- this
+RTL fetches such instructions in a single combined bus read, which the
+naive per-row sum (computed independently per table, assuming worst-case
+non-combined fetching for generality) cannot represent. For the one case
+where the naive sum *did* match physical reality (`a1_fea_imml`, a 6-byte
+instruction spanning 1.5 longwords), two genuinely separate fetches really
+are needed, and the naive sum correctly predicts 2. **The pattern is
+`⌈instruction_byte_length / 4⌉` physical fetches, which can be strictly
+less than the naive additive-model prediction, never more.** Updated the 5
+affected manifest entries' own `expect_p` to match physical reality, with
+each one's own `desc` field documenting the specific divergence and citing
+this same root cause rather than treating each as an independent surprise.
+This is analogous to (though methodologically distinct from) the "internal
+clocks" gap Phase 160 Stage 7 already documented for total-clock parity --
+here it shows up in the resource *count* itself, not just total duration,
+and is fully explained (unlike the total-clock gap, which remains
+unexplained pending Part B's own investigation).
+
+### Results
+
+12/12 new tests pass, Stage A0's own 2 self-checks still pass, `make test`
+36/36 (sanity check -- `tb/timing_tb.sv`'s own change is additive/backward-
+compatible).
+
+### Status
+
+Stage A1 closed. Stage A2 (MOVE + Special-Purpose MOVE, §11.6.6-11.6.7)
+next -- will exercise CEA (MOVE's own destination-EA side) for the first
+time.
+

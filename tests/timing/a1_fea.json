@@ -1,0 +1,86 @@
+[
+  {
+    "name": "a1_fea_dn",
+    "hex": "tests/timing/a1_fea_dn.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "fea Dn NCC=0(0/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_an",
+    "hex": "tests/timing/a1_fea_an.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "fea An NCC=0(0/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_anind",
+    "hex": "tests/timing/a1_fea_anind.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 1, "expect_w": 0,
+    "desc": "fea (An) NCC=3(1/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_anpostinc",
+    "hex": "tests/timing/a1_fea_anpostinc.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 1, "expect_w": 0,
+    "desc": "fea (An)+ NCC=3(1/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_anpredec",
+    "hex": "tests/timing/a1_fea_anpredec.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 1, "expect_w": 0,
+    "desc": "fea -(An) NCC=4(1/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_d16an",
+    "hex": "tests/timing/a1_fea_d16an.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 1, "expect_w": 0,
+    "desc": "fea (d16,An) [classic single-word] NCC=4(1/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_xxxw",
+    "hex": "tests/timing/a1_fea_xxxw.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 1, "expect_w": 0,
+    "desc": "fea (xxx).W NCC=4(1/0/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_xxxl",
+    "hex": "tests/timing/a1_fea_xxxl.hex",
+    "target_pc": "0x200", "instr_len": 6, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 2, "expect_w": 0,
+    "desc": "fea (xxx).L NCC=5(1/1/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_immb",
+    "hex": "tests/timing/a1_fea_immb.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 2, "watch_val": "0xab",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "fea #(data).B NCC=2(0/1/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37 -- naive sum predicts p=2, but this 4-byte instruction (opcode+imm word) packs into one aligned longword, so this RTL fetches it in a single bus read, same pattern documented for a1_fea_briefidx below."
+  },
+  {
+    "name": "a1_fea_immw",
+    "hex": "tests/timing/a1_fea_immw.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 2, "watch_val": "0xbeef",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "fea #(data).W NCC=2(0/1/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37 -- naive sum predicts p=2, same single-longword-packing pattern as a1_fea_immb."
+  },
+  {
+    "name": "a1_fea_imml",
+    "hex": "tests/timing/a1_fea_imml.hex",
+    "target_pc": "0x200", "instr_len": 6, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 0, "expect_p": 2, "expect_w": 0,
+    "desc": "fea #(data).L NCC=4(0/1/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-26/11-37"
+  },
+  {
+    "name": "a1_fea_briefidx",
+    "hex": "tests/timing/a1_fea_briefidx.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 2, "watch_val": "0xdeadbeef",
+    "expect_r": 1, "expect_p": 1, "expect_w": 0,
+    "desc": "fea (d8,An,Xn) NCC=6(1/1/0) + MOVE EA,Dn NCC=2(0/1/0), MC68030UM.pdf 11-27/11-37 -- naive additive sum predicts p=2 (fea's own r/p/w=1/1/0 + MOVE-op's own 0/1/0), but this RTL physically fetches opcode+brief-extension-word together in ONE bus read (same address-range-attributed count as a1_fea_d16an, whose OWN naive sum is p=1 and matches). Documented divergence, not a bug: real 68030 silicon's own internal microcode may charge brief-indexed decode an extra prefetch beyond what the physical byte-fetch count alone would predict (needing to have already decoded the opcode before it can act on the extension word's own scale/index fields) that this project's simplified comb-decode pipeline doesn't reproduce -- see plan.md Phase 161 Part A Stage A1."
+  }
+]

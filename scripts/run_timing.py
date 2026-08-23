@@ -21,6 +21,10 @@ Manifest format (JSON list of objects):
       "hex":        "tests/timing/fea_an.hex",  # or "asm" (see below) -- one required
       "asm":        "tests/timing/fea_an.s",    # optional; built via `make <hex>` if hex missing
       "target_pc":  "0x200",               # hex string or int
+      "instr_len":  4,                     # optional: instruction's own byte
+                                            # span, for address-range 'p' (see
+                                            # tb/timing_tb.sv) -- omit only for
+                                            # quick/no-cache backward-compat runs
       "watch_reg":  2,                     # 0-7 (Dn)
       "watch_val":  "0xdeadbeef",          # hex string or int
       "expect_r":   1,
@@ -78,6 +82,8 @@ def run_one(entry, verbose=False):
         f"+expect_p={entry['expect_p']}",
         f"+expect_w={entry['expect_w']}",
     ]
+    if 'instr_len' in entry:
+        args.append(f"+instr_len={entry['instr_len']}")
     r = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=60)
     lines = r.stdout.splitlines()
 

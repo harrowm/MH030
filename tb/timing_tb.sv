@@ -149,6 +149,7 @@ module timing_tb;
 
     // ── Measurement window ───────────────────────────────────────────────
     logic [31:0] target_pc;
+    logic [31:0] target_len;   // Phase 161 Part A: instruction's own byte span
     int          watch_reg;
     logic [31:0] watch_val;
 
@@ -161,6 +162,25 @@ module timing_tb;
 
     wire is_prog_fc = (ext_fc == 3'b110) || (ext_fc == 3'b010);
     wire is_data_fc = (ext_fc == 3'b101) || (ext_fc == 3'b001);
+    // Phase 161 Part A Stage A1: a program-space fetch belongs to the
+    // instruction under test iff its own address falls within that
+    // instruction's own byte span (target_pc .. target_pc+target_len-1) --
+    // attributing "p" by ADDRESS rather than by chronological position
+    // within [t_start,t_end) avoids counting the *next* instruction's own
+    // IFU readahead prefetch as if it belonged to this one. Found via a
+    // real measurement (a1_fea_d16an): the IFU can race ahead to fetch the
+    // following instruction's own opcode word before this instruction's
+    // own operand data read + register commit complete, whenever there's
+    // little decode-side work (few extension words) to absorb that
+    // runahead -- exactly the "no overlap with a SUBSEQUENT instruction"
+    // exclusion CC/NCC's own definition already calls for (Phase 159 Stage
+    // 0), just previously only guarded against overlap with the PRECEDING
+    // instruction. Data reads/writes (r/w) keep the original chronological
+    // windowing -- in this project's own isolated-test-program convention
+    // (setup code, then a taken branch, then the instruction under test,
+    // then STOP) there is no address-range analog for them to leak into,
+    // since nothing else in the test program touches data memory.
+    wire in_instr_range = (ext_a >= target_pc) && (ext_a < target_pc + target_len);
 
     logic dbg_on = 1'b0;
     always_ff @(posedge clk_4x) begin
@@ -170,11 +190,12 @@ module timing_tb;
                 t_start      <= sim_ticks;
                 dbg_on       <= 1'b1;
             end
+            if (!t_end_seen && is_prog_fc && ext_rw && in_instr_range)
+                p_count <= p_count + 1;
             if (!t_end_seen &&
                 (t_start_seen || (is_prog_fc && ext_rw && ext_a == target_pc))) begin
-                if (is_prog_fc && ext_rw)      p_count <= p_count + 1;
-                else if (is_data_fc && ext_rw) r_count <= r_count + 1;
-                else if (!ext_rw)              w_count <= w_count + 1;
+                if (is_data_fc && ext_rw) r_count <= r_count + 1;
+                else if (!ext_rw)         w_count <= w_count + 1;
             end
             if (dbg_on && !t_end_seen)
                 $display("  [tick=%0d] AS-fall  %s %h fc=%b siz=%b",
@@ -228,6 +249,10 @@ module timing_tb;
 
         if (!$value$plusargs("target_pc=%h", tpc_arg)) tpc_arg = 32'h0;
         target_pc = tpc_arg[31:0];
+        // Default (no +instr_len=): effectively unbounded, so a test that
+        // hasn't been updated with its own instruction length still runs
+        // (informationally) rather than reporting p=0 always.
+        if (!$value$plusargs("instr_len=%d", target_len)) target_len = 32'h7FFF_FFFF;
         if (!$value$plusargs("watch_reg=%d", wreg_arg)) wreg_arg = 0;
         watch_reg = wreg_arg[2:0];
         if (!$value$plusargs("watch_val=%h", wval_arg)) wval_arg = 32'h0;
