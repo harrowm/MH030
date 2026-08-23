@@ -6,16 +6,25 @@
 // Restriction: bf_offset + actual_width ≤ 32 (field fits in one 32-bit value).
 // Bit ordering: bit 0 of the field is bf_data[31-bf_offset] (MSB side), per 68030 convention.
 //
-// bf_op encoding (= {f_dn[1:0], f_dir} from opcode):
+// bf_op encoding (= {f_dn[1:0], f_dir} from opcode). Phase 161 Part A Stage
+// A5: this mapping was previously wrong (BFCHG was entirely unhandled,
+// landing on the default/zero case, and BFEXTS/BFFFO's own formulas were
+// swapped onto each other's slots) -- confirmed against vasm's own
+// assembly of "bfchg Dn{o:w}" (which produces f_dn=101,f_dir=0, i.e. the
+// full 4-bit opcode-selector field is 1010, matching Motorola's real
+// TST=1000/EXTU=1001/CHG=1010/EXTS=1011/CLR=1100/FFO=1101/SET=1110/
+// INS=1111 ordering, NOT a naive TST/EXTU/EXTS/FFO/CLR/CHG/SET/INS
+// sequential guess):
 //   000 = BFTST   set N/Z, no register output
 //   001 = BFEXTU  extract zero-extended
-//   010 = BFEXTS  extract sign-extended
-//   011 = BFFFO   find first one (returns bit position of first 1 from MSB)
+//   010 = BFCHG   complement (toggle) field; result = modified data
+//   011 = BFEXTS  extract sign-extended
 //   100 = BFCLR   clear field; result = modified data
+//   101 = BFFFO   find first one (returns bit position of first 1 from MSB)
 //   110 = BFSET   set field; result = modified data
 //   111 = BFINS   insert bf_src into field; result = modified data
 //
-// N/Z flags: set from original field for TST/EXTU/EXTS/FFO/CLR/SET;
+// N/Z flags: set from original field for TST/EXTU/CHG/EXTS/FFO/CLR/SET;
 //            set from inserted value for BFINS. V and C are always 0.
 
 module eu_bitfield (
@@ -88,9 +97,10 @@ module eu_bitfield (
         case (bf_op)
             3'b000:  bf_result = 32'h0;                              // BFTST: no reg output
             3'b001:  bf_result = field;                              // BFEXTU: zero-extended
-            3'b010:  bf_result = field | exts_sign_mask;             // BFEXTS: sign-extended
-            3'b011:  bf_result = ffo_result;                         // BFFFO
+            3'b010:  bf_result = bf_data ^  field_pos_mask;          // BFCHG: complement
+            3'b011:  bf_result = field | exts_sign_mask;             // BFEXTS: sign-extended
             3'b100:  bf_result = bf_data & ~field_pos_mask;          // BFCLR
+            3'b101:  bf_result = ffo_result;                         // BFFFO
             3'b110:  bf_result = bf_data |  field_pos_mask;          // BFSET
             3'b111:  bf_result = (bf_data & ~field_pos_mask) | src_placed; // BFINS
             default: bf_result = 32'h0;

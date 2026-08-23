@@ -266,19 +266,41 @@ module bitfield_tb;
         run_instr(16'h0C81, 1'b1, 32'h0000_00AB);  // CMPI.L #0xAB,D1 → Z=1 if D1=0xAB
         chk1("BFEXTU-01:D1=0xAB", sr_out[2], 1'b1);
 
+        $display("--- BFCHG D0{4:4} (toggle 4-bit field at offset 4) ---");
+        // D0=0xABCDEF01; field bits[27:24]=0xB=1011 -> complement -> 0100=0x4
+        // -> D0=0xA4CDEF01. Opcode: 0xEAC0 (type=1010=BFCHG); ext [10:6]=00100(4),
+        // [4:0]=00100(4) -> 0x0104 (same ext-word shape as the BFCLR test below,
+        // deliberately reusing its own D0{4:4} field so the two are directly
+        // comparable). Phase 161 Part A Stage A5: BFCHG was previously entirely
+        // unimplemented in eu_bitfield.sv (fell through to the default/zero case)
+        // -- this opcode used to be mislabeled "BFEXTS" in this very test (a
+        // shared wrong assumption about the bf_op-to-opcode mapping that both the
+        // RTL and this unit test inherited), which happened to "pass" only
+        // because the RTL's OWN old (also-wrong) mapping treated this same
+        // opcode as EXTS too -- see eu_bitfield.sv's own header comment for the
+        // corrected mapping.
+        set_dn(3'd0, 32'hABCD_EF01);
+        run_instr(16'hEAC0, 1'b1, 32'h0000_0104);
+        run_instr(16'h0C80, 1'b1, 32'hA4CD_EF01);  // CMPI.L #0xA4CDEF01,D0
+        chk1("BFCHG-01:D0=0xA4CDEF01", sr_out[2], 1'b1);
+
         $display("--- BFEXTS D0{24:8},D1 (sign-extend 0x80 → 0xFFFFFF80) ---");
         // D0=0x00000080; field=0x80 → sign_ext→D1=0xFFFFFF80; N=1
-        // Opcode: 0xEAC0; ext [14:12]=001(D1), [10:6]=11000(24), [4:0]=01000(8) → 0x1608
+        // Opcode: 0xEBC0 (type=1011=BFEXTS -- was 0xEAC0/type=1010 before Stage
+        // A5's own fix, which is really BFCHG's opcode, see above);
+        // ext [14:12]=001(D1), [10:6]=11000(24), [4:0]=01000(8) → 0x1608
         set_dn(3'd0, 32'h0000_0080);
-        run_instr(16'hEAC0, 1'b1, 32'h0000_1608);
+        run_instr(16'hEBC0, 1'b1, 32'h0000_1608);
         run_instr(16'h0C81, 1'b1, 32'hFFFF_FF80);  // CMPI.L #0xFFFFFF80,D1
         chk1("BFEXTS-01:D1=0xFFFFFF80", sr_out[2], 1'b1);
 
         $display("--- BFFFO D0{0:32},D1 (find first one; D0=0x08000000 → offset=4) ---");
         // D0=0x08000000: highest set bit is bit27; BFFFO result = offset+31-27 = 4
-        // Opcode: 0xEBC0; ext [14:12]=001(D1), [10:6]=00000(0), [4:0]=00000(32) → 0x1000
+        // Opcode: 0xEDC0 (type=1101=BFFFO -- was 0xEBC0/type=1011 before Stage
+        // A5's own fix, which is really BFEXTS's opcode, see above);
+        // ext [14:12]=001(D1), [10:6]=00000(0), [4:0]=00000(32) → 0x1000
         set_dn(3'd0, 32'h0800_0000);
-        run_instr(16'hEBC0, 1'b1, 32'h0000_1000);
+        run_instr(16'hEDC0, 1'b1, 32'h0000_1000);
         run_instr(16'h0C81, 1'b1, 32'h0000_0004);  // CMPI.L #4,D1
         chk1("BFFFO-01:D1=4", sr_out[2], 1'b1);
 

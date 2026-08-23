@@ -437,6 +437,72 @@ SHIFT_ROTATE = {
 }
 
 
+# ── 11.6.13 Bit Manipulation Instructions — PDF 509, manual 11-46 ──────────
+# '*' = Add Fetch Effective Address Time. '#' = Add Fetch Immediate
+# Effective Address Time (fiea).
+BIT_MANIP = {
+    'BTST #(data),Dn':   (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'BTST Dn,Dn':        (4, 0,   4, 0,0,0,   4, 0,1,0),
+    '#BTST #(data),Mem': (0, 0,   4, 0,0,0,   4, 0,1,0),
+    '*BTST Dn,Mem':      (0, 0,   4, 0,0,0,   4, 0,1,0),
+    'BCHG #(data),Dn':   (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'BCHG Dn,Dn':        (6, 0,   6, 0,0,0,   6, 0,1,0),
+    '#BCHG #(data),Mem': (0, 0,   6, 0,0,1,   6, 0,1,1),
+    '*BCHG Dn,Mem':      (0, 0,   6, 0,0,1,   6, 0,1,1),
+    'BCLR #(data),Dn':   (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'BCLR Dn,Dn':        (6, 0,   6, 0,0,0,   6, 0,1,0),
+    '#BCLR #(data),Mem': (0, 0,   6, 0,0,1,   6, 0,1,1),
+    '*BCLR Dn,Mem':      (0, 0,   6, 0,0,1,   6, 0,1,1),
+    'BSET #(data),Dn':   (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'BSET Dn,Dn':        (6, 0,   6, 0,0,0,   6, 0,1,0),
+    '#BSET #(data),Mem': (0, 0,   6, 0,0,1,   6, 0,1,1),
+    '*BSET Dn,Mem':      (0, 0,   6, 0,0,1,   6, 0,1,1),
+}
+
+# ── 11.6.14 Bit Field Manipulation Instructions — PDF 510, manual 11-47 ────
+# '*' = Add Calculate Immediate Effective Address Time (ciea). NOTE: a
+# 32-bit bit field may span 5 bytes (two operand cycles) or 4 bytes (one).
+BIT_FIELD = {
+    'BFTST Dn':              (8, 0,   8, 0,0,0,   8, 0,1,0),
+    '*BFTST Mem(<5 Bytes)':  (6, 0,  10, 1,0,0,  10, 1,1,0),
+    '*BFTST Mem(5 Bytes)':   (6, 0,  14, 2,0,0,  14, 2,1,0),
+    'BFCHG Dn':              (14, 0, 14, 0,0,0,  14, 0,1,0),
+    '*BFCHG Mem(<5 Bytes)':  (6, 0,  14, 1,0,1,  14, 1,1,1),
+    '*BFCHG Mem(5 Bytes)':   (6, 0,  22, 2,0,2,  22, 2,1,2),
+    'BFCLR Dn':              (14, 0, 14, 0,0,0,  14, 0,1,0),
+    '*BFCLR Mem(<5 Bytes)':  (6, 0,  14, 1,0,1,  14, 1,1,1),
+    '*BFCLR Mem(5 Bytes)':   (6, 0,  22, 2,0,2,  22, 2,1,2),
+    'BFSET Dn':              (14, 0, 14, 0,0,0,  14, 0,1,0),
+    '*BFSET Mem(<5 Bytes)':  (6, 0,  14, 1,0,1,  14, 1,1,1),
+    '*BFSET Mem(5 Bytes)':   (6, 0,  22, 2,0,2,  22, 2,1,2),
+    'BFEXTS Dn':             (10, 0, 10, 0,0,0,  10, 0,1,0),
+    '*BFEXTS Mem(<5 Bytes)': (6, 0,  12, 1,0,0,  12, 1,1,0),
+    '*BFEXTS Mem(5 Bytes)':  (6, 0,  18, 2,0,0,  18, 2,1,0),
+    'BFEXTU Dn':             (10, 0, 10, 0,0,0,  10, 0,1,0),
+    '*BFEXTU Mem(<5 Bytes)': (6, 0,  12, 1,0,0,  12, 1,1,0),
+    '*BFEXTU Mem(5 Bytes)':  (6, 0,  18, 2,0,0,  18, 2,1,0),
+    'BFINS Dn':              (12, 0, 12, 0,0,0,  12, 0,1,0),
+    '*BFINS Mem(<5 Bytes)':  (6, 0,  12, 1,0,1,  12, 1,1,1),
+    '*BFINS Mem(5 Bytes)':   (6, 0,  18, 2,0,2,  18, 2,1,2),
+    'BFFFO Dn':              (20, 0, 20, 0,0,0,  20, 0,1,0),
+    '*BFFFO Mem(<5 Bytes)':  (6, 0,  22, 1,1,0,  22, 1,1,0),
+    '*BFFFO Mem(5 Bytes)':   (6, 0,  28, 2,0,0,  28, 2,1,0),
+}
+
+# ── 11.6.15 Conditional Branch Instructions — PDF 511, manual 11-48 ────────
+# Opportunistically captured while reading §11.6.13-14 (Stage A5); reserved
+# for Stage A6.
+COND_BRANCH = {
+    'Bcc (Taken)':                     (6, 0,   6, 0,0,0,   8, 0,2,0),
+    'Bcc.B (Not Taken)':               (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'Bcc.W (Not Taken)':               (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'Bcc.L (Not Taken)':               (6, 0,   6, 0,0,0,   8, 0,2,0),
+    'DBcc (cc=False,Count Not Expired)': (6, 0,   6, 0,0,0,   8, 0,2,0),
+    'DBcc (cc=False,Count Expired)':   (10, 0,  10, 0,0,0,  13, 0,3,0),
+    'DBcc (cc=True)':                  (6, 0,   6, 0,0,0,   8, 0,1,0),
+}
+
+
 def ncc_rpw(table, mode):
     """Return (r, p, w) from the No-Cache-Case column for a table row."""
     row = table[mode]
@@ -453,5 +519,7 @@ if __name__ == '__main__':
                          ('CIEA', CIEA), ('JEA', JEA), ('MOVE', MOVE),
                          ('MOVE_SPECIAL', MOVE_SPECIAL), ('ALU', ALU),
                          ('ALU_IMM', ALU_IMM), ('BCD_EXT', BCD_EXT),
-                         ('SINGLE_OP', SINGLE_OP), ('SHIFT_ROTATE', SHIFT_ROTATE)]:
+                         ('SINGLE_OP', SINGLE_OP), ('SHIFT_ROTATE', SHIFT_ROTATE),
+                         ('BIT_MANIP', BIT_MANIP), ('BIT_FIELD', BIT_FIELD),
+                         ('COND_BRANCH', COND_BRANCH)]:
         print(f"{name}: {len(table)} rows")

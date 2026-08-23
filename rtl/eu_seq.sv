@@ -755,11 +755,11 @@ module eu_seq (
     logic [2:0]  dec_cas2_dc2_reg;    // Dc2 register from ext_data[30:28]
     logic [2:0]  dec_cas2_du2_reg;    // Du2 register from ext_data[26:24]
 
-    // bit-field instructions (BFTST/BFEXTU/BFEXTS/BFFFO/BFCLR/BFSET/BFINS)
+    // bit-field instructions (BFTST/BFEXTU/BFCHG/BFEXTS/BFCLR/BFFFO/BFSET/BFINS)
     logic        dec_is_bf;        // bit-field instruction
-    logic [2:0]  dec_bf_op;        // {f_dn[1:0], f_dir}: 000=TST 001=EXTU 010=EXTS 011=FFO 100=CLR 110=SET 111=INS
+    logic [2:0]  dec_bf_op;        // {f_dn[1:0], f_dir}: 000=TST 001=EXTU 010=CHG 011=EXTS 100=CLR 101=FFO 110=SET 111=INS
     logic        dec_bf_reg_ea;    // 1=register EA (Dn), 0=memory EA ((An))
-    logic        dec_bf_mutates;   // 1=CLR/SET/INS (modifies field in place)
+    logic        dec_bf_mutates;   // 1=CHG/CLR/SET/INS (modifies field in place)
 
     // PACK/UNPK/LINK.L/RESET
     logic        dec_is_pack;      // PACK instruction (register or memory form)
@@ -5686,8 +5686,10 @@ module eu_seq (
                             dec_reads_dst   = 1'b1;
                         end
                     // ── bit-field instructions (f_ss=11, f_dn[2]=1) ──────
-                    // BFTST=1000 BFEXTU=1001 BFEXTS=1010 BFFFO=1011
-                    // BFCLR=1100 BFSET=1110  BFINS=1111 (bits 11:8 of opcode)
+                    // BFTST=1000 BFEXTU=1001 BFCHG=1010  BFEXTS=1011
+                    // BFCLR=1100 BFFFO=1101  BFSET=1110  BFINS=1111 (bits 11:8 of opcode;
+                    // confirmed against vasm's own assembly -- Phase 161 Part A Stage A5
+                    // found this ordering was previously wrong, see eu_bitfield.sv)
                     // Dn (000) and (An) (010) — 1 ext word (bf_spec in [15:0])
                     // (d16,An)(101) and (xxx).W(111/000) — 2 ext words:
                     //   bf_spec in ext_data[31:16], displacement in ext_data[15:0].
@@ -5707,7 +5709,15 @@ module eu_seq (
                         dec_is_bf     = 1'b1;
                         dec_siz       = 2'b00;
                         dec_bf_op     = {f_dn[1:0], f_dir};
-                        dec_bf_mutates = (f_dn[1:0] == 2'b10 || f_dn[1:0] == 2'b11);
+                        // Phase 161 Part A Stage A5: real bf_op mapping is
+                        // 000=TST 001=EXTU 010=CHG 011=EXTS 100=CLR 101=FFO
+                        // 110=SET 111=INS (confirmed against vasm's own
+                        // assembly of "bfchg" -- NOT the sequential
+                        // TST/EXTU/EXTS/FFO/CLR/(gap)/SET/INS ordering this
+                        // decode used to assume). Mutating (modifies the
+                        // field, writes back): CHG/CLR/SET/INS.
+                        dec_bf_mutates = (dec_bf_op == 3'b010) || (dec_bf_op == 3'b100) ||
+                                         (dec_bf_op == 3'b110) || (dec_bf_op == 3'b111);
                         dec_bf_reg_ea  = (f_mode == 3'b000);
                         // For 2-ext-word modes, put bf_spec in dec_imm[15:0] so ex_imm matches
                         if (bf_two_ext) dec_imm = {16'h0, bf_spec_w};
@@ -5737,13 +5747,13 @@ module eu_seq (
                         if (f_mode == 3'b000) begin
                             // Register EA: WB path handles result and CCR
                             case ({f_dn[1:0], f_dir})
-                                3'b000: dec_updates_ccr = 1'b1;
-                                3'b001, 3'b010, 3'b011: begin  // BFEXTU/BFEXTS/BFFFO
+                                3'b000: dec_updates_ccr = 1'b1;  // BFTST
+                                3'b001, 3'b011, 3'b101: begin  // BFEXTU/BFEXTS/BFFFO: write to a DIFFERENT Dn
                                     dec_writes_reg  = 1'b1;
                                     dec_dest_reg    = {1'b0, bf_spec_w[14:12]};
                                     dec_updates_ccr = 1'b1;
                                 end
-                                default: begin  // BFCLR/BFSET/BFINS: write back to Dn
+                                default: begin  // BFCHG/BFCLR/BFSET/BFINS: write back to the SAME Dn
                                     dec_writes_reg  = 1'b1;
                                     dec_dest_reg    = {1'b0, f_reg};
                                     dec_updates_ccr = 1'b1;

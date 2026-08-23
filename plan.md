@@ -9058,3 +9058,100 @@ Stage A4 closed. Stage A5 (Shift/Rotate + Bit Manipulation + Bit Field,
 `SHIFT_ROTATE` (not yet re-verified digit-by-digit); §11.6.13-14 (Bit
 Manipulation, Bit Field) still need a fresh PDF read.
 
+## Phase 161 Part A Stage A5
+
+Shift/Rotate + Bit Manipulation + Bit Field (§11.6.12-11.6.14). Re-read
+§11.6.12 (PDF 508) and confirmed `SHIFT_ROTATE`'s own Stage A4 opportunistic
+transcription matches exactly, digit-for-digit. Transcribed `BIT_MANIP`
+(§11.6.13, PDF 509) and `BIT_FIELD` (§11.6.14, PDF 510) fresh. Also
+opportunistically captured §11.6.15 (Conditional Branch, PDF 511) as
+`COND_BRANCH` for Stage A6's later use.
+
+Built `scripts/gen_a5_tests.py` producing 24 new tests + manifest: 8
+SHIFT_ROTATE rows (immediate-count/register-count/%/+/memory-by-1 forms),
+8 BIT_MANIP rows (BTST/BCHG/BCLR/BSET, register and memory-EA), and 8
+BIT_FIELD register-only rows (BFTST/BFCHG/BFCLR/BFSET/BFEXTS/BFEXTU/BFINS/
+BFFFO). Applied the by-now-established watch-value-transition discipline
+throughout (every watched register's expected final value must genuinely
+differ from its pre-instruction value, or `t_end_seen` can never fire) --
+caught and fixed 3 self-inflicted cases before the first real run (BTST's
+own marker checking a bit that happened to already be set; ASR's own
+`count>32` case initializing D2 to the exact expected post-shift value).
+
+### A genuine, previously-undiscovered 3-way bit-field encoding bug
+
+`a5_bfchg_dn` (`BFCHG D2{0:8}`) hung outright -- the harness's own IFU
+readahead filled its queue and stopped, with decode never retiring. Traced
+(temporary `$display` tracing of `dec_valid`/`stall`/`dec_alu_op`/`instr_word`
+at commit, the same technique Stage A2's own USP investigation used)
+straight to the real opcode being correctly fetched and dispatched, ruling
+out a hang in the ordinary sense -- the actual defect was structural, not
+timing-related. Reading `eu_bitfield.sv`'s own header comment against a
+fresh derivation from first principles (decoding `vasm`'s own assembled
+`0xEAC2` for `bfchg d2{0:8}`) found the file's documented `bf_op` mapping
+was simply wrong: it claimed a sequential `TST=1000, EXTU=1001, EXTS=1010,
+FFO=1011, CLR=1100, SET=1110, INS=1111` ordering with **no BFCHG entry at
+all** -- but the real Motorola encoding (confirmed against vasm's own
+assembler output, an independent authority) is `TST=1000, EXTU=1001,
+CHG=1010, EXTS=1011, CLR=1100, FFO=1101, SET=1110, INS=1111`. The
+practical effect of the file's own wrong assumption: (a) BFCHG's real
+opcode slot (1010) fell into the unhandled `default:` case in
+`eu_bitfield.sv`, always computing 0 instead of toggling the field; (b)
+BFEXTS's real opcode slot (1011) had BFFFO's own formula sitting there
+instead, and vice versa for BFFFO's real slot (1101), which had nothing
+at all; (c) `eu_seq.sv`'s own decode-side switch (which register a
+bit-field instruction's *result* writes to -- the source register itself
+for CLR/CHG/SET/INS, but a *separate* register named in the extension word
+for TST/EXTU/EXTS/FFO) grouped opcode-slot 1010 (real CHG) into the
+"separate register" class instead of "same register," and slot 1101 (real
+FFO) into "same register" instead of "separate register" -- explaining
+the actual hang for BFCHG specifically: its result was silently routed to
+whichever register happened to occupy the (entirely unpopulated, for
+BFCHG's own encoding) `bf_spec_w[14:12]` extension-word bits, never to D2,
+so the watched register genuinely never changed.
+
+**Fixed in `rtl/eu_bitfield.sv`** (the `bf_result` case statement and its
+own header comment, now matching the confirmed-correct mapping) **and
+`rtl/eu_seq.sv`** (the decode-side register-destination switch: moved
+1010/CHG into the "same register" group and 1101/FFO into the "separate
+register" group; `dec_bf_mutates`'s own formula, which only checked
+`f_dn[1:0]` and so couldn't distinguish CHG(1010) from EXTS(1011) sharing
+the same `f_dn[1:0]` value, rewritten to check the full 3-bit `dec_bf_op`
+against all four real mutating values CHG/CLR/SET/INS directly). Comments at
+both the field-declaration site and the bit-field decode block's own
+opcode-layout comment updated to the corrected ordering.
+
+**Found the same bug already baked into `tb/bitfield_tb.sv`'s own existing
+unit tests**, a stale-test-validates-old-wrong-behavior instance: its
+"BFEXTS" test used opcode `0xEAC0` (the type field 1010) and its "BFFFO"
+test used `0xEBC0` (type field 1011) -- both were, under the *real*
+encoding, actually testing BFCHG and BFEXTS respectively, mislabeled, and
+had only ever "passed" because the RTL's own old (also-wrong) mapping
+happened to match this same test's own wrong assumption. Fixed both
+opcodes to their real values (BFEXTS→`0xEBC0`, BFFFO→`0xEDC0`) so each
+test genuinely exercises the instruction its own name and comment claim,
+and added a new, permanent BFCHG regression test (reusing `0xEAC0`, now
+correctly BFCHG, with the same `D0{4:4}` field the adjacent BFCLR test
+already uses for direct comparability) -- `tb/bitfield_tb.sv` 23→24 checks,
+all passing.
+
+### Results
+
+24/24 new Stage A5 tests pass, `tb/bitfield_tb.sv` 24/24 (was 23, +1 new
+BFCHG check, 2 pre-existing checks corrected to their real opcodes),
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full
+124-suite Harte sweep (mandatory -- `eu_seq.sv`/`eu_bitfield.sv` changed)
+-- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0, bit-identical to baseline (expected: bit-field instructions are
+68020+-only, zero Harte coverage of any kind -- this is purely a
+correctness-preservation gate, not a direct test of the fix).
+
+### Status
+
+Stage A5 closed -- the third genuine RTL bug this Part A rollout has found
+(after Stage A2's USP hazard), and by far the most structurally
+significant: a completely unimplemented instruction plus two others
+silently computing the wrong operation. Stage A6 (Conditional Branch +
+Control Instructions, §11.6.15-11.6.16) next -- §11.6.15's own table is
+already transcribed as `COND_BRANCH`, found opportunistically this stage.
+
