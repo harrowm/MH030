@@ -1,0 +1,30 @@
+[
+  {
+    "name": "d0_lsl_cnt1",
+    "hex": "tests/timing/d0_lsl_cnt1.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0x2",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "Stage D0: LSL.L Dx,Dy count=1 (same '<=32' bucket as d0_lsl_cnt30) -- confirms baseline r/p/w, clocks compared manually against d0_lsl_cnt30's own MEASURED line"
+  },
+  {
+    "name": "d0_lsl_cnt30",
+    "hex": "tests/timing/d0_lsl_cnt30.hex",
+    "target_pc": "0x200", "instr_len": 2, "watch_reg": 2, "watch_val": "0x40000000",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "Stage D0: LSL.L Dx,Dy count=30 (same '<=32' bucket as d0_lsl_cnt1) -- MEASURED clocks= must match d0_lsl_cnt1's own exactly to confirm the flat/lookup-table hypothesis"
+  },
+  {
+    "name": "d0_bfffo_early",
+    "hex": "tests/timing/d0_bfffo_early.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 3, "watch_val": "0x0",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "Stage D0: BFFFO Dn, set bit at the shallowest scan position (offset 0) -- MEASURED clocks= compared manually against d0_bfffo_late's own"
+  },
+  {
+    "name": "d0_bfffo_late",
+    "hex": "tests/timing/d0_bfffo_late.hex",
+    "target_pc": "0x200", "instr_len": 4, "watch_reg": 3, "watch_val": "0x1f",
+    "expect_r": 0, "expect_p": 1, "expect_w": 0,
+    "desc": "Stage D0: BFFFO Dn, set bit at the deepest scan position (offset 31) -- MEASURED clocks= must match d0_bfffo_early's own exactly to confirm BFFFO's own gap is flat, not data-dependent on scan depth"
+  }
+]
