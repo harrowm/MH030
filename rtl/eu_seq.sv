@@ -6749,37 +6749,69 @@ module eu_seq (
     // pipeline-control shape -- see the ex_mem_stall/ex_berr_abort_wb
     // block just above for the pattern this mirrors.
     //
-    // dec_internal_stall_ticks is in real clk_4x ticks (4 ticks = 1
-    // external/"manual" clock, matching every other timing figure in this
-    // project) and is 0 (inert) for every instruction until Stage D2+
-    // populates real whitelist entries here.
-    logic [7:0] dec_internal_stall_ticks;
+    // dec_internal_stall_ticks_fixed / ex_internal_stall_ticks_resolved are
+    // both in real clk_4x ticks (4 ticks = 1 external/"manual" clock,
+    // matching every other timing figure in this project).
+    //
+    // Stage D2 (plan.md): first real whitelist entries -- shift/rotate
+    // register forms. N derived from scripts/timing_tables.py's own
+    // SHIFT_ROTATE NCC values, minus this project's own already-measured
+    // 3-clock (12-tick) baseline for a 1-word register-direct instruction
+    // (confirmed uniform across this whole family: Stage D0's own LSL/
+    // BFFFO spot-checks plus a direct ROL.L Dx,Dy check before this stage,
+    // all measuring the identical baseline regardless of shift count or
+    // scan depth/width).
+    //
+    // Two computation paths, because the manual's own row for a given op
+    // sometimes depends on the register-supplied COUNT (the "%"=count<=
+    // operand-size vs "+"=count>size split for LSL/LSR/ASR), and that
+    // count isn't known until the register file read resolves -- the same
+    // timing shf_count itself already has (rd_b_data-derived, valid once
+    // ex_valid=1, not at decode time). ASL/ROL/ROR have no such split (a
+    // single flat NCC value in the manual regardless of count) and so can
+    // be decided purely combinationally at decode time; ROXL/ROXR's own
+    // single "ROXd Dn" row applies identically whether the count comes
+    // from an immediate or a register (no separate rows exist), so it's
+    // also decode-time-only via dec_shf_imm_cnt/dec_use_reg_cnt requiring
+    // no distinction at all.
+    logic [7:0] dec_internal_stall_ticks_fixed;
     always_comb begin
-        dec_internal_stall_ticks = 8'd0;
-        // Stage D2+ (plan.md) adds real whitelist entries here, e.g.:
-        //   if (dec_unit == UNIT_SHF && dec_use_reg_cnt)
-        //       dec_internal_stall_ticks = <bucket-dependent N>;
-    end
-
-    logic [7:0] internal_stall_cnt_r;
-    logic       ex_internal_stall;
-    assign ex_internal_stall = (internal_stall_cnt_r != 8'd0);
-
-    // Loaded the exact cycle a whitelisted instruction dispatches into EX
-    // (instr_ack, the same "this instruction is entering EX right now"
-    // condition every other one-shot EX-entry latch in this file keys
-    // off); decrements every cycle thereafter until it reaches 0, at which
-    // point ex_internal_stall drops and the ordinary (non-stalled) EX/WB
-    // path takes over on its own, needing no further changes here.
-    always_ff @(posedge clk_4x or negedge rst_n) begin
-        if (!rst_n) begin
-            internal_stall_cnt_r <= 8'd0;
-        end else if (internal_stall_cnt_r != 8'd0) begin
-            internal_stall_cnt_r <= internal_stall_cnt_r - 8'd1;
-        end else if (instr_ack && (dec_internal_stall_ticks != 8'd0)) begin
-            internal_stall_cnt_r <= dec_internal_stall_ticks;
+        dec_internal_stall_ticks_fixed = 8'd0;
+        if (dec_valid && dec_unit == UNIT_SHF) begin
+            case (dec_shf_op)
+                SHF_ASL:            if (dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd20; // NCC=8 -3clk=5clk=20t
+                SHF_ROL, SHF_ROR:   if (dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd20; // NCC=8
+                SHF_ROXL, SHF_ROXR: dec_internal_stall_ticks_fixed = 8'd36; // NCC=12 -3clk=9clk=36t (imm or reg, one row)
+                default: ;
+            endcase
         end
     end
+
+    // LSL/LSR/ASR register-count forms: arm a one-cycle "resolving" flag
+    // at dispatch (instr_ack) -- it ALSO freezes the pipeline exactly like
+    // ex_internal_stall itself (folded into the same stall_base/EX-freeze/
+    // WB-bubble sites below), so nothing can advance during the one-cycle
+    // resolution window. The following cycle, ex_shf_op/ex_siz/shf_count
+    // are all valid (same timing shf_count already has) and the real tick
+    // count loads directly, based on the manual's own count<=size / >size
+    // bucket split.
+    logic dec_needs_stall_resolve;
+    assign dec_needs_stall_resolve = dec_valid && dec_unit == UNIT_SHF && dec_use_reg_cnt &&
+                                      (dec_shf_op == SHF_LSL || dec_shf_op == SHF_LSR ||
+                                       dec_shf_op == SHF_ASR);
+
+    // internal_stall_cnt_r/internal_stall_resolving_r are declared (and
+    // ex_internal_stall computed from them) here so stall_base -- assigned
+    // just below -- can reference ex_internal_stall without a forward
+    // reference; the always_ff that actually DRIVES these two regs is
+    // deferred to just after ex_siz/ex_shf_op's own declarations further
+    // down in this file (Icarus requires those declared before the
+    // resolving-cycle logic that reads them), search for "Phase 162 Stage
+    // D2 (continued)".
+    logic [7:0] internal_stall_cnt_r;
+    logic       internal_stall_resolving_r;
+    logic       ex_internal_stall;
+    assign ex_internal_stall = (internal_stall_cnt_r != 8'd0) || internal_stall_resolving_r;
 
     logic hazard_ex, hazard_wb, hazard_ccr, hazard_usp, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -7121,6 +7153,54 @@ module eu_seq (
     logic [31:0] ex_return_pc;   // return address for JSR/BSR push
     logic [31:0] ex_bsr_target;  // pre-computed BSR branch target
     logic [31:0] ex_jump_offset; // JMP/JSR target offset (0 or d16)
+
+    // Phase 162 Stage D2 (continued): the resolving-cycle half of the
+    // artificial-internal-stall mechanism declared up near ex_mem_stall/
+    // ex_berr_abort_wb -- deferred to here because it needs ex_siz/
+    // ex_shf_op (just declared above), which Icarus requires to be
+    // declared before any expression referencing them, unlike the many
+    // other far-later-declared signals ex_mem_stall's own OR-list gets
+    // away forward-referencing (those were deliberately relocated earlier
+    // in the file for exactly this reason; moving ex_siz/ex_shf_op
+    // themselves felt like the wrong tradeoff given how many other things
+    // in this file already depend on their current declaration point).
+    logic [5:0] ex_shf_width_bits;
+    assign ex_shf_width_bits = (ex_siz == 2'b01) ? 6'd8 : (ex_siz == 2'b10) ? 6'd16 : 6'd32;
+
+    logic [7:0] ex_internal_stall_ticks_resolved;
+    always_comb begin
+        ex_internal_stall_ticks_resolved = 8'd0;
+        case (ex_shf_op)
+            SHF_LSL, SHF_LSR: ex_internal_stall_ticks_resolved =
+                (shf_count <= ex_shf_width_bits) ? 8'd12 : 8'd20; // %NCC=6->3clk=12t, +NCC=8->5clk=20t
+            SHF_ASR: ex_internal_stall_ticks_resolved =
+                (shf_count <= ex_shf_width_bits) ? 8'd12 : 8'd28; // %NCC=6->3clk=12t, +NCC=10->7clk=28t
+            default: ;
+        endcase
+    end
+
+    // Loaded the exact cycle a whitelisted instruction dispatches into EX
+    // (instr_ack, the same "this instruction is entering EX right now"
+    // condition every other one-shot EX-entry latch in this file keys
+    // off); decrements every cycle thereafter until it reaches 0, at which
+    // point ex_internal_stall drops and the ordinary (non-stalled) EX/WB
+    // path takes over on its own, needing no further changes here.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            internal_stall_cnt_r      <= 8'd0;
+            internal_stall_resolving_r <= 1'b0;
+        end else if (internal_stall_resolving_r) begin
+            // Resolution cycle: ex_shf_op/ex_siz/shf_count are now valid.
+            internal_stall_cnt_r       <= ex_internal_stall_ticks_resolved;
+            internal_stall_resolving_r <= 1'b0;
+        end else if (internal_stall_cnt_r != 8'd0) begin
+            internal_stall_cnt_r <= internal_stall_cnt_r - 8'd1;
+        end else if (instr_ack && (dec_internal_stall_ticks_fixed != 8'd0)) begin
+            internal_stall_cnt_r <= dec_internal_stall_ticks_fixed;
+        end else if (instr_ack && dec_needs_stall_resolve) begin
+            internal_stall_resolving_r <= 1'b1;
+        end
+    end
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin

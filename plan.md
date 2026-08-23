@@ -131,3 +131,97 @@ anywhere it isn't explicitly populated.
 
 Stage D1 closed. Stage D2 (implement for shift/rotate register forms,
 the first real whitelist entries) is next.
+
+## Phase 162 Stage D2
+
+Populated the artificial-internal-stall mechanism for shift/rotate
+register-count forms (ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR) — the first real
+whitelist entries, the highest-confidence family available (the manual's
+own `SHIFT_ROTATE` table is the most detailed anywhere in this rollout,
+and all 8 op×size combinations are 100%-passing Harte suites, the
+strongest correctness gate this whole plan has access to).
+
+### A real design complication found while implementing, not anticipated in Stage D1
+
+`dec_internal_stall_ticks`'s original design (Stage D1) assumed the stall
+amount could always be computed purely combinationally at decode time.
+That holds for ASL/ROL/ROR (a single flat NCC value regardless of count)
+and ROXL/ROXR (one row, "ROXd Dn", covering immediate *and*
+register-supplied count identically — no separate rows exist), but not
+for LSL/LSR/ASR: the manual's own `%`(count≤operand-size)/`+`(count>size)
+bucket split needs the *live*, register-supplied count value, which isn't
+known until the register file read resolves — the same timing `shf_count`
+itself already has (valid once `ex_valid=1`, not at decode time).
+
+Solved with a two-stage load: a `dec_needs_stall_resolve` flag arms at
+`instr_ack` (decode→EX handoff) for LSL/LSR/ASR register-count forms
+specifically; on that same cycle, `internal_stall_resolving_r` (folded
+into `ex_internal_stall` exactly like the counter itself, so it freezes
+the pipeline through the whole one-cycle resolution window, not just once
+the real count loads) goes high; the *following* cycle, once
+`ex_shf_op`/`ex_siz`/`shf_count` are all valid, the real tick count is
+computed (`ex_internal_stall_ticks_resolved`, comparing `shf_count`
+against the operand width derived from `ex_siz`) and loaded into the
+down-counter. ASL/ROL/ROR/ROXL/ROXR skip this entirely, loading their
+fixed value directly at `instr_ack`.
+
+### A second, purely mechanical complication: Icarus forward-reference rules
+
+The `ex_internal_stall_ticks_resolved` computation needs `ex_siz`/
+`ex_shf_op`, both declared much later in the file (the big EX-latch
+declaration block) than where Stage D1 placed the rest of this mechanism
+(right after `ex_mem_stall`/`ex_berr_abort_wb`, needed there so
+`stall_base` — assigned shortly after — could reference `ex_internal_stall`
+without its own forward-reference problem). Rather than relocate
+`ex_siz`/`ex_shf_op` themselves (used throughout the file, high blast
+radius for a purely mechanical fix), split the mechanism: declarations of
+`internal_stall_cnt_r`/`internal_stall_resolving_r`/`ex_internal_stall`
+plus the decode-only `dec_internal_stall_ticks_fixed`/
+`dec_needs_stall_resolve` stay at the original Stage D1 location; the
+actual `always_ff` that *drives* those two registers (needing
+`ex_shf_op`/`ex_siz`/`shf_count`) moved to just after `ex_siz`/`ex_shf_op`
+are declared, right before the big EX-latch update block — a plain
+Verilog register can be declared in one place and driven by an
+`always_ff` anywhere else in the same module, so this required no
+semantic change, just relocating which lines live where (documented with
+a cross-reference comment at both ends so a future reader isn't confused
+by the split).
+
+### Baseline confirmation before computing N
+
+Directly measured `ROL.L Dx,Dy` (register form, not yet covered by any
+existing test) before finalizing the lookup table: `ticks=14` — the same
+baseline every other register-direct 1-word instruction measures,
+confirming the 3-clock (12-tick) baseline used to derive every N value
+(`N_ticks = (manual_NCC_clocks - 3) * 4`) really is uniform across this
+whole family, not just the two cases Stage D0 already checked (LSL/BFFFO).
+
+### Results
+
+**Exact match, not just "closer"**: every one of the 5 directly re-
+measured whitelist entries now reports `MEASURED clocks=` identical to
+the manual's own NCC total — `LSL.L Dx,Dy` (%, 6), `ASL.L Dx,Dy` (flat,
+8), `ASR.L Dx,Dy` (+, 10), `ROR.L Dx,Dy` (flat, 8), `ROXL.L #1,Dn` (flat,
+12) — all gap=0 in `scripts/b_final_clock_survey.py`'s own re-run (was
+-3/-5/-7/-5/-9 respectively before this stage). Immediate-count forms
+(`LSL.L #1,Dy`, `ROL.L #1,Dy`) correctly remain unaffected (not in this
+stage's own whitelist, `clocks=3` unchanged) — the small residual gap
+those still carry (manual NCC=4/6 vs measured 3, i.e. -1/-3) is deferred
+to a later Part D stage, not this one.
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, all 24
+directly-affected Harte suites (ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR × b/w/l)
+individually re-run at 100% (`PASS 148449 FAIL 2` — the 2 being the same
+documented ASL.b corpus anomaly, unrelated), then the full 124-suite
+sweep — PASS 702142, FAIL 2, SKIP 281221, TIMEOUT 0, bit-identical to
+baseline. This is the strongest possible confirmation available in this
+whole plan: the artificial stall changes *only* total clock count
+(informational, never asserted against Harte), while every one of the
+~24000 directly-relevant Harte vectors (final-state correctness) remains
+untouched.
+
+### Status
+
+Stage D2 closed — the first real clock-accuracy fix landed and fully
+verified. Stage D3+ (bit-field ops, then the smaller-gap register-direct
+families) is next.
