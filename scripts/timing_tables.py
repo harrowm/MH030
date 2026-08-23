@@ -298,6 +298,94 @@ MOVE_SPECIAL = {
 }
 
 
+# ── 11.6.8 Arithmetical/Logical Instructions — PDF 503-504, manual 11-40/41 ─
+# '*' = Add Fetch Effective Address Time. '**' = Add Fetch Immediate
+# Effective Address Time (same meaning as FEA/FIEA elsewhere in this file --
+# kept as a single leading-'*'-count marker in the key, not a separate dict,
+# since Stage A3 only needs the printed row values directly).
+ALU = {
+    'ADD Rn,Dn':          (2, 0,  2, 0,0,0,  2, 0,1,0),
+    'ADDA.W Rn,An':       (4, 0,  4, 0,0,0,  4, 0,1,0),
+    'ADDA.L Rn,An':       (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*ADD EA,Dn':         (0, 0,  2, 0,0,0,  2, 0,1,0),
+    '*ADD.W EA,An':       (0, 0,  4, 0,0,0,  4, 0,1,0),
+    '*ADDA.L EA,An':      (0, 0,  2, 0,0,0,  2, 0,1,0),
+    '*ADD Dn,EA':         (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'AND Dn,Dn':          (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*AND EA,Dn':         (0, 0,  2, 0,0,0,  2, 0,1,0),
+    '*AND Dn,EA':         (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'EOR Dn,Dn':          (2, 0,  2, 0,0,0,  2, 0,1,0),
+    'EOR Dn,EA':          (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'OR Dn,Dn':           (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*OR EA,Dn':          (0, 0,  2, 0,0,0,  2, 0,1,0),
+    '*OR Dn,EA':          (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'SUB Rn,Dn':          (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*SUB EA,Dn':         (0, 0,  2, 0,0,0,  2, 0,1,0),
+    '*SUB Dn,EA':         (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'SUBA.W Rn,An':       (4, 0,  4, 0,0,0,  4, 0,1,0),
+    'SUBA.L Rn,An':       (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*SUBA.W EA,An':      (0, 0,  4, 0,0,0,  4, 0,1,0),
+    '*SUBA.L EA,An':      (0, 0,  2, 0,0,0,  2, 0,1,0),
+    'CMP Rn,Dn':          (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*CMP EA,Dn':         (0, 0,  2, 0,0,0,  2, 0,1,0),
+    'CMPA.W Rn,An':       (4, 0,  4, 0,0,0,  4, 0,1,0),
+    '*CMPA.W EA,An':      (0, 0,  4, 0,0,0,  4, 0,1,0),
+    '**+CMP2 EA,Rn':      (2, 0, 20, 1,0,0, 20, 1,1,0),
+    '*+MULS.W EA,Dn':     (2, 0, 28, 0,0,0, 28, 0,1,0),
+    '**+MULS.L EA,Dn':    (2, 0, 44, 0,0,0, 44, 0,1,0),
+    '*+MULU.W EA,Dn':     (2, 0, 28, 0,0,0, 28, 0,1,0),
+    '**+MULU.L EA,Dn':    (2, 0, 44, 0,0,0, 44, 0,1,0),
+    '+DIVS.W Dn,Dn':      (2, 0, 56, 0,0,0, 56, 0,1,0),
+    '*+DIVS.W EA,Dn':     (0, 0, 56, 0,0,0, 56, 0,1,0),
+    '**+DIVS.L Dn,Dn':    (6, 0, 90, 0,0,0, 90, 0,1,0),
+    '**+DIVS.L EA,Dn':    (0, 0, 90, 0,0,0, 90, 0,1,0),
+    '+DIVU.W Dn,Dn':      (2, 0, 44, 0,0,0, 44, 0,1,0),
+    '*+DIVU.W EA,Dn':     (0, 0, 44, 0,0,0, 44, 0,1,0),
+    '**+DIVU.L Dn,Dn':    (6, 0, 78, 0,0,0, 78, 0,1,0),
+    '**+DIVU.L EA,Dn':    (0, 0, 78, 0,0,0, 78, 0,1,0),
+}
+
+# ── 11.6.9 Immediate Arithmetical/Logical Instructions — PDF 505, 11-42 ─────
+ALU_IMM = {
+    'MOVEQ #(data),Dn':   (2, 0,  2, 0,0,0,  2, 0,1,0),
+    'ADDQ #(data),Rn':    (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*ADDQ #(data),Mem':  (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'SUBQ #(data),Rn':    (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '*SUBQ #(data),Mem':  (0, 1,  3, 0,0,1,  4, 0,1,1),
+    '**ADDI #(data),Dn':  (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '**ADDI #(data),Mem': (0, 1,  3, 0,0,1,  4, 0,1,1),
+    'ANDI #(data),Dn':    (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '**ANDI #(data),Mem': (0, 1,  3, 0,0,1,  4, 0,1,1),
+    '**EORI #(data),Dn':  (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '**EORI #(data),Mem': (0, 1,  3, 0,0,1,  4, 0,1,1),
+    '**ORI #(data),Dn':   (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '**ORI #(data),Mem':  (0, 1,  3, 0,0,1,  4, 0,1,1),
+    '**SUBI #(data),Dn':  (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '**SUBI #(data),Mem': (0, 1,  3, 0,0,1,  4, 0,1,1),
+    '**CMPI #(data),Dn':  (2, 0,  2, 0,0,0,  2, 0,1,0),
+    '**CMPI #(data),Mem': (0, 0,  2, 0,0,0,  2, 0,1,0),
+}
+
+# ── 11.6.10 Binary-Coded Decimal and Extended Instructions — PDF 506, 11-43 ─
+# No footnotes needed -- these tables are already self-contained totals.
+# Transcribed here (Stage A3) for reuse in Stage A4.
+BCD_EXT = {
+    'ABCD Dn,Dn':              (0, 0,   4, 0,0,0,   4, 0,1,0),
+    'ABCD -(An),-(An)':        (2, 1,  13, 2,0,1,  14, 2,1,1),
+    'SBCD Dn,Dn':               (0, 0,   4, 0,0,0,   4, 0,1,0),
+    'SBCD -(An),-(An)':         (2, 1,  13, 2,0,1,  14, 2,1,1),
+    'ADDX Dn,Dn':               (2, 0,   2, 0,0,0,   2, 0,1,0),
+    'ADDX -(An),-(An)':         (2, 1,   9, 2,0,1,  10, 2,1,1),
+    'SUBX Dn,Dn':               (2, 0,   2, 0,0,0,   2, 0,1,0),
+    'SUBX -(An),-(An)':         (2, 1,   9, 2,0,1,  10, 2,1,1),
+    'CMPM (An)+,(An)+':         (6, 0,   8, 2,0,0,   8, 2,1,0),
+    'PACK Dn,Dn,#(data)':       (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'PACK -(An),-(An),#(data)': (2, 1,  11, 1,0,1,  11, 1,1,1),
+    'UNPK Dn,Dn,#(data)':       (8, 0,   8, 0,0,0,   8, 0,1,0),
+    'UNPK -(An),-(An),#(data)': (2, 1,  11, 1,0,1,  11, 1,1,1),
+}
+
+
 def ncc_rpw(table, mode):
     """Return (r, p, w) from the No-Cache-Case column for a table row."""
     row = table[mode]
@@ -312,5 +400,6 @@ def ncc_total(table, mode):
 if __name__ == '__main__':
     for name, table in [('FEA', FEA), ('FIEA', FIEA), ('CEA', CEA),
                          ('CIEA', CIEA), ('JEA', JEA), ('MOVE', MOVE),
-                         ('MOVE_SPECIAL', MOVE_SPECIAL)]:
+                         ('MOVE_SPECIAL', MOVE_SPECIAL), ('ALU', ALU),
+                         ('ALU_IMM', ALU_IMM), ('BCD_EXT', BCD_EXT)]:
         print(f"{name}: {len(table)} rows")

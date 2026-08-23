@@ -8905,3 +8905,90 @@ correctness bug found by this timing-verification sweep (after none in
 Stage A1, which was pure resource-count confirmation). Stage A3
 (Arithmetic/Logical + Immediate, §11.6.8-11.6.9) next.
 
+## Phase 161 Part A Stage A3
+
+Arithmetic/Logical + Immediate (§11.6.8-11.6.9), read directly from
+MC68030UM.pdf 11-40/41/42 (also captured §11.6.10 BCD/Extended in the same
+read, transcribed into `scripts/timing_tables.py` as `BCD_EXT` for reuse in
+Stage A4). Transcribed `ALU` and `ALU_IMM` dicts covering ADD/ADDA/AND/EOR/
+OR/SUB/SUBA/CMP/CMPA/CMP2/MULS/MULU/DIVS/DIVU and MOVEQ/ADDQ/SUBQ/ADDI/ANDI/
+EORI/ORI/SUBI/CMPI. Built a one-shot generator (`scripts/gen_a3_tests.py`,
+not part of the regular Makefile flow) producing 24 test programs +
+`tests/timing/a3_alu.json`, auto-computing each `instr_len` via a `-no-opt`
+vasm listing (mirroring Stage A2's own technique) -- 14 register-direct rows
+(no footnote math needed) plus 10 exercising the `*`/`**` (fea/fiea)
+footnoted rows for the first time in this rollout.
+
+### Two real methodology bugs found and fixed (not RTL)
+
+**(1) Silent assembler optimization desync.** `ADDI.L #5,D2`/`SUBI.L #5,D2`
+initially showed p=1 instead of the naively-expected p=2 -- investigated via
+temporary `$display` tracing of `dec_valid`/`stall`/`dec_alu_op`/`dec_imm`
+in `eu_seq.sv`, which surfaced something alarming at first: `instr_word`
+at the moment of commit read `0x5A82` (a `SUBQ.L #5,D2`-shaped opcode),
+not the assembled `0x0682` (`ADDI.L`). Traced to the root cause via a direct
+hex-file byte check: the Makefile's own shared `tests/%.bin: tests/%.s`
+pattern rule (used project-wide, not just by this timing sweep) invokes
+`vasmm68k_mot` **without** `-no-opt` -- so vasm's default optimizer silently
+folds `ADDI #imm,Dn`/`SUBI #imm,Dn` into the shorter, semantically-identical
+`ADDQ`/`SUBQ` whenever the immediate falls in the 1-8 quick-immediate range,
+while this stage's own `instr_len`-detection pass (which *did* use
+`-no-opt`, mirroring Stage A2) measured the *unfolded* 6-byte length --
+a genuine mismatch between what the generator measured and what actually
+got simulated. Confirmed via direct hex-file inspection (`5a824e72` at
+`$200` instead of `06820000...`) before concluding, not guessed at. **Fix**:
+changed the affected immediates from 5 to 20 (outside ADDQ/SUBQ's 1-8
+range) in the three affected tests (`a3_addi_dn`/`a3_subi_dn`/
+`a3_addi_mem`) rather than touching the shared Makefile rule, which has
+project-wide blast radius (every other `.s` test in the repo relies on its
+current un-optimized-immediate behavior being self-consistent with its own
+cosim reference, and auditing all of them for a similar latent issue is out
+of this stage's own scope). **(2) A second, independent bug this same
+investigation surfaced**: once (1) was fixed, ADDI/SUBI genuinely matched
+p=2 like ANDI/EORI/ORI/CMPI -- but that in turn revealed my OWN original
+`expect_p=1` for all six Dn-dest immediate-ALU rows was simply wrong: the
+manual's own `**` footnote ("Add Fetch Immediate Effective Address Time")
+means these rows are NOT self-contained totals the way MOVEQ/register-form
+ADDQ/SUBQ are -- FIEA(#imm.L,Dn)=(0,1,0) must be added to the row's own
+(0,1,0), giving (0,2,0), which is exactly what the RTL measures. Also found
+the same class of error for `a3_addi_mem` (mixed up fea with fiea -- ADDQ's
+own memory-dest row is genuinely `*`=fea since its quick immediate needs no
+separate fetch, but ADDI's is `**`=fiea, giving FIEA(1,1,0)+row(0,1,1)=
+(1,2,1), not fea((An))+row=(1,1,1) as first modeled). **Neither of these
+two findings is an RTL bug** -- both are corrections to this stage's own
+expected-value derivation, caught by taking a measured mismatch seriously
+rather than assuming the RTL was wrong.
+
+**(3) Marker-read inflating r_count.** The four memory-destination tests
+(`a3_add_dn_ea`/`a3_and_dn_ea`/`a3_addq_mem`/`a3_addi_mem`) initially used a
+`MOVE.L (A0),D2` marker to read back the just-written value and confirm
+correctness -- but `r_count`/`w_count` are chronological-window, not
+address-range-gated (Stage A1's own deliberate design, reasoned to be safe
+since "no existing test touches data memory outside the instruction under
+test" -- an assumption these four tests were the first to break by design).
+The marker's own genuine data read got counted into `r_count`, inflating
+every one of these four measurements by exactly 1. Fixed by switching to a
+register-only marker (`MOVE.L #imm,D2`, matching Stage A2's own proven-safe
+convention) -- sacrificing this harness's ability to directly assert the
+written *value* for these four cases, which is fine since correctness is
+already independently proven via Harte (ADD/AND/ADDQ/ADDI are all
+100%-passing suites); this sweep's own job is r/p/w confirmation, not a
+second correctness proof.
+
+### Results
+
+24/24 new tests pass. **Zero RTL changes** -- confirmed via `git diff
+--stat rtl/` showing no output before committing; every issue found this
+stage was in test construction (assembler-optimization desync, wrong
+footnote-composition arithmetic, marker-read miscounting), not the RTL
+itself. `make test` 36/36 (sanity check only -- no Harte/cosim_grp/
+cosim_memind re-run needed, matching this project's own established
+convention for testbench-only changes).
+
+### Status
+
+Stage A3 closed. Stage A4 (BCD/Extended + Single Operand, §11.6.10-11.6.11)
+next -- §11.6.10's own table (ABCD/SBCD/ADDX/SUBX/CMPM/PACK/UNPK) is already
+transcribed as `BCD_EXT`, found opportunistically while reading §11.6.8-9's
+own PDF pages this stage.
+
