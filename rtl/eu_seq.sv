@@ -584,6 +584,7 @@ module eu_seq (
     logic        dec_is_branch;    // BRA/Bcc: redirects PC at decode time
     logic        dec_is_dbcc;      // DBcc: branch decision deferred to EX stage
     logic        dec_reads_ccr;    // stall if pending CCR write in EX or WB
+    logic        dec_reads_usp;    // stall if pending USP write (MOVE An,USP) in EX or WB -- Phase 161 Part A Stage A2
     logic [3:0]  dec_branch_cond;  // condition code for Bcc/Scc/DBcc
     logic [31:0] dec_branch_disp;  // branch displacement (relative to PC+2)
     logic        dec_is_swap;      // SWAP Dn: swap halfwords in EX
@@ -828,6 +829,7 @@ module eu_seq (
         dec_siz          = 2'b00;
         dec_updates_ccr  = 1'b0;
         dec_reads_ccr    = 1'b0;
+        dec_reads_usp    = 1'b0;
         dec_x_unchanged  = 1'b0;
         dec_sext         = 1'b0;
         dec_sext_from_byte = 1'b0;
@@ -3722,6 +3724,7 @@ module eu_seq (
                             dec_writes_reg = 1'b1;
                             dec_use_imm    = 1'b1;
                             dec_imm        = usp_in;
+                            dec_reads_usp  = 1'b1;
                         end
                     end else if (instr_word == 16'h4E74) begin
                         // RTD #d16: 0100 1110 0111 0100 + ext
@@ -6724,7 +6727,7 @@ module eu_seq (
     end
     assign ex_berr_abort_wb = ex_mem_stall_r && mem_abort_r;
 
-    logic hazard_ex, hazard_wb, hazard_ccr, need_ext, stall;
+    logic hazard_ex, hazard_wb, hazard_ccr, hazard_usp, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
                             (dec_reads_src && ex_dest_reg == dec_src_reg) ||
                             (dec_reads_dst && ex_dest_reg == dec_dst_reg) ||
@@ -6750,6 +6753,17 @@ module eu_seq (
     assign hazard_ccr = dec_reads_ccr && (
                             (ex_valid && ex_updates_ccr) ||
                             (wb_valid && wb_updates_ccr));
+    // hazard_usp: MOVE USP,An reads usp_in live at decode; usp_r (eu_regfile.sv)
+    // is a plain registered write with no forwarding, so a back-to-back
+    // MOVE An,USP ; MOVE USP,An pair can otherwise read the pre-write value --
+    // found via Phase 161 Part A Stage A2's own timing sweep (MC68030UM.pdf
+    // 11-39), the first time this exact instruction pair was ever exercised
+    // in this project's history (absent from the Harte corpus, which has no
+    // USP coverage at all). Same two-stage EX/WB protection shape as
+    // hazard_ccr above.
+    assign hazard_usp = dec_reads_usp && (
+                            (ex_valid && ex_is_move_usp) ||
+                            (wb_valid && wb_is_move_usp));
     assign need_ext   = dec_needs_ext && !ext_valid;
     // ex_mem_stall freezes the entire pipeline regardless of dec_valid.
     // STOP stall: one-cycle bubble after STOP fires in EX so the following
@@ -6993,7 +7007,7 @@ module eu_seq (
                       || ex_exc_dispatch_hazard
                       || (ex_jmp_taken | ex_jsr_taken | ex_bsr_taken
                          | ex_rts_taken | ex_rtr_taken | ex_rte_taken | ex_dbcc_taken)
-                      || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || need_ext || stop_first_cycle || stop_wb_hazard));
+                      || (dec_valid && (hazard_ex || hazard_wb || hazard_ccr || hazard_usp || need_ext || stop_first_cycle || stop_wb_hazard));
     // int_defer: a pending interrupt sees a clean instruction boundary this
     // cycle (dec_valid would otherwise dispatch with no other stall source).
     // Real 68030 silicon only samples IPL between instructions; freezing

@@ -216,6 +216,88 @@ JEA = {
 }
 
 
+# ── 11.6.6 MOVE Instruction — PDF 500-501, manual 11-37/11-38 ──────────────
+# "...the number of clock periods needed for the processor to calculate the
+# destination effective address and perform the MOVE or MOVEA instruction,
+# including the first level of indirection on memory indirect addressing
+# modes." Rows without '*' are register-source (Rn) forms -- no fea needed.
+# Rows with '*' need the SOURCE's own fea (or 0 if source is Dn/An) added.
+MOVE = {
+    'Rn,Dn':                    (2, 0,   2, 0,0,0,   2, 0,1,0),
+    'Rn,An':                    (2, 0,   2, 0,0,0,   2, 0,1,0),
+    '*EA,An':                   (0, 0,   2, 0,0,0,   2, 0,1,0),
+    '*EA,Dn':                   (0, 0,   2, 0,0,0,   2, 0,1,0),
+    'Rn,(An)':                  (2, 0,   3, 0,0,1,   4, 0,1,1),
+    '*SOURCE,(An)':             (2, 0,   4, 0,0,1,   5, 0,1,1),
+    'Rn,(An)+':                 (0, 1,   3, 0,0,1,   4, 0,1,1),
+    '*SOURCE,(An)+':            (2, 0,   4, 0,0,1,   5, 0,1,1),
+    'Rn,-(An)':                 (0, 2,   4, 0,0,1,   4, 0,1,1),
+    '*SOURCE,-(An)':            (2, 0,   4, 0,0,1,   5, 0,1,1),
+    '*EA,(d16,An)':             (2, 0,   4, 0,0,1,   5, 0,1,1),
+    '*EA,XXX.W':                (2, 0,   4, 0,0,1,   5, 0,1,1),
+    '*EA,XXX.L':                (0, 0,   6, 0,0,1,   7, 0,2,1),
+    # Brief format extension word
+    '*EA,(d8,An,Xn)':           (4, 0,   6, 0,0,1,   7, 0,1,1),
+    # Full format extension word(s)
+    '*EA,(d16,An)_full':        (2, 0,   8, 0,0,1,   9, 0,2,1),
+    '*EA,(d16,An,Xn)_full':     (2, 0,   8, 0,0,1,   9, 0,2,1),
+    '*EA,([d16,An],Xn)':        (2, 0,  10, 1,0,1,  11, 1,2,1),
+    '*EA,([d16,An],d16)':       (2, 0,  12, 1,0,1,  14, 1,2,1),
+    '*EA,([d16,An],Xn,d16)':    (2, 0,  12, 1,0,1,  14, 1,2,1),
+    '*EA,([d16,An],d32)':       (2, 0,  14, 1,0,1,  16, 1,3,1),
+    '*EA,([d16,An],Xn,d32)':    (2, 0,  14, 1,0,1,  16, 1,3,1),
+    '*EA,(B)':                  (4, 0,   8, 0,0,1,   9, 0,1,1),
+    '*EA,(d16,B)':               (4, 0,  10, 0,0,1,  12, 0,2,1),
+    '*EA,(d32,B)':               (4, 0,  14, 0,0,1,  16, 0,2,1),
+    '*EA,([B])':                 (4, 0,  10, 1,0,1,  11, 1,1,1),
+    '*EA,([B],I)':                (4, 0,  10, 1,0,1,  11, 1,1,1),
+    '*EA,([B],d16)':              (4, 0,  12, 1,0,1,  14, 1,2,1),
+    '*EA,([B],I,d16)':             (4, 0,  12, 1,0,1,  14, 1,2,1),
+    '*EA,([B],d32)':              (4, 0,  14, 1,0,1,  16, 1,2,1),
+    '*EA,([B],I,d32)':             (4, 0,  14, 1,0,1,  16, 1,2,1),
+    '*EA,(d16,B])':               (4, 0,  12, 1,0,1,  14, 1,2,1),
+    '*EA,(d16,B],I)':              (4, 0,  12, 1,0,1,  17, 1,2,1),
+    '*EA,(d16,B],d16)':            (4, 0,  14, 1,0,1,  17, 1,2,1),
+    '*EA,(d16,B],I,d16)':          (4, 0,  14, 1,0,1,  17, 1,2,1),
+    '*EA,(d16,B],d32)':            (4, 0,  16, 1,0,1,  19, 1,3,1),
+    '*EA,(d16,B],I,d32)':          (4, 0,  16, 1,0,1,  19, 1,3,1),
+    '*EA,(d32,B])':               (4, 0,  16, 1,0,1,  18, 1,2,1),
+    '*EA,(d32,B],I)':              (4, 0,  16, 1,0,1,  18, 1,2,1),
+    '*EA,(d32,B],d16)':            (4, 0,  18, 1,0,1,  21, 1,3,1),
+    '*EA,(d32,B],I,d16)':          (4, 0,  18, 1,0,1,  21, 1,3,1),
+    '*EA,(d32,B],d32)':            (4, 0,  20, 1,0,1,  23, 1,3,1),
+    '*EA,(d32,B],I,d32)':          (4, 0,  20, 1,0,1,  23, 1,3,1),
+}
+
+# ── 11.6.7 Special-Purpose MOVE Instruction — PDF 502, manual 11-39 ────────
+# EXG/MOVEC/MOVE-CCR-SR/MOVEM/MOVEP/MOVES/SWAP/MOVE-USP. MOVEM's own two
+# rows are n(register-count)-dependent formulas (footnote '+'), transcribed
+# for completeness but not swept in Stage A2 (needs its own per-n test
+# generation, deferred).
+MOVE_SPECIAL = {
+    'EXG Ry,Rx':                (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'MOVEC Cr,Rn':               (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'MOVEC Rn,Cr-A':             (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'MOVEC Rn,Cr-B':             (4, 0,  12, 0,0,0,  12, 0,1,0),
+    'MOVE CCR,Dn':               (2, 0,   4, 0,0,0,   4, 0,1,0),
+    '*MOVE CCR,Mem':             (2, 0,   4, 0,0,1,   5, 0,1,1),
+    'MOVE Dn,CCR':               (4, 0,   4, 0,0,0,   4, 0,1,0),
+    '*MOVE EA,CCR':              (0, 0,   4, 0,0,0,   4, 0,1,0),
+    'MOVE SR,Dn':                (2, 0,   4, 0,0,0,   4, 0,1,0),
+    '*MOVE SR,Mem':              (2, 0,   4, 0,0,1,   5, 0,1,1),
+    '#MOVE EA,SR':               (0, 0,   8, 0,0,0,  10, 0,2,0),
+    'MOVEP.W Dn,(d16,An)':       (4, 0,  10, 0,0,2,  10, 0,1,2),
+    'MOVEP.W (d16,An),Dn':       (4, 0,  10, 0,2,0,  10, 2,1,0),
+    'MOVEP.L Dn,(d16,An)':       (4, 0,  14, 0,0,4,  14, 0,1,4),
+    'MOVEP.L (d16,An),Dn':       (4, 0,  14, 0,4,0,  14, 4,1,0),
+    '%MOVES EA,Rn':              (3, 0,   7, 1,0,2,   5, 0,1,1),
+    '%MOVES Rn,EA':              (2, 1,   5, 0,0,1,   6, 0,1,1),
+    'MOVE USP,An':               (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'MOVE An,USP':               (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'SWAP Dn':                   (4, 0,   4, 0,0,0,   4, 0,1,0),
+}
+
+
 def ncc_rpw(table, mode):
     """Return (r, p, w) from the No-Cache-Case column for a table row."""
     row = table[mode]
@@ -229,5 +311,6 @@ def ncc_total(table, mode):
 
 if __name__ == '__main__':
     for name, table in [('FEA', FEA), ('FIEA', FIEA), ('CEA', CEA),
-                         ('CIEA', CIEA), ('JEA', JEA)]:
+                         ('CIEA', CIEA), ('JEA', JEA), ('MOVE', MOVE),
+                         ('MOVE_SPECIAL', MOVE_SPECIAL)]:
         print(f"{name}: {len(table)} rows")

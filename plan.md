@@ -8822,3 +8822,86 @@ Stage A1 closed. Stage A2 (MOVE + Special-Purpose MOVE, §11.6.6-11.6.7)
 next -- will exercise CEA (MOVE's own destination-EA side) for the first
 time.
 
+## Phase 161 Part A Stage A2
+
+MOVE + Special-Purpose MOVE (§11.6.6-11.6.7), read directly from
+MC68030UM.pdf 11-37/11-38/11-39. Transcribed the full MOVE Instruction table
+(register-source rows plus every asterisked general-EA-destination row,
+including all brief- and full-format-extension-word rows) and the full
+Special-Purpose MOVE table (EXG/MOVEC/MOVE-CCR-SR/MOVEM/MOVEP/MOVES/SWAP/
+MOVE-USP) into `scripts/timing_tables.py` as new `MOVE`/`MOVE_SPECIAL`
+dicts, mirroring Stage A1's own tuple format.
+
+Built 17 new isolated test programs (`tests/timing/a2_*.s` +
+`tests/timing/a2_move.json`), covering: MOVE Rn,Dn/An/(An)/(An)+/-(An)
+(register-source, no fea needed); MOVE Dn,XXX.W/XXX.L/(d16,An)/(d8,An,Xn)
+(general-EA-destination rows with a register source, so fea(Dn)=0 and the
+row's own NCC applies directly -- the brief-indexed case also directly
+re-validates Phase 149's own `rd_c` fix, confirming w=1 not 2, i.e. still a
+genuine single-phase write with no phantom read); EXG; MOVEC (read
+direction); MOVE CCR/SR,Dn and MOVE Dn,CCR; SWAP; MOVE USP,An and MOVE
+An,USP. For instructions whose own destination isn't a directly-observable
+Dn register (MOVEA, memory-dest MOVEs, MOVE Dn,CCR, MOVE USP,An/An,USP), a
+one- or two-instruction marker sequence (`MOVE #imm,D2`, or for An,USP a
+readback through a spare An into D2) follows the tested instruction and
+`tb/timing_tb.sv`'s own address-range `p`-attribution (Stage A1) keeps the
+marker's own opcode fetch from polluting the measurement.
+
+### Two test-authoring bugs found and fixed (not RTL)
+
+`a2_move_ccr_dn.s` and `a2_move_sr_dn.s` each initially set CCR/SR to a
+target pattern *before* a `CLR.L Dn` used to zero the destination register
+-- but CLR itself updates the CCR (Z=1), silently overwriting the very
+pattern the test had just set. Symptom looked identical to a genuine RTL
+hang (the watch register never reached its expected value, so the harness
+timed out waiting), and was investigated as one first (temporary `$display`
+tracing of `dec_valid`/`stall`/`hazard_ccr`/`ex_updates_ccr`/`wb_updates_ccr`
+confirmed the instruction itself dispatched and retired normally -- the
+CCR/SR value it read back was just never what the test expected). Fixed by
+reordering: clear the destination register *before* setting CCR/SR, not
+after.
+
+### One genuine RTL bug found and fixed
+
+`a2_move_an_usp.s` (`MOVE A1,USP` immediately followed by a `MOVE USP,A3`
+readback) hung for a different reason -- confirmed via the same tracing
+technique that both instructions genuinely dispatch, but `MOVE USP,An`
+reads `usp_in` (`eu_regfile.sv`'s `usp_out = usp_r`, a plain registered
+value with no forwarding) at decode time with **no hazard protection at
+all** against a still-in-flight `MOVE An,USP` write one instruction ahead --
+unlike every general-purpose-register read, which is protected by
+`hazard_ex`/`hazard_wb`, or a CCR read, protected by the existing
+`hazard_ccr` mechanism. The read landed one cycle before the write's own WB
+commit reached `usp_r`, silently returning the *pre-write* value -- not
+actually a hang, just the same "watch value never reached, so the harness
+times out" symptom as the two test bugs above, this time for a real reason.
+This exact instruction pair had never been exercised anywhere in the
+project's 160-prior-phase history: MOVE USP,An/MOVE An,USP have zero Harte
+coverage (Harte's corpus has no USP concept at all), and no existing
+hand-written testbench happened to chain a USP write immediately followed
+by a USP read. **Fixed in `rtl/eu_seq.sv`**: added `dec_reads_usp` (set only
+by the `MOVE USP,An` decode arm) and `hazard_usp = dec_reads_usp &&
+((ex_valid && ex_is_move_usp) || (wb_valid && wb_is_move_usp))`, folded into
+`stall_base`'s existing OR-list alongside `hazard_ccr` -- the exact same
+two-stage EX/WB protection shape already proven for CCR reads, reusing
+`ex_is_move_usp`/`wb_is_move_usp` signals that already existed for the write
+side. One-line-per-site change (declaration, default, set-site, hazard
+assign, stall_base fold-in); `MOVE USP,An` in isolation (no preceding
+write) is completely unaffected since `hazard_usp` can only ever fire when
+`dec_reads_usp` is set on the *current* decode.
+
+### Results
+
+17/17 new tests pass, `make test` 36/36, `make cosim_grp` 8/8,
+`make cosim_memind` 12/12, full 124-suite Harte sweep (mandatory --
+`rtl/eu_seq.sv` changed) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, confirming the
+new `hazard_usp` stall is inert everywhere it doesn't apply.
+
+### Status
+
+Stage A2 closed -- the second genuine, previously-undiscovered RTL
+correctness bug found by this timing-verification sweep (after none in
+Stage A1, which was pure resource-count confirmation). Stage A3
+(Arithmetic/Logical + Immediate, §11.6.8-11.6.9) next.
+
