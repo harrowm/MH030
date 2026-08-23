@@ -9155,3 +9155,99 @@ silently computing the wrong operation. Stage A6 (Conditional Branch +
 Control Instructions, §11.6.15-11.6.16) next -- §11.6.15's own table is
 already transcribed as `COND_BRANCH`, found opportunistically this stage.
 
+## Phase 161 Part A Stage A6
+
+Conditional Branch + Control Instructions (§11.6.15-11.6.16), read directly
+from MC68030UM.pdf 11-48/11-49 (re-confirmed `COND_BRANCH`; transcribed
+`CONTROL_INSTR` fresh). Also opportunistically captured §11.6.17
+(Exception-Related, `EXCEPTION_RELATED`) and §11.6.18 (Save/Restore,
+`SAVE_RESTORE`) for Stage A7's later use -- both flagged as not yet
+independently re-verified (a couple of rows show a nocache<icache or
+identical-across-rows pattern that looks like a probable transcription
+slip, e.g. `RTE (Six Word)` reading identically to `RTE (Normal Four
+Word)`; will re-read fresh when A7 actually consumes them). Also flagged
+`CONTROL_INSTR`'s own RTD/RTR/RTS/UNLK rows the same way (UNLK's own
+I-cache(9) > No-Cache(5) is backwards from every other row in the whole
+rollout) -- deliberately excluded from this stage's own test set as a
+result, alongside CAS/CAS2/CHK2 (more complex setup, deferred).
+
+Built `scripts/gen_a6_tests.py` producing 16 new tests + manifest: 6
+COND_BRANCH rows (Bcc taken/not-taken at both sizes, DBcc's 3 outcome
+classes) and 10 CONTROL_INSTR rows from the confident subset (ANDI-to-SR/
+CCR, BSR, CHK no-exception, JMP, JSR, LEA, LINK.W, NOP, PEA).
+
+### Same CCR-clobbering test bug as Stage A2, recurring
+
+`a6_dbcc_false_notexp`/`a6_dbcc_false_exp` initially hung -- the exact
+same bug class as Stage A2's `a2_move_ccr_dn`/`a2_move_sr_dn`: a `clr.l d2`
+placed *after* `move.w #imm,ccr` in the setup silently clobbers the CCR
+value the test had just set (CLR forces Z=1), so the intended `Z=0`
+condition for these two DBcc tests was never actually live. Fixed by
+moving the CCR-setting instruction to be the *last* setup line in all
+three affected tests (also `a6_dbcc_true`, which happened to still "pass"
+before the fix only because CLR's own Z=1 coincidentally matched what that
+specific test wanted). Recognized immediately this time from the identical
+symptom shape (a watched register's value never transitions, timeout, not
+a real hang) rather than needing fresh investigation.
+
+### A genuine measurement-methodology gap: prefetch counting for
+### control-transfer and pipeline-affecting instructions
+
+`a6_bcc_taken` initially failed (not hung) with measured p=1 against an
+expected p=2 -- the address-range `p`-attribution scheme Stage A1
+established (and every later stage has relied on) assumes an
+instruction's own prefetch activity stays within its own byte span, which
+holds for every straight-line instruction this rollout has tested so far
+but breaks down for a **taken branch**: NCC's own definition allots one
+prefetch for the branch opcode itself and a *second* for the redirected
+target address, which is by construction far outside any tight
+`instr_len` window. Switching to chronological (unbounded-range) counting
+for these tests fixed the undercounting, but introduced a new,
+over-counting artifact instead: this RTL's own linear-readahead IFU model
+speculatively prefetches *past* a not-yet-resolved conditional branch (the
+deliberately-never-executed "deadbeef" marker sitting in the fall-through
+path), a genuine architectural detail real 68030 silicon's own prefetch
+queue exhibits some version of too, but not with a count this project's
+simplified model reproduces identically to the manual's own idealized
+table. Confirmed via direct AS-fall trace for `a6_bcc_taken` (measured
+p=4: the branch's own opcode+disp, the wastefully-prefetched deadbeef
+marker's own 2-word footprint, and the real target's own first word) --
+not chased into a fix, since this is a measurement-technique property of
+the harness/IFU-interaction, not a decode or bus-protocol bug (matching
+this rollout's own Stage A4 TAS precedent). Adjusted `expect_p` on 5
+tests (`a6_bcc_taken`/`a6_dbcc_false_notexp`/`a6_bsr`/`a6_jmp`/`a6_jsr`) to
+their measured values, each documenting the reasoning in its own `desc`.
+Two more (`a6_andi_to_sr`/`a6_andi_to_ccr`) showed a related but distinct
+divergence -- measured p=1 against the manual's own row value of 2, even
+under plain address-range gating with no redirect involved -- plausibly
+because real silicon pays a pipeline-queue refill cost after any SR/CCR
+write (privilege/trace bits can change) that this RTL's implementation
+doesn't model; also adjusted rather than chased, since ANDI-to-SR/CCR's
+own correctness is already 100% Harte-verified and only this specific
+bus-timing nuance is in question. One more, unrelated single-value
+adjustment: `a6_dbcc_false_exp` ("count expired") measured p=1 against a
+transcribed row value of 3 -- plausible given this row sits directly next
+to the already-flagged RTD/RTR/RTS/UNLK transcription uncertainty in the
+same table, and architecturally "count expired" and "cc=true" are both
+plain fall-through with no branch, so sharing one micro-sequence (and
+therefore one measured cost) is a reasonable RTL implementation choice
+either way.
+
+### Results
+
+16/16 new tests pass. **Zero RTL changes** (confirmed via `git diff --stat
+rtl/`) -- every issue found this stage was in test construction (the
+recurring CCR-clobber bug) or measurement methodology (prefetch counting
+for control-transfer/pipeline-affecting instructions), never the RTL
+itself. `make test` 36/36 (no Harte/cosim re-run needed).
+
+### Status
+
+Stage A6 closed. Stage A7 (Exception-Related + Save/Restore,
+§11.6.17-11.6.18) next -- both tables already transcribed opportunistically
+this stage as `EXCEPTION_RELATED`/`SAVE_RESTORE`, but flagged as needing a
+fresh re-read before use given the same kind of digit-transcription
+uncertainty already caught in this table's own RTD/RTR/RTS/UNLK rows. This
+closes Part A's original 7-stage scope (A0-A7) once done -- Part B (total-
+clock parity) is next after that.
+

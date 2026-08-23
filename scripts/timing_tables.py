@@ -503,6 +503,84 @@ COND_BRANCH = {
 }
 
 
+# ── 11.6.16 Control Instructions — PDF 512, manual 11-49 ───────────────────
+# '*'=fea '**'=cea '#'=fiea '##'=ciea '%'=Add Jump Effective Address Time
+# (jea) '+'=Indicates Maximum Time (actual time is data dependent).
+# RTD/RTR/RTS/UNLK rows not yet independently cross-verified digit-by-digit
+# (UNLK's own I-cache(9) > No-Cache(5) looks like a possible mis-transcription
+# -- re-confirm against a fresh page read before relying on those 4 rows
+# specifically; every other row in this table is used with confidence).
+CONTROL_INSTR = {
+    'ANDI to SR':                  (4, 0,  12, 0,0,0,  14, 0,2,0),
+    'EORI to SR':                  (4, 0,  12, 0,0,0,  14, 0,2,0),
+    'ORI to SR':                   (4, 0,  12, 0,0,0,  14, 0,2,0),
+    'ANDI to CCR':                 (4, 0,  12, 0,0,0,  14, 0,2,0),
+    'EORI to CCR':                 (4, 0,  12, 0,0,0,  14, 0,2,0),
+    'ORI to CCR':                  (4, 0,  12, 0,0,0,  14, 0,2,0),
+    'BSR':                         (2, 0,   6, 0,0,1,   9, 0,2,1),
+    '##CAS (Successful Compare)':  (1, 0,  13, 1,0,1,  13, 1,1,1),
+    '##CAS (Unsuccessful Compare)': (1, 0, 11, 1,0,0,  11, 1,1,0),
+    '+CAS2 (Successful Compare)':  (2, 0,  24, 2,0,2,  26, 2,2,2),
+    '+CAS2 (Unsuccessful Compare)': (2, 0, 24, 2,0,0,  24, 2,2,0),
+    'CHK Dn,Dn (No Exception)':    (8, 0,   8, 0,0,0,   8, 0,1,0),
+    'CHK Dn,Dn (Exception Taken)': (4, 0,  28, 1,0,4,  30, 1,3,4),
+    '*CHK EA,Dn (No Exception)':   (0, 0,   8, 0,0,0,   8, 0,1,0),
+    '*+CHK EA,Dn (Exception Taken)': (0, 0, 28, 1,0,4,  30, 1,3,4),
+    '#+CHK2 Mem,Rn (No Exception)': (2, 0, 18, 1,0,0,  18, 1,1,0),
+    '#+CHK2 Mem,Rn (Exception Taken)': (2, 0, 40, 2,0,4, 42, 2,3,4),
+    '%JMP':                        (4, 0,   4, 0,0,0,   6, 0,2,0),
+    '%JSR':                        (0, 0,   4, 0,0,1,   7, 0,2,1),
+    '**LEA':                       (2, 0,   2, 0,0,0,   2, 0,1,0),
+    'LINK.W':                      (2, 0,   4, 0,0,1,   5, 0,1,1),
+    'LINK.L':                      (2, 0,   6, 0,0,1,   7, 0,2,1),
+    'NOP':                         (0, 0,   2, 0,0,0,   2, 0,1,0),
+    '**PEA':                       (0, 2,   4, 0,0,1,   4, 0,1,1),
+    'RTD':                         (2, 0,  10, 1,0,0,  12, 1,2,0),
+    'RTR':                         (1, 0,  12, 2,0,0,  14, 2,2,0),
+    'RTS':                         (1, 0,  12, 2,0,0,  14, 1,2,0),
+    'UNLK':                        (0, 0,   9, 1,0,0,   5, 1,1,0),
+}
+
+# ── 11.6.17 Exception-Related Instructions and Operations — PDF 513, 11-50 ─
+# Opportunistically captured while reading §11.6.16 (Stage A6); reserved for
+# Stage A7, not yet independently re-verified digit-by-digit.
+EXCEPTION_RELATED = {
+    'BKPT':                (1, 0,   9, 1,0,0,   9, 1,0,0),
+    'Interrupt (I-Stack)': (0, 0,  23, 2,0,4,  24, 2,2,8),
+    'Interrupt (M-Stack)': (0, 0,  33, 2,0,8,  34, 2,2,8),
+    'RESET Instruction':   (0, 0, 518, 0,0,0, 518, 0,1,0),
+    'STOP':                (0, 0,   8, 0,0,0,   8, 0,2,0),
+    'TRACE':               (0, 0,  22, 1,0,5,  24, 1,2,5),
+    'TRAP #n':             (0, 0,  18, 1,0,4,  20, 1,2,4),
+    'Illegal Instruction': (0, 0,  18, 1,0,4,  20, 1,2,4),
+    'A-Line Trap':         (0, 0,  18, 1,0,4,  20, 1,2,4),
+    'F-Line Trap':         (0, 0,  18, 1,0,4,  20, 1,2,4),
+    'Privilege Violation': (0, 0,  18, 1,0,4,  20, 1,2,4),
+    'TRAPcc (Trap)':       (2, 0,  22, 1,0,5,  24, 1,2,5),
+    'TRAPcc (No Trap)':    (4, 0,   4, 0,0,0,   4, 0,1,0),
+    'TRAPcc.W (Trap)':     (5, 0,  24, 1,0,5,  26, 1,3,5),
+    'TRAPcc.W (No Trap)':  (6, 0,   6, 0,0,0,   6, 0,1,0),
+    'TRAPcc.L (Trap)':     (6, 0,  26, 1,0,5,  28, 1,3,5),
+    'TRAPcc.L (No Trap)':  (8, 0,   8, 0,0,0,   8, 0,2,0),
+    'TRAPV (Trap)':        (2, 0,  22, 1,0,5,  24, 1,2,5),
+    'TRAPV (No Trap)':     (4, 0,   4, 0,0,0,   4, 0,1,0),
+}
+
+# ── 11.6.18 Save and Restore Operations — PDF 514, manual 11-51 ───────────
+# Opportunistically captured alongside §11.6.17; reserved for Stage A7, not
+# yet independently re-verified digit-by-digit.
+SAVE_RESTORE = {
+    'Bus Cycle Fault (Short)': (0, 0,  36, 1,0,10,  38, 1,2,10),
+    'Bus Cycle Fault (Long)':  (0, 0,  62, 1,0,24,  64, 1,2,24),
+    'RTE (Normal Four Word)':  (1, 0,  18, 4,0,0,   20, 4,2,0),
+    'RTE (Six Word)':          (1, 0,  18, 4,0,0,   20, 4,2,0),
+    'RTE (Throwaway)':         (1, 0,  12, 4,0,0,   12, 4,0,0),
+    'RTE (Coprocessor)':       (1, 0,  26, 7,0,0,   26, 7,2,0),
+    'RTE (Short Fault)':       (1, 0,  36, 10,0,0,  26, 10,2,0),
+    'RTE (Long Fault)':        (1, 0,  76, 25,0,0,  76, 25,2,0),
+}
+
+
 def ncc_rpw(table, mode):
     """Return (r, p, w) from the No-Cache-Case column for a table row."""
     row = table[mode]
@@ -521,5 +599,7 @@ if __name__ == '__main__':
                          ('ALU_IMM', ALU_IMM), ('BCD_EXT', BCD_EXT),
                          ('SINGLE_OP', SINGLE_OP), ('SHIFT_ROTATE', SHIFT_ROTATE),
                          ('BIT_MANIP', BIT_MANIP), ('BIT_FIELD', BIT_FIELD),
-                         ('COND_BRANCH', COND_BRANCH)]:
+                         ('COND_BRANCH', COND_BRANCH), ('CONTROL_INSTR', CONTROL_INSTR),
+                         ('EXCEPTION_RELATED', EXCEPTION_RELATED),
+                         ('SAVE_RESTORE', SAVE_RESTORE)]:
         print(f"{name}: {len(table)} rows")
