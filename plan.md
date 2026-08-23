@@ -8528,3 +8528,35 @@ Stage 4 closed. **Every cycle-type family in the project, without exception,
 now has a dimensionally correct S4/S5 wait-loop.** Stage 5 (comment mop-up)
 next.
 
+
+## Phase 160 Stage 5 — S-state pacing correction: stale-comment mop-up
+
+### Goal
+
+Update 3 comment sites that described the old (pre-Stage-1) "4 ticks per
+S-state" pacing in prose -- functionally harmless (the mechanisms they
+describe are robust to any nonzero pulse width, already confirmed by the
+pre-Stage-1 audit), but now inaccurate documentation.
+
+### What was built
+
+`rtl/biu_mmu_if.sv:93,114`: "mmu_ack... holds for 4 ticks at S7" updated to
+"holds for 2 ticks", with a Phase 160 pointer. `rtl/biu_icache_if.sv:~475-489`:
+the Phase 128 stale-repeat-bug historical writeup updated to note the pacing
+that bug was originally found under (4 ticks/state) has since changed (2
+ticks/state, Phase 160's own `state_adv`), while preserving the underlying
+"a raw level held for more than 1 tick can re-trigger an edge-sensitive
+consumer" lesson, which remains true at the narrower width -- not rewriting
+the whole historical narrative, which is valuable project history in its own
+right.
+
+### Results
+
+Comment-only change. `make test` 36/36 (sanity check, no functional change
+expected or found).
+
+### Status
+
+Stage 5 closed. Stage 6 (targeted spot-check of the 5 flagged candidates from
+the scoping fork) next.
+

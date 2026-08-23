@@ -90,7 +90,7 @@ module biu_mmu_if (
     output logic         mmu_req_rw,    // Phase 150 Stage 3: 1=read, 0=write (U/M write-back)
     output logic [31:0]  mmu_req_wdata, // Phase 150 Stage 3: write data for the U/M write-back cycle
     input  logic [31:0] mmu_rdata,
-    input  logic        mmu_ack,    // combinatorial, holds for 4 ticks at S7
+    input  logic        mmu_ack,    // combinatorial, holds for 2 ticks at S7 (Phase 160: named S-states now pace 2 ticks/state, was 4)
     input  logic        mmu_berr,
 
     // Control registers
@@ -111,7 +111,7 @@ module biu_mmu_if (
 );
 
     // -----------------------------------------------------------------------
-    // mmu_ack rising-edge detection (mmu_ack holds for 4 ticks in S7)
+    // mmu_ack rising-edge detection (mmu_ack holds for 2 ticks in S7, Phase 160)
     // -----------------------------------------------------------------------
     logic mmu_ack_prev_r;
     always_ff @(posedge clk_4x or negedge rst_n)

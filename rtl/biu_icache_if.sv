@@ -475,14 +475,14 @@ module biu_icache_if (
                 // Root cause of the earlier stale-repeat bug (found via
                 // direct cycle-counted tracing, see the "phase_r==2'd3"
                 // discovery below): biu_cycle_gen only advances its own
-                // internal state on 1 of every 4 clk_4x edges (the "4 ticks
-                // per external bus cycle" design), so a combinational
-                // ifu_ack tied to state==ST_READ_S7 genuinely reads high for
-                // 4 consecutive clk_4x edges, not 1 -- reacting to raw
-                // cg_ack (as an earlier draft did) re-triggered on every one
-                // of those 4 edges, racing ahead through all 4 words in a
-                // single real S7 window with 3 of the 4 "acks" reading
-                // stale/repeated data. cg_ack_rise (declared above,
+                // internal state on 1 of every 4 clk_4x edges at the time
+                // this was found (Phase 128) -- since Phase 160, named
+                // S-states pace 2 ticks/state (state_adv = phase_r[0]), so a
+                // combinational ifu_ack tied to state==ST_READ_S7 now reads
+                // high for 2 consecutive clk_4x edges, not 4, but the same
+                // underlying hazard (a raw level held for more than 1 tick,
+                // re-triggering on every one of them) is still real at that
+                // narrower width. cg_ack_rise (declared above,
                 // mirroring biu_cache_if.sv's own sf_ack_rise for the
                 // identical reason) fixes it with no gap states needed --
                 // same continuous-hold-req-and-advance-address shape as
