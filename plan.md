@@ -9395,7 +9395,113 @@ build directly on.
 ### Status
 
 Stage B0 closed. Stage B_final (broaden total-clock checking + honest
-closeout) is next. Across 8 stages: built the generator infrastructure
+closeout) is next.
+
+## Phase 161 Part B Stage B_final (closes Part B and the whole plan)
+
+Broadened total-clock checking across the ~150 tests Part A already built
+(`scripts/b_final_clock_survey.py`, new) instead of relying on the single
+worked example Phase 160 Stage 7 used. For each of Part A's own manifest
+entries, ran `sim/timing` and compared the printed `MEASURED ... clocks=`
+value against the manual's own predicted total (parsed from the test's
+own `desc` field, summing every `N(r/p/w)`-shaped occurrence -- correctly
+handles both plain-row tests and composed-footnote tests like `NCC=4(...)
++ fea(...)=3(...)`). 117 of Part A's 141 tests produced a clean
+comparison (the rest either lack a parseable manual total in their own
+`desc`, e.g. pure marker-based CCR tests with no numeric row reference, or
+aren't meaningfully comparable, e.g. the tests already known to diverge in
+resource *count* rather than *timing*).
+
+### The gap is not one-directional -- it splits cleanly by instruction shape
+
+```
+register-only (no bus r/w beyond the opcode fetch): n=85  mean=+1.01  range=[-12,+10]
+bus-touching (a real data read and/or write):       n=32  mean=+9.28  range=[+2,+16]
+```
+
+**Bus-touching instructions are consistently, substantially slower than
+the manual predicts** (mean +9.28 clocks, every single one positive) --
+this is Stage B0's own already-characterized dispatch/handoff
+synchronization overhead (the three stacked, individually-necessary
+1-tick delays: ack-hold, `fetch_pend_r` re-arm, `grant_ifu` registration)
+compounding across however many bus cycles a given instruction needs, plus
+the specific bus-cycle-count divergences Part A's own per-test `desc`
+fields already documented case-by-case (fea/fiea/cea footnote-composition
+differences, RMW-write and CPU-space-read invisibility to this harness's
+own counting, exception-frame write-granularity).
+
+**Register-only instructions net close to even (mean +1.01), but that
+average hides two genuinely opposite effects nearly cancelling out.**
+Verified directly (not just inferred from the aggregate) via three
+spot-checks -- `a5_roxl_dn` (ROXL.L #1,Dn, manual predicts 12 clocks,
+measured 3), `a5_lsl_dx_dy_le` (LSL.L Dx,Dy count≤32, manual predicts 6,
+measured 3), `a5_bfffo_dn` (BFFFO Dn, manual predicts 20, measured 8) --
+all three **faster** than the manual, substantially so. Root cause: real
+68030 silicon's own microcode for shift/rotate-by-register-count and
+bit-field search operations is architecturally serial (very plausibly a
+per-bit-shifted or per-bit-scanned iterative loop internally), while this
+project's own simplified 3-stage pipeline computes both `eu_shifter.sv`'s
+own barrel-shift result and `eu_bitfield.sv`'s own `ffo_result` (a fully
+unrolled 32-iteration `for` loop, resolved in one clock) completely
+combinationally in a single EX cycle regardless of shift count or field
+width -- a direct, structural consequence of this project's own
+deliberate architectural choice (comb decode → 1-cycle EX → 1-cycle WB),
+not a bug. Other register-only instructions (plain ALU ops, MOVE,
+control-register moves) show small positive gaps instead (the base
+dispatch overhead from Stage B0, with nothing to offset it), which is why
+the aggregate nets close to zero rather than cleanly negative.
+
+### Conclusion -- the total-clock gap is now fully characterized, not
+### merely observed
+
+Phase 159 Stage 0's own original finding (13 measured clocks vs. 9
+manual, for one full-format-EA `MOVE` worked example) is now understood as
+one specific point on a real, two-sided distribution, not evidence of a
+single uniform "too slow" divergence: **bus-heavy instructions pay a real,
+now-explained dispatch-overhead cost this simplified pipeline's own
+synchronization discipline requires (Stage B0); purely-computational
+register-direct instructions can run *faster* than real silicon whenever
+their own real-hardware microcode is serial but this pipeline's own
+EX-stage logic is combinational.** Neither direction is a defect to fix --
+closing the bus-heavy gap would mean reopening hazards this project has
+already spent real effort closing (Stage B0's own conclusion); "fixing"
+the register-only direction would mean deliberately *slowing down*
+correctly-computed results to imitate real silicon's own serial
+microcode, a change with zero functional benefit and real performance
+cost, for a simulator whose entire purpose is running real programs
+quickly and cycle-*accurately at the bus* -- not literally re-deriving
+every one of the 68030's own internal microcode timings for instructions
+that never touch the bus at all. A genuine microcode-faithful pipeline
+(replicating real internal serial timing for every instruction class)
+would be a fundamentally different, much larger undertaking than anything
+in this project's history, exactly as the plan's own original framing
+anticipated -- documented here with real, characterized evidence instead
+of left as an open question.
+
+### Results
+
+Survey/investigation only -- no RTL changes (confirmed via `git diff
+--stat rtl/` showing no output from this stage). `make test` still 36/36
+(no regression risk existed, since this stage made no RTL or shared-
+testbench changes). `scripts/b_final_clock_survey.py` is a new, reusable
+artifact for any future revisit of this question.
+
+### Status — Part B closed; the Phase 161 plan is complete
+
+**This closes Part B (Stages B0-B_final) and the Phase 161 Chapter 11
+timing verification plan as a whole.** Part A (Stages A0-A7): all 18 of
+§11.6's own timing tables transcribed from MC68030UM.pdf, 141 new r/p/w
+timing tests, two genuine RTL bugs found and fixed (Stage A2's
+`hazard_usp`, Stage A5's 3-way bit-field encoding bug). Part B (Stages
+B0-B_final): the dispatch-latency component of the original total-clock
+gap traced to three individually-necessary, already-hazard-tested
+synchronization delays (not a fixable inefficiency); the remaining gap
+characterized across a 117-test broad sample and found to be genuinely
+bidirectional, fully explained by this project's own deliberate
+architectural simplification in both directions. No further action
+recommended on total-clock parity without a dedicated scoping
+conversation first, matching the plan's own original framing for exactly
+this outcome. Across 8 stages: built the generator infrastructure
 (A0); transcribed all 18 of §11.6's own timing tables (FEA/FIEA/CEA/CIEA/
 JEA/MOVE/MOVE_SPECIAL/ALU/ALU_IMM/BCD_EXT/SINGLE_OP/SHIFT_ROTATE/
 BIT_MANIP/BIT_FIELD/COND_BRANCH/CONTROL_INSTR/EXCEPTION_RELATED/
