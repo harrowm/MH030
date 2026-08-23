@@ -8410,3 +8410,46 @@ stage (every wait-capable cycle-type family's own S4/S5 restructuring is now don
 except CAS2), the remaining stages are smaller than originally scoped — see
 `plan.md`'s own next update for a re-assessment before Stage 2 begins.
 
+
+## Phase 160 Stage 2 — S-state pacing correction: WRITE cycle
+
+### Goal
+
+Apply the same wait-loop restructuring to the ordinary WRITE cycle
+(`ST_WRITE_S4`/`ST_WRITE_S5`) that Stage 1 already applied to READ and (out of
+necessity) RMW_READ/RMW_WRITE/burst/IACK/INIT_SSP/INIT_PC — the one wait-capable
+cycle-type family Stage 1 didn't reach, since nothing in that stage's own
+verification path (biu_tb.sv, cosim_grp, cosim_memind, the calibration test, or
+stall_fsm_tb.sv's T4 series) exercised a bare ordinary write badly enough to force
+it forward.
+
+### What was built
+
+`rtl/biu_cycle_gen.sv`: `ST_WRITE_S4` now always proceeds to `ST_WRITE_S5`
+(removing the old "S4 may skip straight to S6" path); `ST_WRITE_S5` pings back to
+`ST_WRITE_S4` for each additional wait state instead of self-looping — identical
+shape to Stage 1's `ST_READ_S4`/`S5` fix, same reasoning (every state now holds
+exactly half a clock, so a cycle's total state count must stay even to represent a
+whole number of real clocks). No shared-latch or companion-module changes needed
+this stage — Stage 1 already widened every block WRITE's own completion signaling
+touches (BERR/STERM/captured-rdata all key on `is_S6`/`is_S7`/per-cycle-type `_S2`,
+already fixed generically).
+
+### Results
+
+`tb/biu_tb.sv` ALL TESTS PASSED (no regression from the write-path change).
+`vvp sim/timing` calibration test unchanged (54 ticks/13 clocks, r/p/w 1/2/0) --
+expected, since it exercises a READ, not WRITE. `make test` 36/36 -- clean on the
+first attempt, no cascading corruption this time (unlike Stage 1's RMW/burst
+fixes, WRITE's own change is far more isolated: nothing in the existing test
+suite chains a WRITE immediately into a dependent instruction the way T4d chained
+memory-indirect-EA into TAS). `make cosim_grp` 8/8, `make cosim_memind` 12/12.
+Full 124-suite Harte sweep (Verilator batch backend) -- **PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to the
+pre-stage baseline** -- zero regressions.
+
+### Status
+
+Stage 2 closed. Every wait-capable ordinary/RMW/burst/IACK/init cycle-type family
+now has its own S4/S5 dimensional fix except CAS2 (Stage 3's own scope next).
+
