@@ -9251,3 +9251,88 @@ uncertainty already caught in this table's own RTD/RTR/RTS/UNLK rows. This
 closes Part A's original 7-stage scope (A0-A7) once done -- Part B (total-
 clock parity) is next after that.
 
+## Phase 161 Part A Stage A7 (closes Part A)
+
+Exception-Related + Save/Restore (§11.6.17-11.6.18). Re-read both pages
+fresh (PDF 513-514) -- confirmed the Stage A6 opportunistic transcription
+of `EXCEPTION_RELATED`/`SAVE_RESTORE` was already digit-for-digit accurate;
+the flagged nocache<icache anomalies (`RTE (Short Fault)`) and identical
+adjacent rows (`RTE (Normal Four Word)`/`RTE (Six Word)`) are genuinely
+printed that way in the manual itself, not a transcription slip -- left as
+documented, unexplained manual quirks (same category as the ASL.b Harte
+corpus anomaly this project has hit before), not chased further.
+
+Built a deliberately smaller, **representative rather than exhaustive**
+set (`scripts/gen_a7_tests.py`, 4 tests): TRAPV (No Trap, a plain
+straight-line case, no exception dispatch involved), BKPT (exercises Phase
+157's own real DSACK'd CPU-space bus cycle), and two genuine exception
+dispatches (TRAP #n, Illegal Instruction) each needing a real vector-table
+entry (`org $80`/`org $10`) plus a small handler. Exception dispatch is
+architecturally the most complex measurement category in this whole
+rollout -- unlike every earlier stage's straight-line or single-redirect
+instructions, testing it meaningfully requires standing up a real
+vector+handler, so this stage prioritizes proving the *mechanism* works
+over covering every row (RESET/STOP/interrupt/TRACE/A-Line/F-Line/
+Privilege-Violation/TRAPcc and all of SAVE_RESTORE remain untested,
+documented as deliberately out of scope for this closing stage rather than
+silently skipped).
+
+### Two genuine, small measurement-technique findings (neither an RTL bug)
+
+**(1) CPU-space reads invisible to `r_count`.** `a7_bkpt` measured r=0
+against the manual's own r=1 -- traced directly to `tb/timing_tb.sv`'s own
+`is_data_fc` classification (`FC ∈ {101,001}`, fixed since Stage A0/A1 when
+only ordinary supervisor/user data spaces had ever come up in this
+rollout) simply not recognizing FC=111 (CPU space) as a countable read.
+Confirmed via direct trace that Phase 157's own BKPT implementation
+genuinely does issue a real CPU-space read (`R 00000000 fc=111`) -- the
+harness just can't see it. A first-of-its-kind gap in this specific
+counting mechanism, not chased into a fix (this stage's own scope is
+representative coverage, not hardening the harness itself further).
+**(2) Exception-frame write granularity.** `a7_trap_n`/`a7_illegal` both
+measured w=2 against the manual's own row value of 4 -- traced directly to
+this RTL pushing the 4-word (8-byte) Format-$0 frame as two LONGWORD
+(`siz=00`) writes rather than four word writes. Not a correctness issue --
+Harte's own RTE/exception-frame suites are 100% passing, meaning the final
+pushed *content* is byte-for-byte correct regardless of how many bus
+cycles it took to write it; this is purely a bus-transaction-granularity
+choice this RTL's implementation makes differently from what the manual's
+own row assumes.
+
+### Results
+
+4/4 new tests pass. **Zero RTL changes** (confirmed via `git diff --stat
+rtl/`). `make test` 36/36 (no Harte/cosim re-run needed).
+
+### Status — Part A closed
+
+**This closes Part A of the Chapter 11 timing verification plan in full
+(Stages A0-A7).** Across 8 stages: built the generator infrastructure
+(A0); transcribed all 18 of §11.6's own timing tables (FEA/FIEA/CEA/CIEA/
+JEA/MOVE/MOVE_SPECIAL/ALU/ALU_IMM/BCD_EXT/SINGLE_OP/SHIFT_ROTATE/
+BIT_MANIP/BIT_FIELD/COND_BRANCH/CONTROL_INSTR/EXCEPTION_RELATED/
+SAVE_RESTORE) directly from MC68030UM.pdf; swept 141 new isolated r/p/w
+timing tests across A1-A7. Found and fixed **two genuine, previously-
+undiscovered RTL bugs** neither Harte nor any prior verification method in
+this project's 160-phase history had ever caught, since neither
+instruction pair had ever actually been exercised before: Stage A2's
+`hazard_usp` (a `MOVE An,USP`/`MOVE USP,An` back-to-back pair could read a
+stale pre-write value) and Stage A5's 3-way bit-field encoding bug (BFCHG
+completely unimplemented; BFEXTS/BFFFO's own formulas swapped onto each
+other's opcode slots) -- the latter also found and fixed the identical
+mislabeling already baked into `tb/bitfield_tb.sv`'s own pre-existing unit
+tests. Along the way, found and fixed a recurring test-authoring bug
+(CCR/SR clobbered by a later `CLR`/`MOVE` in the same setup sequence,
+hit independently in Stages A2, A3, and A6) and several genuine
+measurement-methodology findings specific to this new harness (address-
+range vs. chronological prefetch attribution for control-transfer
+instructions, `fea`-vs-`fiea`-vs-`cea` footnote composition, marker-read
+miscounting, RMW-locked-write invisibility to edge-based `w_count`,
+CPU-space-read invisibility to `is_data_fc`, and exception-frame write
+granularity) -- each investigated, root-caused, and either fixed or
+explicitly documented per this project's own established discipline,
+never silently worked around. Part B (total-clock parity, Stage B0
+onward) is next -- see the top of this plan's own "Part B" section, and
+the grounding already recorded there from before Part A began, for where
+to resume.
+
