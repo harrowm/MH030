@@ -9307,7 +9307,95 @@ rtl/`). `make test` 36/36 (no Harte/cosim re-run needed).
 ### Status — Part A closed
 
 **This closes Part A of the Chapter 11 timing verification plan in full
-(Stages A0-A7).** Across 8 stages: built the generator infrastructure
+(Stages A0-A7).**
+
+## Phase 161 Part B Stage B0
+
+Investigated the dispatch/handoff latency gap identified before Part A
+began (the ~1-extra-real-clock-per-bus-cycle-transition finding from the
+plan's own grounding). Temporary `$display` tracing in `rtl/m68030_biu.sv`
+(bracketing `ifu_req`/`ifu_ack`/`grant_ifu`/`u_cg.state`/`ext_as_n` every
+`clk_4x` tick, the same direct-signal-tracing technique used throughout
+this whole session) against `tests/timing0.s`'s own calibration example,
+counting real ticks by line number rather than trusting `$time` (whose own
+coarse rounding merges multiple real ticks under one label, a lesson
+already learned earlier this session).
+
+**Traced the exact 5-tick (~1.25-clock) gap between one bus cycle's own
+`ifu_ack` and the next cycle's first real S-state advance, tick by tick**:
+1. The tick `ifu_ack` first pulses, `ifu_req` drops the *same* tick
+   (`fetch_pend_r<=1'b0` on ack, per `m68030_ifu.sv`'s own design).
+2. `ifu_ack` itself stays asserted one further tick (`biu_cycle_gen` holds
+   ack through S7's own window); the IFU's own drain-only re-arm branch is
+   explicitly gated on `!ifu_ack` — its own comment documents why: without
+   this guard, "the drain-only path re-arms `fetch_pend_r` on tick 1 of
+   S7, causing a spurious second fill... with stale captured_rdata."
+3. Once `ifu_ack` clears, the drain-only branch fires on the *next* edge,
+   registering `fetch_pend_r<=1'b1`; the resulting `ifu_req=1` is only
+   visible the edge *after that* (a real register, not a same-cycle
+   combinational path).
+4. `grant_ifu` needs its own further tick to update from `biu_arbiter`'s
+   own registered grant logic (not combinational) -- `biu_icache_if.sv`'s
+   own header comment already documents *why* this can't be combinational
+   for at least the analogous I-cache case: Phase 128 hit a real hang from
+   exactly this kind of "freshly-computed combinational output reintroduces
+   a hazard" mistake, on the one port that had never needed protection
+   from it before.
+5. `biu_cycle_gen`'s own idle-state exit needs one further tick once
+   `ifu_req`+`grant_ifu` are both stably asserted before its own S-state
+   sequence visibly begins advancing.
+
+**Conclusion: this is not one fixable inefficiency -- it's the sum of (at
+least) three separately-necessary 1-tick synchronization delays, each with
+its own already-documented, already-hazard-tested reason** (avoid a
+spurious double-fill; avoid an address race between the old and new fetch
+address; avoid the exact combinational-loop class of bug Phase 128 already
+found and fixed once). None of the three look like accidental,
+speculatively-removable overhead -- each is load-bearing against a
+specific, previously-discovered hazard in this exact handoff path. Given
+that, this component of the total-clock gap sits in the plan's own
+category **(b) load-bearing**, not (a) fixable overhead: attempting to
+collapse any of these three delays would mean re-opening a hazard class
+this project has already spent real, hard-won debugging effort closing,
+for a payout of at most ~1 clock per bus-cycle transition -- a poor
+risk/reward trade given the size and centrality of `m68030_biu.sv`/
+`m68030_ifu.sv` to literally every test this project has ever run.
+
+### Decision
+
+Given B0's own explicit purpose ("this stage's own output is the
+accounting itself -- it determines how much of Part B is even
+achievable"), and given the accounting above finds the dispatch-latency
+component of the gap is predominantly load-bearing rather than fixable:
+**Stage B1+'s own originally-planned "fix identified (a)-category
+overhead" work has little to act on** -- there is no confidently-safe,
+worthwhile fix to make here. Skipping directly to Stage B_final (broaden
+total-clock checking using Part A's own infrastructure across a wider
+instruction sample, then an honest closeout) rather than attempting a
+speculative RTL change against this specific finding. This mirrors the
+plan's own explicit fallback: "a full architectural pipeline redesign...
+is out of scope to attempt speculatively without a dedicated scoping
+conversation first if B0's own accounting suggests that's most of the
+remaining gap" -- the accounting here suggests exactly that, for the
+dispatch-latency component specifically (the *other* component, genuine
+internal-microcode time this simplified 3-stage pipeline never spends,
+remains the separate, larger, and already-anticipated category (c) --
+unaffected by this stage's own finding, and equally out of scope for the
+same reason).
+
+### Results
+
+Investigation only -- no RTL changes (the temporary trace was added and
+fully removed from `rtl/m68030_biu.sv`, confirmed via `git diff --stat
+rtl/` showing no output). `make test` 36/36 (sanity check only, no
+Harte/cosim re-run needed). See `plan.md`'s own Part B section (written
+before Part A began) for the original grounding this stage's own findings
+build directly on.
+
+### Status
+
+Stage B0 closed. Stage B_final (broaden total-clock checking + honest
+closeout) is next. Across 8 stages: built the generator infrastructure
 (A0); transcribed all 18 of §11.6's own timing tables (FEA/FIEA/CEA/CIEA/
 JEA/MOVE/MOVE_SPECIAL/ALU/ALU_IMM/BCD_EXT/SINGLE_OP/SHIFT_ROTATE/
 BIT_MANIP/BIT_FIELD/COND_BRANCH/CONTROL_INSTR/EXCEPTION_RELATED/
