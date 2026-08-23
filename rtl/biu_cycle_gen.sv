@@ -1092,15 +1092,13 @@ module biu_cycle_gen #(
             ST_CAS2_R1_S1: state_nxt = ST_CAS2_R1_S2;
             ST_CAS2_R1_S2: state_nxt = ST_CAS2_R1_S3;
             ST_CAS2_R1_S3: state_nxt = ST_CAS2_R1_S4;
-            ST_CAS2_R1_S4: begin
-                if      (berr_s)                       state_nxt = ST_CAS2_R1_S6;
-                else if (sterm_active || !dsack_wait)  state_nxt = ST_CAS2_R1_S6;
-                else                                   state_nxt = ST_CAS2_R1_S5;
-            end
+            // Phase 160 Stage 3: S4 always proceeds to S5 (see the identical
+            // ST_READ_S4/S5 comment above for the full reasoning).
+            ST_CAS2_R1_S4: state_nxt = ST_CAS2_R1_S5;
             ST_CAS2_R1_S5: begin
                 if      (berr_s)                       state_nxt = ST_CAS2_R1_S6;
                 else if (sterm_active || !dsack_wait)  state_nxt = ST_CAS2_R1_S6;
-                else                                   state_nxt = ST_CAS2_R1_S5;
+                else                                   state_nxt = ST_CAS2_R1_S4;
             end
             ST_CAS2_R1_S6: state_nxt = ST_CAS2_R1_S7;
             ST_CAS2_R1_S7:
@@ -1111,15 +1109,11 @@ module biu_cycle_gen #(
             ST_CAS2_W1_S1: state_nxt = ST_CAS2_W1_S2;
             ST_CAS2_W1_S2: state_nxt = ST_CAS2_W1_S3;
             ST_CAS2_W1_S3: state_nxt = ST_CAS2_W1_S4;
-            ST_CAS2_W1_S4: begin
-                if      (berr_s)      state_nxt = ST_CAS2_W1_S6;
-                else if (!dsack_wait) state_nxt = ST_CAS2_W1_S6;
-                else                  state_nxt = ST_CAS2_W1_S5;
-            end
+            ST_CAS2_W1_S4: state_nxt = ST_CAS2_W1_S5;
             ST_CAS2_W1_S5: begin
                 if      (berr_s)      state_nxt = ST_CAS2_W1_S6;
                 else if (!dsack_wait) state_nxt = ST_CAS2_W1_S6;
-                else                  state_nxt = ST_CAS2_W1_S5;
+                else                  state_nxt = ST_CAS2_W1_S4;
             end
             ST_CAS2_W1_S6: state_nxt = ST_CAS2_W1_S7;
             ST_CAS2_W1_S7:
@@ -1129,15 +1123,11 @@ module biu_cycle_gen #(
             ST_CAS2_R2_S1: state_nxt = ST_CAS2_R2_S2;
             ST_CAS2_R2_S2: state_nxt = ST_CAS2_R2_S3;
             ST_CAS2_R2_S3: state_nxt = ST_CAS2_R2_S4;
-            ST_CAS2_R2_S4: begin
-                if      (berr_s)                       state_nxt = ST_CAS2_R2_S6;
-                else if (sterm_active || !dsack_wait)  state_nxt = ST_CAS2_R2_S6;
-                else                                   state_nxt = ST_CAS2_R2_S5;
-            end
+            ST_CAS2_R2_S4: state_nxt = ST_CAS2_R2_S5;
             ST_CAS2_R2_S5: begin
                 if      (berr_s)                       state_nxt = ST_CAS2_R2_S6;
                 else if (sterm_active || !dsack_wait)  state_nxt = ST_CAS2_R2_S6;
-                else                                   state_nxt = ST_CAS2_R2_S5;
+                else                                   state_nxt = ST_CAS2_R2_S4;
             end
             ST_CAS2_R2_S6: state_nxt = ST_CAS2_R2_S7;
             ST_CAS2_R2_S7:
@@ -1148,15 +1138,11 @@ module biu_cycle_gen #(
             ST_CAS2_W2_S1: state_nxt = ST_CAS2_W2_S2;
             ST_CAS2_W2_S2: state_nxt = ST_CAS2_W2_S3;
             ST_CAS2_W2_S3: state_nxt = ST_CAS2_W2_S4;
-            ST_CAS2_W2_S4: begin
-                if      (berr_s)      state_nxt = ST_CAS2_W2_S6;
-                else if (!dsack_wait) state_nxt = ST_CAS2_W2_S6;
-                else                  state_nxt = ST_CAS2_W2_S5;
-            end
+            ST_CAS2_W2_S4: state_nxt = ST_CAS2_W2_S5;
             ST_CAS2_W2_S5: begin
                 if      (berr_s)      state_nxt = ST_CAS2_W2_S6;
                 else if (!dsack_wait) state_nxt = ST_CAS2_W2_S6;
-                else                  state_nxt = ST_CAS2_W2_S5;
+                else                  state_nxt = ST_CAS2_W2_S4;
             end
             ST_CAS2_W2_S6: state_nxt = ST_CAS2_W2_S7;
             ST_CAS2_W2_S7: state_nxt = ST_IDLE;

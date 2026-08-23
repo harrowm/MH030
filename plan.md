@@ -8453,3 +8453,39 @@ pre-stage baseline** -- zero regressions.
 Stage 2 closed. Every wait-capable ordinary/RMW/burst/IACK/init cycle-type family
 now has its own S4/S5 dimensional fix except CAS2 (Stage 3's own scope next).
 
+
+## Phase 160 Stage 3 — S-state pacing correction: CAS2
+
+### Goal
+
+Apply the same wait-loop restructuring to CAS2's own four sub-cycles
+(R1→W1→R2→W2, no bus release across any of them) — the last cycle-type family
+needing its own S4/S5 dimensional fix, per Stage 1/2's own established pattern.
+
+### What was built
+
+`rtl/biu_cycle_gen.sv`: `ST_CAS2_R1/W1/R2/W2_S4` each now always proceeds to
+their own `_S5`; each `_S5` pings back to `_S4` for each additional wait state
+instead of self-looping — identical shape and reasoning to every prior stage's
+own fix, applied four times (once per sub-cycle). No shared-latch or
+companion-module changes needed — CAS2's own rdata capture already goes through
+Stage 1's already-widened captured-rdata block.
+
+### Results
+
+`tb/biu_tb.sv` ALL TESTS PASSED. `make test` 36/36 — including `WS-CAS2`, deferred
+since Stage 1 (CAS2 was explicitly out of scope there), now passing on the first
+attempt with no further changes needed beyond the state-graph fix itself.
+`make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep —
+PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline, zero regressions.
+
+### Status
+
+Stage 3 closed. **Every cycle-type family in the project now has a dimensionally
+correct S4/S5 wait-loop.** Remaining: burst/BWRITE's own deeper re-verification
+(Stage 1 already fixed the hang-causing parts of necessity, but the plan's own
+Stage 6 wanted a more careful beat-counter/completion-ack timing re-check given
+this project's prior history there), comment mop-up, the full duration-constant
+sweep, and the Chapter 11 calibration re-run.
+
