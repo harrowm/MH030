@@ -8599,3 +8599,65 @@ prediction that none of the 5 looked tuned close to failure.
 Stage 6 closed. Stage 7 (Chapter 11 calibration re-run) is the last stage in
 this plan.
 
+
+## Phase 160 Stage 7 — S-state pacing correction: Chapter 11 calibration re-run (closes the plan)
+
+### Goal
+
+Re-run Phase 159 Stage 0's own calibration test (`tb/timing_tb.sv` +
+`tests/timing0.s`, `MOVE.L ($1000,A0,D1.L),D2`) now that every cycle-type
+family paces correctly (Stages 1-4), to confirm the r/p/w breakdown still
+matches MC68030UM.pdf §11's own tables and record the current total-clock
+reading, closing the whole pacing correction plan.
+
+### Results
+
+Reading unchanged from Stage 1's own final measurement (expected -- this test
+exercises a plain READ instruction, and Stages 4-6 touched BURST/BWRITE/
+comments/testbench-only verification, none of which affect a READ-only
+instruction's own timing): **54 ticks / 13 clocks**, r/p/w = **1/2/0** --
+still an exact match to the manual's own resource-count prediction
+(fea "(d16,An,Xn)" NCC=7(1/1/0) + MOVE "EA,Dn" NCC=2(0/1/0) = 9(1/2/0)).
+
+Bus-activity-clocks = (1r+2p+0w)*2 = 6, matching the manual's own accounting
+exactly. The remaining gap is in the "internal" (non-bus) component: this
+RTL's own total-13 minus bus-activity-6 = 7 internal clocks, versus the
+manual's own published total-9 minus bus-activity-6 = 3 internal clocks --
+our internal/non-bus latency is ~2.3x the real 68030's own for this
+instruction. This is the *separate*, already-anticipated finding flagged
+since Phase 159 Stage 0 and reconfirmed unchanged by pacing alone: real 68030
+silicon's own internal microcode sequencer spends real clock cycles on
+effective-address arithmetic, extension-word field decoding, etc. that this
+project's simplified 3-stage pipeline (comb decode → 1-cycle EX → 1-cycle WB,
+per `eu_seq.sv`'s own header) was never designed to reproduce cycle-for-cycle
+-- a genuinely different, much larger undertaking (replicating real internal
+microarchitecture timing, not pin-level bus behavior) than this plan's own
+scope, and not pursued further here.
+
+### Status
+
+**Stage 7 closed -- the S-state pacing correction plan (Phase 160) is complete
+in full, all 7 stages done.** Summary of what changed: every named S-state in
+`biu_cycle_gen.sv` now paces 2-per-real-clock (matching real 68030 silicon,
+via the new `state_adv` trigger) instead of 1-per-clock; every cycle-type
+family's own wait-loop was restructured so every bus cycle's total state count
+stays dimensionally valid; every shared `phase_r`-gated latch was audited and
+fixed per its own correct category. Verified via `make test` (36/36 every
+stage), `cosim_grp` (8/8), `cosim_memind` (12/12, plus a new
+`--allow-adjacent-swap` buscmp.py tolerance for a long-documented-benign
+prefetch-race reordering shifted by the speedup), and 4 independent full
+124-suite Harte sweeps (Stages 1-4, each bit-identical to the pre-fix
+baseline) -- zero correctness regressions throughout. Found and fixed 5 real
+testbench bugs along the way (Stage 1: 4; none in Stages 2-6), all confirmed
+via direct tracing, none masking genuine RTL issues.
+
+**Handoff**: whether/how to resume the original Instruction Execution Timing
+plan's own Stages 1-7 (the §11.6 table sweep against Chapter 11's own
+per-instruction CC/NCC tables, paused at Stage 0 pending this pacing fix) is a
+follow-up decision for the user -- not started unilaterally here. The
+bus-cycle-count (r/p/w) portion of that comparison is now known-good (matches
+exactly, both before and after this whole plan); the *total-clock* portion
+will structurally never reach exact parity for the reason documented above,
+so any resumed sweep should likely be scoped to r/p/w verification rather than
+total-clock matching, if and when the user wants to pick it back up.
+
