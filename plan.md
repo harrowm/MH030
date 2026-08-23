@@ -8489,3 +8489,42 @@ Stage 6 wanted a more careful beat-counter/completion-ack timing re-check given
 this project's prior history there), comment mop-up, the full duration-constant
 sweep, and the Chapter 11 calibration re-run.
 
+
+## Phase 160 Stage 4 — S-state pacing correction: BURST/BWRITE
+
+### Goal
+
+Fix a gap in Stage 1's own closing claim: `biu_burst_ctrl.sv`'s hang-causing
+`phase_r==2'd3` sites were fixed out of necessity in Stage 1, but
+`biu_cycle_gen.sv`'s own BURST/BWRITE **state graph** (`ST_BURST_S4/S5`,
+`ST_BURST_NEXT_S4/S5`, `ST_BWRITE_S4/S5`, `ST_BWRITE_NEXT_S4/S5`) still had the
+old "S4 may skip straight to S6" pattern -- the same dimensional issue every
+other cycle-type family needed fixed in Stages 1-3, discovered while scoping
+this continuation (not during Stage 1 itself).
+
+### What was built
+
+`rtl/biu_cycle_gen.sv`: identical S4-always-visits-S5 restructuring applied to
+all 4 pairs (`ST_BURST_S4/S5`, `ST_BURST_NEXT_S4/S5`, `ST_BWRITE_S4/S5`,
+`ST_BWRITE_NEXT_S4/S5`). No functional bug was expected or found --
+`biu_burst_ctrl.sv`'s own `at_burst_data` (used for CBACK#-sampling and
+per-beat data capture) already ORs across S4/S5, tolerating whichever one a
+0-wait beat lands on; this closes the purely dimensional gap (an odd,
+non-physically-realizable real-clock count for a 0-wait burst beat) so burst
+cycles compose the same way every other cycle type now does.
+
+### Results
+
+`tb/biu_tb.sv` ALL TESTS PASSED, `tb/cache_tb.sv` ALL TESTS PASSED (I-cache
+burst fill, D-cache burst fill -- Phase 127/136's own territory, both
+unaffected). `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind`
+12/12, full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, zero
+regressions.
+
+### Status
+
+Stage 4 closed. **Every cycle-type family in the project, without exception,
+now has a dimensionally correct S4/S5 wait-loop.** Stage 5 (comment mop-up)
+next.
+

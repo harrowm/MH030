@@ -1152,15 +1152,13 @@ module biu_cycle_gen #(
             ST_BURST_S1: state_nxt = ST_BURST_S2;
             ST_BURST_S2: state_nxt = ST_BURST_S3;
             ST_BURST_S3: state_nxt = ST_BURST_S4;
-            ST_BURST_S4: begin
-                if      (berr_s)                         state_nxt = ST_BURST_S6;
-                else if (sterm_active || !dsack_wait)    state_nxt = ST_BURST_S6;
-                else                                     state_nxt = ST_BURST_S5;
-            end
+            // Phase 160 Stage 4: S4 always proceeds to S5 (see the identical
+            // ST_READ_S4/S5 comment above for the full reasoning).
+            ST_BURST_S4: state_nxt = ST_BURST_S5;
             ST_BURST_S5: begin
                 if      (berr_s)                         state_nxt = ST_BURST_S6;
                 else if (sterm_active || !dsack_wait)    state_nxt = ST_BURST_S6;
-                else                                     state_nxt = ST_BURST_S5;
+                else                                     state_nxt = ST_BURST_S4;
             end
             ST_BURST_S6: state_nxt = ST_BURST_S7;
             ST_BURST_S7: begin
@@ -1169,15 +1167,11 @@ module biu_cycle_gen #(
                 else                                       state_nxt = ST_IDLE;
             end
             ST_BURST_NEXT_S3: state_nxt = ST_BURST_NEXT_S4;
-            ST_BURST_NEXT_S4: begin
-                if      (berr_s)                         state_nxt = ST_BURST_NEXT_S6;
-                else if (sterm_active || !dsack_wait)    state_nxt = ST_BURST_NEXT_S6;
-                else                                     state_nxt = ST_BURST_NEXT_S5;
-            end
+            ST_BURST_NEXT_S4: state_nxt = ST_BURST_NEXT_S5;
             ST_BURST_NEXT_S5: begin
                 if      (berr_s)                         state_nxt = ST_BURST_NEXT_S6;
                 else if (sterm_active || !dsack_wait)    state_nxt = ST_BURST_NEXT_S6;
-                else                                     state_nxt = ST_BURST_NEXT_S5;
+                else                                     state_nxt = ST_BURST_NEXT_S4;
             end
             ST_BURST_NEXT_S6: state_nxt = ST_BURST_NEXT_S7;
             ST_BURST_NEXT_S7: begin
@@ -1190,15 +1184,11 @@ module biu_cycle_gen #(
             ST_BWRITE_S1: state_nxt = ST_BWRITE_S2;
             ST_BWRITE_S2: state_nxt = ST_BWRITE_S3;
             ST_BWRITE_S3: state_nxt = ST_BWRITE_S4;
-            ST_BWRITE_S4: begin
-                if      (berr_s)                      state_nxt = ST_BWRITE_S6;
-                else if (sterm_active || !dsack_wait) state_nxt = ST_BWRITE_S6;
-                else                                  state_nxt = ST_BWRITE_S5;
-            end
+            ST_BWRITE_S4: state_nxt = ST_BWRITE_S5;
             ST_BWRITE_S5: begin
                 if      (berr_s)                      state_nxt = ST_BWRITE_S6;
                 else if (sterm_active || !dsack_wait) state_nxt = ST_BWRITE_S6;
-                else                                  state_nxt = ST_BWRITE_S5;
+                else                                  state_nxt = ST_BWRITE_S4;
             end
             ST_BWRITE_S6: state_nxt = ST_BWRITE_S7;
             ST_BWRITE_S7: begin
@@ -1207,15 +1197,11 @@ module biu_cycle_gen #(
                 else                                       state_nxt = ST_IDLE;
             end
             ST_BWRITE_NEXT_S3: state_nxt = ST_BWRITE_NEXT_S4;
-            ST_BWRITE_NEXT_S4: begin
-                if      (berr_s)                      state_nxt = ST_BWRITE_NEXT_S6;
-                else if (sterm_active || !dsack_wait) state_nxt = ST_BWRITE_NEXT_S6;
-                else                                  state_nxt = ST_BWRITE_NEXT_S5;
-            end
+            ST_BWRITE_NEXT_S4: state_nxt = ST_BWRITE_NEXT_S5;
             ST_BWRITE_NEXT_S5: begin
                 if      (berr_s)                      state_nxt = ST_BWRITE_NEXT_S6;
                 else if (sterm_active || !dsack_wait) state_nxt = ST_BWRITE_NEXT_S6;
-                else                                  state_nxt = ST_BWRITE_NEXT_S5;
+                else                                  state_nxt = ST_BWRITE_NEXT_S4;
             end
             ST_BWRITE_NEXT_S6: state_nxt = ST_BWRITE_NEXT_S7;
             ST_BWRITE_NEXT_S7: begin
