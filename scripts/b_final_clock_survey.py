@@ -65,6 +65,8 @@ def run_one(entry):
     ]
     if 'instr_len' in entry:
         args.append(f"+instr_len={entry['instr_len']}")
+    if 'watch_kind' in entry:
+        args.append(f"+watch_kind={entry['watch_kind']}")
     try:
         r = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:

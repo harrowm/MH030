@@ -17,11 +17,12 @@
     "target_pc": "0x200",
     "instr_len": 2,
     "watch_reg": 2,
-    "watch_val": "0xcafebabe",
+    "watch_val": "0x10",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "ALU 'ADDA.W Rn,An': ADDA.W Rn,An NCC=4(0/1/0)"
+    "desc": "ALU 'ADDA.W Rn,An' NCC=4(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches A2 directly (watch_kind=1), no marker needed",
+    "watch_kind": 1
   },
   {
     "name": "a3_adda_l",
@@ -29,11 +30,12 @@
     "target_pc": "0x200",
     "instr_len": 2,
     "watch_reg": 2,
-    "watch_val": "0xcafebabe",
+    "watch_val": "0x10",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "ALU 'ADDA.L Rn,An': ADDA.L Rn,An NCC=2(0/1/0)"
+    "desc": "ALU 'ADDA.L Rn,An' NCC=2(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches A2 directly (watch_kind=1), no marker needed",
+    "watch_kind": 1
   },
   {
     "name": "a3_and_dn_dn",
@@ -89,11 +91,12 @@
     "target_pc": "0x200",
     "instr_len": 2,
     "watch_reg": 2,
-    "watch_val": "0xcafebabe",
+    "watch_val": "0xB",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "ALU 'SUBA.W Rn,An': SUBA.W Rn,An NCC=4(0/1/0)"
+    "desc": "ALU 'SUBA.W Rn,An' NCC=4(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches A2 directly (watch_kind=1), no marker needed",
+    "watch_kind": 1
   },
   {
     "name": "a3_suba_l",
@@ -101,35 +104,38 @@
     "target_pc": "0x200",
     "instr_len": 2,
     "watch_reg": 2,
-    "watch_val": "0xcafebabe",
+    "watch_val": "0xB",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "ALU 'SUBA.L Rn,An': SUBA.L Rn,An NCC=2(0/1/0)"
+    "desc": "ALU 'SUBA.L Rn,An' NCC=2(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches A2 directly (watch_kind=1), no marker needed",
+    "watch_kind": 1
   },
   {
     "name": "a3_cmp_rn_dn",
     "hex": "tests/timing/a3_cmp_rn_dn.hex",
     "target_pc": "0x200",
     "instr_len": 2,
-    "watch_reg": 3,
-    "watch_val": "0xcafebabe",
+    "watch_reg": 0,
+    "watch_val": "0x14",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "ALU 'CMP Rn,Dn': CMP Rn,Dn NCC=2(0/1/0)"
+    "desc": "ALU 'CMP Rn,Dn' NCC=2(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches CCR directly (watch_kind=2), no marker needed",
+    "watch_kind": 2
   },
   {
     "name": "a3_cmpa_w",
     "hex": "tests/timing/a3_cmpa_w.hex",
     "target_pc": "0x200",
     "instr_len": 2,
-    "watch_reg": 3,
-    "watch_val": "0xcafebabe",
+    "watch_reg": 0,
+    "watch_val": "0x14",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "ALU 'CMPA.W Rn,An': CMPA.W Rn,An NCC=4(0/1/0)"
+    "desc": "ALU 'CMPA.W Rn,An' NCC=4(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches CCR directly (watch_kind=2), no marker needed",
+    "watch_kind": 2
   },
   {
     "name": "a3_moveq",
@@ -232,12 +238,13 @@
     "hex": "tests/timing/a3_cmpi_dn.hex",
     "target_pc": "0x200",
     "instr_len": 6,
-    "watch_reg": 3,
-    "watch_val": "0xcafebabe",
+    "watch_reg": 0,
+    "watch_val": "0x14",
     "expect_r": 0,
     "expect_p": 2,
     "expect_w": 0,
-    "desc": "ALU_IMM '**CMPI #(data),Dn': CMPI #(data),Dn NCC=2(0/1/0) + FIEA(#imm.L,Dn)=2(0/1/0)"
+    "desc": "ALU_IMM '**CMPI #(data),Dn' NCC=2(0/1/0) + FIEA(#imm.L,Dn)=2(0/1/0), MC68030UM.pdf 11-40/41/42 -- watches CCR directly (watch_kind=2), no marker needed",
+    "watch_kind": 2
   },
   {
     "name": "a3_add_dn_ea",

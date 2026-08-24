@@ -1792,3 +1792,162 @@ Item 2 closed as investigation-only -- root cause identified precisely
 (not guessed at), no independent fix exists separate from item 4's own
 already-planned `ST_IDLE` investigation. Item 3 (redesign the 29
 marker-needed register tests for a clean measurement) is next.
+
+## Phase 166 (cycle-accuracy-closing plan, item 3) -- redesign marker-needed register tests + fix newly-revealed gaps
+
+### New testbench capability: watch_kind
+
+`tb/timing_tb.sv` gained `watch_kind` (0=Dn, unchanged default; 1=An
+via `u_rf.a_reg[0:6]`; 2=CCR via `u_rf.sr_out[7:0]`), letting a test
+observe completion directly instead of always needing a trailing
+marker instruction whose own real, unaccounted cost was folding into
+the measured total for anything that doesn't write a Dn register.
+Confirmed zero regression on the existing 117-test survey before
+touching any individual test (`watch_kind` defaults to 0, bit-
+identical to the old hardcoded `d_reg[watch_reg]` path).
+
+### 15 tests converted (of the 29 originally marker-needed)
+
+**Category A -- An writes (`watch_kind=1`)**: `a2_move_rn_an`
+(MOVEA), `a2_move_usp_an` (MOVE USP,An), `a3_adda_w/l`, `a3_suba_w/l`,
+`a6_lea`.
+
+**Category B/C -- CCR-only writes and compare-only ops
+(`watch_kind=2`)**: `a2_move_dn_ccr`, `a3_cmp_rn_dn`, `a3_cmpa_w`,
+`a3_cmpi_dn`, `a4_tst_dn`, `a5_btst_imm_dn`, `a5_btst_dn_dn`,
+`a5_bftst_dn`, `a6_chk_dn_dn_noexc`. Each test's own setup now
+explicitly sets a known CCR baseline (mostly `$1F`, all flags set, or
+`$10`/`$14` where the target's own real result would otherwise
+coincide with `$1F` and produce no detectable transition) immediately
+before the target instruction, so the watch mechanism's own
+`prev!=new` edge-detection has a genuine transition to catch.
+
+**14 tests deliberately NOT converted this phase**: `a6_andi_to_sr`/
+`a6_andi_to_ccr` (reverted after investigation -- see below);
+Bcc/DBcc/JMP (7 tests) and `a2_move_an_usp`/`a7_trapv_notrap`/
+`a7_bkpt` (3 tests) were never attempted -- PC-redirect-as-completion-
+signal raises the same "does decode_pc race ahead of real retirement"
+reliability question this project has hit and fixed multiple times
+before (most recently the `docs/stalls.md`-cataloged hazards), and
+deserves its own careful pass rather than a rushed extension; TRAPV-
+notrap/BKPT genuinely have zero observable side effect when they don't
+trap, so eliminating their marker isn't even possible with a watch-
+based approach -- would need a different technique (measure the
+marker's own isolated cost and subtract it) not built this phase.
+
+### `a6_andi_to_sr`/`a6_andi_to_ccr`: investigated and reverted, not a regression
+
+Converting these first revealed the mask `#$FFFF`/`#$FF` in the
+original tests is a pure no-op AND (identity operation) -- CCR/SR
+provably CANNOT change value, so no `prev!=new` transition can ever
+be detected regardless of baseline. Changed the masks to `$FF00`/`$00`
+(clears CCR only, doesn't touch S/M/IPL, and the manual's own NCC
+doesn't depend on the operand value) to get a real transition, which
+surfaced `p=1` where `expect_p=2` -- direct trace confirmed the RTL
+genuinely fetches opcode+immediate together in ONE combined longword
+bus cycle (a real hardware alignment property, not a bug), while the
+manual's own row assumes two separate word fetches. **This exact
+finding was ALREADY documented** in the tests' own pre-existing `desc`
+field from an earlier phase ("Measured p=1, not the manual's own row
+value of 2 -- the extra prefetch... is plausibly a pipeline-queue
+refill... after any SR write") -- not new territory, and matches
+Phase 162 Stage D5's own "not safely fixable" conclusion for these two
+instructions' unusually large natural baseline. Reverted both `.s`
+files and their JSON entries back to the original marker-based form
+via `git checkout` -- **initially forgot to also rebuild the now-stale
+`.hex` files**, which briefly desynced the reverted JSON (expecting
+the marker-based program) against the still-edited `.hex` (no marker),
+hanging both tests in the full survey run; caught by comparing the
+survey's own test-name list against the pre-item-3 baseline (2 tests
+silently missing), fixed by rebuilding.
+
+### Two real hand-derivation mistakes, both caught by direct simulation trace rather than trusted
+
+`a6_chk_dn_dn_noexc`'s first watch_val (`$1B`, assuming CHK leaves
+V/C unaffected when it doesn't trap) hung -- direct trace showed the
+real result is `$18`: CHK actually **clears** V/C for the no-trap
+case rather than leaving them unaffected, an easy mistake for a field
+the architecture itself calls "undefined." Confirmed via
+`u_rf.sr_out` traced cycle-by-cycle rather than re-guessing. No other
+watch_val needed correction (each was double-checked against this
+same kind of direct trace before trusting it, following this whole
+project's own established discipline).
+
+### 9 newly-revealed "too fast" gaps, 8 fixed, 1 investigated-and-declined
+
+Converting these tests to a clean, marker-free measurement revealed
+several gaps that a marker-inflated measurement had been silently
+hiding (some previously showed a *positive* gap purely because of
+marker overhead, masking a real negative one underneath). All 8
+fixable ones use the identical `dec_internal_stall_ticks_fixed`
+mechanism as item 1, gated on already-existing decode flags: `MOVE
+Dn,CCR` (`dec_is_move_ccr_w`), `MOVE USP,An` (`dec_reads_usp`, unique
+to that one decode site), `ADDA.W/SUBA.W/CMPA.W` register-direct
+(`dec_sext_src`, confirmed to naturally exclude the already-accurate
+`.L` forms since it's defined as `!f_dir`), `BTST #(data)/Dn,Dn`
+(`dec_unit==UNIT_BIT && dec_bit_op==BIT_TST && !dec_is_mem_rd` --
+`dec_writes_reg` isn't the right exclusion here since BTST never
+writes, unlike the already-whitelisted BCHG/BCLR/BSET), `BFTST Dn`
+(`dec_bf_op==3'b000`, the one bit-field register form Stage D3's own
+whitelist explicitly left out "see marker-overcounting note"), `LEA
+(An),An` (`dec_is_lea && f_mode==3'b010`, gated to the one-word EA
+form specifically since other LEA EA modes have a structurally
+different, untested baseline).
+
+**`CHK Dn,Dn` (manual=8, natural=3, gap=-5) was attempted and reverted
+-- a genuine functional regression, not a test-margin issue.** `make
+test` caught it immediately: `exception_tb.sv`'s CHK-02/03/06 checks
+failed with `chk_trap_cnt` incrementing by 11 instead of 1. Root
+cause, confirmed by reading `eu_seq.sv`'s own `chk_trap` assign: `(ex_
+valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w||chk_above_w))
+|| ...` -- a pure combinational condition with no one-shot/edge guard,
+because the register-direct CHK path had never held `ex_valid` high
+for more than 1 cycle before this stall existed. Holding it for 5
+extra clocks via the ordinary `ex_internal_stall` mechanism let `chk_
+trap` re-fire on every one of those ticks. A real fix would need `chk_
+trap` itself made edge-triggered -- a genuine, separate RTL change,
+not attempted here (same "not safely fixable within this mechanism,
+needs a structural change elsewhere" shape as the already-documented
+ANDI-to-SR/CCR case). Reverted; documented in-line at the point where
+the entry would have gone, so a future attempt starts from this
+finding instead of re-discovering it.
+
+### A second, unrelated test-margin regression, also caught by `make test`
+
+`tb/ea_modes_tb.sv`'s `run_instr()` task uses a fixed `repeat(5)`
+post-`instr_ack` settle margin, predating any artificial-stall entry
+touching an instruction this file exercises -- the new `LEA (An),An`
++4-tick stall made it read A3 one cycle too early (`basic-EA LEA(An)
+A3: got 00000000 exp 00002000`, a stale pre-write value). No busy/
+stall signal was exposed on this testbench's own DUT ports to poll
+instead, so widened the fixed margin to `repeat(10)` (matches this
+whole project's established precedent of widening fixed margins when
+a new stall entry needs it, e.g. Stage D4's `eu_seq_tb.sv` fix).
+
+### Verification
+
+`make test` 36/36 (after both fixes above), `make cosim_grp` 8/8,
+`make cosim_memind` 12/12, full 124-suite Harte sweep (mandatory --
+touches MOVE/ADDA/SUBA/CMPA/BTST/BFTST/LEA/MOVEC decode, all real,
+heavily-Harte-covered instruction families) -- PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline.
+
+Re-ran the survey and diffed against the pre-item-3 baseline: the 15
+converted tests' own gaps are now genuinely isolated per-instruction
+measurements for the first time (several previously "looked fine" by
+coincidence -- marker overhead happened to land close to the manual's
+own value); the 8 newly-whitelisted fixes each land at exactly gap=0;
+zero effect on any of the other 102 untouched tests. **117 tests, gap
+min=-5 (CHK, deliberately un-whitelisted, documented) max=+7 mean=1.30
+(was 1.73 before this phase), 48 of 117 now an exact gap=0 (was 39).**
+
+### Status
+
+Closes item 3's own scoped portion of the cycle-accuracy-closing plan
+(15 of 29 marker-needed tests converted; 8 of 9 newly-revealed gaps
+fixed; CHK documented as a genuine, deliberately-declined fix). Item
+3's remaining scope (Bcc/DBcc/JMP PC-redirect tests, `a2_move_an_usp`/
+`a7_trapv_notrap`/`a7_bkpt`) is left as documented follow-up, not
+picked up this phase. Item 4 (`ST_IDLE` quantization compressibility)
+is next.

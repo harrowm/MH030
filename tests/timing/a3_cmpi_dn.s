@@ -1,5 +1,7 @@
 ; tests/timing/a3_cmpi_dn.s -- Phase 161 Part A Stage A3: ALU_IMM '**CMPI #(data),Dn'
 ; MC68030UM.pdf 11-40/41/42: CMPI #(data),Dn NCC=2(0/1/0) + FIEA(#imm.L,Dn)=2(0/1/0)
+; Cycle-accuracy-closing plan.md, item 3: watches CCR directly
+; (watch_kind=2), same $1F->$14 transition as CMP Rn,Dn.
 ;
 ;   cmpi.l  #5,d2
         org     0
@@ -8,13 +10,12 @@
 
 start:
         move.l  #5,d2
-        clr.l   d3
+        move.w  #$1F,ccr
         bra.w   target
 
         org     $200
 target:
         cmpi.l  #5,d2
-        move.l  #$cafebabe,d3
 after:
         stop    #$2700
         dc.w    $2700

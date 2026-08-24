@@ -274,7 +274,12 @@ module ea_modes_tb;
         end
         instr_valid = 1'b0;
         ext_valid   = 1'b0;
-        repeat(5) @(posedge clk);
+        // Cycle-accuracy-closing plan.md, item 3: widened from 5 to cover
+        // LEA (An),An's own new +4-tick artificial-stall entry (eu_seq.sv's
+        // dec_internal_stall_ticks_fixed) -- this fixed post-ack margin
+        // predates that stall and was too tight for it, caught by the
+        // "basic-EA LEA(An) A3" check reading a stale (still-zero) A3.
+        repeat(10) @(posedge clk);
     endtask
 
     // Load Dn: CLR.L Dn + ADDI.L #val,Dn

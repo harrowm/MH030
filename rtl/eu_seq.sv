@@ -6889,6 +6889,70 @@ module eu_seq (
         if (dec_valid && f_move_sz != 2'b00 && f_move_dst_mode == 3'b000 &&
             f_mode == 3'b111 && f_reg == 3'b100)
             dec_internal_stall_ticks_fixed = 8'd4; // MOVE.B/W #(data),Dn NCC=4-3clk=1clk=4t
+        // Cycle-accuracy-closing plan.md, item 3: 7 more register-only
+        // "too fast" gaps, all newly surfaced by item 3's own marker-free
+        // watch_kind=1/2 redesign (previously hidden -- with a trailing
+        // marker instruction folded into the measured total, several of
+        // these coincidentally landed on a POSITIVE gap that looked
+        // already-fine, or simply had no clean data point at all). All
+        // confirmed against the identical 3-clock/12-tick 1-word
+        // register-direct baseline this whole whitelist already uses.
+        if (dec_valid && dec_is_move_ccr_w)
+            dec_internal_stall_ticks_fixed = 8'd4; // MOVE Dn,CCR NCC=4-3clk=1clk=4t
+        // MOVE USP,An (read direction) -- dec_reads_usp is unique to this
+        // one decode site (the write direction, MOVE An,USP, uses the
+        // separate dec_is_move_usp flag instead).
+        if (dec_valid && dec_reads_usp)
+            dec_internal_stall_ticks_fixed = 8'd4; // MOVE USP,An NCC=4-3clk=1clk=4t
+        // ADDA.W/SUBA.W/CMPA.W, register-direct source (Dn or An) --
+        // dec_sext_src is set only for f_mode==000/001 (register-direct
+        // source, sign-extended 16->32) among all three ops' own shared
+        // decode block, per that block's own comment ("SUBA/ADDA .W
+        // (f_dir=0)... CCR unchanged") -- naturally excludes the .L forms
+        // (already accurate, dec_sext_src=!f_dir=0 there) and the memory-
+        // EA/immediate-source forms (untested, different natural timing,
+        // not touched here). All three ops confirmed to need the
+        // identical correction, matching this whole family's own uniform
+        // NCC=4 row.
+        if (dec_valid && dec_sext_src)
+            dec_internal_stall_ticks_fixed = 8'd4; // ADDA.W/SUBA.W/CMPA.W Rn,An NCC=4-3clk=1clk=4t
+        // BTST #(data),Dn / BTST Dn,Dn -- dec_writes_reg=0 (BTST never
+        // writes back) is what distinguishes this from the already-
+        // whitelisted BCHG/BCLR/BSET entries above, which share the same
+        // dec_unit==UNIT_BIT / dec_bit_from_reg split but always write.
+        if (dec_valid && dec_unit == UNIT_BIT && dec_bit_op == BIT_TST && !dec_is_mem_rd)
+            dec_internal_stall_ticks_fixed = 8'd4; // BTST #(data)/Dn,Dn NCC=4-3clk=1clk=4t
+        // BFTST Dn -- the one bit-field register-form op (3'b000) the
+        // Stage D3 whitelist above deliberately left out, per its own
+        // "3'b000 = BFTST: see marker-overcounting note above" comment;
+        // item 3's own watch_kind=2 redesign finally gives it a clean
+        // data point instead of a marker-inflated one.
+        if (dec_valid && dec_is_bf && dec_bf_reg_ea && dec_bf_op == 3'b000)
+            dec_internal_stall_ticks_fixed = 8'd20; // BFTST Dn NCC=8-3clk=5clk=20t
+        // CHK Dn,Dn (no exception): investigated, DELIBERATELY NOT
+        // whitelisted. `chk_trap` (below) is a pure combinational
+        // condition on `ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_
+        // below_w||chk_above_w)` with no one-shot/edge guard -- the
+        // register-direct CHK path had never held `ex_valid` for more
+        // than 1 cycle before, so nothing needed one. A first attempt at
+        // this whitelist entry held `ex_valid` for 5 extra clocks via the
+        // normal ex_internal_stall mechanism, and `chk_trap` combinationally
+        // re-fired on every one of those ticks -- caught by `make test`'s
+        // own exception_tb.sv (CHK-02/03/06: chk_trap_cnt incremented by
+        // 11 instead of 1). Fixing this for real needs chk_trap itself
+        // made edge-triggered (a genuine, separate RTL fix, not attempted
+        // here) rather than papering over it with a narrower stall
+        // condition. Left as a documented, un-whitelisted gap -- same
+        // "not safely fixable within this mechanism" shape as the
+        // already-documented ANDI-to-SR/CCR case just below.
+        // LEA (An),An -- f_mode==3'b010 is LEA's own plain register-
+        // indirect form specifically (the ONE-word, no-extension-word
+        // shape matching this whole whitelist's shared baseline); LEA's
+        // other EA modes (d16,An / indexed / abs / PC-relative) all need
+        // an extension word and so have a structurally different natural
+        // baseline already, not touched here.
+        if (dec_valid && dec_is_lea && f_mode == 3'b010)
+            dec_internal_stall_ticks_fixed = 8'd4; // LEA (An),An NCC=4-3clk=1clk=4t
         // ANDI/ORI/EORI #imm,SR or CCR (manual NCC=14, own natural
         // baseline measures 13 -- gap=-1) were investigated but are
         // DELIBERATELY NOT whitelisted here. A +4-tick entry gated on

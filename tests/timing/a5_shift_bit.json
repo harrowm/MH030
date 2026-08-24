@@ -100,24 +100,26 @@
     "hex": "tests/timing/a5_btst_imm_dn.hex",
     "target_pc": "0x200",
     "instr_len": 4,
-    "watch_reg": 3,
-    "watch_val": "0xFF",
+    "watch_reg": 0,
+    "watch_val": "0x14",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "BIT_MANIP 'BTST #(data),Dn': BTST #(data),Dn NCC=4(0/1/0) -- D2's bit5=0 (rest set) -> BTST finds it clear -> Z=1 -> marker SEQ D3 writes $FF to D3's low byte (D3 pre-cleared to 0, a real detectable transition)"
+    "desc": "BIT_MANIP 'BTST #(data),Dn' NCC=4(0/1/0), MC68030UM.pdf 11-45/46/47 -- watches CCR directly (watch_kind=2), no marker needed",
+    "watch_kind": 2
   },
   {
     "name": "a5_btst_dn_dn",
     "hex": "tests/timing/a5_btst_dn_dn.hex",
     "target_pc": "0x200",
     "instr_len": 2,
-    "watch_reg": 3,
-    "watch_val": "0xFF",
+    "watch_reg": 0,
+    "watch_val": "0x14",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "BIT_MANIP 'BTST Dn,Dn': BTST Dn,Dn NCC=4(0/1/0) -- D2's bit5=0 (rest set) -> BTST finds it clear -> Z=1 -> marker SEQ D3 writes $FF"
+    "desc": "BIT_MANIP 'BTST Dn,Dn' NCC=4(0/1/0), MC68030UM.pdf 11-45/46/47 -- watches CCR directly (watch_kind=2), no marker needed",
+    "watch_kind": 2
   },
   {
     "name": "a5_bchg_imm_dn",
@@ -196,12 +198,13 @@
     "hex": "tests/timing/a5_bftst_dn.hex",
     "target_pc": "0x200",
     "instr_len": 4,
-    "watch_reg": 3,
-    "watch_val": "0xFF",
+    "watch_reg": 0,
+    "watch_val": "0x14",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "BIT_FIELD 'BFTST Dn': BFTST Dn NCC=8(0/1/0) -- D2{0:8}=0 -> Z=1 -> SEQ D3 writes $FF"
+    "desc": "BIT_FIELD 'BFTST Dn' NCC=8(0/1/0), MC68030UM.pdf 11-45/46/47 -- watches CCR directly (watch_kind=2), no marker needed",
+    "watch_kind": 2
   },
   {
     "name": "a5_bfchg_dn",

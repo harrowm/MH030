@@ -152,6 +152,26 @@ module timing_tb;
     logic [31:0] target_len;   // Phase 161 Part A: instruction's own byte span
     int          watch_reg;
     logic [31:0] watch_val;
+    // Cycle-accuracy-closing plan.md, item 3: watch_kind lets a test observe
+    // completion via An or CCR directly instead of always needing a
+    // trailing marker instruction (whose own real cost was folding into
+    // the measured total for every instruction that doesn't write a Dn --
+    // e.g. MOVEA/ADDA/SUBA/LEA writing An, or CMP/TST/BTST/MOVE-to-CCR/
+    // ANDI-to-CCR-or-SR only updating CCR). 0=Dn (default, unchanged),
+    // 1=An (a_reg[0:6] -- A7 deliberately unsupported, no current test
+    // needs it and it aliases through a7_current's own S/M bank
+    // selection, a materially different read path), 2=CCR (sr_out[7:0]
+    // only, zero-extended -- deliberately NOT the full 16-bit SR, so a
+    // CCR-only-writing instruction like MOVE Dn,CCR doesn't need the
+    // test to also predict the untouched upper SR byte).
+    int          watch_kind;
+    function automatic logic [31:0] watch_current();
+        case (watch_kind)
+            1: watch_current = u_top.u_eu.u_rf.a_reg[watch_reg[2:0]];
+            2: watch_current = {24'h0, u_top.u_eu.u_rf.sr_out[7:0]};
+            default: watch_current = u_top.u_eu.u_rf.d_reg[watch_reg];
+        endcase
+    endfunction
 
     logic        t_start_seen = 1'b0;
     logic        t_end_seen   = 1'b0;
@@ -238,16 +258,16 @@ module timing_tb;
     logic [31:0] watch_prev_r;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) watch_prev_r <= 32'h0;
-        else        watch_prev_r <= u_top.u_eu.u_rf.d_reg[watch_reg];
+        else        watch_prev_r <= watch_current();
     end
 
     always_ff @(posedge clk_4x) begin
         if (t_start_seen && !t_end_seen &&
-            u_top.u_eu.u_rf.d_reg[watch_reg] == watch_val &&
+            watch_current() == watch_val &&
             watch_prev_r != watch_val) begin
             t_end_seen <= 1'b1;
             t_end      <= sim_ticks;
-            $display("  [tick=%0d] WATCH d%0d == %h (retirement)", sim_ticks, watch_reg, watch_val);
+            $display("  [tick=%0d] WATCH kind=%0d reg=%0d == %h (retirement)", sim_ticks, watch_kind, watch_reg, watch_val);
         end
     end
 
@@ -287,6 +307,7 @@ module timing_tb;
         watch_reg = wreg_arg[2:0];
         if (!$value$plusargs("watch_val=%h", wval_arg)) wval_arg = 32'h0;
         watch_val = wval_arg[31:0];
+        if (!$value$plusargs("watch_kind=%d", watch_kind)) watch_kind = 0;
         have_exp = $value$plusargs("expect_clocks=%d", exp_clocks);
         exp_r = 0; exp_p = 0; exp_w = 0;
         begin

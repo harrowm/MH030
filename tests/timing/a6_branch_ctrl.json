@@ -108,13 +108,14 @@
     "name": "a6_chk_dn_dn_noexc",
     "hex": "tests/timing/a6_chk_dn_dn_noexc.hex",
     "target_pc": "0x200",
-    "watch_reg": 3,
-    "watch_val": "0xcafebabe",
+    "watch_reg": 0,
+    "watch_val": "0x18",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "CONTROL_INSTR 'CHK Dn,Dn (No Exception)': CHK Dn,Dn (No Exception) NCC=8(0/1/0) -- D2=5 is within [0,D1=10] -> no exception, falls through normally",
-    "instr_len": 2
+    "desc": "CONTROL_INSTR 'CHK Dn,Dn (No Exception)' NCC=8(0/1/0), MC68030UM.pdf 11-48/49 -- watches CCR directly (watch_kind=2), no marker needed",
+    "instr_len": 2,
+    "watch_kind": 2
   },
   {
     "name": "a6_jmp",
@@ -142,13 +143,14 @@
     "name": "a6_lea",
     "hex": "tests/timing/a6_lea.hex",
     "target_pc": "0x200",
-    "watch_reg": 2,
-    "watch_val": "0xcafebabe",
+    "watch_reg": 1,
+    "watch_val": "0x3000",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "CONTROL_INSTR '**LEA': LEA NCC=2(0/1/0) + cea((An))=2(0/0/0) -- marker is register-only; A1's own new value isn't directly observable here",
-    "instr_len": 2
+    "desc": "CONTROL_INSTR '**LEA' NCC=2(0/1/0) + cea((An))=2(0/0/0), MC68030UM.pdf 11-48/49 -- watches A1 directly (watch_kind=1), no marker needed",
+    "instr_len": 2,
+    "watch_kind": 1
   },
   {
     "name": "a6_link_w",
