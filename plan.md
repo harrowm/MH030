@@ -502,3 +502,118 @@ confirmed clean throughout every stage, with zero net RTL correctness
 regressions across the whole Part. Part E (bus-touching dispatch-
 overhead reduction, Stage E0's own investigation-first design) remains
 untouched and is the plan's only remaining open work.
+
+## Phase 162 Stage E0
+
+### Context
+
+First stage of Part E (bus-touching dispatch-overhead reduction).
+Investigation-only, per the plan's own design: examine each of Phase 161
+Stage B0's 3 already-identified 1-tick synchronization delays in the
+IFU/arbiter/cycle_gen handoff and determine, from the actual code (not
+just re-stating Stage B0's own summary), whether any can be safely
+shrunk without reopening the specific hazard it was added to prevent.
+
+### Delay 1: biu_cycle_gen's own ifu_ack hold through S7
+
+Traced `ifu_ack`'s own drive site (`rtl/biu_cycle_gen.sv`): it's asserted
+combinationally from `state == ST_READ_S7` (via the `grant_ifu` branch of
+the shared SP_S7 ack-dispatch case), for as many `clk_4x` ticks as the
+FSM holds `state` at that value. Since Phase 160's own S-state pacing
+correction, S7 -- like every other named S-state -- genuinely occupies 2
+real `clk_4x` ticks (one "half-clock" pairing with S6), matching the
+real 68030's own documented per-clock S-state grouping (Figures 7-64/
+7-65, already the basis for the whole pacing-correction plan). This
+isn't implementation overhead sitting on top of the real bus protocol --
+it IS the real bus protocol's own genuine pin-level duration, the exact
+thing Phase 160 spent 7 stages calibrating to be correct. Shrinking it
+would mean asserting `ifu_ack`/deasserting AS# faster than real 68030
+silicon does, directly regressing the project's own core pin-level-
+accuracy goal for a payoff of at most 1-2 ticks. **Verdict: NOT safe to
+shrink -- it's not overhead, it's the genuine S7 phase width.**
+
+### Delay 2: m68030_ifu's own fetch_pend_r re-arm, gated on !ifu_ack
+
+Traced the exact re-arm site (`rtl/m68030_ifu.sv:333-336`): the
+`!fetch_pend_r && !bus_err_r && ... && !ifu_ack && !held_valid_r` guard's
+own inline comment (already present, from the Phase 128/147-era work)
+explains precisely why: without the `!ifu_ack` guard, the drain-only
+branch re-arms `fetch_pend_r` on the first tick of `ifu_ack`'s own
+multi-tick hold (S7), causing a spurious second fill one tick later with
+stale `captured_rdata` and advancing `fetch_addr_r` past the real next
+fetch address -- a real, previously-hit bug, not a hypothetical one.
+This delay is entirely *derived from* Delay 1 (it exists only because
+`ifu_ack` is held for more than one tick) -- since Delay 1 is confirmed
+not shrinkable, this one can't be shrunk independently either without
+reopening the exact bug its own guard documents. **Verdict: NOT safe to
+shrink, and not independent of Delay 1.**
+
+### Delay 3: biu_arbiter's own registered (not combinational) grant
+
+Read `rtl/biu_arbiter.sv` in full. The module's own header comment states
+the design intent directly: "The grant register is held until the bus
+returns to idle at the end of the current cycle; this ensures the
+cycle_gen sees a stable grant throughout the entire bus cycle." Making
+`grant_ifu`/`grant_eu`/`grant_mmu` purely combinational (`req && bus_idle
+&& <priority>`) would reintroduce exactly the combinational-loop hazard
+class Phase 128 already found and fixed once for a structurally similar
+port (the I-cache's own direct `biu_cycle_gen` connection) -- `bus_idle`
+itself depends on `state`, which depends on grants, which would then
+depend on `bus_idle` combinationally in the same cycle: a real loop risk,
+not a stylistic choice. **Verdict: NOT safe to shrink** -- the registered
+grant is deliberate, documented, and touches the identical hazard class
+this project has already been burned by once.
+
+### Status
+
+All 3 delays confirmed, via direct code inspection (not re-assertion of
+Stage B0's own summary), to be load-bearing: two are real pin-level
+protocol timing this project deliberately calibrated to match silicon
+(Delay 1, and Delay 2 as its direct consequence), and one guards a
+specific, previously-fixed combinational-loop bug class (Delay 3).
+**Stage E1+ does not happen** -- there is nothing Stage E0 found safe to
+implement. Proceeding directly to Stage E_final with this finding, per
+the plan's own explicit anticipation of this exact outcome ("If Stage E0
+finds none of the three safely shrinkable, this stage doesn't happen --
+go straight to E_final with that finding documented"). No RTL changed
+this stage -- pure investigation, no temporary tracing was even needed
+since the existing code comments already document the reasoning for
+each of the 3 sites.
+
+## Phase 162 Stage E_final (closes Part E and the Phase 162 plan)
+
+### Results
+
+Re-surveyed the bus-touching subset (`expect_r>0 || expect_w>0`, n=32):
+min=2, max=16, mean=9.28 -- unchanged from Phase 161 Stage B_final's own
+original measurement and from Stage D_final's own re-confirmation, since
+Part E never made an RTL change (Stage E0 found nothing safe to touch).
+
+### Status
+
+**Part E is closed with the plan's own explicitly-anticipated "nothing
+safely fixable" outcome** -- not a failure of the stage, but its answer,
+matching the plan's own Context section framing this as a legitimate,
+accepted possibility going in. The bus-touching dispatch overhead (mean
++9.28 clocks per instruction that touches the bus) remains, fully
+characterized and documented (Phase 161 Stage B0, this stage) as three
+stacked, individually-necessary synchronization delays: two are genuine
+pin-level S-state timing this project deliberately calibrated to match
+real 68030 silicon (not implementation overhead at all), and one guards
+a real, previously-fixed combinational-loop hazard. No further action
+is recommended without a fundamentally different design for the IFU/
+arbiter/cycle_gen handoff -- out of proportion to the ~1-2-tick-per-
+transition payoff.
+
+**This closes the Phase 162 clock-cycle-accuracy plan (Parts D and E) in
+full.** Part D (Stages D0-D5, D_final): closed every register-only
+RTL-too-fast gap the original survey found, either to an exact match or
+to a documented not-safely-fixable finding (ANDI/ORI/EORI to SR/CCR
+alone). Part E (Stages E0, E_final): investigated the bus-touching
+RTL-too-slow gap and confirmed, via direct code inspection of all 3
+candidate delays, that none are safely shrinkable -- they are either
+genuine calibrated pin-level timing or hazard-preventing by design.
+Zero RTL correctness regressions across the whole plan, confirmed via
+`make test`/`cosim_grp`/`cosim_memind`/the full 124-suite Harte sweep at
+every RTL-touching stage. `~/.claude/plans/compressed-hopping-cocoa.md`
+has no further open items from its own scope.
