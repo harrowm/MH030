@@ -2119,3 +2119,123 @@ indexed RMW combinations -- roughly double the already-fixed plain-
 for the user rather than assumed to be in scope for continuing
 unilaterally. Item 6 (lowest priority -- re-verify Phase 160's own
 S0-S7 pin timing) not started.
+
+## Phase 169 -- CORRECTION to Phase 168's own item-5 finding, and a new master timing-benchmark script
+
+### The correction
+
+Beginning Stage 1 of the user-approved "Cycle-accuracy closing plan
+v2" (re-prioritizing the remaining items by impact), traced `a4_neg_
+mem_predec`/`a3_addq_postinc` directly to find where Phase 168's own
+reported +9/+10 clock gaps came from -- and found there was nothing to
+find. **Phase 168's own gap numbers were wrong**, caused by the one-off
+Python script used to build and check those 3 new tests: it read the
+raw `MEASURED` field from `sim/timing`'s own stdout instead of
+`MEASURED_INSTR_ONLY` -- the field `scripts/b_final_clock_survey.py`
+already correctly uses for any test needing a trailing marker
+instruction (which all 3 of these do, since NEG/ADDQ write to memory,
+not a directly-watchable register). Re-measured properly via the real
+survey script:
+
+| test | EA mode | manual | measured | gap (corrected) | gap (Phase 168, wrong) |
+|---|---|---|---|---|---|
+| `a4_neg_mem_predec` | `-(An)` | 8 | 11 | **+3** | +9 |
+| `a4_neg_mem_idx` | `(d8,An,Xn)` | 10 | 11 | **+1** | +12 |
+| `a3_addq_postinc` | `(An)+` | 7 | 11 | **+4** (identical to the `(An)` baseline) | +10 |
+
+The real finding is the opposite of what was reported: all three EA
+modes measure the **same flat 11-clock dispatch cost** as the already-
+fixed plain-`(An)` baseline, and the gap actually *shrinks* as EA
+complexity increases (the manual predicts more clocks for the fancier
+addressing computation; this RTL's own fixed dispatch floor doesn't
+grow to match). Tracks A-D's own fixes already generalize cleanly
+across these EA modes -- there was no new, unfixed overhead to chase.
+This was reported to the user directly and transparently as soon as it
+was caught, before any RTL work was attempted on the false premise.
+
+### Root cause of the mistake, and the fix: one canonical script
+
+The mistake was possible specifically because there were two separate,
+overlapping scripts (`scripts/run_timing.py` for r/p/w PASS/FAIL,
+`scripts/b_final_clock_survey.py` for the manual-vs-measured gap) and
+no single, hardened, per-instruction-capable tool -- exactly the gap
+that led to writing a fresh, under-tested one-off script for the 3 new
+tests in the first place. User asked for a proper "master script" and
+approved a plan to build one.
+
+New `scripts/timing_benchmark.py` consolidates both existing scripts'
+proven logic into one canonical tool (neither predecessor touched or
+renamed -- both are referenced by name throughout this file's own
+permanent phase history; each got a one-line docstring pointer to the
+new tool instead):
+
+- Auto-hex-build (from `run_timing.py`), correct `MEASURED`-vs-`
+  MEASURED_INSTR_ONLY` field selection (from `b_final_clock_survey.py`,
+  ported verbatim -- now the *only* place this decision is made).
+- **Surfaces the r/p/w PASS/FAIL the simulation already computes right
+  next to the gap number** -- the direct structural fix for today's
+  mistake: a wrong bus-cycle count (or a hang) now shows `MISMATCH`
+  instead of silently producing a number that looks like an ordinary
+  result.
+- `--filter SUBSTR`: run/report just one instruction or family by
+  name/desc substring -- the per-instruction spot-check capability
+  that was missing, meant to remove the temptation to write another
+  one-off script.
+- `tests/timing/known_issues.json` sidecar: already-investigated,
+  documented non-bugs get tagged `[KNOWN: reason]` in the report
+  instead of looking like unexplained anomalies; summary stats report
+  both an all-tests mean and a known-excluded mean.
+- Optional per-entry `manual_ref` field cross-checks the `desc`-parsed
+  manual total against `scripts/timing_tables.py`'s own structured
+  `ncc_total()`/`ncc_rpw()` lookups -- opt-in for new tests only,
+  deliberately not retrofitted onto the ~150-test existing corpus
+  (that would be its own real transcription-risk migration).
+- `--json OUTFILE` for machine-readable output; `--strict` exits
+  nonzero on any mismatch (for future CI-style use).
+
+### Verification
+
+Cross-validated against both predecessors on the full corpus before
+trusting the new tool, per the approved plan: diffed `timing_
+benchmark.py`'s own per-test gap numbers against `b_final_clock_
+survey.py`'s across all 120 tests -- **exact match, byte-for-byte,
+zero differences** (confirmed via a stripped-formatting diff, not just
+eyeballing the aggregate mean). Cross-checked the r/p/w MISMATCH
+detection against `run_timing.py`'s own verdicts for every test that
+doesn't use `watch_kind`.
+
+**Found a real, pre-existing gap in `run_timing.py` along the way**:
+it crashes (unhandled `TimeoutExpired`, 60s hang) on any `watch_kind`-
+using test (the item-3 CCR/An-watch capability), because it was never
+updated to pass that plusarg through when item 3 added it -- confirmed
+by direct inspection of the actual subprocess command it built (missing
+`+watch_kind=`). Not a flaw in the new tool (which already handles
+`watch_kind` correctly, matching `b_final_clock_survey.py`'s own
+already-correct handling) -- a stale gap in the older, now-superseded
+script. Left unfixed per the approved plan's own explicit "kept as-is"
+scope for the two predecessor scripts.
+
+The new tool's own r/p/w surfacing immediately found 3 more real,
+already-explained-but-never-formally-annotated findings, previously
+invisible to `b_final_clock_survey.py` (which never checked r/p/w at
+all): `a6_bcc_taken`/`a6_dbcc_false_notexp`/`a6_bsr` all show measured
+`p=4` vs the manual's own `p=2` -- already documented in each test's
+own `desc` field from Phase 161 Part A Stage A6 as the IFU's own
+speculative-linear-readahead prefetch model running past a not-yet-
+resolved branch, not an RTL bug. Added all 3 (plus the already-known
+CHK and ANDI-to-SR/CCR cases) to `known_issues.json`.
+
+Pure tooling change -- no RTL touched, `make test` 36/36 sanity check
+(unaffected, as expected).
+
+### Status
+
+Corrects Phase 168's own wrong finding (no RTL fix needed for RMW+EA-
+mode dispatch -- already accurate). Delivers the master benchmark
+script requested, now the canonical tool for all future timing work.
+Stage 1 of the "Cycle-accuracy closing plan v2" is effectively closed
+by this correction (nothing to fix). Next: Stage 2 (CHK `chk_trap`
+edge-triggering) or Stage 3 (Bcc/DBcc/JMP clean measurement), per the
+plan's own ordering -- the newly-surfaced `a6_bcc_taken`/`a6_dbcc_
+false_notexp`/`a6_bsr` p-count findings are directly relevant context
+for Stage 3's own work.

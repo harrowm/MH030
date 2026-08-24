@@ -4,6 +4,13 @@ across the ~150 tests Part A already built, reusing that same
 infrastructure (no new RTL, no new test authoring) rather than the single
 worked example Phase 160 Stage 7 relied on.
 
+NOTE: for new work, prefer scripts/timing_benchmark.py -- it consolidates
+this script's own field-selection logic (MEASURED vs MEASURED_INSTR_ONLY)
+with run_timing.py's own r/p/w PASS/FAIL check into one canonical, hardened
+tool (adds --filter for per-instruction spot-checks and a known-issues
+annotation). This script is kept as-is; it's referenced by name throughout
+plan.md's own permanent phase history.
+
 For each manifest entry, runs sim/timing (informational -- +expect_clocks
 is never asserted, matching every earlier stage's own convention) and
 parses the printed "MEASURED ticks=N clocks=M" line, then extracts the

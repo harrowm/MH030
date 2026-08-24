@@ -1,0 +1,26 @@
+{
+  "a6_chk_dn_dn_noexc": {
+    "reason": "CHK Dn,Dn manual=8 measured=3, gap=-5 -- fix attempted and reverted, causes a real functional regression (chk_trap has no one-shot/edge guard, re-fires on every tick of an artificial multi-cycle stall)",
+    "ref": "plan.md Phase 166"
+  },
+  "a6_andi_to_sr": {
+    "reason": "measured p=1 not manual's own p=2 -- opcode+immediate fetched together in one combined longword bus cycle at this instruction's 4-byte-aligned placement, a real hardware alignment property, not a bug; manual assumes two separate word fetches",
+    "ref": "plan.md Phase 166 (originally documented in this test's own desc field from an earlier phase)"
+  },
+  "a6_andi_to_ccr": {
+    "reason": "same combined-fetch alignment property as a6_andi_to_sr",
+    "ref": "plan.md Phase 166"
+  },
+  "a6_bcc_taken": {
+    "reason": "measured p=4 not manual's own p=2 -- this RTL's IFU speculatively prefetches linearly past the not-yet-resolved conditional branch (the never-taken fall-through path's own 2-fetch footprint) before the redirect discards it; a simplified-linear-readahead-prefetch-model artifact, not an RTL correctness bug. Real 68030 silicon's own prefetch queue does something broadly similar, just not with an exactly reproducible count from the manual's own idealized table",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+  },
+  "a6_dbcc_false_notexp": {
+    "reason": "same speculative-linear-readahead reasoning as a6_bcc_taken (measured p=4, not manual's own p=2)",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+  },
+  "a6_bsr": {
+    "reason": "same speculative-linear-readahead reasoning as a6_bcc_taken (measured p=4, not manual's own p=2)",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+  }
+}

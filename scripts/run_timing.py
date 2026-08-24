@@ -3,6 +3,13 @@
 run_timing.py — Phase 161 Part A: batch runner for the Chapter 11 (MC68030UM.pdf
 Section 11, Instruction Execution Timing) r/p/w verification sweep.
 
+NOTE: for new work, prefer scripts/timing_benchmark.py -- it consolidates
+this script's own r/p/w check with b_final_clock_survey.py's own manual-vs-
+measured gap reporting into one canonical, hardened tool (adds --filter for
+per-instruction spot-checks, a known-issues annotation, and surfaces r/p/w
+PASS/FAIL right next to the gap number). This script is kept as-is; it's
+referenced by name throughout plan.md's own permanent phase history.
+
 Each test case is an isolated, hand-written assembly program (following the
 tests/timing0.s pattern: setup code, then a taken branch landing directly on
 a physically-distant instruction-under-test, so the IFU has no real prefetch
