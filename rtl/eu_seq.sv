@@ -6777,13 +6777,34 @@ module eu_seq (
     logic [7:0] dec_internal_stall_ticks_fixed;
     always_comb begin
         dec_internal_stall_ticks_fixed = 8'd0;
-        if (dec_valid && dec_unit == UNIT_SHF) begin
+        // dec_unit==UNIT_SHF also covers the memory-EA (single-bit) shift
+        // form (dec_is_mem_rmw=1, e.g. "ASL.W (An)") -- that form's own
+        // manual row is fea/cea-based (bus-cycle-driven, already exact via
+        // Stage A1/A4), not the register-direct NCC row this stall
+        // whitelist targets, so it must stay excluded here.
+        if (dec_valid && dec_unit == UNIT_SHF && !dec_is_mem_rmw) begin
             case (dec_shf_op)
-                SHF_ASL:            if (dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd20; // NCC=8 -3clk=5clk=20t
-                SHF_ROL, SHF_ROR:   if (dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd20; // NCC=8
+                SHF_ASL: dec_internal_stall_ticks_fixed =
+                    dec_use_reg_cnt ? 8'd20 : 8'd4; // reg:NCC=8-3clk=5clk=20t; imm:NCC=4-3clk=1clk=4t
+                SHF_ASR: if (!dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd4; // imm:NCC=4=4t (reg form via resolve, below)
+                SHF_LSL, SHF_LSR: if (!dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd4; // imm:NCC=4=4t (reg form via resolve)
+                SHF_ROL, SHF_ROR: dec_internal_stall_ticks_fixed =
+                    dec_use_reg_cnt ? 8'd20 : 8'd12; // reg:NCC=8=20t; imm:NCC=6-3clk=3clk=12t
                 SHF_ROXL, SHF_ROXR: dec_internal_stall_ticks_fixed = 8'd36; // NCC=12 -3clk=9clk=36t (imm or reg, one row)
                 default: ;
             endcase
+        end
+        // Stage D4 (plan.md): a handful of other simple register-direct
+        // instructions with small (1-3 clock), flat, decode-time-only
+        // gaps -- EXG/MOVE CCR,Dn/MOVE SR,Dn/SWAP, all confirmed to share
+        // the same 3-clock (12-tick) baseline as every other 1-word
+        // register-direct instruction (Stage D0's own established
+        // pattern), each needing just N=(manual-3)*4 ticks.
+        if (dec_valid) begin
+            if (dec_is_exg)          dec_internal_stall_ticks_fixed = 8'd4;  // EXG NCC=4-3clk=4t
+            else if (dec_is_move_ccr_r) dec_internal_stall_ticks_fixed = 8'd4;  // MOVE CCR,Dn NCC=4
+            else if (dec_is_move_sr_r)  dec_internal_stall_ticks_fixed = 8'd4;  // MOVE SR,Dn NCC=4
+            else if (dec_is_swap)    dec_internal_stall_ticks_fixed = 8'd4;  // SWAP Dn NCC=4
         end
         // Stage D3 (plan.md): bit-field register (Dn) forms. All confirmed
         // flat regardless of offset/width/scan-depth (Stage D0's own

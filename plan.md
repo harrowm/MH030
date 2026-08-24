@@ -280,3 +280,89 @@ anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline.
 Stage D3 closed. Stage D4+ (the smaller-gap register-direct families --
 BCD ops, EXG/SWAP/TAS/Scc/MOVE CCR-SR-USP/MOVEC, plus the still-deferred
 immediate-count shift/rotate forms) is next.
+
+## Phase 162 Stage D4
+
+### Context
+
+Extended the artificial-internal-stall whitelist two ways: (1) generalized
+the shift/rotate case in `dec_internal_stall_ticks_fixed` from Stage D2's
+register-count-only forms to also cover *immediate*-count forms (`LSL.L
+#2,Dy` etc, `dec_use_reg_cnt=0`) -- these are pure decode-time-computable
+(no live register read needed, unlike the register-count `%`/`+` bucket
+split), so no new resolving-stage machinery was needed, just widening the
+existing `case (dec_shf_op)` arms with an `if (dec_use_reg_cnt) ... else
+...` split per op; (2) added a small, flat whitelist for EXG/MOVE CCR,Dn/
+MOVE SR,Dn/SWAP -- four simple register-direct instructions all sharing
+the project's own established 3-clock (12-tick) 1-word baseline, each
+needing just 1 clock (4 ticks) to match the manual's own NCC=4.
+
+### A real near-miss caught before it shipped
+
+`dec_unit == UNIT_SHF` is set by BOTH the register-direct shift/rotate
+decode block (`f_ss != 2'b11`, no memory access) AND the completely
+separate memory-EA single-bit shift decode block (`f_dn[2]==0` +
+specific `f_mode`s, `dec_is_mem_rmw=1'b1`, e.g. `ASL.W (An)`) -- my first
+whitelist draft (`if (dec_valid && dec_unit == UNIT_SHF)`) fired for
+both, wrongly injecting a 4-tick internal stall into memory-destination
+shifts too. Their own manual row is fea/cea-based (bus-cycle-driven,
+already exact since Stage A1/A4) with no separate internal-only
+component -- caught by `make test`'s own pre-existing `alu_mem_tb.sv`
+("ASL-01:mem"/"ASL-01:Z" failed), not by reasoning alone; the actual
+fix was adding `&& !dec_is_mem_rmw` to the whitelist's own top-level
+gate, the one signal that already distinguishes the two decode blocks.
+
+### A second, testbench-only regression: eu_seq_tb.sv's own `drain()`
+
+`tb/eu_seq_tb.sv`'s `run()` task (`send()` + `drain()`) uses a *fixed*
+2-cycle `drain()` sized for "EX->WB->regfile-commit" on an unstalled
+instruction -- with immediate-count shift/rotate now carrying a real
+stall, E1-E6 (the file's own pre-existing shift-instruction checks) all
+started reading a value exactly ONE INSTRUCTION STALE (e.g. E1's own
+`LSL #2` check read D0's PRE-shift value, while E2's check read E1's own
+POST-shift result) -- the write was landing, just one full `run()` call
+later than `drain()` was waiting for.
+
+First fix attempt: add `while (seq_busy) @(posedge clk_4x);` after the
+fixed 2 cycles, mirroring the shape this same file's own cpSAVE/cpRESTORE
+tests already use. This alone did NOT fix it (identical failures,
+identical values) -- traced to `rtl/eu_seq.sv`'s own WB-stage latch:
+`wb_valid <= ex_valid;` fires only in the `else` branch, i.e. the cycle
+*after* `ex_internal_stall` itself clears, and the actual `eu_regfile`
+array write trails `wb_valid` by a further cycle -- so a loop that exits
+the instant `seq_busy` first reads 0 is still (at least) one cycle short
+of the real commit. Fixed by pairing the `while (seq_busy)` loop with a
+fixed `repeat(4)` settle margin afterward -- exactly the same two-part
+shape the file's own cpSAVE/cpRESTORE tests already used (apparently for
+the identical reason, never spelled out there either). Confirmed via
+`make test`: all previously-stale E1-E6 checks now read correctly, and
+the previously-unexplained downstream F1-F3 (MULU/MULS/DIVU) failures
+-- never actually broken by this stage's own RTL change, just corrupted
+by E-series' own stale D0/D1 values feeding into F1's setup -- cleared
+as a direct consequence, confirming they were never a separate bug.
+
+### Results
+
+Exact match (`scripts/b_final_clock_survey.py` gap=0) for all 6 directly
+targeted tests: `a2_exg`/`a2_move_ccr_dn`/`a2_move_sr_dn`/`a2_swap`
+(manual=4, was gap=-1 each) and `a5_lsl_imm_dy` (manual=4, was -1)/
+`a5_rol_imm_dy` (manual=6, was -3). The full 117-test survey's own
+negative tail shrank further: min=-3 (was -3 already, but now from a
+*different*, smaller residual set -- NBCD/dynamic-BCHG-BCLR-BSET's own
+-3s, not the immediate-shift ones D4 just fixed), gap distribution now
+`{-3: 4, -1: 7, 0: 22, ...}` (22 tests at an exact match, was fewer
+before this stage). `make test` 36/36 (after both the `eu_seq.sv`
+`!dec_is_mem_rmw` fix and the `eu_seq_tb.sv` `drain()` fix), `make
+cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep
+(mandatory -- `eu_seq.sv` changed) -- PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to
+baseline.
+
+### Status
+
+Stage D4 closed. Remaining register-only negative-gap entries, all
+small (-1/-3): ABCD/SBCD/EXT/Scc/TAS register-direct forms (-1 each),
+NBCD (-3), dynamic BCHG/BCLR/BSET Dn,Dn (-3 each), and ANDI-to-SR/CCR
+(-1 each, a bus-touching-but-register-only-classified pair) -- these are
+Stage D5's own scope. Part E (bus-touching dispatch-overhead reduction)
+remains untouched.

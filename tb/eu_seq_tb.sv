@@ -298,6 +298,27 @@ module eu_seq_tb;
     task drain;
         @(posedge clk_4x); #1;
         @(posedge clk_4x); #1;
+        // Phase 162 Stage D4 (plan.md): some instructions now carry a
+        // real artificial internal stall (eu_seq.sv's ex_internal_stall)
+        // so their own total clock count matches MC68030UM.pdf Section
+        // 11's own timing tables -- the fixed 2-cycle wait above is only
+        // ever enough for an unstalled instruction; wait out any extra
+        // stall cycles before returning. Sampled after #1 (not bare at
+        // the posedge), per this project's own established Icarus race
+        // convention (feedback_icarus_timing.md).
+        while (seq_busy) begin
+            @(posedge clk_4x); #1;
+        end
+        // wb_valid itself only turns on the cycle AFTER ex_internal_stall
+        // clears (rtl/eu_seq.sv's WB-stage latch: `end else begin
+        // wb_valid <= ex_valid; ...`, gated on !ex_internal_stall), and
+        // the actual eu_regfile array write trails wb_valid by a further
+        // cycle -- a fixed 2-cycle wait right after seq_busy clears
+        // wasn't enough on its own (confirmed by direct experiment: reads
+        // came back exactly one instruction stale). Match this file's own
+        // cpSAVE/cpRESTORE tests, which already pair `while (seq_busy)`
+        // with a fixed repeat(4) settle margin for the same reason.
+        repeat(4) @(posedge clk_4x);
     endtask
 
     // Convenience: send + drain (single instruction with full pipeline flush)
