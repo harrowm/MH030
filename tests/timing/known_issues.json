@@ -50,5 +50,73 @@
   "a3_addi_mem": {
     "reason": "gap=+7 -- the compounding of two already-investigated, already-accepted mechanisms: the genuine-second-IFU-fetch cost for ADDI's own long immediate (item 2/Phase 165, same as a1_fea_xxxl) plus the shared RMW-to-memory bus-dispatch floor (Tracks A-D, closed bus-pipelining-overlap plan). Not a new, separately-fixable gap",
     "ref": "plan.md Phase 165 and the closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a3_add_dn_ea": {
+    "reason": "gap=+4, r/p/w clean -- the shared RMW-to-memory bus-dispatch floor (this project's own measured, EA-mode-independent ~11-clock floor for a plain-(An) RMW cycle), extensively investigated and partially closed (real, sub-clock/absorbed improvements) by the closed bus-pipelining-overlap plan's own Tracks A-D. Not a new gap",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a3_and_dn_ea": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a3_addq_mem": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a3_addq_postinc": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean) -- confirmed flat regardless of (An) vs (An)+ EA mode (Phase 169's own correction of the earlier, wrong item-5 finding)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); plan.md Phase 169"
+  },
+  "a4_neg_mem": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a4_neg_mem_predec": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+3, r/p/w clean) -- confirmed flat regardless of (An) vs -(An) EA mode (Phase 169's own correction of the earlier, wrong item-5 finding)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); plan.md Phase 169"
+  },
+  "a5_lsl_mem": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a5_bchg_dn_mem": {
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea, smaller magnitude (gap=+2, r/p/w clean)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a5_bset_dn_mem": {
+    "reason": "same RMW-to-memory dispatch floor as a5_bchg_dn_mem (gap=+2, r/p/w clean)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+  },
+  "a4_cmpm": {
+    "reason": "gap=+3, r/p/w clean -- CMPM (An)+,(An)+'s own dual-read dispatch cost, already investigated and improved (real, sub-clock-granularity gain) by Track C of the closed bus-pipelining-overlap plan. Not a new gap",
+    "ref": "closed bus-pipelining-overlap plan (Track C)"
+  },
+  "a3_addi_dn": {
+    "reason": "gap=+4, r/p/w clean -- the genuine-second-IFU-fetch cost for a long immediate operand (ext_count==2), confirmed unavoidable in item 2/Phase 165 (the 3rd word needed can't arrive with the first 2-word IFU fetch when the queue starts empty)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a3_andi_dn": {
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a3_eori_dn": {
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a3_ori_dn": {
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a3_subi_dn": {
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a3_cmpi_dn": {
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a1_fea_imml": {
+    "reason": "gap=+2, r/p/w clean -- smaller-magnitude instance of the same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (MOVE.L #imm32,Dn's own long immediate)",
+    "ref": "plan.md Phase 165 (item 2)"
   }
 }
