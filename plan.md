@@ -690,3 +690,98 @@ RMW's own read completing and its own write starting despite EU's
 documented higher bus priority. Stage 1 (implementing the fix for
 mechanism 1) is next; Stage 2 (investigating mechanism 2 in more depth)
 follows.
+
+## Phase 163 Stage 1
+
+### Context
+
+Implements the confirmed, well-scoped fix from Stage 0's investigation:
+`eu_ext_valid`'s dispatch gate used the same `q_cnt>=3` threshold for
+both `ext_count==1` and `ext_count==2` instructions, when `ext_count==1`
+only ever needs `q_cnt>=2` — already documented as a known, deliberate
+over-conservative simplification in `m68030_seq.sv`'s own header comment
+(never revisited for performance).
+
+### RTL changes
+
+- `rtl/m68030_ifu.sv`: new `ext1_valid` output, `assign ext1_valid =
+  (q_cnt >= 3'd2);` — mirrors `instr_valid`/`ext_valid`/etc exactly.
+- `rtl/m68030_top.sv`: new `ifu_ext1_valid` wire, threaded through both
+  `u_ifu`'s and `u_seq`'s port lists alongside the existing `ext_valid`
+  wiring.
+- `rtl/m68030_seq.sv`: new `ifu_ext1_valid` input; `eu_ext_valid`'s mux
+  gained `(ext_count == 3'd1) ? ifu_ext1_valid :` ahead of the final
+  `ifu_ext_valid` fallback (which now serves only `ext_count==2`,
+  unchanged). Verified the `peek_fi_full`/`peek_fi_bdsz`/`peek_fi_iis`
+  mechanism (mode=110 full-format EA peek, reads q[1] via `ifu_ext_data
+  [31:16]`) is unaffected — q[1] is already stable at `q_cnt>=2`, so the
+  peek's own gating gets *more* precise, not less.
+- Three standalone testbenches with separate `m68030_ifu`+`m68030_seq`
+  instantiations (`tb/pipeline_tb.sv`, `tb/stall_hazard_tb.sv`,
+  `tb/seq_ctrl_tb.sv`) needed the new signal wired through explicitly
+  (named-port connections, not wildcard, so a new port doesn't auto-
+  connect) — `tb/seq_ctrl_tb.sv` uses `.*` wildcard binding and would
+  have needed no change, except its own SEQ-6 test was directly
+  exercising the exact case this fix changes (an `ADDI.B` — ext_count==1
+  — instruction's own `eu_ext_valid` pass-through), so it was extended
+  (not just patched) into 3 checks explicitly covering both the new
+  `ext1_valid` arm and the unchanged `ext_valid` (ext_count==2) arm,
+  rather than silently leaving the new port undriven-then-guessed-safe.
+
+### A real regression found and fixed before it shipped
+
+Re-running the corrected pin-level survey after the fix showed the
+expected large improvement for `ext_count==1` bus-touching tests (e.g.
+`a2_move_ea_xxxw` gap 7→2, `a1_fea_d16an` gap 6→1) -- but also flipped
+Phase 162 Stage D3's own already-exact bit-field register-form results
+(BFCHG/BFCLR/BFSET/BFEXTS/BFEXTU/BFINS/BFFFO, all 2-word/ext_count==1
+instructions) from gap=0 to a uniform gap=-5. Root cause: Stage D3's
+own artificial-stall constants were calibrated against the *old*,
+slower unstalled baseline (8 clocks for a 2-word register-direct
+instruction) -- this fix sped that baseline up to a uniform 3 clocks
+(identical to the 1-word baseline, since the "wait for an unneeded 2nd
+fetch" penalty is now gone entirely), so the *same* old stall additions
+now overshoot the manual target by exactly the amount the baseline
+itself improved. Re-derived and updated all 7 constants in `rtl/eu_seq.
+sv`'s `dec_internal_stall_ticks_fixed` (e.g. BFCHG 24→44 ticks, BFFFO
+48→68 ticks -- each simply +20 ticks/5 clocks, matching the uniform
+8-clock→3-clock baseline shift exactly) -- restored to exact gap=0 for
+all 7, confirmed via re-measurement.
+
+### Two new findings, documented but not fixed this stage (out of scope)
+
+1. **`a5_bftst_dn`** (gap=+1, unchanged by this fix): BFTST writes no
+   register (only CCR), so its own test needs a trailing marker (`SEQ
+   D3`) to observe completion — the exact same class of gap Stage 0
+   fixed for bus-touching tests, just for a case with zero *data*-bus
+   activity (`expect_r==0 && expect_w==0`), which Stage 0's own
+   `needs_marker` classifier (`expect_r>0 || expect_w>0`) doesn't catch.
+   Genuine blind spot in the survey's own classifier, not an RTL issue.
+2. **`a2_movec_read`/`a4_pack_dn`/`a4_unpk_dn`/`a5_bchg_imm_dn`** (new
+   negative gaps: -3/-3/-5/-3): all `ext_count==1` register-direct
+   instructions *never in Part D's own original scope* (their gaps were
+   positive/zero before this fix, so Part D's Stage B_final survey
+   never flagged them as "too fast") — this fix's dispatch speedup
+   pushed them into negative territory for the first time. Genuinely
+   new "too fast" cases, not a regression of anything previously
+   promised fixed, and Part D itself is a closed plan; left undone as
+   out of this plan's own bus-touching-focused scope, flagged for a
+   possible future extension of Part D's own family-by-family work if
+   the user wants full register-only exactness later.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full
+124-suite Harte sweep (mandatory -- touches the shared IFU/sequencer
+dispatch-gating path every instruction in the corpus goes through) --
+PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0, bit-identical to baseline. Corrected bus-touching survey
+(n=32, via the `MEASURED_INSTR_ONLY` pin-level figure): every
+`ext_count==1` test's gap shrank by exactly 5 clocks as predicted;
+`ext_count==0` tests (e.g. `a3_add_dn_ea`) correctly unaffected --
+that's Stage 2's own scope.
+
+### Status
+
+Stage 1 closed. Stage 2 (investigate the RMW read-to-write dispatch
+gap, the second mechanism Stage 0 found) is next.

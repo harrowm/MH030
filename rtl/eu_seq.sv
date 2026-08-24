@@ -6867,25 +6867,34 @@ module eu_seq (
         // BFFFO spot-check) and fully decode-time computable -- offset/
         // width come from the already-fetched extension word, not a live
         // register read, unlike shift/rotate's own register-count case
-        // above. Baseline (before any stall) for a 2-word bit-field
-        // register-direct instruction is a uniform 8 clocks (32 ticks),
-        // confirmed across all 7 non-BFTST ops via their own natural
-        // register-write timing (BFEXTS/BFEXTU/BFINS/BFFFO write a real
-        // destination register; BFCHG/BFCLR/BFSET write back to the same
-        // Dn) -- BFTST itself needs no marker-based inference since it
-        // already matches the manual's own NCC=8 exactly with zero extra
-        // stall (only reads/tests, no register write at all in the real
-        // ISA either), so it's deliberately absent from this case below.
+        // above.
+        //
+        // Phase 163 Stage 1 (plan.md) recalibration: these are 2-word
+        // (ext_count==1) register-direct instructions, so Stage 1's own
+        // ext1_valid dispatch fix (m68030_seq.sv) sped up their shared
+        // unstalled baseline too -- from 8 clocks (32 ticks, Stage D3's
+        // own original figure) down to a uniform 3 clocks (12 ticks),
+        // identical to the 1-word register-direct baseline, confirmed by
+        // direct re-measurement of all 7 forms after Stage 1 landed (each
+        // needed exactly 5 more clocks / 20 more ticks than before to
+        // stay exact -- a uniform shift, not a per-op adjustment). BFTST
+        // itself needs its own marker instruction to observe completion
+        // (it writes no register, only CCR) and that marker's own cost
+        // isn't isolated by the pin-level MEASURED_INSTR_ONLY correction
+        // (Stage 0) either -- both are the same class of gap this
+        // project's timing-survey infrastructure already knows how to
+        // fix, just not yet extended to cover it; flagged as a follow-up,
+        // not chased down as part of this stage.
         if (dec_valid && dec_is_bf && dec_bf_reg_ea) begin
             case (dec_bf_op)
-                3'b010:  dec_internal_stall_ticks_fixed = 8'd24; // BFCHG NCC=14 -8clk=6clk=24t
-                3'b100:  dec_internal_stall_ticks_fixed = 8'd24; // BFCLR NCC=14
-                3'b110:  dec_internal_stall_ticks_fixed = 8'd24; // BFSET NCC=14
-                3'b011:  dec_internal_stall_ticks_fixed = 8'd8;  // BFEXTS NCC=10 -8clk=2clk=8t
-                3'b001:  dec_internal_stall_ticks_fixed = 8'd8;  // BFEXTU NCC=10
-                3'b111:  dec_internal_stall_ticks_fixed = 8'd16; // BFINS NCC=12 -8clk=4clk=16t
-                3'b101:  dec_internal_stall_ticks_fixed = 8'd48; // BFFFO NCC=20 -8clk=12clk=48t
-                default: ; // 3'b000 = BFTST: already exact, no stall needed
+                3'b010:  dec_internal_stall_ticks_fixed = 8'd44; // BFCHG NCC=14 -3clk=11clk=44t
+                3'b100:  dec_internal_stall_ticks_fixed = 8'd44; // BFCLR NCC=14
+                3'b110:  dec_internal_stall_ticks_fixed = 8'd44; // BFSET NCC=14
+                3'b011:  dec_internal_stall_ticks_fixed = 8'd28; // BFEXTS NCC=10 -3clk=7clk=28t
+                3'b001:  dec_internal_stall_ticks_fixed = 8'd28; // BFEXTU NCC=10
+                3'b111:  dec_internal_stall_ticks_fixed = 8'd36; // BFINS NCC=12 -3clk=9clk=36t
+                3'b101:  dec_internal_stall_ticks_fixed = 8'd68; // BFFFO NCC=20 -3clk=17clk=68t
+                default: ; // 3'b000 = BFTST: see marker-overcounting note above
             endcase
         end
     end

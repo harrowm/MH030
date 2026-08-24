@@ -68,6 +68,7 @@ module stall_hazard_tb;
     logic [15:0] ct_ifu_q3_word;
     logic [31:0] ct_ifu_ext34_data;
     logic        ct_ifu_instr_valid;
+    logic        ct_ifu_ext1_valid;   // Phase 163 Stage 1 (plan.md)
     logic        ct_ifu_ext_valid;
     logic        ct_ifu_ext4_valid;
     logic        ct_ifu_ext5_valid;
@@ -126,6 +127,7 @@ module stall_hazard_tb;
         .q3_word      (ct_ifu_q3_word),
         .ext34_data   (ct_ifu_ext34_data),
         .instr_valid  (ct_ifu_instr_valid),
+        .ext1_valid   (ct_ifu_ext1_valid),
         .ext_valid    (ct_ifu_ext_valid),
         .ext4_valid   (ct_ifu_ext4_valid),
         .ext5_valid   (ct_ifu_ext5_valid),
@@ -148,6 +150,7 @@ module stall_hazard_tb;
         .ifu_q3_word     (ct_ifu_q3_word),
         .ifu_ext34_data  (ct_ifu_ext34_data),
         .instr_valid     (ct_ifu_instr_valid),
+        .ifu_ext1_valid  (ct_ifu_ext1_valid),
         .ifu_ext_valid   (ct_ifu_ext_valid),
         .ifu_ext4_valid  (ct_ifu_ext4_valid),
         .ifu_ext5_valid  (ct_ifu_ext5_valid),

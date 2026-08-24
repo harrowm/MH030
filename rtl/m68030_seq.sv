@@ -22,9 +22,14 @@
 //     f_dn≠100, f_ss≠10 (byte/word): 1 ext word
 //   All other supported groups: 0 ext words
 //
-// IFU ext_valid uses the q_cnt≥3 threshold from m68030_ifu.  This is
-// conservative for 1-extension-word instructions (q_cnt≥2 would suffice),
-// but is always correct: EU stalls on need_ext until ext_valid rises.
+// IFU ext_valid uses the q_cnt≥3 threshold from m68030_ifu -- correct for
+// 2-extension-word instructions. 1-extension-word instructions (the
+// majority of memory-EA/short-immediate forms) instead use ext1_valid
+// (q_cnt≥2, Phase 163 Stage 1, plan.md): since IFU fills always arrive 2
+// words at a time, q_cnt jumps straight from 2 to 4, so gating a
+// 1-ext-word instruction on q_cnt≥3 forced it to wait for an entire
+// unneeded extra bus fetch before dispatch -- a real, measurable
+// dispatch-overhead cost, not just a theoretical inefficiency.
 
 module m68030_seq (
     // From m68030_ifu
@@ -34,6 +39,7 @@ module m68030_seq (
     input  logic [31:0] ifu_ext34_data,   // {q[3],q[4]} — words 3+4
     input  logic [15:0] ifu_q5_word,      // q[5] — fifth extension word (Phase 145)
     input  logic        instr_valid,      // IFU has ≥1 word (q_cnt ≥ 1)
+    input  logic        ifu_ext1_valid,   // IFU has ≥2 words (q_cnt ≥ 2, Phase 163 Stage 1)
     input  logic        ifu_ext_valid,    // IFU has ≥3 words (q_cnt ≥ 3)
     input  logic        ifu_ext4_valid,   // IFU has ≥4 words (q_cnt ≥ 4)
     input  logic        ifu_ext5_valid,   // IFU has ≥5 words (q_cnt ≥ 5)
@@ -931,7 +937,8 @@ module m68030_seq (
     assign eu_ext_valid = (ext_count >= 3'd5) ? ifu_ext6_valid :  // Phase 145
                           (ext_count == 3'd4) ? ifu_ext5_valid :
                           (ext_count == 3'd3) ? ifu_ext4_valid :
-                                                ifu_ext_valid;
+                          (ext_count == 3'd1) ? ifu_ext1_valid :  // Phase 163 Stage 1
+                                                ifu_ext_valid;    // ext_count==2 (or 0, unused)
 
     // -----------------------------------------------------------------------
     // Pass-through to EU

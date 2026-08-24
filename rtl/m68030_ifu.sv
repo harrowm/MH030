@@ -52,6 +52,15 @@ module m68030_ifu (
     output logic [31:0] ext34_data,   // {q[3], q[4]} — words 3+4
     output logic [15:0] q5_word,      // q[5] — fifth extension word (Phase 145)
     output logic        instr_valid,  // q_cnt >= 1
+    // Plan.md (bus-pipelining-overlap): a genuine "1 extension word is
+    // ready" gate, distinct from ext_valid's own q_cnt>=3 -- fills always
+    // arrive 2 words at a time, so an instruction needing only 1
+    // extension word (the majority of memory-EA/short-immediate forms)
+    // was previously forced through the same q_cnt>=3 gate 2-ext-word
+    // instructions genuinely need, waiting an entire unneeded extra
+    // fetch for a word it never uses. See m68030_seq.sv's own eu_ext_
+    // valid mux for the consumer.
+    output logic        ext1_valid,   // q_cnt >= 2
     output logic        ext_valid,    // q_cnt >= 3
     output logic        ext4_valid,   // q_cnt >= 4
     output logic        ext5_valid,   // q_cnt >= 5
@@ -99,6 +108,7 @@ module m68030_ifu (
     assign ext34_data   = {q[3], q[4]};
     assign q5_word      = q[5];
     assign instr_valid  = (q_cnt >= 3'd1);
+    assign ext1_valid   = (q_cnt >= 3'd2);
     assign ext_valid    = (q_cnt >= 3'd3);
     assign ext4_valid   = (q_cnt >= 3'd4);
     assign ext5_valid   = (q_cnt >= 3'd5);

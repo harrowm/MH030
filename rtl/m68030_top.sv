@@ -189,6 +189,7 @@ module m68030_top #(
     logic [15:0] ifu_q5_word;      // Phase 145
     logic        ifu_instr_valid, ifu_ext_valid, ifu_ext4_valid, ifu_ext5_valid;
     logic        ifu_ext6_valid;   // Phase 145
+    logic        ifu_ext1_valid;   // Phase 163 Stage 1 (plan.md)
     logic [31:0] ifu_decode_pc;
     logic [31:0] eu_ex_decode_pc;  // Phase 150 Stage 1 (plan.md): see eu_seq.sv's own ex_decode_pc_out comment
     logic [31:0] ifu_bus_addr;
@@ -376,6 +377,7 @@ module m68030_top #(
         .ext34_data   (ifu_ext34_data),
         .q5_word      (ifu_q5_word),
         .instr_valid  (ifu_instr_valid),
+        .ext1_valid   (ifu_ext1_valid),
         .ext_valid    (ifu_ext_valid),
         .ext4_valid   (ifu_ext4_valid),
         .ext5_valid   (ifu_ext5_valid),
@@ -403,6 +405,7 @@ module m68030_top #(
         .ifu_ext34_data  (ifu_ext34_data),
         .ifu_q5_word     (ifu_q5_word),
         .instr_valid     (ifu_instr_valid),
+        .ifu_ext1_valid  (ifu_ext1_valid),
         .ifu_ext_valid   (ifu_ext_valid),
         .ifu_ext4_valid  (ifu_ext4_valid),
         .ifu_ext5_valid  (ifu_ext5_valid),

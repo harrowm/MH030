@@ -15,6 +15,7 @@ module seq_ctrl_tb;
     logic [31:0] ifu_ext34_data;
     logic [15:0] ifu_q5_word;
     logic        instr_valid;
+    logic        ifu_ext1_valid;   // Phase 163 Stage 1 (plan.md)
     logic        ifu_ext_valid;
     logic        ifu_ext4_valid;
     logic        ifu_ext5_valid;
@@ -86,6 +87,7 @@ module seq_ctrl_tb;
         instr_word    = 16'h0;
         ifu_ext_data  = 32'h0;
         instr_valid   = 1'b0;
+        ifu_ext1_valid = 1'b0;
         ifu_ext_valid = 1'b0;
         eu_instr_ack  = 1'b0;
         eu_busy       = 1'b0;
@@ -164,13 +166,28 @@ module seq_ctrl_tb;
         end else $display("PASS SEQ-5b eu_instr_valid=0");
 
         // ----------------------------------------------------------------
-        // SEQ-6: eu_ext_valid = ifu_ext_valid pass-through
+        // SEQ-6: eu_ext_valid mux — ext_count==1 follows ifu_ext1_valid,
+        // ext_count==2 follows ifu_ext_valid (Phase 163 Stage 1, plan.md).
+        // instr_word is still ADDI_B_D0 (ext_count==1) from SEQ-4c.
         // ----------------------------------------------------------------
-        ifu_ext_valid = 1'b1; #1;
-        if (eu_ext_valid !== 1'b1) begin
-            $display("FAIL SEQ-6a eu_ext_valid not passed");
+        ifu_ext1_valid = 1'b0; ifu_ext_valid = 1'b1; #1;
+        if (eu_ext_valid !== 1'b0) begin
+            $display("FAIL SEQ-6a eu_ext_valid (ext_count=1) should follow ifu_ext1_valid, not ifu_ext_valid");
             fail = fail + 1;
-        end else $display("PASS SEQ-6a eu_ext_valid=1");
+        end else $display("PASS SEQ-6a eu_ext_valid=0 (ext_count=1, ifu_ext1_valid=0)");
+
+        ifu_ext1_valid = 1'b1; ifu_ext_valid = 1'b0; #1;
+        if (eu_ext_valid !== 1'b1) begin
+            $display("FAIL SEQ-6b eu_ext_valid (ext_count=1) not following ifu_ext1_valid");
+            fail = fail + 1;
+        end else $display("PASS SEQ-6b eu_ext_valid=1 (ext_count=1, ifu_ext1_valid=1)");
+
+        instr_word = ADDI_L_D0;  // ext_count==2
+        ifu_ext1_valid = 1'b0; ifu_ext_valid = 1'b1; #1;
+        if (eu_ext_valid !== 1'b1) begin
+            $display("FAIL SEQ-6c eu_ext_valid (ext_count=2) should follow ifu_ext_valid, not ifu_ext1_valid");
+            fail = fail + 1;
+        end else $display("PASS SEQ-6c eu_ext_valid=1 (ext_count=2, ifu_ext_valid=1)");
 
         // ----------------------------------------------------------------
         // SEQ-7: ext_data format conversion

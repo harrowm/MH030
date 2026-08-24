@@ -69,6 +69,7 @@ module pipeline_tb;
     logic [15:0] ifu_q3_word;
     logic [31:0] ifu_ext34_data;
     logic        ifu_instr_valid;
+    logic        ifu_ext1_valid;   // Phase 163 Stage 1 (plan.md)
     logic        ifu_ext_valid;
     logic        ifu_ext4_valid;
     logic        ifu_ext5_valid;
@@ -129,6 +130,7 @@ module pipeline_tb;
         .q3_word      (ifu_q3_word),
         .ext34_data   (ifu_ext34_data),
         .instr_valid  (ifu_instr_valid),
+        .ext1_valid   (ifu_ext1_valid),
         .ext_valid    (ifu_ext_valid),
         .ext4_valid   (ifu_ext4_valid),
         .ext5_valid   (ifu_ext5_valid),
@@ -154,6 +156,7 @@ module pipeline_tb;
         .ifu_q3_word     (ifu_q3_word),
         .ifu_ext34_data  (ifu_ext34_data),
         .instr_valid     (ifu_instr_valid),
+        .ifu_ext1_valid  (ifu_ext1_valid),
         .ifu_ext_valid   (ifu_ext_valid),
         .ifu_ext4_valid  (ifu_ext4_valid),
         .ifu_ext5_valid  (ifu_ext5_valid),
