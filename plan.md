@@ -2046,3 +2046,76 @@ Item 4 closed -- concluded not applicable, with reasoning grounded in
 how the mechanism is actually built (not just re-stated uncertainty).
 Item 5 (broaden the bus-touching survey beyond the current 32
 representative tests) is next.
+
+## Phase 168 (cycle-accuracy-closing plan, item 5 -- 3 new tests, real gaps found, deep investigation deferred)
+
+### Scope
+
+The existing 32-test bus-touching survey only ever exercises RMW
+instructions (NEG/ADDQ/ADD/AND/CLR/TAS/TST/LSL/BCHG/BSET/etc) combined
+with the single simplest EA mode, plain `(An)`. Added 3 new tests
+combining already-tested instruction families with EA modes never
+paired with an RMW op before: `a4_neg_mem_predec` (`neg.l -(a0)`),
+`a4_neg_mem_idx` (`neg.l (4,a0,d1.l)`, brief-format indexed), and
+`a3_addq_postinc` (`addq.l #1,(a0)+`) -- each combining an already-
+proven-accurate instruction (the plain-`(An)` form already measures
+gap=+4, matching the standard baseline) with a fea-table EA mode
+already independently verified accurate in isolation (Stage A1's own
+`a1_fea_anpredec`/`a1_fea_briefidx`/`a1_fea_anpostinc`).
+
+### Result: real, substantial, previously-unknown gaps -- roughly double the plain-(An) case
+
+| test | manual | measured | gap | (An)-only sibling's own gap |
+|---|---|---|---|---|
+| `a4_neg_mem_predec` | 8 | 17 | **+9** | `a4_neg_mem`: +4 |
+| `a3_addq_postinc` | 7 | 17 | **+10** | `a3_addq_mem`: (comparable +4-class) |
+| `a4_neg_mem_idx` | 10 | 22 | **+12** | `a4_neg_mem`: +4 |
+
+Cross-checked each against its own r/p/w bus-cycle-count expectation
+before trusting the gap number at all (same discipline as every prior
+finding this whole investigation used): `a4_neg_mem_predec`/`a3_addq_
+postinc` both PASS their r/p/w check cleanly (1/1/1 as predicted), so
+their own +9/+10 gaps are genuine, not a counting artifact.
+`a4_neg_mem_idx` FAILS its own r/p/w check (measured p=1, manual's own
+row assumes p=2) -- direct investigation strongly suggests this is the
+SAME already-documented, already-understood "opcode+extension-word
+fetched together in one combined longword bus cycle" alignment
+property first found for `a6_andi_to_sr` in item 3 (this instruction
+is also exactly 4 bytes, at the same 4-byte-aligned `target_pc=0x200`)
+-- not a new bug, and not something that would make the RTL *slower*
+if anything (fewer real bus cycles should cost less, not more), so it
+doesn't explain the gap's own magnitude either.
+
+### Deliberately not investigated further this phase
+
+The `-(An)`/`(An)+`/indexed auto-increment RMW forms carrying roughly
+**double** the plain-`(An)` form's own already-fixed dispatch gap is a
+real, substantive, previously-undiscovered finding -- but tracing WHY
+(is it the auto-increment/decrement address computation adding a
+genuine extra dispatch step analogous to `ext_count==2`'s own item-2
+finding? a different, new mechanism specific to the RMW-plus-EA-
+update interaction? something in `setup_mem_incdec()`'s own timing?)
+is open-ended work of comparable scope to items 1-4 individually, not
+a quick trace-and-fix. Given the substantial ground already covered
+this session (items 1-4 fully closed, a real ~25% mean-gap reduction
+on the existing clean register-only survey, multiple genuine RTL bugs
+found and fixed), this is surfaced as a concrete, well-characterized
+finding for the user to prioritize rather than chased unilaterally.
+
+### Results
+
+3 new tests added to the survey (`tests/timing/a4_neg_mem_predec.s`/
+`a4_neg_mem_idx.s`/`a3_addq_postinc.s` + their JSON manifest entries).
+No RTL changed -- `make test` 36/36 sanity check (these new tests
+aren't part of `make test`'s own regression gate, a separate `sim/
+timing`-based mechanism entirely, so zero regression risk either way).
+
+### Status
+
+Item 5 partially closed: broadened the survey and found real,
+substantial, previously-unknown gaps in auto-increment/decrement/
+indexed RMW combinations -- roughly double the already-fixed plain-
+`(An)` case. Deep investigation of the root cause is deferred, flagged
+for the user rather than assumed to be in scope for continuing
+unilaterally. Item 6 (lowest priority -- re-verify Phase 160's own
+S0-S7 pin timing) not started.

@@ -239,5 +239,29 @@
     "expect_p": 1,
     "expect_w": 0,
     "desc": "SINGLE_OP '*TST Mem': TST Mem NCC=2(0/1/0) + fea((An))=3(1/0/0)"
+  },
+  {
+    "name": "a4_neg_mem_predec",
+    "hex": "tests/timing/a4_neg_mem_predec.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "watch_reg": 2,
+    "watch_val": "0xcafebabe",
+    "expect_r": 1,
+    "expect_p": 1,
+    "expect_w": 1,
+    "desc": "SINGLE_OP '*NEG Mem' + -(An): NEG Mem NCC=4(0/1/1) + fea(-(An))=4(1/0/0), MC68030UM.pdf 11-43/11-44/11-26 -- item 5, new EA-mode coverage for an already-tested op"
+  },
+  {
+    "name": "a4_neg_mem_idx",
+    "hex": "tests/timing/a4_neg_mem_idx.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "watch_reg": 2,
+    "watch_val": "0xcafebabe",
+    "expect_r": 1,
+    "expect_p": 2,
+    "expect_w": 1,
+    "desc": "SINGLE_OP '*NEG Mem' + (d8,An,Xn): NEG Mem NCC=4(0/1/1) + fea(d8,An,Xn)=6(1/1/0), MC68030UM.pdf 11-43/11-44/11-27 -- item 5, new EA-mode coverage for an already-tested op"
   }
 ]

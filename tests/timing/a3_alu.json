@@ -293,5 +293,17 @@
     "expect_p": 2,
     "expect_w": 1,
     "desc": "ALU_IMM '**ADDI #(data),Mem': ADDI #(data),Mem NCC=4(0/1/1) + FIEA(#imm.L,(An))=5(1/1/0) -- imm=20 (not 5), same ADDQ quick-immediate-folding avoidance as a3_addi_dn; '**' means FIEA not fea (unlike ADDQ's single '*') -- total is FIEA(1,1,0)+row(0,1,1) = (1,2,1), NOT fea((An))+row as originally (incorrectly) modeled; marker is register-only, same rationale as a3_add_dn_ea"
+  },
+  {
+    "name": "a3_addq_postinc",
+    "hex": "tests/timing/a3_addq_postinc.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "watch_reg": 2,
+    "watch_val": "0xcafebabe",
+    "expect_r": 1,
+    "expect_p": 1,
+    "expect_w": 1,
+    "desc": "ALU_IMM '*ADDQ #(data),Mem' + (An)+: ADDQ #(data),Mem NCC=4(0/1/1) + fea((An)+)=3(1/0/0), MC68030UM.pdf 11-40/41/42/11-26 -- item 5, new EA-mode coverage for an already-tested op"
   }
 ]
