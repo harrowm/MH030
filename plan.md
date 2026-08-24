@@ -448,3 +448,57 @@ documented as not safely fixable via this mechanism (ANDI/ORI/EORI to
 SR/CCR). Stage D_final (re-survey + confirm the mean gap, formally close
 Part D) is next; Part E (bus-touching dispatch-overhead reduction)
 remains untouched.
+
+## Phase 162 Stage D_final
+
+### Context
+
+Closes Part D of the clock-cycle-accuracy plan. Re-surveyed the
+register-only subset (`expect_r==0 && expect_w==0`) separately from the
+bus-touching subset, using the same classification Phase 161 Stage
+B_final originally used to characterize the bidirectional gap.
+
+### Results
+
+Register-only (n=85): min=-1, max=10, mean=2.13 -- was min=-12, mean=1.01
+at Part D's start (Stage D0). Bus-touching (n=32): min=2, max=16,
+mean=9.28 -- **completely unchanged**, exactly as expected since Part D
+never touched anything on the bus-touching side (that's Part E's own,
+separate, not-yet-started scope).
+
+The register-only *minimum* is the number that matters for confirming
+Part D's own actual job (closing the "too fast" side of the gap) is
+done: min=-1, and that one remaining negative entry (ANDI/ORI/EORI to
+SR/CCR, both dest forms) is investigated and documented in Stage D5 as
+genuinely not fixable via this mechanism, not an oversight. Every other
+family with a negative (RTL-too-fast) gap Stage B_final originally
+found -- shift/rotate (register- and immediate-count), bit-field
+register forms, EXG/MOVE-CCR-SR-USP/SWAP, ABCD/SBCD/EXT/Scc/TAS/NBCD/
+dynamic-bit-ops -- is now an exact gap=0 match.
+
+The register-only *mean* rising from 1.01 to 2.13 is expected, not a
+regression: Stage B_final's original 1.01 figure was two large,
+opposite-signed effects (register-only-too-fast families this plan
+existed to fix, netted against register-only-too-slow families it was
+never scoped to touch) accidentally landing close to zero by
+coincidence. With the too-fast side now closed, the mean simply reflects
+what was always there on the too-slow side -- e.g. `a6_nop` (+6),
+`a7_trapv_notrap` (+4), and others already characterized in Phase 161
+Part A as measurement-methodology artifacts (taken-branch/exception-
+dispatch prefetch overcounting, bus-transaction-granularity differences
+in frame pushes) rather than genuine RTL slowness -- explicitly out of
+Part D's own scope, which this plan's Context section framed as
+"register-only 'too fast' instructions" specifically.
+
+### Status
+
+**Part D of the clock-cycle-accuracy plan (Stages D0-D5, D_final) is
+now closed.** Every register-only instruction family with a genuine
+RTL-too-fast timing gap is either an exact match to MC68030UM.pdf
+Section 11's own NCC tables, or investigated and documented as not
+safely fixable via the artificial-internal-stall mechanism (ANDI/ORI/
+EORI to SR/CCR alone). `make test`/`cosim_grp`/`cosim_memind`/Harte all
+confirmed clean throughout every stage, with zero net RTL correctness
+regressions across the whole Part. Part E (bus-touching dispatch-
+overhead reduction, Stage E0's own investigation-first design) remains
+untouched and is the plan's only remaining open work.
