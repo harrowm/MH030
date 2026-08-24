@@ -118,5 +118,13 @@
   "a1_fea_imml": {
     "reason": "gap=+2, r/p/w clean -- smaller-magnitude instance of the same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (MOVE.L #imm32,Dn's own long immediate)",
     "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a6_jmp": {
+    "reason": "gap=+5, r/p/w shows no MISMATCH only because expect_p was pre-adjusted to 3 (not the manual's own row value of 2) -- same speculative-linear-readahead mechanism as a6_bcc_taken/a6_bsr, already documented in this test's own desc field; JMP has no not-taken alternative to prefetch so the divergence is smaller than the conditional-branch cases",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+  },
+  "a6_jsr": {
+    "reason": "same pre-adjusted-expect_p speculative-readahead mechanism as a6_jmp (gap=+7, own desc field already documents measured p=3 not manual's p=2)",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
   }
 }
