@@ -1348,3 +1348,93 @@ MOVEP dynamic-sizing reads) was found and fixed via the mandatory `make
 test` gate before this stage's own verification completed. Track D
 (`biu_cache_if.sv`'s own `CI_DONE` collapse, Stages D0/D1/D2) is next,
 per the plan's own default ordering.
+
+## Phase 163 Track D, Stage D0 -- biu_cache_if.sv's CI_WRITE fast path
+
+Implemented the highest-value, lowest-complexity of `CI_DONE`'s 5 entry
+points first, per the plan's own staging. `CI_WRITE` (write-through/
+write-allocate) has no cache-hit lookup and no `extract_rd()` sizing --
+just a write-through/write-allocate side effect using `dhit_r`/
+`wa_en`/`addr_r`/`wdata_r`/`siz_r`, all already latched and valid by
+the time `sf_ack_rise` fires.
+
+### Implementation
+
+Unlike Track C, this stage doesn't OR a new combinational condition
+onto the old registered ack path -- it removes the extra hop
+altogether. `CI_WRITE`'s own registered next-state logic (`always_ff`)
+now transitions directly `state <= CI_IDLE` on `sf_ack_rise`, instead
+of `state <= CI_DONE`; the output block's own `CI_WRITE` case arm gains
+`if (sf_ack_rise) eu_ack = 1'b1;` (mirroring the fast-path shape, but
+sole-source from the start, learning directly from Track C's own
+double-pulse mistake rather than repeating it). `eu_rdata` stays at its
+default `32'h0` for this path -- correct, since a write never returns
+read data (the old `CI_DONE`-routed path returned whatever stale
+`fill_rdata_r` a write's own logic never touched anyway, so this is a
+strict improvement, not a behavior change any caller could depend on).
+
+This is cleaner than Track C's own final shape specifically because
+`CI_WRITE` doesn't need anything `CI_DONE` itself provides -- unlike
+`biu_sizing_fsm.sv`'s `SS_DONE`, which stayed as a harmless, unused-but-
+present fallback state, `biu_cache_if.sv`'s `CI_DONE` is *shared* by
+the other 4 entry points (`CI_D_MISS`/`CI_D_BURST0`/`CI_D_FILL_3B`/
+`CI_FILL_3`, none touched this stage) and its own case arm
+unconditionally asserts `eu_ack=1` whenever `state==CI_DONE` -- so
+leaving `CI_WRITE`'s own transition pointed at `CI_DONE` while also
+adding the new combinational fast path would have reproduced Track C's
+exact double-pulse bug one cycle later. Skipping `CI_DONE` outright for
+this one entry point is safe because `CI_IDLE`'s own next-state logic
+is purely combinational off live inputs, with no dependency on how it
+was reached -- already proven by `CI_BERR`'s own pre-existing identical
+direct-to-`CI_IDLE` return path. `CI_DONE` itself, and all 4 of its
+other entry points, are completely unchanged.
+
+### A real, measurable win -- and a direct demonstration of the absorption mechanism from Track C
+
+Controlled A/B measurement (`git stash`/`pop`, rebuilding `sim/timing`
+between each) on the full bus-touching survey's own tick-level output,
+run from Track C's own already-fixed baseline: `a6_bsr`/`a6_jsr` both
+improved 66->64 ticks (-2) -- the SAME BSR/JSR redirect that Track B
+found blocked on ack-propagation delay and that Track C's own read-side
+fix left completely unmoved (absorbed by `m68030_ifu.sv`'s own flush/
+redirect sequence reaching an identical absolute tick regardless).
+BSR/JSR push their own return address via a **write**, so stacking a
+second tick off the write-side ack-propagation chain (Track C's
+`biu_sizing_fsm.sv` fix plus this stage's `biu_cache_if.sv` fix
+together) evidently broke through whatever fixed floor absorbed the
+first tick alone -- direct, tick-level confirmation that Track C's own
+"absorption" finding was a genuine but *partial* saturation, not an
+unmovable wall. Every RMW-shaped test (`a3_add_dn_ea`/`a3_and_dn_ea`/
+`a3_addq_mem`/`a3_addi_mem`/`a4_neg_mem`/`a5_lsl_mem`/`a5_bchg_dn_mem`/
+`a5_bset_dn_mem`) and `a7_trap_n`/`a7_illegal` showed **zero** further
+change this stage -- consistent with the same absorption mechanism
+still applying to them, just not yet broken through with only one of
+the two tracks' fixes stacked on the write side for those specific
+shapes (this stage only touches `CI_WRITE`; `CI_D_MISS`, the read-miss
+side those RMW tests' own *read* phase depends on, is Stage D1's own
+scope, not yet touched). `a4_cmpm` (no write phase) is correctly
+unaffected.
+
+As with Track A/C, every improvement here is below `scripts/b_final_
+clock_survey.py`'s own integer-clock reporting granularity.
+
+### Results
+
+`make test` 36/36 (clean on the first attempt -- no bug found this
+stage, unlike Track C), `make cosim_grp` 8/8, `make cosim_memind` 12/12
+(memind17/21/15/24), full 124-suite Harte sweep (mandatory --
+`biu_cache_if.sv` is the single largest, most heavily-relied-upon
+module either track touches: ordinary reads/writes, D-cache hit/miss,
+MMU translation faults, and burst fills all share this one state
+machine) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline.
+
+### Status
+
+Track D Stage D0 closed. A real, measurable (not just sub-granularity)
+tick-level improvement on BSR/JSR, directly demonstrating that Track
+C's own "absorption" finding was partial saturation rather than a hard
+floor. Zero correctness regression, and unlike Track C this stage's
+implementation was correct on the first attempt (informed directly by
+Track C's own double-pulse lesson). Stage D1 (`CI_D_MISS`, the
+read-miss side) is next.

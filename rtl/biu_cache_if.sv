@@ -763,7 +763,31 @@ module biu_cache_if (
                                 valid_d[idx_r][woff_r] <= 1'b0;
                             end
                         end
-                        state <= CI_DONE;
+                        // Bus-pipelining-overlap plan.md, Track D Stage D0:
+                        // goes straight to CI_IDLE, not CI_DONE -- the
+                        // output block's own CI_WRITE arm below now
+                        // presents eu_ack combinationally the same cycle
+                        // sf_ack_rise fires, so CI_DONE's own registered
+                        // eu_ack=1 (unconditional whenever state==CI_DONE)
+                        // would otherwise double-pulse eu_ack one cycle
+                        // later for the identical completion -- the exact
+                        // bug class Track C's own SS_DONE fix hit and had
+                        // to fix by removing the old OR'd term entirely.
+                        // Skipping CI_DONE outright (rather than trying to
+                        // suppress its own eu_ack conditionally) is cleaner
+                        // here since nothing else needs the extra tick: a
+                        // write never returns eu_rdata (defaults to 32'h0,
+                        // same as before -- the old path returned whatever
+                        // stale fill_rdata_r a write's own CI_WRITE logic
+                        // never touched anyway), and CI_IDLE's own
+                        // next-state logic is purely combinational off live
+                        // inputs with no dependency on how it was reached
+                        // (already proven by CI_BERR's own identical direct-
+                        // to-CI_IDLE return). CI_DONE remains completely
+                        // unchanged and still serves every OTHER entry
+                        // point (CI_D_MISS/CI_D_BURST0/CI_D_FILL_3B/
+                        // CI_FILL_3) -- Track D's later stages, not this one.
+                        state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
@@ -891,6 +915,14 @@ module biu_cache_if (
             CI_WRITE: begin
                 sf_rw   = 1'b0;
                 sf_req  = !sf_ack;
+                // Bus-pipelining-overlap plan.md, Track D Stage D0: present
+                // eu_ack the same cycle sf_ack_rise fires, instead of
+                // waiting for the registered CI_WRITE->CI_DONE hop (now
+                // skipped entirely for this path -- see the always_ff
+                // block's own comment on the matching state<=CI_IDLE edit).
+                // eu_rdata stays at its default 32'h0 (correct -- a write
+                // never returns read data).
+                if (sf_ack_rise) eu_ack = 1'b1;
             end
 
             CI_DONE: begin
