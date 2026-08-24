@@ -1222,3 +1222,129 @@ investigated and found not concretely fixable within this session's
 own risk tolerance). Bus-touching mean ratio stands at 1.29x (Stage 3's
 own figure; Track A's own real improvement is below the survey's
 reporting granularity, as documented in Track A's own writeup).
+
+## Phase 163 Track C, Stage C0+C1 -- biu_sizing_fsm.sv's SS_DONE collapse
+
+A follow-up investigation past Track A/B's own close traced the AS-rise-
+to-mem_ack "ack-propagation" path precisely and found 2 of its 4 ticks
+are genuine S6/S7 pin timing (Phase 160's own calibrated protocol, not
+touchable), and 2 are avoidable internal bookkeeping:
+`biu_sizing_fsm.sv`'s own `SS_ACTIVE->SS_DONE` transition and
+`biu_cache_if.sv`'s own transition into `CI_DONE` each cost a genuine
+extra tick before the ack becomes visible to the next layer up, purely
+because each module presents its own ack combinationally off its OWN
+registered terminal state rather than off the triggering condition
+directly. Both were investigated and found structurally safe to
+collapse in principle; a user-approved 2-track plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`) staged the smaller,
+single-site `biu_sizing_fsm.sv` fix (Track C) ahead of the larger,
+5-entry-point `biu_cache_if.sv` fix (Track D).
+
+### Stage C0 -- confirm the fix shape
+
+Re-read the current file (not trusting line numbers from the pre-plan
+investigation). Confirmed `sf_accum`'s own reset in `SS_IDLE` (`if
+(eu_req) sf_accum<=32'h0`) is genuinely sufficient on its own --
+`SS_DONE`'s own reset of the same signal is redundant, not load-bearing
+for anything. Grepped all three files (`biu_sizing_fsm.sv`,
+`biu_cache_if.sv`, `m68030_biu.sv`) for any consumer that reads `sf`/
+`cyc_req`/`eu_ack` in a way that assumes `SS_DONE` is entered as a
+genuine, distinct registered state -- found none; every consumer reacts
+to `eu_ack` itself, not the underlying state name.
+
+### Stage C1 -- implement
+
+Added a combinational fast path: `ss_active_fast_done = (sf==SS_ACTIVE)
+&& cyc_ack_edge && !needs_more(sf_siz, cyc_port_dsack)` (the same
+`!needs_more(...)` guard that already correctly excludes a mid-transfer
+sub-cycle's own ack from prematurely completing a multi-sub-cycle
+dynamic-port-sizing transfer), with `eu_rdata` computed the same way
+`SS_DONE` itself already did (`merge_rdata(sf_accum, cyc_rdata, sf_siz,
+sf_orig_siz, cyc_port_dsack, sf_addr[1:0])` for reads, `32'h0` for
+writes) -- confirmed this only needs `sf_accum` (already registered
+from earlier sub-cycles) and `cyc_rdata` (the current bus data, already
+valid the same cycle), no dependency on the extra registered wait.
+
+**A first attempt OR'd the fast path with the existing registered
+`sf==SS_DONE` term, reasoning the registered path was a harmless
+fallback -- this was wrong, and `make test` caught it.** Since
+`SS_DONE` is reached exactly one cycle after the fast-path condition
+itself fires, OR'ing the two makes `eu_ack` assert on two CONSECUTIVE
+ticks for what should be one completion. `biu_cache_if.sv`'s own
+`sf_ack_rise` edge-detector absorbs a double-pulsed ack harmlessly, but
+`biu_multiop_fsm.sv`'s own `sf_eu_ack` consumer (drives MOVEP/MOVEM
+multi-beat transfers) checks `if (sf_eu_ack)` directly with **no**
+edge-detection -- correct only because `sf_eu_req = (mo_state ==
+MO_CYCING)` stays continuously asserted across an entire multi-byte
+transfer (unlike `biu_cache_if.sv`'s own one-request-per-transaction
+shape) and the old single-tick-wide `SS_DONE` pulse was never wide
+enough to be double-counted. `tb/biu_tb.sv`'s own pre-existing MOVEP
+dynamic-sizing test caught this immediately: `rdata1`/`rdata3`
+mismatched, root-caused to `mo_idx`/`cur_addr` advancing twice per byte
+instead of once. **Fix**: `eu_ack` is now driven SOLELY by the new
+fast-path condition, not OR'd with the old term -- the fast path fully
+supersedes `SS_DONE`'s own old role (every case that would reach
+`SS_DONE` already passed through this identical trigger one cycle
+earlier), so it's the sole source, not a fallback. The registered
+`SS_ACTIVE->SS_DONE->SS_IDLE` state path itself (and `SS_DONE`'s own
+now-redundant-but-harmless `sf_accum` reset) is left completely
+unchanged, still driving `cyc_req`/next-state -- only the `eu_ack`/
+`eu_rdata` OUTPUTS switch to the fast path.
+
+### A real, verified, but unevenly-distributed result
+
+Controlled A/B measurement (`git stash`/`pop` on just `rtl/biu_sizing_
+fsm.sv`, rebuilding `sim/timing` between each) on the full bus-touching
+survey's own tick-level output: `a4_cmpm` improved 46->44 ticks (-2) and
+`a7_trap_n`/`a7_illegal` each improved 88->84 ticks (-4, two independent
+writes each benefiting once). Every other test in the suite (including
+every RMW-shaped test Track A improved, and `a6_bsr`/`a6_jsr`) showed
+**zero** change.
+
+Investigated the zero-change cases directly via joint hierarchical
+tracing (`cg_state`, `cyc_ack_edge`, `sf_state`, `sf_eu_ack`,
+`sf_ack_rise`, `ci_state`, `top_eu_ack` for the RMW cases; `cg_state`,
+`top_eu_ack`, `exc_active`, `mem_ack`, `ex_valid`, `ex_is_bsr`,
+`branch_taken`, `pc_wr_en` for BSR) rather than assuming the fix simply
+didn't apply. Confirmed the fix genuinely works exactly as designed in
+both cases -- ack-propagation now takes 3 ticks instead of 4 from
+AS-rise, and BSR's own `pc_wr_en` now fires at tick 115 instead of 116
+-- but the 1-tick gain is fully **absorbed** downstream by a different
+bottleneck outside this stage's own scope: for RMW cases,
+`biu_cache_if.sv`'s own remaining `CI_IDLE->CI_WRITE` registration hop
+and `biu_sizing_fsm.sv`'s own `SS_IDLE->SS_ACTIVE` hand-off (both
+unchanged by this stage) consume the freed tick; for BSR/JSR,
+`m68030_ifu.sv`'s own flush/redirect sequence reaches the identical
+absolute tick (120) regardless of whether `pc_wr_en` arrived at 115 or
+116. This is the same "absorption" phenomenon already documented
+elsewhere in this project's history (e.g. Phase 125's `WS-MOVEM`
+finding) -- a genuine, verified partial fix whose visibility depends on
+whether anything downstream is already waiting on exactly this signal
+with nothing else to do. `a4_cmpm` (no write phase to bottleneck on)
+and `a7_trap_n`/`a7_illegal` (a multi-word exception-frame push with
+multiple independent writes, each benefiting) show the gain directly
+because nothing downstream absorbs it for them.
+
+As with Track A, every improvement here is below `scripts/b_final_
+clock_survey.py`'s own integer-clock (`ticks/4`) reporting granularity
+and does not show up in its coarse output.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12
+(memind17/21/15/24), full 124-suite Harte sweep (mandatory --
+`biu_sizing_fsm.sv` sits on every single EU bus transaction of any
+kind, arguably the single most centrally-exercised file this whole
+investigation has touched) -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline.
+
+### Status
+
+Track C (Stages C0+C1) closed. Real, verified, sub-clock-granularity
+improvement on `a4_cmpm`/`a7_trap_n`/`a7_illegal`; zero net change (but
+confirmed-genuine, confirmed-absorbed) on RMW-shaped and BSR/JSR tests;
+zero correctness regression. A real bug (double-ack-pulse corrupting
+MOVEP dynamic-sizing reads) was found and fixed via the mandatory `make
+test` gate before this stage's own verification completed. Track D
+(`biu_cache_if.sv`'s own `CI_DONE` collapse, Stages D0/D1/D2) is next,
+per the plan's own default ordering.

@@ -419,8 +419,46 @@ module biu_sizing_fsm (
     // -----------------------------------------------------------------------
     // Outputs to EU
     // -----------------------------------------------------------------------
-    assign eu_ack   = (sf == SS_DONE);
-    assign eu_rdata = sf_rdata_r;
+    // Track C (bus-pipelining-overlap plan.md, ack-propagation collapse):
+    // SS_DONE exists purely to present a clean, 1-tick eu_ack/eu_rdata
+    // pulse to biu_cache_if.sv one cycle after the real completion --
+    // but the underlying data (merge_rdata(sf_accum, cyc_rdata, ...))
+    // only ever needs sf_accum (already registered from earlier sub-
+    // cycles) and cyc_rdata (the current bus data, already valid this
+    // same cycle), so the SS_DONE-only wait is avoidable overhead, not
+    // a real dependency. Fires only on the FINAL sub-cycle of a
+    // transfer (!needs_more(...)) -- an intermediate sub-cycle's own
+    // cyc_ack_edge must still route through SS_ACTIVE staying SS_ACTIVE,
+    // unchanged. The registered SS_ACTIVE->SS_DONE->SS_IDLE state path
+    // (and SS_DONE's own now-redundant-but-harmless sf_accum reset) is
+    // left completely unchanged, still driving cyc_req/next-state --
+    // only the eu_ack/eu_rdata OUTPUTS switch to the fast path.
+    //
+    // Deliberately NOT OR'd with the old `sf==SS_DONE` term: a first
+    // attempt did OR them, reasoning the registered path was a harmless
+    // fallback -- but since SS_DONE is reached exactly one cycle after
+    // this same fast-path condition fires, OR'ing the two makes eu_ack
+    // assert on two CONSECUTIVE ticks for one completion. biu_cache_if.
+    // sv's own sf_ack_rise edge-detector absorbs that harmlessly, but
+    // biu_multiop_fsm.sv's own sf_eu_ack consumer is level-sensitive
+    // (no edge-detector -- its own sf_eu_req stays asserted continuously
+    // across an entire MOVEP/MOVEM transfer, unlike biu_cache_if.sv's
+    // one-request-per-transaction shape) and double-counted the second
+    // tick as a second byte's own completion, corrupting rdata1/rdata3
+    // in tb/biu_tb.sv's own MOVEP dynamic-sizing tests -- caught by the
+    // mandatory `make test` gate, not reasoned out in advance. The fast
+    // path fully supersedes SS_DONE's own old role (every case that
+    // would reach SS_DONE already passed through this identical trigger
+    // one cycle earlier), so it's the sole source now, not a fallback.
+    wire ss_active_fast_done = (sf == SS_ACTIVE) && cyc_ack_edge &&
+                               !needs_more(sf_siz, cyc_port_dsack);
+    assign eu_ack   = ss_active_fast_done;
+    assign eu_rdata = ss_active_fast_done
+                     ? (sf_rw ? merge_rdata(sf_accum, cyc_rdata, sf_siz,
+                                             sf_orig_siz, cyc_port_dsack,
+                                             sf_addr[1:0])
+                              : 32'h0)
+                     : sf_rdata_r;
 
 endmodule
 
