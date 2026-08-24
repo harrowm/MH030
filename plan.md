@@ -1951,3 +1951,98 @@ fixed; CHK documented as a genuine, deliberately-declined fix). Item
 `a7_trapv_notrap`/`a7_bkpt`) is left as documented follow-up, not
 picked up this phase. Item 4 (`ST_IDLE` quantization compressibility)
 is next.
+
+## Phase 167 (cycle-accuracy-closing plan, item 4 -- investigation only, no RTL change)
+
+### The question
+
+Item 2's own trace found `biu_cycle_gen`'s `ST_IDLE` state holds for
+up to 2 extra ticks after a real request (`eu_req`/`ifu_req`) becomes
+ready, before `state` actually advances to `ST_READ_S0`/`ST_WRITE_S0`
+-- the same 2-tick quantization the closed bus-pipelining-overlap
+plan's own Track D Stage D1 finding already flagged for RMW dispatch.
+The question this item set out to answer: is that quantization itself
+avoidable, the same way Track A/C/D found and removed an *extra
+registered hop* (`CI_WRITE`/`CI_D_MISS`->`CI_DONE`, `SS_ACTIVE`->
+`SS_DONE`) sitting on top of the real bus timing in `biu_cache_if.sv`/
+`biu_sizing_fsm.sv`?
+
+### Read `ST_IDLE`'s own code directly before reasoning about it
+
+`biu_cycle_gen.sv`'s `state<=state_nxt` (the ONE place the whole
+module's state register actually updates) is gated on a single,
+uniform condition: `else if (state_adv) state <= state_nxt;`
+(`state_adv = phase_r[0]`, firing every 2 ticks -- the exact mechanism
+Phase 160 established to correctly pace every REAL S-state pair to
+match actual 68030 silicon, "S0+S1 share one real clock" etc,
+confirmed against MC68030UM.pdf Figures 7-64/7-65). `ST_IDLE`'s own
+`state_nxt` computation (the big `if/else if` chain selecting which
+bus-cycle type to launch) is **purely combinational, with no extra
+registered state of its own** -- it reacts live to `eu_req`/`ifu_req`/
+etc every single tick. There is no `ST_IDLE_PENDING` or equivalent
+intermediate state the way `CI_WRITE`/`CI_D_MISS`/`SS_ACTIVE` each had
+their own separate `CI_DONE`/`SS_DONE` hop layered on top.
+
+### The key structural difference from Track A/C/D's own fixes
+
+Every prior fix in this whole investigation (Track A's `CI_IDLE`,
+Track C's `SS_ACTIVE`, Track D's `CI_D_MISS`/`CI_WRITE`/etc) worked by
+adding a **combinational OUTPUT fast path** that let the module
+present its own ack/request one cycle *earlier* than its own
+registered *next* state would have, while leaving the underlying
+state register's own transition timing completely untouched. None of
+them ever needed to change *when the state register itself advances*
+-- they only changed *what gets presented combinationally while
+waiting for* that already-scheduled advance.
+
+`ST_IDLE`'s exit has no equivalent structure to exploit this pattern
+on: **the `state_adv`-gated transition INTO `ST_READ_S0`/`ST_WRITE_S0`
+already IS the real S0 launch itself** -- there's no separate,
+removable intermediate hop sitting between "request ready" and "S0
+begins." Bypassing `state_adv`'s own gating specifically for this one
+transition (while leaving it in place, unchanged, for every other
+S-state-pair transition within the resulting bus cycle, including the
+immediately-following S0->S1) would be internally inconsistent with
+the uniform synchronous discipline Phase 160 already carefully
+established and extensively verified project-wide -- it would mean "a
+new bus cycle's own S0 can begin at any tick" while "every other named
+S-state pair transition within that same cycle can only advance at a
+`state_adv` boundary," two different rules for what is, physically,
+the exact same kind of clock-boundary-aligned transition.
+
+### Corroborating evidence, not just structural reasoning
+
+The SAME 2-tick quantization was independently observed via two
+completely different request paths -- Track D Stage D1's own EU-driven
+RMW write dispatch, and item 2's own IFU-driven fetch dispatch trace
+-- landing on the identical mechanism both times. That consistency
+across two structurally unrelated call sites is exactly what's
+expected if `state_adv`'s own cadence is a genuine, fixed hardware-
+alignment property (the same half-clock granularity governing every
+other S-state pair), rather than a coincidental implementation
+artifact that happened to reproduce itself twice.
+
+### Decision
+
+No RTL change. `ST_IDLE`'s own quantization is concluded to be
+correct, hardware-matching behavior -- not avoidable dispatch overhead
+comparable to what Tracks A/C/D fixed -- based on a genuine structural
+argument (no extra hop exists to bypass; bypassing `state_adv` itself
+for just this one transition would break the uniform synchronous
+discipline the whole FSM, and Phase 160's own already-validated
+derivation, depend on), not merely "investigated and gave up." Given
+`biu_cycle_gen.sv` is the single most centrally-tested, highest-
+blast-radius module in the whole project, a speculative change here
+without this level of confidence would be irresponsible regardless of
+potential upside.
+
+### Results
+
+No RTL changed; `make test` 36/36 sanity check.
+
+### Status
+
+Item 4 closed -- concluded not applicable, with reasoning grounded in
+how the mechanism is actually built (not just re-stated uncertainty).
+Item 5 (broaden the bus-touching survey beyond the current 32
+representative tests) is next.
