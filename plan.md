@@ -1644,3 +1644,75 @@ land within the same downstream `ST_IDLE` quantization window either
 way. Zero correctness regression at any stage, confirmed via `make
 test`/`cosim_grp`/`cosim_memind`/a full 124-suite Harte sweep after
 every single RTL-touching stage in this plan.
+
+## Phase 164 (cycle-accuracy-closing plan, item 1) -- register-only "too fast" regressions
+
+User asked how far this RTL is from cycle-perfect real-68030 timing and
+wanted the gap closed. Re-ran `scripts/b_final_clock_survey.py` against
+current RTL first to get real numbers rather than rely on memory, and
+found the register-only comparison had a real measurement flaw: about
+half of those 85 tests need a trailing "marker" instruction (target
+writes `An`/`SR`/`CCR`/nothing watchable) whose own real cost was
+silently folding into the reported gap -- making instructions like NOP
+look ~4x slower than real silicon when the actual culprit was the
+marker's own unaccounted cost. Split into 56 "clean" tests (target's
+own destination IS the watched register, genuinely isolated) vs 29
+"marker-needed" tests (not a clean per-instruction signal, item 3's own
+scope): clean set gap min=-5, max=+4, mean=+0.41 clocks -- essentially
+exact already. A small number of genuine negative ("too fast") outliers
+remained: `a4_unpk_dn` (-5), `a2_movec_read`/`a4_pack_dn`/
+`a5_bchg_imm_dn` (-3 each), `a1_fea_immb`/`a1_fea_immw` (-1 each, same
+underlying MOVE.B/W #(data),Dn instruction). Traced these to Phase
+163 Stage 1's own documented-but-never-revisited side effect (that
+stage's `ext_valid` fix sped up several `ext_count==1` instructions'
+shared baseline as a side effect, and its own writeup explicitly
+flagged these as "newly-negative... left for a possible future
+extension of Part D's own work" -- never revisited until now).
+
+### Implementation
+
+Five new whitelist entries in `rtl/eu_seq.sv`'s existing
+`dec_internal_stall_ticks_fixed` mechanism (Phase 162 Part D's own
+established, purely-additive artificial-stall infrastructure -- no new
+mechanism needed): **BCHG/BCLR/BSET #(data),Dn** (static bit-number,
+register dest; `scripts/timing_tables.py`'s own `BIT_MANIP` table gives
+all three an identical NCC=6, matching the already-whitelisted dynamic-
+register form's own uniform treatment; `dec_writes_reg` naturally
+excludes BTST, which has no clean-list data point yet); **MOVEC Cr,Rn**
+(read direction, decoded via a fixed opcode match `16'h4E7A` -- the
+decode block's own comment already notes this direction has no
+dedicated `dec_is_X` flag, "Rc→Rn uses dec_use_imm", so re-derives the
+raw opcode check directly, same precedent as every other fixed-encoding
+whitelist entry); **PACK/UNPK Dy,Dx,#(data)** (register form only,
+`dec_is_pack_mem=0` excludes the memory `-(Ay),-(Ax)` form; BCD_EXT
+table gives PACK NCC=6, UNPK NCC=8, matching the measured -3/-5 gaps
+exactly); **MOVE.B/W #(data),Dn** (re-derives the exact decode
+condition from the MOVE/MOVEA block using only module-level continuous-
+assign fields -- `f_move_sz!=00` alone already implies `f_group∈{1,3}`
+byte/word by its own definition, but `f_move_dst_mode`/`f_mode`/`f_reg`
+are still required to avoid colliding with an unrelated opcode sharing
+the same bit positions outside groups 1/2/3; the long form
+`MOVE.L #(data),Dn` has no clean-list data point -- `a1_fea_imml` is a
+POSITIVE +2 gap, a different, not-yet-investigated mechanism, item 2's
+own scope -- and is deliberately excluded).
+
+### Verification
+
+`make test` 36/36 (clean on the first attempt), `make cosim_grp` 8/8,
+`make cosim_memind` 12/12, full 124-suite Harte sweep (mandatory --
+MOVEC/PACK/UNPK/BCHG/MOVE are all real, heavily-Harte-covered
+instructions) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly),
+SKIP 281221, TIMEOUT 0, bit-identical to baseline. Re-ran the survey
+and diffed line-by-line against the pre-fix run: **exactly the 6
+targeted tests changed, all to gap=0 exactly**, zero side effects on
+any of the other 111 tests -- `a1_fea_immb`/`a1_fea_immw`/
+`a2_movec_read`/`a4_pack_dn`/`a4_unpk_dn`/`a5_bchg_imm_dn` all now
+measure exactly their manual NCC value.
+
+### Status
+
+Closes item 1 of the cycle-accuracy-closing plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`). Every clean-list
+register-only negative ("too fast") gap identified by the fresh survey
+is now fixed. Item 2 (the ADDI/ANDI/EORI/ORI/SUBI-to-Dn +4 gap cluster)
+is next.

@@ -6839,6 +6839,56 @@ module eu_seq (
         if (dec_valid && dec_unit == UNIT_BIT && dec_bit_from_reg &&
             !dec_is_mem_rd && dec_writes_reg)
             dec_internal_stall_ticks_fixed = 8'd12; // dynamic BCHG/BCLR/BSET Dn,Dn NCC=6-3clk=3clk=12t
+        // Cycle-accuracy-closing plan.md, item 1: register-only "too fast"
+        // regressions found via a fresh clock survey after Phase 163 Stage
+        // 1's own ext_valid fix (documented there as "left for a possible
+        // future extension of Part D's own work," never revisited until
+        // now). All 5 confirmed via the survey's own "clean" (target's
+        // destination IS the watched register, no marker-cost inflation)
+        // subset -- a genuinely isolated, apples-to-apples measurement.
+        //
+        // BCHG/BCLR/BSET #(data),Dn (static bit-number, register dest):
+        // scripts/timing_tables.py's own BIT_MANIP table gives all three an
+        // identical NCC=6, matching the dynamic-register form's own already-
+        // whitelisted uniform treatment just above -- `dec_writes_reg`
+        // naturally excludes BTST (which doesn't write) the same way the
+        // dynamic form's own entry does; BTST #(data),Dn has no clean-list
+        // data point yet and is deliberately left untouched.
+        if (dec_valid && dec_unit == UNIT_BIT && !dec_bit_from_reg &&
+            !dec_is_mem_rd && dec_writes_reg)
+            dec_internal_stall_ticks_fixed = 8'd12; // BCHG/BCLR/BSET #(data),Dn NCC=6-3clk=3clk=12t
+        // MOVEC Cr,Rn (read direction) -- decoded via a fixed opcode match
+        // (16'h4E7A, mirrors the decode block's own comment: "Rc→Rn uses
+        // dec_use_imm", so no dedicated dec_is_X flag exists for this
+        // direction the way dec_is_movec/dec_movec_to_ctrl covers the write
+        // direction) -- same re-derive-the-raw-opcode-check precedent as
+        // every fixed-encoding entry elsewhere in this project.
+        if (dec_valid && instr_word == 16'h4E7A)
+            dec_internal_stall_ticks_fixed = 8'd12; // MOVEC Cr,Rn NCC=6-3clk=3clk=12t
+        // PACK/UNPK Dy,Dx,#(data) -- register form only (dec_is_pack_mem=0
+        // is the memory -(Ay),-(Ax) form, already excluded); BCD_EXT table
+        // gives PACK NCC=6, UNPK NCC=8, matching this project's own
+        // separately-measured -3/-5 clean-list gaps exactly.
+        if (dec_valid && dec_is_pack && !dec_is_pack_mem)
+            dec_internal_stall_ticks_fixed = 8'd12; // PACK Dy,Dx,#(data) NCC=6-3clk=3clk=12t
+        if (dec_valid && dec_is_unpk && !dec_is_pack_mem)
+            dec_internal_stall_ticks_fixed = 8'd20; // UNPK Dy,Dx,#(data) NCC=8-3clk=5clk=20t
+        // MOVE.B/W #(data),Dn -- re-derives the exact decode condition from
+        // the MOVE/MOVEA block above (f_group∈{1,3} byte/word, dst=Dn,
+        // f_mode=111/f_reg=100 immediate source) using only module-level
+        // continuous-assign fields, same precedent as MOVEC's own raw-
+        // opcode check. f_move_sz!=00 alone already implies f_group∈{1,3}
+        // (its own definition maps every other group to 2'b00/long) so no
+        // separate f_group check is needed, but f_move_dst_mode/f_mode/
+        // f_reg are still required to avoid colliding with an unrelated
+        // opcode that happens to share these same bit positions outside
+        // groups 1/2/3. The long form (MOVE.L #(data),Dn, f_move_sz==00)
+        // has no clean-list data point (a1_fea_imml is a POSITIVE +2 gap,
+        // a different, not-yet-investigated mechanism -- item 2) and is
+        // deliberately excluded here.
+        if (dec_valid && f_move_sz != 2'b00 && f_move_dst_mode == 3'b000 &&
+            f_mode == 3'b111 && f_reg == 3'b100)
+            dec_internal_stall_ticks_fixed = 8'd4; // MOVE.B/W #(data),Dn NCC=4-3clk=1clk=4t
         // ANDI/ORI/EORI #imm,SR or CCR (manual NCC=14, own natural
         // baseline measures 13 -- gap=-1) were investigated but are
         // DELIBERATELY NOT whitelisted here. A +4-tick entry gated on
