@@ -785,3 +785,96 @@ that's Stage 2's own scope.
 
 Stage 1 closed. Stage 2 (investigate the RMW read-to-write dispatch
 gap, the second mechanism Stage 0 found) is next.
+
+## Phase 163 Stage 2
+
+### Context
+
+Investigation-only stage (no RTL change), following on from Stage 0's
+second finding: for RMW-shaped instructions, an unrelated IFU prefetch
+was observed running in the gap between the RMW's own read completing
+and its own write starting, despite the EU's own `mem_req` staying
+continuously asserted and despite `biu_arbiter.sv`'s documented EU>IFU
+priority.
+
+### Root cause, fully confirmed via direct signal trace
+
+Traced `bus_idle`/`mmu_req`/`eu_req`/`ifu_req`/`grant_eu`/`grant_ifu` at
+`biu_arbiter.sv`'s own port boundary (temporary `$display`, removed
+before committing) against `a3_add_dn_ea` (`ADD.L D1,(A0)`). Found the
+precise mechanism:
+
+`rtl/biu_sizing_fsm.sv` sits between the EU and `biu_cycle_gen`'s own
+EU port, and `biu_arbiter.sv`'s own `eu_req` input is fed from this
+module's `cyc_req` output (`m68030_biu.sv`: `.eu_req (sf_cyc_req |
+dc_burst_req)`) -- NOT the EU's own raw request directly. The sizing
+FSM's 3-state machine (`SS_IDLE -> SS_ACTIVE -> SS_DONE -> SS_IDLE`)
+unconditionally drives `cyc_req = 1'b0` for exactly one tick while in
+`SS_DONE` (a one-tick "ack pulse" state signaling completion to the
+EU) -- regardless of whether the EU's own raw `eu_req` is already
+asserted again for a follow-up transaction (e.g. an RMW's own write
+phase, which needs the bus immediately after the read with zero real
+gap). `biu_arbiter.sv`'s own grant only re-evaluates on the exact tick
+`bus_idle` first re-asserts (its own "only reassign when bus is idle"
+rule) -- and that tick lands precisely on `biu_sizing_fsm`'s own
+`SS_DONE` tick, the ONE moment `eu_req` (as the arbiter sees it) reads
+0 even though the EU's own true intent never wavered. With `ifu_req=1`
+at that same moment (the IFU is essentially always trying to prefetch
+ahead), the arbiter -- correctly applying its own EU>IFU priority to
+what it can actually see -- grants IFU instead, and since grants are
+locked until the NEXT `bus_idle` window (an entire bus cycle later),
+the EU's own write has to wait for the IFU's whole prefetch to finish
+first. Confirmed directly in the trace: `eu_req` reads 1 for the whole
+read, drops to 0 for exactly one tick coinciding with `bus_idle=1`,
+`grant_ifu` flips to 1 that same tick, and `eu_req` reads 1 again the
+very next tick -- one tick too late.
+
+This answers all three of Stage 0's own open questions: (1) `eu_req` is
+NOT already visible to the arbiter at the critical edge -- it reads 0
+at exactly that tick, a `biu_sizing_fsm`-induced artifact, not a raw
+EU-side gap; (2) this isn't about the EU's write-phase readiness at
+all -- the EU's own raw request (`mem_req` in `eu_seq.sv`) is already
+continuously asserted throughout, confirmed in Stage 0's own trace; the
+gap is entirely introduced one level up, in the sizing FSM's own
+ack-signaling protocol; (3) since `biu_sizing_fsm.sv` is a shared,
+generic module used for every EU bus transaction (not RMW-specific),
+this exact one-tick gap happens after every EU bus cycle completes --
+it only *matters* (creates contention) when the EU wants another cycle
+immediately with zero real gap, which is specifically the RMW/multi-
+beat-FSM shape (RMW read-then-write, MOVEM/MOVEP/CAS2's own multi-beat
+sequences), not ordinary single-cycle reads/writes.
+
+### Proposed fix shape (for Stage 3, not implemented this stage)
+
+`SS_DONE`'s own `cyc_req=1'b0` should not suppress the underlying
+request when the EU genuinely wants to continue -- but a naive "just
+keep cyc_req=eu_req during SS_DONE" fix needs to first confirm whether
+`eu_addr`/`eu_wdata`/`eu_rw` (the raw EU-side signals `biu_sizing_fsm`
+would present to `biu_cycle_gen` on that same tick) already reflect the
+FOLLOW-UP transaction's own correct parameters at that point, or still
+reflect the just-completed transaction's stale ones -- `eu_seq.sv`'s own
+RMW-phase-transition register (e.g. `mem_rmw_run_r`) may only update
+the cycle *after* `eu_ack` (`sf==SS_DONE`) is observed, in which case
+presenting `cyc_req=1` with still-stale `eu_addr`/`eu_wdata` during
+`SS_DONE` itself would start a bus cycle with the WRONG address/data --
+a correctness bug, not just a performance one. Stage 3 must trace this
+specific timing relationship (does `eu_seq.sv`'s own write-phase output
+become valid combinationally on the SAME cycle as `eu_ack`, or only the
+cycle after) before choosing between: (a) keep `cyc_req=eu_req` through
+SS_DONE if the EU's own follow-up parameters are already valid that
+same cycle, or (b) a different mechanism entirely -- e.g. have
+`biu_arbiter.sv` itself not immediately re-evaluate on `bus_idle` if
+the currently-granted requester's own *raw* (pre-sizing-FSM) request is
+still asserted, giving the sizing FSM's own one-tick pulse nowhere to
+cause harm regardless of its own internal signal shape.
+
+### Results
+
+No RTL changed (temporary trace only, removed before committing).
+`make test` 36/36 sanity check.
+
+### Status
+
+Stage 2 closed -- a confirmed, precise, verified root cause with a
+credible fix-shape candidate (pending one more targeted trace to choose
+between the two options above). Stage 3 (implement the fix) is next.
