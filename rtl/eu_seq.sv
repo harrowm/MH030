@@ -6929,22 +6929,18 @@ module eu_seq (
         // data point instead of a marker-inflated one.
         if (dec_valid && dec_is_bf && dec_bf_reg_ea && dec_bf_op == 3'b000)
             dec_internal_stall_ticks_fixed = 8'd20; // BFTST Dn NCC=8-3clk=5clk=20t
-        // CHK Dn,Dn (no exception): investigated, DELIBERATELY NOT
-        // whitelisted. `chk_trap` (below) is a pure combinational
-        // condition on `ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_
-        // below_w||chk_above_w)` with no one-shot/edge guard -- the
-        // register-direct CHK path had never held `ex_valid` for more
-        // than 1 cycle before, so nothing needed one. A first attempt at
-        // this whitelist entry held `ex_valid` for 5 extra clocks via the
-        // normal ex_internal_stall mechanism, and `chk_trap` combinationally
-        // re-fired on every one of those ticks -- caught by `make test`'s
-        // own exception_tb.sv (CHK-02/03/06: chk_trap_cnt incremented by
-        // 11 instead of 1). Fixing this for real needs chk_trap itself
-        // made edge-triggered (a genuine, separate RTL fix, not attempted
-        // here) rather than papering over it with a narrower stall
-        // condition. Left as a documented, un-whitelisted gap -- same
-        // "not safely fixable within this mechanism" shape as the
-        // already-documented ANDI-to-SR/CCR case just below.
+        // CHK Dn,Dn (no exception): re-enabled (Cycle-accuracy-closing
+        // plan.md, Stage 2) now that `chk_trap` (below) is edge-triggered
+        // via `chk_trap_fired_r` -- see that signal's own comment for the
+        // full history. A first attempt at this same whitelist entry
+        // (Phase 166) found `chk_trap`'s own pure-combinational condition
+        // re-firing on every tick of the artificial stall (`chk_trap_cnt`
+        // incremented 11x instead of 1x); with the one-shot latch in
+        // place this is now safe. !dec_use_imm excludes the separate CHK
+        // #(data),Dn form (untested, different baseline); !dec_is_mem_rd
+        // excludes CHK's own memory-source forms.
+        if (dec_valid && dec_is_chk && !dec_use_imm && !dec_is_mem_rd)
+            dec_internal_stall_ticks_fixed = 8'd20; // CHK Dn,Dn NCC=8-3clk=5clk=20t
         // LEA (An),An -- f_mode==3'b010 is LEA's own plain register-
         // indirect form specifically (the ONE-word, no-extension-word
         // shape matching this whole whitelist's shared baseline); LEA's
@@ -8715,6 +8711,18 @@ module eu_seq (
     // corrupts the result (Musashi: sint src = MAKE_INT_16(DX)).
     logic [31:0] chk_val_w, chk_ub_w, chk_val_ext_w, chk_ub_ext_w;
     logic        chk_below_w, chk_above_w;
+    // Cycle-accuracy-closing plan.md, Stage 2: chk_trap_raw/chk_trap_
+    // fired_r declared here (near chk_below_w/chk_above_w, which the
+    // chk_trap_raw assign further down depends on) so the always_ff block
+    // below can reference chk_trap_raw without a forward-declaration issue
+    // -- this project has hit that exact Icarus limitation many times
+    // before with mid-file continuous assigns.
+    logic        chk_trap_raw, chk_trap_fired_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)             chk_trap_fired_r <= 1'b0;
+        else if (!ex_valid)     chk_trap_fired_r <= 1'b0;
+        else if (chk_trap_raw)  chk_trap_fired_r <= 1'b1;
+    end
     assign chk_val_w     = rd_b_data;
     assign chk_ub_w      = ex_use_imm ? ex_imm : rd_a_data;
     assign chk_val_ext_w = ex_chk_word ? {{16{chk_val_w[15]}}, chk_val_w[15:0]} : chk_val_w;
@@ -9785,10 +9793,26 @@ module eu_seq (
     assign div_trap = (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src && md_div_by_zero)
                     || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && mem_ack && md_div_by_zero);
     // CHK: trap on reg/imm comparison, memory-source ack, or CHK2 second-read ack.
-    assign chk_trap = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
-                   || (ex_valid && ex_is_chk && ex_is_mem_rd && mem_ack &&
-                       (chk_mem_below_w || chk_mem_above_w))
-                   || (cmp2_run_r && mem_ack && cmp2_is_chk2_r && cmp2_c_w);
+    assign chk_trap_raw = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
+                        || (ex_valid && ex_is_chk && ex_is_mem_rd && mem_ack &&
+                            (chk_mem_below_w || chk_mem_above_w))
+                        || (cmp2_run_r && mem_ack && cmp2_is_chk2_r && cmp2_c_w);
+    // Cycle-accuracy-closing plan.md, Stage 2: chk_trap_fired_r makes this
+    // edge-triggered -- fires at most once per instruction occupying EX,
+    // not on every cycle its own raw condition stays true. Phase 166's own
+    // attempted CHK Dn,Dn artificial-stall whitelist entry found this the
+    // hard way: the register-direct branch above is a pure combinational
+    // condition on ex_valid, which the ex_internal_stall mechanism holds
+    // high for multiple extra cycles once an instruction gets a stall
+    // entry -- chk_trap re-fired on every one of those ticks (chk_trap_cnt
+    // incremented 11x instead of 1x in tb/exception_tb.sv's own CHK-02/03/
+    // 06 checks), never a problem before since the register-direct CHK
+    // path had never held ex_valid for more than 1 cycle. chk_trap_fired_r
+    // (declared/updated near ex_valid's own EX-latch block) clears whenever
+    // ex_valid drops (the instruction retires or gets flushed, ready for
+    // the next one) and latches the instant chk_trap_raw first fires,
+    // suppressing every subsequent tick of the same instance.
+    assign chk_trap = chk_trap_raw && !chk_trap_fired_r;
 
     // -----------------------------------------------------------------------
     // BRA/Bcc branch — decided at decode time once CCR hazards are clear.

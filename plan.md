@@ -2239,3 +2239,63 @@ edge-triggering) or Stage 3 (Bcc/DBcc/JMP clean measurement), per the
 plan's own ordering -- the newly-surfaced `a6_bcc_taken`/`a6_dbcc_
 false_notexp`/`a6_bsr` p-count findings are directly relevant context
 for Stage 3's own work.
+
+## Phase 170 (cycle-accuracy closing plan v2, Stage 2) -- CHK chk_trap edge-triggering + re-add the CHK Dn,Dn stall
+
+User asked to work through `scripts/timing_benchmark.py`'s own report
+and close gaps one at a time: fix, verify, commit, push, repeat.
+Started with `a6_chk_dn_dn_noexc` (gap=-5), already fully diagnosed in
+Phase 166 -- `chk_trap` (in `eu_seq.sv`) is a pure combinational
+condition on `ex_valid && ex_is_chk && ...` with no one-shot/edge
+guard, so holding `ex_valid` for extra cycles via the artificial-stall
+mechanism made it re-fire on every one of those ticks.
+
+### Fix
+
+New `chk_trap_raw` (the exact old combinational expression, renamed)
+plus a one-shot latch `chk_trap_fired_r`: clears whenever `ex_valid`
+drops (instruction retires/flushes, ready for the next CHK), sets the
+instant `chk_trap_raw` first fires, suppressing every later tick of
+the same instance. `chk_trap = chk_trap_raw && !chk_trap_fired_r`.
+Hit the same Icarus forward-reference issue this project has hit
+repeatedly before (an `always_ff` block referencing a `wire ... =`
+assign declared later in the file) -- fixed by declaring both signals
+up front (near `chk_below_w`/`chk_above_w`, which `chk_trap_raw`
+itself depends on) and moving the `always_ff` block there too, with
+the `assign`s themselves staying at their original, later textual
+position.
+
+Verified the edge-triggering fix alone (before touching the stall
+whitelist) directly against `tb/exception_tb.sv`'s own CHK-02/03/06
+checks -- 48/48 clean. Then re-added the `CHK Dn,Dn` whitelist entry
+to `dec_internal_stall_ticks_fixed` (manual=8, natural=3, `+20` ticks)
+that Phase 166 had reverted.
+
+### A second real bug found immediately by the full regression gate
+
+`make test` caught a new failure with the stall entry back in:
+CHK-03/06's own "N=1" checks read a stale `0` instead of the expected
+`1`. Traced to `tb/exception_tb.sv`'s own `run_instr()` task -- a fixed
+`repeat(12)` post-`instr_ack` settle margin, predating CHK's own new
++20-tick artificial stall and too tight to see the trap's own SR
+update land by the time the check runs. Exact same class of stale-
+margin bug as Stage 1's own `ea_modes_tb.sv` fix (Phase 166) -- widened
+to `repeat(30)`.
+
+### Verification
+
+`make test` 36/36 (after both fixes), `make cosim_grp` 8/8, `make
+cosim_memind` 12/12, full 124-suite Harte sweep (mandatory -- touches
+the shared exception-dispatch path) -- PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to
+baseline. `scripts/timing_benchmark.py --filter chk` now reports
+`a6_chk_dn_dn_noexc` at exactly gap=0 (was -5). Removed the now-stale
+`known_issues.json` entry for it.
+
+### Status
+
+Closes Stage 2 of the cycle-accuracy closing plan v2. Corpus-wide gap
+stats (`scripts/timing_benchmark.py`, full 120-test corpus): min moved
+-5 -> **-4** (CHK's own -5 is gone; the new min is `a4_tas_mem`'s own
+-4, next up), mean (known-excluded) 1.32 -> 1.30. Next: `a4_tas_mem`
+(-4).

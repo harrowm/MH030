@@ -1,8 +1,4 @@
 {
-  "a6_chk_dn_dn_noexc": {
-    "reason": "CHK Dn,Dn manual=8 measured=3, gap=-5 -- fix attempted and reverted, causes a real functional regression (chk_trap has no one-shot/edge guard, re-fires on every tick of an artificial multi-cycle stall)",
-    "ref": "plan.md Phase 166"
-  },
   "a6_andi_to_sr": {
     "reason": "measured p=1 not manual's own p=2 -- opcode+immediate fetched together in one combined longword bus cycle at this instruction's 4-byte-aligned placement, a real hardware alignment property, not a bug; manual assumes two separate word fetches",
     "ref": "plan.md Phase 166 (originally documented in this test's own desc field from an earlier phase)"

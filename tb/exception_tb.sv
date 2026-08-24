@@ -251,7 +251,14 @@ module exception_tb;
         end
         instr_valid = 1'b0;
         ext_valid   = 1'b0;
-        repeat(12) @(posedge clk);
+        // Cycle-accuracy-closing plan.md, Stage 2: widened from 12 to cover
+        // CHK Dn,Dn's own new +20-tick artificial-stall entry (eu_seq.sv's
+        // dec_internal_stall_ticks_fixed) -- this fixed post-ack settle
+        // margin predates that stall and was too tight for it, caught by
+        // CHK-03/06's own "N=1" checks reading a stale (not-yet-updated)
+        // SR value. Same class of fix as Stage 1's own ea_modes_tb.sv
+        // widening (repeat(5) -> repeat(10)).
+        repeat(30) @(posedge clk);
     endtask
 
     task automatic set_dn(input int n, input logic [31:0] val);
