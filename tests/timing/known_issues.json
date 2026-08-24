@@ -26,5 +26,17 @@
   "a2_move_ea_briefidx": {
     "reason": "gap=-1, r/p/w clean -- same internal-microcode-ceiling character as a1_fea_briefidx (indexed-EA decode overhead real silicon pays that this pipeline's own combinational EA computation doesn't need); small magnitude, not chased further to avoid artificially slowing down a genuinely-correct fast dispatch path for zero functional benefit",
     "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+  },
+  "a2_move_rn_anind": {
+    "reason": "gap=+2 (manual=4, measured=6), r/p/w clean. This RTL's own plain-write BIU dispatch has a shared, EA-mode-independent ~6-clock floor -- confirmed exact for CLR.L (a0) (manual=6 including its own explicit cea((An))=2 addition, measured=6). MOVE Rn,(An)'s own manual row is self-contained at NCC=4 with NO cea/fea addition (unlike CLR's row), implying real 68030 microcode genuinely executes MOVE's own EA-then-write sequence 2 clocks faster than CLR's -- a genuine per-instruction microcode difference this project's shared, uniform write-dispatch path can't distinguish. Can't be fixed by shrinking the shared floor (would break CLR's own currently-exact measurement) or via dec_internal_stall_ticks_fixed (that mechanism only applies to register-only, non-bus-touching instructions) without a genuinely new, instruction-specific dispatch-latency mechanism -- same architectural-ceiling character as the briefidx cases above",
+    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+  },
+  "a2_move_rn_anpostinc": {
+    "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+2, r/p/w clean)",
+    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+  },
+  "a2_move_rn_anpredec": {
+    "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+2, r/p/w clean)",
+    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
   }
 }
