@@ -2299,3 +2299,52 @@ stats (`scripts/timing_benchmark.py`, full 120-test corpus): min moved
 -5 -> **-4** (CHK's own -5 is gone; the new min is `a4_tas_mem`'s own
 -4, next up), mean (known-excluded) 1.32 -> 1.30. Next: `a4_tas_mem`
 (-4).
+
+## Phase 171 -- `a4_tas_mem` (-4) investigated, real finding, deliberately not fixed this pass
+
+Traced `a4_tas_mem` directly (temporary `biu_cycle_gen` state trace,
+removed before committing) to understand its own -4 gap before
+attempting anything. Confirmed the RTL's own bus-locked RMW protocol
+for TAS is genuinely correct and matches CLAUDE.md's own documented
+spec exactly: entering the RMW dispatch (`cg` state 47) at t=176, AS
+asserts once at t=180 and stays asserted continuously through both the
+read phase (DS toggles, `rw=1`) and the write phase (`rw` flips to 0
+at t=192 with AS still held), only deasserting once at t=204 -- a
+single, genuinely-locked 28-tick (7-clock) read+write cycle, not two
+separate bus transactions. This confirms the test's own pre-existing
+`desc` note (from Phase 161) was right: the write phase genuinely
+never produces its own `AS-fall` event, so `tb/timing_tb.sv`'s own
+address-edge-based measurement can't separately observe it -- a
+harness limitation already documented, not a new finding.
+
+**The new finding**: between the opcode fetch completing (`cg` back to
+`ST_IDLE` at t=154) and the RMW dispatch actually starting (t=176),
+there's a genuine, separate, ordinary 16-tick (4-clock) bus cycle
+(`cg` states 18-25, `rw=1`) that has nothing to do with TAS's own RMW
+sequence -- almost certainly the IFU speculatively prefetching the
+trailing marker instruction's own opcode ahead of TAS's own dispatch,
+similar in *character* to the already-documented "speculative-linear-
+readahead" phenomenon (`a6_bcc_taken`/`a6_bsr`/etc), but not yet
+confirmed to be the *same* mechanism, and not yet understood well
+enough to say whether TAS's own RMW dispatch is being genuinely
+delayed *by* that prefetch (a real, possibly-fixable arbitration
+question -- EU should have priority over IFU per this project's own
+documented arbiter priority) or whether the two are simply running
+concurrently with no real interaction.
+
+### Decision
+
+Not fixed this pass -- the magnitude (-4) is moderate, TAS itself is a
+comparatively rare instruction in typical code (mostly synchronization
+primitives), and root-causing the prefetch-vs-RMW-dispatch interaction
+properly would need the same depth of investigation as a full stage
+(comparable to the CHK work), not a quick trace. Documented here as an
+open, real, partially-characterized finding rather than added to
+`known_issues.json` (reserved for *confirmed* non-bugs) -- this one
+isn't confirmed either way yet. Moving to the next item in the
+priority list; can return to this with a dedicated pass later.
+
+### Results
+
+No RTL changed; temporary trace fully removed (`git diff --stat tb/
+timing_tb.sv` shows no diff). `make test` 36/36 sanity check.
