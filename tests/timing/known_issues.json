@@ -18,5 +18,13 @@
   "a6_bsr": {
     "reason": "same speculative-linear-readahead reasoning as a6_bcc_taken (measured p=4, not manual's own p=2)",
     "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+  },
+  "a1_fea_briefidx": {
+    "reason": "gap=-2, r/p/w clean (p=1, not the naive-sum p=2 -- this RTL fetches opcode+brief-extension-word together in one bus read, same already-documented pattern as a1_fea_d16an). Falls under the already-documented 'internal microcode' ceiling: real 68030 silicon's own microcode sequencer charges brief-indexed EA decode extra internal time (needing the opcode already decoded before acting on the extension word's own scale/index fields) that this project's simplified comb-decode/1-cycle-EX pipeline doesn't reproduce -- closing this needs a fundamentally deeper pipeline, not a targeted fix",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A1); cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+  },
+  "a2_move_ea_briefidx": {
+    "reason": "gap=-1, r/p/w clean -- same internal-microcode-ceiling character as a1_fea_briefidx (indexed-EA decode overhead real silicon pays that this pipeline's own combinational EA computation doesn't need); small magnitude, not chased further to avoid artificially slowing down a genuinely-correct fast dispatch path for zero functional benefit",
+    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
   }
 }
