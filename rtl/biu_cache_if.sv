@@ -600,7 +600,30 @@ module biu_cache_if (
                             // sf_rdata is a full longword passthrough.
                             fill_rdata_r <= sf_rdata;
                         end
-                        state <= CI_DONE;
+                        // Bus-pipelining-overlap plan.md, Track D Stage D1:
+                        // goes straight to CI_IDLE, not CI_DONE -- mirrors
+                        // Stage D0's own CI_WRITE fix exactly (see that
+                        // stage's comment for why skipping CI_DONE outright,
+                        // rather than trying to suppress its own eu_ack
+                        // conditionally, is the safe way to avoid a
+                        // double-pulsed eu_ack). The cache-populate side
+                        // effects above (data_d/tag_d/valid_d, and this
+                        // now-redundant-but-harmless fill_rdata_r write) stay
+                        // on their existing registered schedule, completely
+                        // unchanged -- only the EU-visible eu_ack/eu_rdata
+                        // move earlier, via the output block's own new
+                        // CI_D_MISS fast-path arm below (computing the exact
+                        // same extract_rd(sf_rdata,...)/sf_rdata split
+                        // combinationally, since dcache_en/mmu_ci/
+                        // d_size_ok_r/dfreeze_en/siz_r/addr_r/sf_rdata are
+                        // all already live this same cycle -- ciin is
+                        // deliberately NOT part of this split, matching the
+                        // comment above: it only gates the array-population
+                        // side effect, never the returned value). CI_DONE
+                        // itself is untouched and still serves the 3
+                        // remaining entry points (CI_D_BURST0/
+                        // CI_D_FILL_3B/CI_FILL_3) -- Track D's later stages.
+                        state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
@@ -910,6 +933,21 @@ module biu_cache_if (
                 end
                 sf_rw   = 1'b1;
                 sf_req  = !sf_ack;
+                // Bus-pipelining-overlap plan.md, Track D Stage D1: present
+                // eu_ack/eu_rdata the same cycle sf_ack_rise fires, instead
+                // of waiting for the registered CI_D_MISS->CI_DONE hop (now
+                // skipped -- see the always_ff block's own comment on the
+                // matching state<=CI_IDLE edit). Same would-cache condition
+                // as sf_addr/sf_siz above and the always_ff block's own
+                // extract_rd() split -- deliberately excludes ciin, which
+                // only gates the array-population side effect (still on its
+                // existing registered schedule), never the returned value.
+                if (sf_ack_rise) begin
+                    eu_ack   = 1'b1;
+                    eu_rdata = (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en)
+                             ? extract_rd(sf_rdata, siz_r, addr_r[1:0])
+                             : sf_rdata;
+                end
             end
 
             CI_WRITE: begin

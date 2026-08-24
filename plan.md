@@ -1438,3 +1438,114 @@ floor. Zero correctness regression, and unlike Track C this stage's
 implementation was correct on the first attempt (informed directly by
 Track C's own double-pulse lesson). Stage D1 (`CI_D_MISS`, the
 read-miss side) is next.
+
+## Phase 163 Track D, Stage D1 -- biu_cache_if.sv's CI_D_MISS fast path
+
+Second-highest-value entry point per the plan's own staging: the
+D-cache read-miss / cache-disabled-passthrough path, which every
+ordinary EU read (not just RMW reads) dispatches through regardless of
+whether the D-cache is actually enabled (`CI_D_MISS`'s own `if
+(dcache_en && ...)` branch selects cache-populate vs plain passthrough,
+but either way a read reaches this state -- confirmed by reading the
+code, not assumed).
+
+### Implementation
+
+Same shape as Stage D0: `CI_D_MISS`'s own registered `always_ff` next-
+state logic now transitions directly `state <= CI_IDLE` on
+`sf_ack_rise` (was `<= CI_DONE`), for BOTH of its own internal branches
+(cache-populate and passthrough) -- the cache-array side effects
+(`data_d`/`tag_d`/`valid_d`, and the now-redundant-but-harmless
+`fill_rdata_r` write) stay on their existing registered schedule,
+completely unchanged, per the plan's own explicit design. The output
+block's `CI_D_MISS` case arm gains a combinational fast path computing
+`eu_rdata` the exact same way the always_ff block's own `fill_rdata_r`
+assignment already did -- `extract_rd(sf_rdata, siz_r, addr_r[1:0])`
+when the cache-populate condition holds, plain `sf_rdata` passthrough
+otherwise -- deliberately excluding `ciin` from the split (per the
+existing comment on the always_ff block: CIIN only gates the
+array-population side effect, never the returned value, since the bus
+request is already committed before CIIN's own value is even knowable).
+`CI_DONE` itself, and its 3 remaining entry points
+(`CI_D_BURST0`/`CI_D_FILL_3B`/`CI_FILL_3`), are untouched -- Stage D2's
+own scope.
+
+### Verification: correct on the first attempt
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12,
+full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline.
+
+### Tick-level survey: zero visible change, and a direct trace explaining exactly why
+
+Controlled A/B measurement showed **zero** tick-level change on every
+single bus-touching test in the survey, including every RMW-shaped
+test this stage was specifically targeting. Rather than accept that at
+face value, added a temporary hierarchical trace (`cg`/`ci`/`sf` state,
+`ci_ack`/`sf_ack`/`top_ack`, `mem_req`/`mem_rmw_run_r`/
+`mem_rmw_read_ack` -- removed before committing) and re-ran
+`a3_add_dn_ea` (`add.l d1,(a0)`) both with and without the Stage D1
+change to compare directly, cycle by cycle.
+
+**Confirmed the fix genuinely works exactly as designed**: in the
+"before" trace, the read's own `sf_ack`/`ci_ack`/`top_ack`/
+`mem_rmw_read_ack` all land one cycle apart (`sf_ack` fires, then
+`ci_ack`/`top_ack` fire the FOLLOWING cycle once `CI_DONE` is reached).
+In the "after" trace, all four fire on the exact same cycle, and
+`mem_rmw_run_r` (the write-phase dispatch register) consequently
+updates one full tick earlier too -- precisely the intended effect,
+identical in shape to Stage D0's own confirmed win.
+
+**But the write's own bus cycle start (`biu_cycle_gen`'s own `cg`
+state leaving `ST_IDLE` for the write's S0) lands on the EXACT SAME
+absolute tick in both traces**, despite `mem_rmw_run_r` being ready a
+full tick earlier in the "after" case. Root cause: `ST_IDLE`'s own
+registered next-state transition only advances on `state_adv`
+(`phase_r[0]`) boundaries -- the same 2-tick-per-named-state pacing
+grid Phase 160's own S-state pairing correction established project-
+wide. `mem_rmw_run_r` becoming ready one tick earlier moves it to an
+earlier position WITHIN the same 2-tick `ST_IDLE` window, not across
+it, so the write's own dispatch is quantized to the identical grid
+point regardless. This is a DIFFERENT absorption mechanism than Track
+C/D0's own finding (a different, specific downstream bottleneck, not
+the same one) -- worth distinguishing precisely rather than lumping
+together as "the same absorption phenomenon" out of pattern-matching.
+
+For the plain-read tests (`a1_fea_*`, no RMW phase at all), the zero
+change is even more directly explained: `MEASURED_INSTR_ONLY` tracks
+the read bus cycle's own AS-rise (a `biu_cycle_gen`-level pin event,
+governed entirely by Phase 160's own calibrated S-state timing) --
+Stage D1 only speeds up how quickly the ALREADY-COMPLETED read's ack
+becomes visible one layer up, an internal handshake signal with no
+bearing on the bus cycle's own pin-level duration. A standalone read
+with nothing downstream depending on ack-propagation speed simply has
+no way to show this fix's own effect at all.
+
+### Results and decision to keep the fix
+
+`make test`/`cosim_grp`/`cosim_memind`/Harte sweep all confirm zero
+correctness regression (see above). The fix is kept despite showing
+zero effect on the CURRENT 32-test bus-touching survey -- it's a
+structurally real, correctly-verified latency reduction (confirmed via
+direct trace, not assumed), consistent with Track A/C's own "real but
+not currently visible" findings, just even more fully absorbed here by
+a specific, well-understood downstream quantization boundary rather
+than merely sub-clock-granularity. It remains a legitimate
+architectural improvement that could matter for instruction shapes
+outside the current 32-test survey (e.g. a multi-beat FSM chain whose
+own downstream dispatch timing happens to straddle the `ST_IDLE`
+quantization boundary differently) -- not chased further this stage,
+since nothing in the existing survey demonstrates it.
+
+### Status
+
+Track D Stage D1 closed. Correct on the first attempt, zero
+correctness regression, and a fix that is real and verified-working at
+the signal level but currently invisible on every test in the existing
+bus-touching survey -- root-caused precisely (not just asserted) via
+direct trace comparison, distinguishing this from Track C/D0's own
+different absorption mechanism. Stage D2 (burst paths + I-cache fill:
+`CI_D_BURST0`/`CI_D_FILL_3B`/`CI_FILL_3`) is next, gated by `make
+test`'s own `tb/cache_tb.sv` rather than the timing survey (per the
+plan's own note that none of these three sites are exercised by
+bus-touching timing tests at all).
