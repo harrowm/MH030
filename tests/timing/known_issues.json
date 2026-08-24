@@ -38,5 +38,17 @@
   "a2_move_rn_anpredec": {
     "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+2, r/p/w clean)",
     "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+  },
+  "a1_fea_xxxl": {
+    "reason": "gap=+4 (manual=7, measured=11). fea (xxx).L's own manual row already implies p=1 (a single combined 32-bit longword program fetch for the absolute address) -- but this RTL's IFU only ever fills 2 words per bus cycle, so when the queue starts empty (the common post-branch case every timing test hits), the first fetch delivers only opcode+addr_hi, forcing a genuinely separate second fetch for addr_lo. Same root cause as item 2's own already-investigated, confirmed-unavoidable ext_count==2 finding (Phase 165) for long-immediate ALU ops, just manifesting for absolute-long addressing instead of an immediate operand",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a2_move_ea_xxxl": {
+    "reason": "same genuine-second-IFU-fetch mechanism as a1_fea_xxxl (gap=+4, absolute-long destination needs 2 extension words, first fetch only ever delivers the first)",
+    "ref": "plan.md Phase 165 (item 2)"
+  },
+  "a3_addi_mem": {
+    "reason": "gap=+7 -- the compounding of two already-investigated, already-accepted mechanisms: the genuine-second-IFU-fetch cost for ADDI's own long immediate (item 2/Phase 165, same as a1_fea_xxxl) plus the shared RMW-to-memory bus-dispatch floor (Tracks A-D, closed bus-pipelining-overlap plan). Not a new, separately-fixable gap",
+    "ref": "plan.md Phase 165 and the closed bus-pipelining-overlap plan (Tracks A-D)"
   }
 }
