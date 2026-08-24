@@ -366,3 +366,85 @@ NBCD (-3), dynamic BCHG/BCLR/BSET Dn,Dn (-3 each), and ANDI-to-SR/CCR
 (-1 each, a bus-touching-but-register-only-classified pair) -- these are
 Stage D5's own scope. Part E (bus-touching dispatch-overhead reduction)
 remains untouched.
+
+## Phase 162 Stage D5
+
+### Context
+
+Closed out the remaining small (-1/-3) register-only negative-gap entries
+Stage D4 left open: ABCD/SBCD Dn,Dn, EXT (EXT.W/EXT.L/EXTB.L), Scc Dn,
+TAS Dn, NBCD Dn, and dynamic BCHG/BCLR/BSET Dn,Dn -- plus an
+investigation into ANDI/ORI/EORI #imm,SR/CCR.
+
+### Decode-signal reconnaissance
+
+Each op needed a way to isolate its register-direct form from a memory-
+destination sibling that shares the same `dec_unit`/`dec_bcd_op`/
+`dec_bit_op` value -- Stage D4's own `!dec_is_mem_rmw` lesson applied
+again, generalized: read the actual decode blocks in `eu_seq.sv` before
+writing any condition, rather than trusting a shared enum value alone.
+Found: `dec_is_abcd_sbcd_mem` already exists and cleanly excludes ABCD/
+SBCD/NBCD's own `-(Ay),-(Ax)`/memory-EA forms; the memory forms of NBCD/
+TAS/dynamic-BCHG-BCLR-BSET all set `dec_is_mem_rd=1'b1` (their register-
+direct siblings never do) -- the same signal, reused three times, is
+enough on its own. `EXT.W`/`EXT.L`/`EXTB.L` share `dec_sext=1'b1` with no
+memory form at all (real ISA constraint, no exclusion needed). Scc Dn had
+no existing dedicated flag distinguishing it from `Scc <ea>` -- added a
+new `dec_is_scc_dn` (mirrors `dec_is_tas`'s own shape), set only in the
+`f_mode==3'b000` register-direct arm.
+
+### RTL
+
+`rtl/eu_seq.sv`'s `dec_internal_stall_ticks_fixed`: `ABCD Dn,Dn`/`SBCD
+Dn,Dn` (+4 ticks each, NCC=4), `EXT` (+4, NCC=4), `Scc Dn` (+4, NCC=4),
+`TAS Dn` (+4, NCC=4), `NBCD Dn` (+12, NCC=6), dynamic `BCHG/BCLR/BSET
+Dn,Dn` (+12, NCC=6 -- one shared condition since all three share the
+identical manual row and the same `dec_writes_reg`-based BTST exclusion).
+
+### ANDI/ORI/EORI to SR/CCR: investigated, deliberately not fixed
+
+Added the analogous +4-tick entry (gated on `dec_reads_ccr && dec_use_imm
+&& dec_needs_ext && (dec_is_move_sr_w || dec_is_move_ccr_w)`, confirmed
+via code inspection to uniquely select this block over MOVE #imm,SR/CCR
+and MOVE Dn,SR/CCR) and measured -- still gap=-1, unchanged. Traced
+directly with a temporary `$display` (removed before committing): the
+stall genuinely counted down 4→3→2→1→0 and delayed this instruction's own
+`wb_valid`/`wb_is_move_sr_w` commit by exactly 4 ticks, exactly as
+designed -- but the test's total measured clock count (ANDI-to-SR
+followed by a dependent `MOVE.L #imm,Dn`) didn't move at all. This op's
+own unusually large 13-clock *unstalled* baseline (vs. the uniform
+8-clock baseline every other 2-word register-direct instruction in this
+project shares, per Stage D3) already pointed at a separate mechanism --
+almost certainly the IFU prefetch-queue refill/flush this project's own
+history (Phase 96/98) already associates with SR/CCR writes -- and the 4
+extra EX-stage ticks were fully absorbed into slack that mechanism
+already has, never reaching the measured total. A real fix would need
+the extra time inserted at the IFU/decode stage instead of EX/WB, a
+materially different and riskier change than every other entry in this
+whitelist. Left undone, matching this plan's own explicit "not safely
+fixable" allowance (see the plan's own Context section) -- documented
+in-line in `eu_seq.sv` rather than silently dropped.
+
+### Results
+
+Exact match (gap=0) for all 6 fixed entries: `a4_abcd_dn`/`a4_sbcd_dn`/
+`a4_ext_dn`/`a4_scc_dn`/`a4_tas_dn` (manual=4, were -1 each) and
+`a4_nbcd_dn`/`a5_bchg_dn_dn`/`a5_bclr_dn_dn`/`a5_bset_dn_dn` (manual=6,
+were -3 each). The full 117-test survey's negative tail is now min=-1
+(the 2 deliberately-unfixed ANDI-to-SR/CCR entries only) -- down from
+min=-3 with 9 entries at Stage D4's close. 30 tests now at an exact
+gap=0 match (up from 22), gap distribution `{-1: 2, 0: 30, 1: 18, ...}`.
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12, full
+124-suite Harte sweep (mandatory -- `eu_seq.sv` changed) -- PASS 702142,
+FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline.
+
+### Status
+
+Stage D5 closed. This closes Part D's own family-by-family whitelist
+work -- every register-only negative-gap entry the Stage B_final survey
+originally found is now either fixed (gap=0) or investigated and
+documented as not safely fixable via this mechanism (ANDI/ORI/EORI to
+SR/CCR). Stage D_final (re-survey + confirm the mean gap, formally close
+Part D) is next; Part E (bus-touching dispatch-overhead reduction)
+remains untouched.

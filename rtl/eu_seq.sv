@@ -654,6 +654,8 @@ module eu_seq (
     logic        dec_moves_load;    // 1=load (ea→Rn, SFC), 0=store (Rn→ea, DFC)
     // TAS
     logic        dec_is_tas;        // TAS.B instruction (test and set byte)
+    // Scc
+    logic        dec_is_scc_dn;     // Scc Dn (register-direct form only, not Scc <ea>)
     // CHK, CMP2, CHK2
     logic        dec_is_chk;        // CHK <ea>,Dn
     logic        dec_chk_word;      // 1=CHK.W (size word), 0=CHK.L (size long)
@@ -939,6 +941,7 @@ module eu_seq (
 
         // ── TAS / CHK / CMP2 / MOVEP / MOVE16 ─────────────────────────────────
         dec_is_tas       = 1'b0;
+        dec_is_scc_dn    = 1'b0;
         dec_is_chk       = 1'b0;
         dec_chk_word     = 1'b0;
         dec_is_cmp2chk2  = 1'b0;
@@ -4109,6 +4112,7 @@ module eu_seq (
                             dec_x_unchanged    = 1'b1;
                             dec_use_imm        = 1'b1;
                             dec_imm            = eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c) ? 32'hFF : 32'h00;
+                            dec_is_scc_dn      = 1'b1;
                         // ── Scc to memory ea ───────────────────────
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                      f_mode == 3'b101 || f_mode == 3'b110 ||
@@ -6806,6 +6810,58 @@ module eu_seq (
             else if (dec_is_move_sr_r)  dec_internal_stall_ticks_fixed = 8'd4;  // MOVE SR,Dn NCC=4
             else if (dec_is_swap)    dec_internal_stall_ticks_fixed = 8'd4;  // SWAP Dn NCC=4
         end
+        // Stage D5 (plan.md): the remaining small (-1/-3) register-only
+        // negative-gap entries left after D2-D4 -- ABCD/SBCD Dn,Dn, EXT,
+        // Scc Dn, TAS Dn all share the same 1-word/3-clock baseline as
+        // D4's own flat entries above (each needs just +1 clock = 4
+        // ticks); NBCD Dn and dynamic BCHG/BCLR/BSET Dn,Dn both need +3
+        // clocks = 12 ticks instead (their own manual NCC=6, vs these
+        // others' NCC=4). Each condition below is deliberately built from
+        // the one signal (or signal combination) that's already proven,
+        // by direct code inspection, to exclude that op's own MEMORY-
+        // destination sibling -- e.g. dec_is_abcd_sbcd_mem/dec_is_mem_rd
+        // are exactly the flags those memory forms set and the
+        // register-direct forms never do (mirrors Stage D4's own
+        // !dec_is_mem_rmw lesson: a shared dec_unit/dec_bcd_op/dec_bit_op
+        // value alone is never enough on its own).
+        if (dec_valid && dec_unit == UNIT_BCD && !dec_is_abcd_sbcd_mem) begin
+            case (dec_bcd_op)
+                BCD_ADD: dec_internal_stall_ticks_fixed = 8'd4;  // ABCD Dn,Dn NCC=4
+                BCD_SUB: dec_internal_stall_ticks_fixed = 8'd4;  // SBCD Dn,Dn NCC=4
+                BCD_NEG: if (!dec_is_mem_rd) dec_internal_stall_ticks_fixed = 8'd12; // NBCD Dn NCC=6-3clk=3clk=12t
+                default: ;
+            endcase
+        end
+        if (dec_valid && dec_sext)     dec_internal_stall_ticks_fixed = 8'd4;  // EXT.W/EXT.L/EXTB.L NCC=4
+        if (dec_valid && dec_is_scc_dn) dec_internal_stall_ticks_fixed = 8'd4; // Scc Dn NCC=4
+        if (dec_valid && dec_is_tas && !dec_is_mem_rd)
+            dec_internal_stall_ticks_fixed = 8'd4;  // TAS Dn NCC=4
+        if (dec_valid && dec_unit == UNIT_BIT && dec_bit_from_reg &&
+            !dec_is_mem_rd && dec_writes_reg)
+            dec_internal_stall_ticks_fixed = 8'd12; // dynamic BCHG/BCLR/BSET Dn,Dn NCC=6-3clk=3clk=12t
+        // ANDI/ORI/EORI #imm,SR or CCR (manual NCC=14, own natural
+        // baseline measures 13 -- gap=-1) were investigated but are
+        // DELIBERATELY NOT whitelisted here. A +4-tick entry gated on
+        // dec_reads_ccr+dec_use_imm+dec_needs_ext+(dec_is_move_sr_w||
+        // dec_is_move_ccr_w) was tried and confirmed, via direct signal
+        // tracing, to genuinely delay this instruction's own WB commit
+        // by exactly 4 ticks as designed -- but the total measured clock
+        // count for the test (ANDI-to-SR followed by a dependent MOVE.L
+        // #imm,Dn) did not change at all. This op's own unusually large
+        // 13-clock unstalled baseline (vs. the uniform 8-clock baseline
+        // every other 2-word register-direct instruction in this project
+        // shares -- see Stage D3's own bit-field entries above) already
+        // points at a genuinely different, separate mechanism -- almost
+        // certainly the IFU prefetch-queue refill/flush this project's
+        // own history (Phase 96/98) already associates with SR/CCR
+        // writes -- and the 4 extra EX-stage ticks were fully absorbed
+        // into slack that mechanism already has, never reaching the
+        // measured total. Fixing this for real would need the extra
+        // time inserted at the IFU/decode stage instead of EX/WB, a
+        // materially different and riskier change than every other
+        // entry in this whitelist; left undone per this plan's own
+        // explicit "not safely fixable" allowance rather than guessed
+        // at further.
         // Stage D3 (plan.md): bit-field register (Dn) forms. All confirmed
         // flat regardless of offset/width/scan-depth (Stage D0's own
         // BFFFO spot-check) and fully decode-time computable -- offset/
