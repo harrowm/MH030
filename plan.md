@@ -617,3 +617,76 @@ Zero RTL correctness regressions across the whole plan, confirmed via
 `make test`/`cosim_grp`/`cosim_memind`/the full 124-suite Harte sweep at
 every RTL-touching stage. `~/.claude/plans/compressed-hopping-cocoa.md`
 has no further open items from its own scope.
+
+## Phase 163 Stage 0
+
+### Context
+
+New plan (`~/.claude/plans/compressed-hopping-cocoa.md`): closing the
+bus-touching dispatch-overhead gap for real, after the user pushed back
+on Phase 162 Stage E0's "not safely fixable" conclusion. That conclusion
+was based on a single worked example and a too-narrow theory (3 small
+1-tick IFU/arbiter sync delays); re-investigating directly with the user
+found the theory didn't explain the actual magnitude of the gap (7-13
+clocks measured vs. ~1 clock the 3-delay theory could account for), and
+also found the underlying SURVEY comparison itself was measuring the
+wrong thing for most of the bus-touching test set.
+
+### The methodology bug
+
+Most bus-touching tests write to *memory*, not a register, so the test
+harness needs a trailing marker instruction (`MOVE.L #imm,Dn`) to make
+completion observable. The existing "MEASURED ticks=/clocks=" figure in
+`tb/timing_tb.sv` is gated purely on the WATCH REGISTER reaching its
+expected value -- which for these tests means "target instruction +
+marker instruction, combined" -- while the `desc` field's own manual
+NCC value only ever described the target instruction alone. Confirmed
+via direct trace on `a2_move_ea_xxxw` (`MOVE.L D1,$1000.W`): the raw
+bus event log showed the marker's own opcode fetch landing INSIDE the
+measured window, before the target's own write even completed.
+
+### Fix: a second, pin-level-only completion measurement
+
+Added `MEASURED_INSTR_ONLY` to `tb/timing_tb.sv`: tracks the AS-rise of
+the LAST bus cycle that genuinely belongs to the target instruction --
+any data-space (r/w) cycle (a memory-dest write or memory-src read,
+never something the marker needs) or any program-space fetch still
+inside the target's own `[target_pc, target_pc+target_len)` byte span.
+A following marker's own opcode/extension fetches, being program-space
+reads outside that span, are correctly excluded. Purely additive --
+new signals (`instr_bus_pending_r`, `t_end_instr_r`), a new informational
+`$display` line, zero change to any existing assertion.
+
+Confirmed the new measurement is meaningless for register-only
+instructions (no bus event marks their own completion at all -- `a4_
+ext_dn` under-reports on `MEASURED_INSTR_ONLY` despite already being an
+exact match on the existing `MEASURED` figure), so `scripts/b_final_
+clock_survey.py` was extended to use `MEASURED_INSTR_ONLY` only for
+tests that need a trailing marker (`expect_r>0 || expect_w>0`),
+otherwise keeping the original `MEASURED`-based figure unchanged.
+
+### Results
+
+Re-surveyed the bus-touching subset (n=32) with the corrected
+measurement: mean ratio (measured/manual) drops from 2.37x to **1.82x**,
+worst case from 3.6x to 2.44x -- the honest, correctly-measured
+baseline this plan's own later stages will track against. `make test`
+36/36 (sanity check; `tb/timing_tb.sv`'s own change is purely additive/
+informational, verified to not perturb anything else).
+
+### Status
+
+Stage 0 (groundwork) closed. Two real, distinct mechanisms behind the
+remaining 1.82x were found via direct signal tracing on two
+representative instructions (temporary `$display`s, removed before this
+writeup) and are documented in the plan's own Context section: (1)
+`eu_ext_valid`'s threshold is a known, deliberately over-conservative
+simplification (already flagged in `m68030_seq.sv`'s own header comment)
+that forces every `ext_count==1` instruction to wait for an entire
+unneeded extra bus fetch; (2) a not-yet-root-caused arbitration/dispatch
+timing gap specific to read-modify-write memory instructions, where an
+unrelated IFU prefetch was observed running in the gap between the
+RMW's own read completing and its own write starting despite EU's
+documented higher bus priority. Stage 1 (implementing the fix for
+mechanism 1) is next; Stage 2 (investigating mechanism 2 in more depth)
+follows.

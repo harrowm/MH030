@@ -11,6 +11,19 @@ manual's own predicted total from the entry's own `desc` field (summing
 every "N(...)" -- (r/p/w) -- occurrence, which correctly handles both
 plain rows and composed rows like "NCC=4(.../...) + fea(...)=3(.../...)").
 Reports the per-test gap (measured - manual) and an aggregate summary.
+
+New plan (bus-pipelining-overlap investigation, plan.md): also parses
+the newer "MEASURED_INSTR_ONLY ticks=N clocks=M" line, tb/timing_tb.sv's
+pin-level-only completion measurement -- the AS-rise of the LAST bus
+cycle genuinely belonging to the target instruction (excludes a trailing
+marker instruction's own fetch/decode time, needed for any test whose
+target writes to memory rather than a register). Used in preference to
+the raw MEASURED figure for exactly those marker-needing tests
+(expect_r>0 or expect_w>0); register-only tests keep using MEASURED,
+since MEASURED_INSTR_ONLY isn't meaningful for them (no bus event marks
+a register-only instruction's own completion -- confirmed via a4_ext_dn,
+which under-reports on MEASURED_INSTR_ONLY despite already being an
+exact match on plain MEASURED).
 """
 import json
 import re
@@ -22,6 +35,7 @@ SIM_BIN = REPO / 'sim' / 'timing'
 
 TOTAL_RE = re.compile(r'(\d+)\([\d/]+\)')
 MEASURED_RE = re.compile(r'MEASURED ticks=(\d+) clocks=(\d+)')
+INSTR_ONLY_RE = re.compile(r'MEASURED_INSTR_ONLY ticks=(\d+) clocks=(\d+)')
 
 
 def to_int(v):
@@ -54,11 +68,12 @@ def run_one(entry):
     try:
         r = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
-        return None
+        return None, None
     m = MEASURED_RE.search(r.stdout)
-    if not m:
-        return None
-    return int(m.group(2))  # clocks
+    mi = INSTR_ONLY_RE.search(r.stdout)
+    meas = int(m.group(2)) if m else None       # clocks
+    instr_only = int(mi.group(2)) if mi else None  # clocks
+    return meas, instr_only
 
 
 def main():
@@ -69,10 +84,12 @@ def main():
             entries = json.load(f)
         for e in entries:
             mt = manual_total(e['desc'])
-            measured = run_one(e)
+            measured, instr_only = run_one(e)
             if measured is None or mt is None:
                 continue
-            rows.append((mpath.stem, e['name'], mt, measured, measured - mt))
+            needs_marker = (e.get('expect_r', 0) > 0) or (e.get('expect_w', 0) > 0)
+            corrected = instr_only if (needs_marker and instr_only is not None) else measured
+            rows.append((mpath.stem, e['name'], mt, corrected, corrected - mt))
 
     print(f"{'stage':10s} {'test':28s} {'manual':>7s} {'measured':>9s} {'gap':>5s}")
     for stage, name, mt, meas, gap in rows:

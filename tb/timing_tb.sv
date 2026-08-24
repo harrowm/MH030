@@ -182,6 +182,36 @@ module timing_tb;
     // since nothing else in the test program touches data memory.
     wire in_instr_range = (ext_a >= target_pc) && (ext_a < target_pc + target_len);
 
+    // Investigation (2026-08-23, user-requested re-review of the bus-
+    // touching dispatch-overhead finding): t_end (above) is gated on the
+    // watch REGISTER reaching its value, which for any memory-destination
+    // instruction under test requires a trailing marker instruction
+    // (typically "move.l #imm,Dn") to make the effect observable at all --
+    // that marker's own bus cycles (its own opcode+immediate fetch) are
+    // real, additional bus activity that lands inside [t_start,t_end) and
+    // was being silently counted as if it belonged to the target
+    // instruction. This tracks a SECOND, pin-level-only completion point:
+    // the AS-rise of the LAST bus cycle that genuinely belongs to the
+    // target instruction itself -- any data-space (r/w) cycle (a memory-
+    // dest instruction's own write, or a memory-src instruction's own
+    // read, never something the marker needs) or any program-space fetch
+    // still inside the target's own [target_pc,target_pc+target_len) byte
+    // span. A following marker's own opcode/extension fetches, being
+    // program-space reads OUTSIDE that span, are correctly excluded.
+    logic        instr_bus_pending_r = 1'b0;
+    logic [63:0] t_end_instr_r       = 0;
+    logic        t_end_instr_valid_r = 1'b0;
+    always_ff @(posedge clk_4x) begin
+        if (as_fall && !t_end_seen &&
+            ((is_prog_fc && ext_rw && in_instr_range) || is_data_fc))
+            instr_bus_pending_r <= 1'b1;
+        if (!as_prev_r && ext_as_n && instr_bus_pending_r) begin
+            t_end_instr_r       <= sim_ticks;
+            t_end_instr_valid_r <= 1'b1;
+            instr_bus_pending_r <= 1'b0;
+        end
+    end
+
     logic dbg_on = 1'b0;
     always_ff @(posedge clk_4x) begin
         if (as_fall) begin
@@ -288,6 +318,14 @@ module timing_tb;
             rem          = total_ticks % 4;
             $display("MEASURED ticks=%0d clocks=%0d rem=%0d  r=%0d p=%0d w=%0d",
                       total_ticks, total_clocks, rem, r_count, p_count, w_count);
+            if (t_end_instr_valid_r) begin
+                longint unsigned instr_ticks, instr_clocks, instr_rem;
+                instr_ticks  = t_end_instr_r - t_start;
+                instr_clocks = instr_ticks / 4;
+                instr_rem    = instr_ticks % 4;
+                $display("MEASURED_INSTR_ONLY ticks=%0d clocks=%0d rem=%0d",
+                          instr_ticks, instr_clocks, instr_rem);
+            end
             // Phase 160 Stage 1: t_end is an internal register-file commit, not
             // a pin transition -- it need not land on a 4-tick (real-clock)
             // boundary the way AS/DS assert/deassert must, so "total_ticks is
