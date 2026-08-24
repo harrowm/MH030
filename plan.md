@@ -1123,3 +1123,102 @@ Track A (Stages A0+A1) closed. Real, verified, sub-clock-granularity
 improvement on every RMW-shaped bus-touching test, with zero
 correctness regression. Track B (BSR/JSR's own redirect latency,
 Stage B0) is next, per the plan's own default ordering.
+
+## Phase 163 Track B, Stage B0
+
+### Context
+
+Investigation-only, per the plan's own staging. `a6_bsr`/`a6_jsr`
+(return-address push + PC redirect + fresh IFU fetch) show the same
+~1.78x ratio as the worst RMW cases, but this is a genuinely different
+instruction shape from anything Track A touched -- the plan's own
+explicit instruction was not to assume it's the same mechanism without
+tracing it.
+
+### Finding: mostly the same underlying chain, exposed differently -- not a separate IFU mechanism
+
+Traced `a6_bsr` with `pc_wr_en`/`pc_wr_data`/`decode_pc`/`fetch_pend_r`/
+`ifu_req`/`biu_cycle_gen`'s own `state`, all together (temporary
+hierarchical `$display`s in `tb/timing_tb.sv`, removed before
+committing). Found the push's own write completes (AS-rise) at one
+tick, but `pc_wr_en` (driven by `eu_seq.sv`'s `branch_taken`) doesn't
+assert until 4 ticks later.
+
+Checked `eu_seq.sv`'s own `branch_taken`/`ex_bsr_taken` definitions:
+`ex_bsr_taken = ex_valid && ex_is_bsr && mem_ack` -- purely
+combinational, asserting the *same* cycle `mem_ack` arrives, with zero
+extra registered EU-side delay. This means the observed 4-tick gap is
+**not** a BSR-specific commit latency at all -- it's the same upstream
+"how long does it take `mem_ack` to actually reach `eu_seq.sv` after a
+write's own bus cycle completes" propagation delay that Stages 2/3 and
+Track A already characterized in detail (the `biu_cache_if.sv` ->
+`biu_sizing_fsm.sv` -> `biu_cycle_gen.sv` hand-off chain), just exposed
+here in a way ordinary instructions don't show: for most instructions
+this same delay is silently absorbed into the already-budgeted "2-cycle
+EX->WB" baseline (Stage D0's own established figure), but `branch_taken`
+depends on `mem_ack` directly and immediately triggers the redirect, so
+none of it is hidden. **Track A's own fix does not help here** --
+confirmed empirically (`a6_bsr`/`a6_jsr` showed zero tick-level change
+in Track A's own before/after comparison) since Track A targeted the
+*dispatch* side (skipping `CI_IDLE`'s own extra hop when issuing a
+follow-up request) while this is the *ack-propagation* side (how long
+`CI_DONE`/`mem_ack` itself takes to first appear after a completed
+write) -- a different segment of the same general chain, not yet
+touched by anything in this plan.
+
+After `pc_wr_en` finally fires, a second, genuinely separate cost
+follows: `m68030_ifu.sv`'s own `fetch_pend_r` correctly flushes the
+stale in-flight fetch and re-arms for the new address (1 tick), then
+`biu_cycle_gen` begins a fresh S-state sequence from `ST_IDLE` for the
+redirected fetch -- ~6 ticks from re-arm to the new fetch's own AS-fall,
+plausibly mostly genuine S0/S1/S2 bus-protocol setup time (the same
+kind of unavoidable pin timing Track A's own remaining-gap analysis
+already found for the RMW case), not investigated further at the same
+depth given the ack-propagation finding above is the larger and more
+novel piece.
+
+Separately confirmed (reading `biu_icache_if.sv`'s own header/`IC_IDLE`
+comment) that the I-cache side is *already* a pure, zero-latency
+combinational bypass whenever `icache_en=0` (Phase 127 Step 1's own
+documented design) -- the timing test suite never enables the I-cache,
+so there is no `biu_icache_if.sv`-side "extra hop" analogous to what
+Track A found and fixed in `biu_cache_if.sv`; that specific shape of
+fix genuinely does not apply here.
+
+### Why this stage stops at investigation
+
+The dominant, newly-identified mechanism (ack-propagation delay through
+the same `biu_cache_if.sv`/`biu_sizing_fsm.sv`/`biu_cycle_gen.sv` chain
+Stages 2/3 and Track A already worked in) does not have an obvious,
+narrow, low-risk fix shape the way Track A's own dispatch-side fix did
+(a direct, already-proven pattern to mirror from `SS_IDLE`). Reducing
+*how long it takes `CI_DONE`/`mem_ack` to first appear* after a write's
+own S6/S7 completes would mean compressing the write's own completion-
+side hand-off (`biu_cycle_gen`'s own already-calibrated S6/S7 timing,
+`biu_sizing_fsm`'s own `SS_ACTIVE->SS_DONE` ack-pulse transition, and
+`biu_cache_if`'s own registered pickup into `CI_DONE`) -- each of these
+has its own established reason for existing (S6/S7 is genuine pin
+timing per Phase 160; the ack-pulse shape is relied on elsewhere in
+`biu_cache_if.sv`'s own state machine, same module Track A already
+found is unusually large and heavily shared). No fix is proposed this
+stage -- per the plan's own explicit framing, Stage B1+ only happens
+"if B0 finds something concretely fixable," and this session's own
+investigation did not find that for the ack-propagation piece.
+
+### Results
+
+No RTL changed. `make test` 36/36 confirms the tree is clean.
+
+### Status
+
+Track B, Stage B0 closed. The plan's original hypothesis (a separate,
+IFU-specific mechanism) is corrected: BSR/JSR's own gap is
+substantially the *same* general ack-propagation-chain phenomenon
+Stages 2/3 already characterized, exposed differently, not a new
+mechanism -- and it does not currently have a narrow, low-risk fix
+shape the way Track A's dispatch-side gap did. This closes the plan's
+own 2-track scope (Track A implemented and verified; Track B
+investigated and found not concretely fixable within this session's
+own risk tolerance). Bus-touching mean ratio stands at 1.29x (Stage 3's
+own figure; Track A's own real improvement is below the survey's
+reporting granularity, as documented in Track A's own writeup).
