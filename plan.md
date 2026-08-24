@@ -1716,3 +1716,79 @@ Closes item 1 of the cycle-accuracy-closing plan
 register-only negative ("too fast") gap identified by the fresh survey
 is now fixed. Item 2 (the ADDI/ANDI/EORI/ORI/SUBI-to-Dn +4 gap cluster)
 is next.
+
+## Phase 165 (cycle-accuracy-closing plan, item 2 -- investigation only, no RTL change)
+
+Traced `a3_addi_dn` (`addi.l #20,d2`, `ext_count==2`) directly (temporary
+hierarchical trace on `biu_cycle_gen`'s own state, `decode_pc`,
+`eu_ext_valid`/`ext_count`, `m68030_ifu`'s own `q_cnt`/`ifu_req`/
+`fetch_pend_r`, and `biu_arbiter`'s own `grant_ifu` -- removed before
+committing) to understand exactly where the +4-clock gap (manual=4,
+measured=8) goes, rather than guess whether it's the same kind of
+"threshold too narrow" bug Phase 163 Stage 1 already fixed for
+`ext_count==1`.
+
+**Confirmed it is NOT that bug, and NOT a single new bug at all** --
+it's two already-understood mechanisms stacking, plus one genuinely
+unavoidable cost:
+
+1. **A genuinely necessary second IFU fetch.** `ext_count==2` needs 3
+   words total (opcode+2 immediate words) in the queue before
+   dispatch, but the IFU always fetches 2 words per bus cycle. When
+   decode first reaches the target instruction with an empty queue
+   (the common case right after a `bra.w` redirect, as in every one of
+   these tests), the FIRST fetch brings `q_cnt` from 0 to 2 --
+   insufficient -- forcing a genuinely separate SECOND fetch to reach
+   `q_cnt>=3` (landing on 4, since fills only ever arrive in pairs).
+   Confirmed via direct trace: `q_cnt` reads 2 right after the first
+   fetch completes (`ifu_ext_valid` still 0), then a second, distinct
+   ~8-tick (2-clock) bus cycle runs before `q_cnt` reaches 4 and
+   `eu_ext_valid` finally asserts. This portion mirrors real 68030
+   silicon's own 32-bit-bus, longword-aligned prefetch granularity --
+   a 3-word instruction genuinely cannot be fetched in fewer than 2
+   aligned bus cycles unless the queue already had a head start, which
+   an isolated `bra.w`-then-target test structurally can't have. **Not
+   fixable, and not a bug** -- this is real, matching-silicon cost.
+
+2. **The gap BETWEEN the two fetches is where the (already-known)
+   avoidable-latency mechanisms live**, confirmed via the trace's own
+   `ifu_req`/`fetch_pend_r`/`grant_ifu` columns: the first fetch's own
+   ack lands and `fetch_pend_r` clears the same cycle, but `ifu_req`
+   doesn't re-assert for the second fetch until 2 ticks later --
+   exactly the "at least one concrete source (`fetch_pend_r` needs a
+   genuine extra cycle to re-arm after `ifu_ack`)" mechanism Phase 161
+   Part B Stage B0 already found and characterized as load-bearing
+   (avoids a stale-ack race, same hazard class Phase 128 already fixed
+   once elsewhere). Then, even once `ifu_req`/`grant_ifu` are both
+   live again, `biu_cycle_gen`'s own `ST_IDLE` state doesn't actually
+   leave idle for a further 2 ticks -- exactly the `state_adv`/
+   `phase_r[0]` 2-tick quantization boundary the closed bus-
+   pipelining-overlap plan's own Track C/D work already characterized
+   for RMW dispatch (Stage D1's own finding). **This is item 4's own
+   scope, not a separate mechanism** -- this trace is a second,
+   independent confirmation of the same `ST_IDLE` quantization
+   question, from an entirely different instruction shape (IFU-driven
+   fetch dispatch, not EU-driven RMW write dispatch).
+
+### Decision
+
+No RTL change this phase. Rather than force a speculative fix onto a
+gap whose real root cause is (a) genuinely unavoidable real-hardware-
+matching bus time and (b) two mechanisms already scoped elsewhere in
+this plan (one already investigated and found load-bearing, one that
+is literally item 4's own next task), item 2 closes as investigation-
+only. The finding is folded into item 4's own scope as an additional,
+independently-derived confirmation that `ST_IDLE`'s own quantization
+is worth investigating -- not a new, separate item.
+
+### Results
+
+No RTL changed; `make test` 36/36 sanity check confirms the tree is
+clean (`tb/timing_tb.sv`'s own temporary trace fully removed, no diff).
+
+### Status
+
+Item 2 closed as investigation-only -- root cause identified precisely
+(not guessed at), no independent fix exists separate from item 4's own
+already-planned `ST_IDLE` investigation. Item 3 (redesign the 29
+marker-needed register tests for a clean measurement) is next.
