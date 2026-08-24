@@ -960,3 +960,74 @@ already at parity; the remaining ~1.29x gap is smaller than either of
 the two mechanisms this plan set out to find and fix. Re-survey and
 formally assess whether further stages are warranted, or whether this
 is a reasonable stopping point, is next.
+
+## Phase 163 follow-up investigation: what remains of the bus-touching gap
+
+### Context
+
+After Stage 3's arbiter fix, the bus-touching mean ratio sits at 1.29x
+(down from the original, flawed-measurement 2.37x). Investigated the
+worst remaining offenders (`a3_addi_mem`/`a6_bsr`/`a6_jsr` at 1.78x;
+a cluster including `a3_add_dn_ea`/`a3_and_dn_ea`/`a4_neg_mem`/
+`a5_lsl_mem` all at a uniform 1.57x) to characterize what's left.
+
+### Finding: a real, multi-layer FSM hand-off chain, distinct from what Stage 3 fixed
+
+Traced `a3_add_dn_ea` (`ADD.L D1,(A0)`) at the internal state-machine
+level -- `biu_cache_if.sv`'s own `state`, `biu_sizing_fsm.sv`'s own
+`sf`, and `biu_cycle_gen.sv`'s own `state`, all together (temporary
+hierarchical `$display`s in `tb/timing_tb.sv`/`rtl/eu_seq.sv`, removed
+before committing). Confirmed Stage 3's fix is fully working -- **zero
+bus contention this time**: no IFU (or any other) bus activity happens
+in the read-to-write gap at all. The entire remaining ~12-tick (3-clock)
+gap is a genuine chain of internal state transitions: `biu_cache_if`'s
+own `CI_DONE` (the read's own ack) needs 2 ticks to reach its own
+`CI_WRITE` state (`CI_DONE→CI_IDLE→CI_WRITE`), `biu_sizing_fsm` needs
+1 more tick to follow (`SS_IDLE→SS_ACTIVE`), and `biu_cycle_gen` needs
+1 more to leave `ST_IDLE` and begin the write's own genuine S0/S1
+address-setup phase (which itself correctly takes its own already-
+calibrated 4 ticks, unrelated to this chain, Phase 160's own proven-
+correct pin timing).
+
+**At least one tick of this chain is confirmed structurally necessary,
+not overhead**: `biu_cache_if`'s own `CI_DONE→CI_IDLE` step is waiting
+on `eu_seq.sv`'s own RMW-phase-transition registers (`mem_rmw_run_r`/
+`mem_rmw_addr_r`/`mem_rmw_wdata_r`, the same registers Stage 2/3's own
+investigation already established only update the cycle *after* the
+read's own ack) -- the write's real address/data genuinely aren't
+computed yet at the moment `CI_DONE` is first entered, so nothing
+downstream can safely move any earlier than this.
+
+The remaining ~2-3 ticks (`CI_IDLE→CI_WRITE`, `SS_IDLE→SS_ACTIVE`,
+`cg` leaving `ST_IDLE`) are each an ordinary, independent registered
+state machine reacting to the *previous* module's own state update one
+clock at a time -- standard, expected synchronous-design latency for a
+genuinely multi-stage internal bus architecture (three separate
+`always_ff` state machines chained in sequence), not a bug or an
+artifact comparable to Stage 1's or Stage 3's own fixes. Whether these
+specific hops could be compressed further (e.g. giving `biu_cache_if`'s
+own `CI_IDLE` state the same "zero added latency, drive combinationally
+from the raw request" fast path `biu_sizing_fsm`'s own `SS_IDLE` state
+already implements) is a real, narrower, but *meaningfully riskier*
+follow-up than anything in Stages 1-3: `biu_cache_if.sv` is the single
+largest, most heavily-relied-upon module touched this whole
+investigation (serves ordinary reads/writes, D-cache hit/miss, MMU
+translation faults, and burst fills all through the same state
+machine) -- collapsing one of its own states needs the same rigor as
+every prior fix in this plan, but with a much larger blast radius to
+re-verify.
+
+### Status
+
+**Investigated and characterized, not pursued further this session.**
+The remaining bus-touching gap (mean 1.29x, worst case 1.78x) is now
+fully explained: part is genuine real-silicon-analogous internal
+sequencing overhead (already-established project precedent, Phase 159/
+160's own "internal microcode this simplified pipeline wasn't designed
+to reproduce cycle-for-cycle" finding), part is a real, register-
+dependency-gated one-tick minimum, and a small remaining slice
+(`biu_cache_if.sv`'s own `CI_IDLE` hop specifically) is a plausible but
+unverified further optimization target, deliberately not attempted
+without the same investigation-then-verify rigor every other fix in
+this plan received. No RTL changed this session's follow-up
+investigation -- `make test` 36/36 confirms the working tree is clean.
