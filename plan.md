@@ -878,3 +878,85 @@ No RTL changed (temporary trace only, removed before committing).
 Stage 2 closed -- a confirmed, precise, verified root cause with a
 credible fix-shape candidate (pending one more targeted trace to choose
 between the two options above). Stage 3 (implement the fix) is next.
+
+## Phase 163 Stage 3
+
+### Context
+
+Implements the fix for Stage 2's confirmed root cause, after one more
+targeted trace (needed to choose safely between the two candidate fix
+shapes Stage 2 left open).
+
+### The missing trace: which layer actually creates the gap
+
+Extended Stage 2's own trace to also watch `biu_cache_if.sv`'s own
+`sf_req` output (`ca_sf_req`) alongside `biu_sizing_fsm.sv`'s `cyc_req`
+(`sf_cyc_req`) and the raw EU-level request reaching `m68030_biu.sv`
+directly. Found: `ca_sf_req` and `sf_cyc_req` drop to 0 together, in
+lockstep, at the exact same tick -- `biu_sizing_fsm.sv`'s own `SS_DONE`
+gap (Stage 2's own original finding) is not an independent, second
+layer of the same problem; it's a transparent pass-through of an
+upstream one-tick gap in `biu_cache_if.sv`'s own `CI_DONE` state (its
+own default case, `sf_req=1'b0`, mirrors `biu_sizing_fsm`'s `SS_DONE`
+exactly). Crucially, the *raw* EU-level request reaching `m68030_biu.sv`
+(the `eu_req` top-level port, fed straight from `eu_seq.sv`'s own
+`mem_req`) never drops at all -- confirmed continuous across the whole
+RMW sequence, exactly matching Stage 0's own original eu_seq-level
+trace.
+
+This settles which fix shape from Stage 2's two candidates is safe:
+neither intermediate FSM (`biu_cache_if.sv`'s `CI_DONE` nor
+`biu_sizing_fsm.sv`'s `SS_DONE`) can safely present the write phase's
+own address/data any earlier than it already does -- confirmed via
+`eu_seq.sv`'s own `mem_rmw_run_r` (and equivalent registers for other
+RMW-shaped FSMs), which only updates the cycle *after* the read's own
+ack is observed, so asserting a downstream request one tick early would
+risk launching a bus cycle with stale (read-phase) address/data, a
+correctness bug. The raw EU-level signal, however, is safe to use for
+the ARBITER's own grant-holding decision specifically, since it never
+carries that same one-tick "settling" gap.
+
+### Fix
+
+`rtl/m68030_biu.sv`: widened `biu_arbiter`'s own `eu_req` input from
+`sf_cyc_req | dc_burst_req` to `sf_cyc_req | dc_burst_req | (eu_req &
+!eu_mo_req)` -- the raw top-level `eu_req` port, gated by `!eu_mo_req`
+matching the identical, already-established convention used for
+`biu_cache_if`'s own `eu_req` input a few lines below (currently a
+no-op since `eu_mo_req` is hardwired 0, kept for consistency). This
+only changes the ARBITER's own view of "does EU still want the bus" --
+it does not change what data `biu_cycle_gen` ever receives (still
+gated by `sf_cyc_req` itself, completely unchanged), so a stale-address
+scenario is structurally impossible: the grant simply stays with EU
+through the one-tick gap instead of handing to a lower-priority IFU
+request that happened to be pending, and the sizing FSM presents the
+write's own correct parameters the very next tick once its own
+internal state has caught up, exactly as it already correctly does.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12,
+full 124-suite Harte sweep (mandatory and the highest-stakes gate of
+this whole plan -- `biu_arbiter.sv`'s own grant logic is the single
+most centrally-used mechanism in the chip) -- PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to
+baseline. Bus-touching survey (n=32): mean ratio **1.61x -> 1.29x**
+(worst case 2.33x -> 1.78x) -- e.g. `a3_add_dn_ea`/`a3_and_dn_ea`/
+`a4_neg_mem`/`a5_lsl_mem` all improved by exactly 5 clocks (the full
+one-tick-gap cost, ~20 ticks, matching Stage 1's own uniform-shift
+finding for the ext1_valid fix). No previously-exact (gap=0) result
+regressed -- the count of exact matches in the 117-test survey actually
+grew from 30 to 34; a handful of already-known, never-in-scope negative
+cases (TAS's own AS-never-re-falls measurement quirk, brief-indexed EA)
+shifted 1 clock more negative as an expected side effect, not a new
+regression.
+
+### Status
+
+Stage 3 closed. Bus-touching mean ratio has now dropped from the
+original (flawed-measurement) 2.37x down to a correctly-measured 1.29x
+across this plan's 3 fix stages -- register-only accuracy (Part D) is
+already at parity; the remaining ~1.29x gap is smaller than either of
+the two mechanisms this plan set out to find and fix. Re-survey and
+formally assess whether further stages are warranted, or whether this
+is a reasonable stopping point, is next.

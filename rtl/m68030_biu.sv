@@ -414,7 +414,30 @@ module m68030_biu #(
         // dc_burst_req here would let a D-cache burst bypass normal
         // mmu>eu>ifu arbitration the exact same way the original ic_burst_req
         // bug did (see that bug's own writeup in the ifu_req comment below).
-        .eu_req    (sf_cyc_req | dc_burst_req),
+        //
+        // | (eu_req & !eu_mo_req) (Phase 163 Stage 3, plan.md): both
+        // biu_cache_if.sv's own CI_DONE state and biu_sizing_fsm.sv's own
+        // SS_DONE state (which merely passes CI_DONE's own gap through)
+        // correctly drop their downstream request for exactly one tick as
+        // a terminal "ack pulse" -- neither can safely present the NEXT
+        // transaction's own address/data any earlier, since eu_seq.sv's
+        // own RMW-phase-transition registers (e.g. mem_rmw_run_r) only
+        // update the cycle *after* that ack is observed. But that one-tick
+        // gap coincides exactly with the one tick this arbiter's own grant
+        // re-evaluates (bus_idle), so a read-modify-write instruction's own
+        // immediate write phase could lose that specific window to a
+        // lower-priority ifu_req that happened to be pending at that exact
+        // moment -- confirmed via direct trace (Stage 2): the raw eu_req
+        // port below stays genuinely continuous (unbroken) across the
+        // whole RMW sequence the entire time sf_cyc_req blips low, so OR-
+        // ing it in here only affects THIS module's own grant-holding
+        // decision, not what data biu_cycle_gen ever sees (still gated by
+        // sf_cyc_req itself, unchanged, so nothing can launch a cycle with
+        // stale address/data). !eu_mo_req mirrors the identical gate
+        // already applied to biu_cache_if's own eu_req input just below
+        // (currently a no-op since eu_mo_req is hardwired 0, kept for
+        // consistency with that established convention).
+        .eu_req    (sf_cyc_req | dc_burst_req | (eu_req & !eu_mo_req)),
         // downstream request from biu_icache_if, not the raw IFU-side ifu_req
         // (which stays asserted on a cache hit that never reaches the bus).
         // ic_cg_req | ic_burst_req: biu_icache_if now has TWO distinct
