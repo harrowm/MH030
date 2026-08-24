@@ -906,7 +906,40 @@ module biu_cache_if (
                 xlate_fault_pulse = xlate_fault_r;
             end
 
-            default: ;  // CI_IDLE: sf_req=0, eu_ack=0
+            // Bus-pipelining-overlap plan.md, Track A: a write request
+            // (eu_req && !eu_rw), with the MMU disabled (!tc_e, so no
+            // CI_XLATE detour), never needs the dhit/ihit lookup the read
+            // side's own CI_IDLE branch makes (module header: "On any
+            // write: write-through -- always issues write to bus") --
+            // present sf_addr/sf_wdata/sf_fc/sf_siz/sf_rw/sf_req
+            // combinationally from the raw eu_ inputs THIS cycle, instead
+            // of waiting for the registered addr_r/wdata_r/etc (latched
+            // this same cycle in the always_ff block above, but not
+            // valid until next cycle) and the CI_IDLE->CI_WRITE state
+            // transition a cycle later. Mirrors biu_sizing_fsm.sv's own
+            // SS_IDLE "zero added latency" pass-through exactly. The
+            // registered CI_IDLE->CI_WRITE transition (unchanged, still
+            // happens next cycle) is harmless once this fires -- it just
+            // re-presents the identical values a cycle later from addr_r/
+            // wdata_r, and a real bus cycle always takes far longer (>=8
+            // ticks) than the 1-tick gap between this combinational
+            // fast-path and that catch-up, so there's no window where
+            // sf_ack could arrive before CI's own state has caught up to
+            // CI_WRITE. Read/hit/translate/burst paths (CI_IDLE's own
+            // registered next-state logic in the always_ff block above)
+            // are completely untouched by this arm.
+            CI_IDLE: begin
+                if (eu_req && !eu_rw && !tc_e) begin
+                    sf_addr  = eu_addr;
+                    sf_fc    = eu_fc;
+                    sf_rw    = 1'b0;
+                    sf_siz   = eu_siz;
+                    sf_wdata = eu_wdata;
+                    sf_req   = 1'b1;
+                end
+            end
+
+            default: ;  // CI_IDLE (no eu_req, or a read/xlate case): sf_req=0, eu_ack=0
         endcase
     end
 

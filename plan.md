@@ -1031,3 +1031,95 @@ unverified further optimization target, deliberately not attempted
 without the same investigation-then-verify rigor every other fix in
 this plan received. No RTL changed this session's follow-up
 investigation -- `make test` 36/36 confirms the working tree is clean.
+
+## Phase 163 Track A, Stage A0+A1
+
+### Stage A0 -- investigation
+
+Read `biu_cache_if.sv`'s `CI_IDLE` case arm in full, both the registered
+next-state logic (`always_ff`) and the combinational output block
+(`always_comb`). Confirmed the module header's own claim directly in
+code: a write request (`!eu_rw`) genuinely never evaluates `dhit`/`ihit`
+at all -- the `always_ff` block's own `CI_IDLE` arm branches `if (eu_rw
+&& hit) ... else if (tc_e) CI_XLATE ... else if (!eu_rw) CI_WRITE`, so
+the write path is reached independently of any cache lookup, confirming
+Stage A0's own first open question. Found a second CI_WRITE entry point
+(from `CI_XLATE`, the MMU-enabled case, line ~460) -- confirmed this is
+a completely separate transition, from a different source state, so a
+fast path gated on `!tc_e` (bypassing `CI_XLATE` entirely) cannot
+interact with it at all.
+
+Found the combinational output block's own top-of-block defaults
+already present `sf_addr=addr_r`/`sf_wdata=wdata_r`/etc for EVERY state
+including `CI_IDLE` (which has no explicit case arm today, falling to
+`default:`) -- `CI_WRITE`'s own case arm only adds `sf_rw=1'b0; sf_req=
+!sf_ack`. This means the only change needed is an explicit `CI_IDLE`
+arm presenting the RAW `eu_addr`/`eu_wdata`/etc (not the stale,
+not-yet-updated `addr_r`/`wdata_r`) the instant a qualifying write
+request arrives -- structurally identical to `biu_sizing_fsm.sv`'s own
+already-proven `SS_IDLE` fast path.
+
+Reasoned through the "could `sf_ack` arrive before CI's own registered
+state catches up to `CI_WRITE`" race and concluded it's structurally
+impossible: a real bus cycle takes >=8 ticks (2 clocks) minimum, while
+the registered `CI_IDLE->CI_WRITE` catch-up (unchanged, still happens
+next cycle regardless of the new fast path) takes exactly 1 tick --
+the fast path can only ever make the request visible EARLIER, never
+racing ahead of what `CI_WRITE`'s own registered body already handles
+one cycle later with identical values.
+
+### Stage A1 -- implementation
+
+`rtl/biu_cache_if.sv`: added an explicit `CI_IDLE` arm to the
+combinational output block, presenting `sf_addr=eu_addr`, `sf_fc=
+eu_fc`, `sf_rw=1'b0`, `sf_siz=eu_siz`, `sf_wdata=eu_wdata`, `sf_req=
+1'b1` whenever `eu_req && !eu_rw && !tc_e`. The registered `always_ff`
+next-state logic (hit/miss/translate/burst decisions) is completely
+untouched -- this is purely additive to the output block.
+
+### A real, verified, but sub-clock-granularity result
+
+Controlled A/B measurement (`git stash`/`pop` on just `rtl/biu_cache_if.
+sv`, rebuilding `sim/timing` between each) on the full bus-touching
+survey's own tick-level output (not the coarser `clocks=` figure):
+every genuine RMW-shaped test (`a3_add_dn_ea`/`a3_and_dn_ea`/`a3_addq_
+mem`/`a3_addi_mem`/`a4_neg_mem`/`a5_lsl_mem`/`a5_bchg_dn_mem`/`a5_bset_
+dn_mem`/`a7_trap_n`/`a7_illegal`) improved by exactly 2 ticks (0.5
+clock) -- consistent, real, and precisely matching the "CI_IDLE's own
+formerly-extra internal hop is now free" theory. `a4_cmpm` (compares
+only, no write phase at all) and `a6_bsr`/`a6_jsr` (Track B's own
+separate, not-yet-fixed mechanism) both correctly show zero change,
+confirming the fix's own scope is exactly as intended -- it doesn't
+accidentally touch anything outside the RMW-write-dispatch case.
+
+Because the improvement (2 ticks) is smaller than the integer-clock
+rounding `scripts/b_final_clock_survey.py` reports (`ticks/4`), **none
+of these show up as a visible change in the survey's own coarse output**
+-- every affected test's `clocks=` figure stays the same (e.g. 46->44
+ticks is 11.5->11 clocks, both truncate to 11). The improvement is real
+and verified at the tick level, just below this project's own chosen
+reporting granularity.
+
+The REMAINING piece of the originally-traced 4-tick hand-off chain
+(`biu_sizing_fsm.sv`'s own `SS_DONE->SS_IDLE` hop, ~1-2 more ticks) is
+NOT addressed by this stage -- Track A's own scope was `biu_cache_if.
+sv` only; closing the sizing-FSM piece too would need its own Stage A0-
+style investigation extended into a second file, deliberately not
+folded into this stage.
+
+### Results
+
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12,
+full 124-suite Harte sweep (mandatory -- `biu_cache_if.sv` is the
+single largest, most heavily-relied-upon module either track could
+touch: ordinary reads/writes, D-cache hit/miss, MMU translation faults,
+and burst fills all share this one state machine) -- PASS 702142, FAIL
+2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline.
+
+### Status
+
+Track A (Stages A0+A1) closed. Real, verified, sub-clock-granularity
+improvement on every RMW-shaped bus-touching test, with zero
+correctness regression. Track B (BSR/JSR's own redirect latency,
+Stage B0) is next, per the plan's own default ordering.
