@@ -1549,3 +1549,98 @@ different absorption mechanism. Stage D2 (burst paths + I-cache fill:
 test`'s own `tb/cache_tb.sv` rather than the timing survey (per the
 plan's own note that none of these three sites are exercised by
 bus-touching timing tests at all).
+
+## Phase 163 Track D, Stage D2 -- burst paths + I-cache fill (closes Track D and the plan)
+
+The last 3 of `CI_DONE`'s 5 entry points, per the plan's own lowest-
+priority staging: `CI_FILL_3` (I-cache linefill's own final beat),
+`CI_D_BURST0` (D-cache burst, full 4-beat CBACK#-ok success), and
+`CI_D_FILL_3B` (D-cache burst, degraded per-beat-fallback's own final
+beat). Unlike D0/D1, none of these three are reached by anything in
+the bus-touching timing survey (which never enables the I-cache or
+D-cache burst mode), so per the plan's own note their real correctness
+gate is `make test`'s own `tb/cache_tb.sv` (Phase 127/136's own
+burst-linefill coverage), not the timing survey.
+
+### Implementation
+
+Same shape as D0/D1 for the always_ff side: all three states'
+registered next-state logic now transitions directly `state <=
+CI_IDLE` on their own completion trigger (`sf_ack_rise` for
+`CI_FILL_3`, `dc_burst_ack` for the other two), instead of `<=
+CI_DONE`; array-populate side effects (`data_i`/`tag_i`/`valid_i` or
+`data_d`/`tag_d`/`valid_d`, plus the now-redundant-but-harmless
+`fill_rdata_r` writes) stay on their existing registered schedule,
+completely unchanged. `CI_D_BURST0`'s own degraded (`dc_burst_beat !=
+3`) branch, which falls through to `CI_D_FILL_1B` rather than
+completing, is deliberately untouched.
+
+For the output block: `CI_FILL_3` already had a case arm (gained a
+fast path the same shape as D0/D1's own). `CI_D_BURST0` and
+`CI_D_FILL_3B` had **no case arm at all** before this stage -- their
+`dc_burst_req`/`dc_burst_addr` outputs were already driven
+unconditionally from the registered `dc_burst_req_r`/`addr_r` (Phase
+158 Stage 4c), and `eu_ack`/`eu_rdata` came exclusively from the
+later, now-removed hop through `CI_DONE`. Added two new case arms:
+`CI_D_BURST0` fires `eu_ack` only for the full-success case
+(`dc_burst_ack && dc_burst_beat==2'd3` -- the degraded case must NOT
+complete here), muxing `eu_rdata` from whichever of
+`dc_burst_rdata0..3` matches `woff_r` (mirroring the always_ff block's
+own `case (woff_r)`); `CI_D_FILL_3B` fires unconditionally on
+`dc_burst_ack` (this state IS always the degraded fallback's own
+completion), with `eu_rdata` either `dc_burst_rdata0` directly
+(`woff_r==3`, this beat's own word) or the already-latched
+`fill_rdata_r` (an earlier beat already captured the CPU's requested
+word) -- same "was it captured by an earlier beat" reasoning as
+`CI_FILL_3`'s own arm.
+
+**Confirmed `dc_burst_ack` is safe to gate on directly, no
+edge-detector needed** -- read `biu_burst_ctrl.sv`'s own
+`eu_burst_ack_r` register before adding this (not assumed): it
+defaults to 0 every cycle and is set for exactly one cycle on
+completion (`state_adv && at_burst_s7` gating a single `<= 1'b1`),
+already a genuine 1-tick pulse -- confirming there's no risk of the
+Track C double-pulse bug class here, since the existing always_ff
+blocks already gate directly on `dc_burst_ack` with no `_rise` wrapper
+either.
+
+### Verification: correct on the first attempt
+
+`make test` 36/36 (including `cache` and `biu`, the two suites that
+directly exercise burst/I-cache-fill), `make cosim_grp` 8/8, `make
+cosim_memind` 12/12, full 124-suite Harte sweep -- PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline -- the highest-stakes gate of this whole Track D given it
+now touches all 5 of `CI_DONE`'s entry points across the file.
+
+### Coverage note, not a gap introduced by this stage
+
+Confirmed by reading (not assumed) that `tb/cache_tb.sv`'s own
+`cback_n` is hardwired permanently asserted (`1'b0`), so the degraded
+burst fallback (`CI_D_FILL_1B/2B/3B`) has never been reachable in this
+testbench -- a pre-existing, already-documented limitation (Phase 166's
+own note: "mirrors the I-cache's own already-validated shape"), not
+something this stage newly introduces or needs to close. `CI_D_BURST0`
+'s own full-success path IS exercised (Phase 166's own D-10 test); the
+new `CI_D_FILL_3B` fast-path arm, like the pre-existing always_ff logic
+it sits beside, remains structurally correct but unexercised by
+anything in the current suite.
+
+### Status
+
+Track D Stage D2 closed -- correct on the first attempt, zero
+correctness regression. **This closes Track D (Stages D0/D1/D2) and
+the whole bus-pipelining-overlap plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`) in full.** Every one of
+`CI_DONE`'s 5 entry points across `biu_cache_if.sv`, plus
+`biu_sizing_fsm.sv`'s own `SS_DONE`, now presents its ack combinationally
+the same cycle its own completion trigger fires, instead of waiting an
+extra registered cycle. Measured, verifiable wins: BSR/JSR improved 2
+full ticks (Stage D0, stacking with Track C); `a4_cmpm`/`a7_trap_n`/
+`a7_illegal` improved (Track C); every RMW-shaped test's own read-to-
+write dispatch gap is now provably tighter at the signal level (D1),
+even though every test currently in the bus-touching survey happens to
+land within the same downstream `ST_IDLE` quantization window either
+way. Zero correctness regression at any stage, confirmed via `make
+test`/`cosim_grp`/`cosim_memind`/a full 124-suite Harte sweep after
+every single RTL-touching stage in this plan.

@@ -509,7 +509,15 @@ module biu_cache_if (
                         if (woff_r == 2'd3) fill_rdata_r <= sf_rdata;
                         tag_i[idx_r]   <= vtag_r;
                         valid_i[idx_r] <= 1'b1;
-                        state <= CI_DONE;
+                        // Bus-pipelining-overlap plan.md, Track D Stage D2:
+                        // goes straight to CI_IDLE, not CI_DONE -- same
+                        // pattern as Stage D0/D1. Array writes above and
+                        // fill_rdata_r (now redundant-but-harmless when
+                        // woff_r==3, since the output block's own new
+                        // CI_FILL_3 fast path arm computes the same value
+                        // combinationally in that case) stay on their
+                        // existing registered schedule.
+                        state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
@@ -675,7 +683,15 @@ module biu_cache_if (
                                 tag_d[idx_r] <= vtag_r;
                                 for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
                             end
-                            state          <= CI_DONE;
+                            // Bus-pipelining-overlap plan.md, Track D Stage
+                            // D2: goes straight to CI_IDLE, not CI_DONE --
+                            // same pattern as Stage D0/D1/CI_FILL_3 above.
+                            // The output block's own new CI_D_BURST0 fast-
+                            // path arm below only fires eu_ack for this FULL
+                            // (dc_burst_beat==3) branch -- the degraded
+                            // (else) branch below is untouched, it
+                            // genuinely doesn't complete yet.
+                            state          <= CI_IDLE;
                             dc_burst_req_r <= 1'b0;
                         end else begin
                             // Degraded: CBACK# never asserted, only word 0
@@ -730,7 +746,10 @@ module biu_cache_if (
                             tag_d[idx_r] <= vtag_r;
                             for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
                         end
-                        state          <= CI_DONE;
+                        // Bus-pipelining-overlap plan.md, Track D Stage D2:
+                        // goes straight to CI_IDLE, not CI_DONE -- same
+                        // pattern as every other Track D site.
+                        state          <= CI_IDLE;
                         dc_burst_req_r <= 1'b0;
                     end else if (dc_burst_berr) begin
                         xlate_fault_r  <= 1'b0;
@@ -912,6 +931,18 @@ module biu_cache_if (
                 sf_siz  = 2'b00;
                 sf_rw   = 1'b1;
                 sf_req  = !sf_ack;
+                // Bus-pipelining-overlap plan.md, Track D Stage D2: present
+                // eu_ack/eu_rdata the same cycle sf_ack_rise fires (I-cache
+                // linefill's own final beat), instead of waiting for the
+                // registered CI_FILL_3->CI_DONE hop (now skipped -- see the
+                // always_ff block's own comment). woff_r==3 means THIS
+                // beat's own sf_rdata is the CPU's requested word; otherwise
+                // fill_rdata_r already holds the correct value, latched by
+                // an earlier CI_FILL_0/1/2 beat and untouched since.
+                if (sf_ack_rise) begin
+                    eu_ack   = 1'b1;
+                    eu_rdata = (woff_r == 2'd3) ? sf_rdata : fill_rdata_r;
+                end
             end
 
             CI_D_MISS: begin
@@ -947,6 +978,49 @@ module biu_cache_if (
                     eu_rdata = (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en)
                              ? extract_rd(sf_rdata, siz_r, addr_r[1:0])
                              : sf_rdata;
+                end
+            end
+
+            // Bus-pipelining-overlap plan.md, Track D Stage D2: neither of
+            // these two states had ANY case arm here before this stage --
+            // dc_burst_req/dc_burst_addr are already driven unconditionally
+            // from the registered dc_burst_req_r/addr_r above (Phase 158
+            // Stage 4c), and eu_ack/eu_rdata used to come exclusively from
+            // the later registered hop through CI_DONE. dc_burst_ack is
+            // already a genuine 1-tick pulse (biu_burst_ctrl.sv's own
+            // eu_burst_ack_r: cleared to 0 every cycle by default, set for
+            // exactly one cycle on completion) -- confirmed by reading that
+            // module before adding this, since an accidentally-multi-tick
+            // ack here would double-pulse eu_ack exactly like Track C's own
+            // mistake. No _rise edge-detector needed, matching how the
+            // always_ff block above already gates directly on dc_burst_ack.
+            CI_D_BURST0: begin
+                // Only the FULL 4-beat success case (dc_burst_beat==3)
+                // completes here -- the degraded case (else, in the
+                // always_ff block above) falls through to CI_D_FILL_1B and
+                // must NOT fire eu_ack yet.
+                if (dc_burst_ack && dc_burst_beat == 2'd3) begin
+                    eu_ack = 1'b1;
+                    case (woff_r)
+                        2'd0: eu_rdata = extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        2'd1: eu_rdata = extract_rd(dc_burst_rdata1, siz_r, addr_r[1:0]);
+                        2'd2: eu_rdata = extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
+                        2'd3: eu_rdata = extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
+                    endcase
+                end
+            end
+
+            CI_D_FILL_3B: begin
+                // Degraded fallback's own final beat. woff_r==3 means THIS
+                // beat's own dc_burst_rdata0 is the CPU's requested word;
+                // otherwise fill_rdata_r already holds the correct value,
+                // latched by an earlier CI_D_BURST0/CI_D_FILL_1B/2B beat and
+                // untouched since (same reasoning as CI_FILL_3's own arm).
+                if (dc_burst_ack) begin
+                    eu_ack   = 1'b1;
+                    eu_rdata = (woff_r == 2'd3)
+                             ? extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0])
+                             : fill_rdata_r;
                 end
             end
 
