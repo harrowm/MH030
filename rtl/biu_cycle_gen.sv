@@ -735,15 +735,16 @@ module biu_cycle_gen #(
                 end
             end
             // Clear berr_abort_r and berr_is_halt_retry_r at S7 -- plain
-            // WRITE no longer visits S7 (bus-cycle round-trip overhead
-            // investigation, plan.md follows Phase 160/205: WRITE now
-            // terminates at S6), so this must also fire at ST_WRITE_S6 or
-            // these latches would never clear for a plain write again.
-            // Every other cycle type (RMW_WRITE included) still has its own
-            // real S7, unaffected -- is_S7 itself is deliberately left
-            // meaning exactly "in an S7 state," not redefined to lie about
-            // ST_WRITE_S6.
-            if (is_S7 || state == ST_WRITE_S6) begin
+            // WRITE and RMW's own write phase no longer visit S7 (bus-cycle
+            // round-trip overhead investigation, plan.md follows Phase
+            // 160/205/206: both now terminate at S6), so this must also
+            // fire at ST_WRITE_S6/ST_RMW_WRITE_S6 or these latches would
+            // never clear for those cycle types again. Every other cycle
+            // type (RMW's own read phase, IACK, CAS2, coprocessor, BKPT,
+            // burst, MMU) still has its own real S7, unaffected -- is_S7
+            // itself is deliberately left meaning exactly "in an S7 state,"
+            // not redefined to lie about the new terminal states.
+            if (is_S7 || state == ST_WRITE_S6 || state == ST_RMW_WRITE_S6) begin
                 berr_abort_r        <= 1'b0;
                 berr_is_halt_retry_r <= 1'b0;
             end
@@ -1116,8 +1117,16 @@ module biu_cycle_gen #(
             end
             ST_RMW_READ_S6: state_nxt = ST_RMW_READ_S7;
             ST_RMW_READ_S7: state_nxt = ST_RMW_WRITE_S0; // no bus release!
-            ST_RMW_WRITE_S0: state_nxt = ST_RMW_WRITE_S1;
-            ST_RMW_WRITE_S1: state_nxt = ST_RMW_WRITE_S2;
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160/205/206): RMW's own write phase mirrors ordinary
+            // WRITE's real timing exactly (MC68030UM.pdf 7.3.3 State 6-11 is
+            // the same 6-state shape as 7.3.2's own State 0-5 -- ECS+addr,
+            // AS+DBEN, data placed, DS asserted, nothing new, negate), so
+            // the same S1/S7 skip applies. AS# staying continuously
+            // asserted across the whole indivisible cycle (rmw_as_hold,
+            // below) is unaffected: SP_S2's own unconditional ext_as_n=0
+            // covers the gap the removed S1 used to bridge.
+            ST_RMW_WRITE_S0: state_nxt = ST_RMW_WRITE_S2;
             ST_RMW_WRITE_S2: state_nxt = ST_RMW_WRITE_S3;
             ST_RMW_WRITE_S3: state_nxt = ST_RMW_WRITE_S4;
             // Phase 160 Stage 1: S4 always proceeds to S5 (see above).
@@ -1127,8 +1136,10 @@ module biu_cycle_gen #(
                 else if (!dsack_wait) state_nxt = ST_RMW_WRITE_S6;
                 else                  state_nxt = ST_RMW_WRITE_S4;
             end
-            ST_RMW_WRITE_S6: state_nxt = ST_RMW_WRITE_S7;
-            ST_RMW_WRITE_S7: state_nxt = ST_IDLE;
+            // RMW write now terminates at S6 too (S7 skipped) -- see the
+            // matching extension of the SP_S7-relocated completion block
+            // and the BERR-abort clear, both below.
+            ST_RMW_WRITE_S6: state_nxt = ST_IDLE;
 
             // CAS2: R1→(W1 if do_write1)→R2→(W2 if do_write2)→IDLE
             ST_CAS2_R1_S0: state_nxt = ST_CAS2_R1_S1;
@@ -1355,20 +1366,24 @@ module biu_cycle_gen #(
                            // -- see the standalone if right after endcase)
             endcase
             // Bus-cycle round-trip overhead investigation (plan.md, follows
-            // Phase 160/205): the S7 completion-dispatch body (unchanged
-            // below) now also runs when state==ST_WRITE_S6, since plain
-            // WRITE terminates there instead of visiting its own S7 (see
-            // the ST_WRITE_S6 transition above). Moved out of the case
-            // statement itself, rather than duplicating one branch of it,
-            // after an initial attempt that duplicated only the grant_eu
-            // branch broke coprocessor writes (cyc_is_coproc_r's own
-            // branch, below, never got a chance to fire) -- this way every
-            // branch (IACK/init/CAS2/coprocessor/BKPT/burst/RMW/MMU/EU/IFU)
-            // applies identically regardless of which trigger fired,
-            // guaranteeing nothing is silently missed the way that first
-            // attempt did. Every other cycle type's own real S7 is
-            // completely unaffected (state != ST_WRITE_S6 for any of them).
-            if (sphase == SP_S7 || state == ST_WRITE_S6) begin
+            // Phase 160/205/206): the S7 completion-dispatch body (unchanged
+            // below) now also runs when state==ST_WRITE_S6 or
+            // state==ST_RMW_WRITE_S6, since plain WRITE and RMW's own write
+            // phase both terminate there instead of visiting their own S7
+            // (see the matching transitions above). Moved out of the case
+            // statement itself, rather than duplicating individual branches
+            // of it, after an initial attempt that duplicated only the
+            // grant_eu branch broke coprocessor writes (cyc_is_coproc_r's
+            // own branch, below, never got a chance to fire) -- this way
+            // every branch (IACK/init/CAS2/coprocessor/BKPT/burst/RMW/MMU/
+            // EU/IFU) applies identically regardless of which trigger
+            // fired, guaranteeing nothing is silently missed the way that
+            // first attempt did. is_rmw_write (used by the branch below)
+            // already covers ST_RMW_WRITE_S6 unchanged, since that state is
+            // still visited, just S7 no longer is. Every other cycle
+            // type's own real S7 is completely unaffected.
+            if (sphase == SP_S7 || state == ST_WRITE_S6 ||
+                state == ST_RMW_WRITE_S6) begin
                 if (is_iack) begin
                         eu_iack_vec  = iack_vec_r;
                         eu_iack_avec = iack_avec_r;
