@@ -2589,3 +2589,53 @@ entry. `make test` 36/36 (no Harte/cosim re-run needed -- pure
 documentation, zero RTL touched). See `~/.claude/plans/compressed-
 hopping-cocoa.md`. Stage 3 (`a6_bcc_w_not_taken` -3, `a7_bkpt` -3) is
 next.
+
+## Phase 175 (timing-gaps-largest-first plan, Stage 3a) -- `a6_bcc_w_not_taken` (-3) root-caused; real test bug found and fixed in `a6_bcc_b_not_taken` along the way
+
+Traced `a6_bcc_b_not_taken` (previously an "exact match," used as the
+comparison baseline for `a6_bcc_w_not_taken`'s own investigation) via
+direct `$display` on `instr_ack`/`dec_internal_stall_ticks_fixed`/
+`instr_word` and found its own dispatched opcode was `0x4DD6`
+(`LEA (A6),A6`), not a real `Bcc.B` opcode at all. Root cause: the
+test's own `skip:` label sat immediately after `bne.b skip`
+(displacement=0), and vasm silently substitutes its own "LEA (An),An"
+2-byte NOP-equivalent placeholder for a degenerate zero-distance short
+branch (confirmed directly: `vasmm68k_mot -L` emits "warning 2058:
+short-branch to following instruction turned into a nop" for this
+exact file, and no other file in the whole `tests/timing/` corpus
+triggers it). **This test had never exercised a real `Bcc.B` opcode
+since Phase 161 first created it** -- its own "exact gap=0" was
+coincidentally matching LEA (An),An's own manual NCC (also 4) via the
+pre-existing, unrelated LEA whitelist entry, not because Bcc.B itself
+was correctly timed.
+
+Fixed by inserting a real `nop` between the branch and `skip:`
+(`tests/timing/a6_bcc_b_not_taken.s`), giving the branch a genuine
+non-degenerate displacement; vasm now emits the real `0x6602` (`bne.b`)
+opcode with no warning. Re-measured: **both** `a6_bcc_b_not_taken` and
+`a6_bcc_w_not_taken` now share the identical 3-clock/12-tick unstalled
+baseline (the byte-form's own true, previously-never-measured value),
+confirming `a6_bcc_w_not_taken`'s own -3 gap was never form-specific --
+neither Bcc-not-taken form had ever had a real whitelist entry.
+
+Added a new `dec_internal_stall_ticks_fixed` entry in `rtl/eu_seq.sv`,
+gated on `dec_is_branch && !eval_cc(dec_branch_cond,...)` (the exact
+mirror-image of `dec_branch_taken`'s own existing "taken" formula, so
+this can never fire for BRA -- always-true condition -- or for the
+taken path, a separate already-KNOWN readahead gap) -- `f_disp8`
+distinguishes byte-form (+1 clock=4t) from word-form (+3 clocks=12t),
+mirroring the same group's own branch-decode block. Long-form
+(`f_disp8==0xFF`, 68020+) has no test coverage and is deliberately left
+unhandled.
+
+Results: `a6_bcc_b_not_taken` gap 0->0 (same number, now testing the
+*real* instruction) and `a6_bcc_w_not_taken` gap -3->0 (both exact
+matches). `a6_bcc_taken`/`a6_dbcc_false_notexp`/`a6_bsr`/`a6_jmp`
+(the readahead cluster, sharing `dec_is_branch`/`eval_cc` machinery)
+confirmed unaffected via direct re-measurement before the full gate.
+`make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind` 12/12,
+full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (a
+meaningful gate here: Bcc is one of the most heavily Harte-exercised
+instructions in the corpus). See `~/.claude/plans/compressed-hopping-
+cocoa.md`. `a7_bkpt` (-3) is next (Stage 3b).

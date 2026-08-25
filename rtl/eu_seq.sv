@@ -7029,6 +7029,34 @@ module eu_seq (
         if (dec_valid && dec_is_dbcc &&
             eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c))
             dec_internal_stall_ticks_fixed = 8'd20; // DBcc(cc=True) NCC=8-3clk=5clk=20t
+        // Bcc not-taken (condition evaluates FALSE -> fall through, no
+        // branch) -- timing-gaps-largest-first plan, Stage 3. Same
+        // "internal microcode ceiling" shape as DBcc(cc=True) above,
+        // gated the mirror-image way: dec_branch_taken's own existing
+        // formula (elsewhere in this file) already defines "taken" as
+        // eval_cc(...)==true, so "not taken" is exactly !eval_cc(...) --
+        // this can never fire for BRA (f_cond=0000, eval_cc always true)
+        // or for the taken path (a separate, already-KNOWN speculative-
+        // readahead gap, untouched by this entry). f_disp8 distinguishes
+        // which extension-word shape was used, mirroring this same
+        // group's own branch-decode block above (f_disp8==8'h00 -> word
+        // displacement follows; otherwise a literal byte displacement is
+        // embedded in the opcode itself) -- found via a real test bug
+        // investigation: a6_bcc_b_not_taken's own original "exact match"
+        // was measuring vasm's own LEA(An),An NOP-substitute for a
+        // degenerate zero-distance branch, not a real Bcc.B opcode at
+        // all (fixed in tests/timing/a6_bcc_b_not_taken.s); once fixed,
+        // BOTH byte and word not-taken forms share the identical
+        // 3-clock/12-tick baseline this whole whitelist already uses.
+        // f_disp8==8'hFF (long-form, 68020+) has no test coverage and is
+        // deliberately left unhandled rather than guessed at.
+        if (dec_valid && dec_is_branch &&
+            !eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c)) begin
+            if (f_disp8 != 8'h00 && f_disp8 != 8'hFF)
+                dec_internal_stall_ticks_fixed = 8'd4;  // Bcc.B not-taken NCC=4-3clk=1clk=4t
+            else if (f_disp8 == 8'h00)
+                dec_internal_stall_ticks_fixed = 8'd12; // Bcc.W not-taken NCC=6-3clk=3clk=12t
+        end
     end
 
     // LSL/LSR/ASR register-count forms: arm a one-cycle "resolving" flag
