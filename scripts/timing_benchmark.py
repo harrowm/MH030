@@ -79,6 +79,9 @@ MEASURED_RE = re.compile(r'MEASURED ticks=(\d+) clocks=(\d+)')
 INSTR_ONLY_RE = re.compile(r'MEASURED_INSTR_ONLY ticks=(\d+) clocks=(\d+)')
 RESULT_RE = re.compile(r'^(PASS|FAIL)\s+(.*)$')
 RPW_CHECK_RE = re.compile(r'^r/p/w == ')
+SEQ_CHECKPOINT_RE = re.compile(
+    r'SEQ_CHECKPOINT k=(\d+) ticks=(\d+) clocks=(\d+) rem=(\d+) '
+    r'inc_ticks=(\d+) inc_clocks=(\d+) r=(\d+) p=(\d+) w=(\d+)')
 
 
 def to_int(v):
@@ -194,6 +197,49 @@ def run_one(entry, timeout=30):
                 measured=measured, instr_only=instr_only, stdout=stdout)
 
 
+def run_sequence(entry, timeout=30):
+    """Run a multi-instruction sequence test (entry['seq_len'] > 1),
+    reusing tb/timing_tb.sv's own +seq_len=N mechanism (Stage 7 follow-up
+    plan: generalizes the proven watch_kind=3 retirement-pulse tracker
+    from 'the first retirement' to 'the first N retirements'). A
+    genuinely different invocation shape from run_one() -- no watch_reg/
+    watch_val/expect_r/p/w, since a sequence has no single completion
+    value or single resource-count expectation, only per-instruction
+    checkpoints -- so this is a separate function, not a variant of
+    run_one().
+
+    Returns a dict with 'hang' and, if not hung, 'checkpoints': a list of
+    per-instruction dicts (k, ticks, clocks, inc_ticks, inc_clocks, r, p,
+    w), one per SEQ_CHECKPOINT line actually observed (may be short of
+    seq_len if the sequence hung partway through)."""
+    hexpath = ensure_hex(entry)
+    args = [
+        str(SIM_BIN),
+        f"+hexfile={hexpath.relative_to(REPO)}",
+        f"+target_pc={to_int(entry['target_pc']):x}",
+        f"+seq_len={entry['seq_len']}",
+    ]
+    if 'instr_len' in entry:
+        args.append(f"+instr_len={entry['instr_len']}")
+
+    try:
+        r = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=timeout)
+        stdout = r.stdout
+    except subprocess.TimeoutExpired:
+        return dict(hang=True, checkpoints=[], stdout='')
+
+    checkpoints = []
+    for line in stdout.splitlines():
+        m = SEQ_CHECKPOINT_RE.search(line)
+        if m:
+            checkpoints.append(dict(
+                k=int(m.group(1)), ticks=int(m.group(2)), clocks=int(m.group(3)),
+                inc_ticks=int(m.group(5)), inc_clocks=int(m.group(6)),
+                r=int(m.group(7)), p=int(m.group(8)), w=int(m.group(9)),
+            ))
+    return dict(hang=False, checkpoints=checkpoints, stdout=stdout)
+
+
 def resolved_measurement(entry, result):
     """The one, canonical field-selection decision for this whole project:
     marker-needing tests (expect_r>0 or expect_w>0) use MEASURED_INSTR_ONLY;
@@ -232,6 +278,7 @@ def main():
     known = load_known_issues()
 
     rows = []
+    seq_rows = []
     any_mismatch = False
     for mpath in manifest_paths:
         with open(mpath) as f:
@@ -239,6 +286,23 @@ def main():
         for e in entries:
             if not matches_filter(e, args.filter):
                 continue
+
+            if e.get('seq_len', 1) > 1:
+                # Multi-instruction sequence entry -- genuinely different
+                # shape (per-instruction checkpoints, no single completion
+                # value/resource-count expectation), reported in its own
+                # section below rather than folded into the single-
+                # instruction rows/sorting/known-issues machinery.
+                result = run_sequence(e)
+                if result['hang']:
+                    any_mismatch = True
+                seq_rows.append(dict(
+                    stage=mpath.stem, name=e['name'],
+                    seq_isolated_ncc=e.get('seq_isolated_ncc'),
+                    hang=result['hang'], checkpoints=result['checkpoints'],
+                ))
+                continue
+
             desc_total = manual_total(e.get('desc', ''))
             ref_note = check_manual_ref(e, desc_total)
             result = run_one(e)
@@ -277,7 +341,8 @@ def main():
             cut = REASON_MAXLEN
         return text[:cut] + '…'
 
-    print(f"{'stage':16s} {'test':28s} {'manual':>7s} {'measured':>9s} {'gap':>5s}  {'status'}")
+    if rows:
+        print(f"{'stage':16s} {'test':28s} {'manual':>7s} {'measured':>9s} {'gap':>5s}  {'status'}")
     for row in rows:
         manual_s = f"{row['manual']:7d}" if row['manual'] is not None else "      ?"
         meas_s = f"{row['measured']:9d}" if row['measured'] is not None else "        ?"
@@ -325,14 +390,58 @@ def main():
     if all_gaps:
         n = len(all_gaps)
         print(f"gap: min={min(all_gaps)} max={max(all_gaps)} mean={sum(all_gaps)/n:.2f}  (n={n})")
-    print(f"{len(matches)} exact matches, {len(known_nonzero)} known non-zero (documented), "
-          f"{len(unexplained)} unexplained non-zero")
+    if rows:
+        print(f"{len(matches)} exact matches, {len(known_nonzero)} known non-zero (documented), "
+              f"{len(unexplained)} unexplained non-zero")
     if unexplained:
         print(f"  unexplained: {', '.join(r['name'] for r in unexplained)}")
 
+    # ── Sequence report ────────────────────────────────────────────────
+    # Multi-instruction sequences (seq_len>1): per-instruction incremental
+    # cost, plus (when the manifest supplies seq_isolated_ncc) the sum of
+    # each sub-instruction's own already-known isolated NCC as an explicit
+    # upper bound (MC68030UM.pdf 11.3.3's own "NCCs assume no overlap...
+    # equal to or greater than the actual" wording, confirmed directly
+    # this session) -- informational, not a pass/fail gap, since the
+    # manual provides no single correct expected number for a no-cache
+    # sequential run.
+    if seq_rows:
+        print(f"\n{'stage':16s} {'test':28s} {'k':>3s} {'cum.clk':>8s} {'inc.clk':>8s} "
+              f"{'r':>3s} {'p':>3s} {'w':>3s}")
+        for sr in seq_rows:
+            if sr['hang']:
+                print(f"{sr['stage']:16s} {sr['name']:28s}  HANG (no checkpoints reached)")
+                continue
+            for cp in sr['checkpoints']:
+                print(f"{sr['stage']:16s} {sr['name']:28s} {cp['k']:3d} "
+                      f"{cp['clocks']:8d} {cp['inc_clocks']:8d} "
+                      f"{cp['r']:3d} {cp['p']:3d} {cp['w']:3d}")
+            if sr['seq_isolated_ncc']:
+                # NOTE: sum(seq_isolated_ncc) is the MANUAL's own per-
+                # instruction NCC figures added together -- a theoretical,
+                # zero-overlap floor. It does NOT account for this RTL's
+                # own separately-documented isolated-dispatch overhead
+                # (e.g. the RMW-dispatch-floor cluster's own +4 gap even
+                # for ONE instruction in isolation). So "vs_manual_sum"
+                # going negative does NOT mean "no overlap benefit was
+                # realized" -- it means the sequence's own real overlap,
+                # however large, hasn't fully absorbed BOTH effects (this
+                # RTL's own baseline overhead AND the lack of overlap) at
+                # once. A positive value means the real sequence beat the
+                # manual's own naive additive prediction outright.
+                manual_sum = sum(sr['seq_isolated_ncc'])
+                measured_total = sr['checkpoints'][-1]['clocks'] if sr['checkpoints'] else None
+                if measured_total is not None:
+                    vs_manual_sum = manual_sum - measured_total
+                    print(f"{'':16s} {'':28s}     sum(manual NCC)={manual_sum} "
+                          f"measured={measured_total} vs_manual_sum={vs_manual_sum:+d} clocks")
+
     if args.json:
         with open(args.json, 'w') as f:
-            json.dump([{k: v for k, v in r.items() if k != 'stdout'} for r in rows], f, indent=2)
+            json.dump(
+                [{k: v for k, v in r.items() if k != 'stdout'} for r in rows] +
+                [{k: v for k, v in r.items()} for r in seq_rows],
+                f, indent=2)
         print(f"\nJSON report written to {args.json}")
 
     if args.strict and any_mismatch:

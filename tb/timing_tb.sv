@@ -165,6 +165,22 @@ module timing_tb;
     // CCR-only-writing instruction like MOVE Dn,CCR doesn't need the
     // test to also predict the untouched upper SR byte).
     int          watch_kind;
+    // Multi-instruction sequential timing measurement (Stage 7 follow-up):
+    // +seq_len=N (default 1, meaning "off") generalizes the watch_kind=3
+    // retirement-pulse mechanism below from "stop at the first retirement"
+    // to "record all N first retirements." Purely additive -- seq_complete_r
+    // can only ever assert when seq_len>1, so every existing invocation
+    // (which never passes +seq_len, defaulting to 1) is provably unaffected.
+    // target_len's existing meaning is reused unchanged for the *whole*
+    // tracked span when seq_len>1 (the combined byte length of all N
+    // instructions), mirroring how it already works for a single
+    // instruction today.
+    int          seq_len;
+    localparam int MAX_SEQ = 16;
+    longint unsigned seq_ticks [0:MAX_SEQ-1];
+    int          seq_r [0:MAX_SEQ-1], seq_p [0:MAX_SEQ-1], seq_w [0:MAX_SEQ-1];
+    int          retire_count_r;
+    logic        seq_complete_r;
     function automatic logic [31:0] watch_current();
         case (watch_kind)
             1: watch_current = u_top.u_eu.u_rf.a_reg[watch_reg[2:0]];
@@ -246,18 +262,18 @@ module timing_tb;
                 t_start      <= sim_ticks;
                 dbg_on       <= 1'b1;
             end
-            if (!t_end_seen && is_prog_fc && ext_rw && in_instr_range)
+            if (!t_end_seen && !seq_complete_r && is_prog_fc && ext_rw && in_instr_range)
                 p_count <= p_count + 1;
-            if (!t_end_seen &&
+            if (!t_end_seen && !seq_complete_r &&
                 (t_start_seen || (is_prog_fc && ext_rw && ext_a == target_pc))) begin
                 if (is_data_fc && ext_rw) r_count <= r_count + 1;
                 else if (!ext_rw)         w_count <= w_count + 1;
             end
-            if (dbg_on && !t_end_seen)
+            if (dbg_on && !t_end_seen && !seq_complete_r)
                 $display("  [tick=%0d] AS-fall  %s %h fc=%b siz=%b",
                           sim_ticks, ext_rw ? "R" : "W", ext_a, ext_fc, ext_siz);
         end
-        if (dbg_on && !t_end_seen && !as_prev_r && ext_as_n)
+        if (dbg_on && !t_end_seen && !seq_complete_r && !as_prev_r && ext_as_n)
             $display("  [tick=%0d] AS-rise", sim_ticks);
     end
 
@@ -314,6 +330,27 @@ module timing_tb;
         else        wb_valid_r <= u_top.u_eu.u_seq.wb_valid;
     end
 
+    // Sequence checkpoint counter -- reuses dispatched_seen_r/wb_valid_r
+    // above unchanged (same in-order, strictly-sequential retirement
+    // argument already established for watch_kind=3), generalized from
+    // "the first retirement" to "the first seq_len retirements." Gated on
+    // seq_len>1 so it is provably inert for every existing single-
+    // instruction invocation.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            retire_count_r <= 0;
+            seq_complete_r <= 1'b0;
+        end else if (seq_len > 1 && !seq_complete_r &&
+                     dispatched_seen_r && wb_valid_r) begin
+            seq_ticks[retire_count_r] <= sim_ticks;
+            seq_r[retire_count_r]     <= r_count;
+            seq_p[retire_count_r]     <= p_count;
+            seq_w[retire_count_r]     <= w_count;
+            retire_count_r            <= retire_count_r + 1;
+            if (retire_count_r + 1 >= seq_len) seq_complete_r <= 1'b1;
+        end
+    end
+
     always_ff @(posedge clk_4x) begin
         if (watch_kind == 3 && t_start_seen && !t_end_seen &&
             dispatched_seen_r && wb_valid_r) begin
@@ -360,6 +397,7 @@ module timing_tb;
         if (!$value$plusargs("watch_val=%h", wval_arg)) wval_arg = 32'h0;
         watch_val = wval_arg[31:0];
         if (!$value$plusargs("watch_kind=%d", watch_kind)) watch_kind = 0;
+        if (!$value$plusargs("seq_len=%d", seq_len)) seq_len = 1;
         have_exp = $value$plusargs("expect_clocks=%d", exp_clocks);
         exp_r = 0; exp_p = 0; exp_w = 0;
         begin
@@ -375,14 +413,34 @@ module timing_tb;
                 repeat(20000) @(posedge clk_4x);
             end
             begin : blk_stop
-                wait(t_end_seen == 1'b1);
+                wait(t_end_seen == 1'b1 || seq_complete_r == 1'b1);
                 repeat(20) @(posedge clk_4x);
                 disable blk_timeout;
             end
         join
 
         check("target instruction's own opcode fetch observed", t_start_seen);
-        check("watch register reached expected value",          t_end_seen);
+        if (seq_len > 1)
+            check("sequence retirement count reached", seq_complete_r);
+        else
+            check("watch register reached expected value", t_end_seen);
+
+        if (seq_len > 1 && t_start_seen && seq_complete_r) begin
+            longint unsigned prev_ticks;
+            prev_ticks = t_start;
+            for (int k = 0; k < seq_len && k < MAX_SEQ; k++) begin
+                longint unsigned cum_ticks, cum_clocks, cum_rem, inc_ticks, inc_clocks;
+                cum_ticks  = seq_ticks[k] - t_start;
+                cum_clocks = cum_ticks / 4;
+                cum_rem    = cum_ticks % 4;
+                inc_ticks  = seq_ticks[k] - prev_ticks;
+                inc_clocks = inc_ticks / 4;
+                $display("SEQ_CHECKPOINT k=%0d ticks=%0d clocks=%0d rem=%0d inc_ticks=%0d inc_clocks=%0d r=%0d p=%0d w=%0d",
+                          k+1, cum_ticks, cum_clocks, cum_rem, inc_ticks, inc_clocks,
+                          seq_r[k], seq_p[k], seq_w[k]);
+                prev_ticks = seq_ticks[k];
+            end
+        end
 
         if (t_start_seen && t_end_seen) begin
             longint unsigned total_ticks, total_clocks, rem;

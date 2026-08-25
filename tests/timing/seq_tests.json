@@ -1,0 +1,47 @@
+[
+  {
+    "name": "seq_reg_pair",
+    "hex": "tests/timing/seq_reg_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 2,
+    "seq_isolated_ncc": [2, 2],
+    "desc": "Two ADD Rn,Dn back to back (no branch/marker between). MC68030UM.pdf 11-40/41: ADD Rn,Dn NCC=2(0/1/0) each. Isolated instr1 measures this RTL's own already-documented register-only dispatch floor (~3 clocks); instr2's own incremental cost (real sequential flow, benefiting from the IFU's own EX/WB-independent continuous prefetch) is expected to be dramatically smaller."
+  },
+  {
+    "name": "seq_extcount_pair",
+    "hex": "tests/timing/seq_extcount_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 12,
+    "seq_len": 2,
+    "seq_isolated_ncc": [4, 4],
+    "desc": "Two ADDI.L #imm,Dn back to back. MC68030UM.pdf 11-40/42: ADDI #(data),Dn NCC=2(0/1/0) + FIEA(#imm.L,Dn)=2(0/1/0) = 4 each. Each instruction is ext_count==2 (needs a genuine second IFU fetch when the queue starts empty, Phase 165). Isolated instr1 measures the already-documented +4 gap; instr2's own incremental cost is expected to shrink substantially."
+  },
+  {
+    "name": "seq_rmw_pair",
+    "hex": "tests/timing/seq_rmw_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 2,
+    "seq_isolated_ncc": [7, 7],
+    "desc": "Two NEG.L (An) at different addresses, back to back. MC68030UM.pdf 11-43/44: NEG Mem NCC=4(0/1/1) + fea((An))=3(1/0/0) = 7 each. Isolated instr1 measures the already-documented RMW-to-memory dispatch-floor +4 gap; instr2's own incremental cost is expected to improve only partially (real bus-arbitration contention -- a single physical bus can't serve two masters at once -- unlike the register-only/ext_count==2 clusters' own near-complete closure)."
+  },
+  {
+    "name": "seq_mixed3",
+    "hex": "tests/timing/seq_mixed3.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 3,
+    "seq_isolated_ncc": [2, 7, 2],
+    "desc": "A heterogeneous 3-instruction sequence: ADD Rn,Dn (NCC=2), NEG.L (An) (NCC=7), ADD Rn,Dn (NCC=2) -- the first test of a realistic mixed sequence rather than two copies of the same instruction, checking whether the overlap benefit generalizes across instruction-class boundaries."
+  },
+  {
+    "name": "seq_branch_pair",
+    "hex": "tests/timing/seq_branch_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 2,
+    "seq_isolated_ncc": [2, 8],
+    "desc": "ADD Rn,Dn (whose own real result sets Z=1) immediately followed by a taken BEQ.W depending on that result -- not isolated setup code. MC68030UM.pdf 11-48: Bcc (Taken) NCC=8(0/2/0). Checks whether the branch-redirect finding (pc_wr_en fires the same cycle as instr_ack, combinationally, confirmed via direct trace) holds when something real precedes the branch."
+  }
+]
