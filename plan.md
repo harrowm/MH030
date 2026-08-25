@@ -2639,3 +2639,35 @@ ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (a
 meaningful gate here: Bcc is one of the most heavily Harte-exercised
 instructions in the corpus). See `~/.claude/plans/compressed-hopping-
 cocoa.md`. `a7_bkpt` (-3) is next (Stage 3b).
+
+## Phase 176 (timing-gaps-largest-first plan, Stage 3b -- closes Stage 3) -- `a7_bkpt` (-3) definitively resolved: no bug, documented
+
+Traced directly (`instr_ack`/`bkpt_start_r`/`bkpt_run_r`/`eu_bkpt_req`/
+`eu_bkpt_ack`/AS/FC, temporary `$display`, fully removed before
+committing). Same shape as Stage 2's `a4_tas_mem` finding: BKPT's own
+CPU-space (FC=111) read cycle is genuinely pin-accurate -- a normal,
+correctly-timed DSACK'd bus cycle (AS-fall at the expected tick,
+AS-rise 8 ticks/2 clocks later, matching every other ordinary read in
+this project). The shortfall is entirely in BKPT's own dispatch FSM
+(`bkpt_start_r`/`bkpt_run_r`, Phase 157's own dedicated mechanism
+mirroring the FPU coprocessor stub's dispatch shape): `eu_bkpt_req`
+asserts the very next tick after `bkpt_start_r`, with no extra internal
+decision time, while real 68030 microcode almost certainly needs more
+serial time to set up a CPU-space cycle -- the same "internal microcode
+ceiling" character as every other confirmed-non-bug finding this
+session.
+
+**Deliberately not fixed**: BKPT is already a deliberately scoped-down
+implementation (Phase 157 documented "no live opcode substitution
+attempted") and a comparatively rare, debugger-only instruction;
+extending its own dispatch FSM's timing for a single -3 gap is the same
+disproportionate risk/value tradeoff as `a4_tas_mem`'s own locked-RMW
+FSM. Documented in `known_issues.json` instead.
+
+Results: no RTL change, temporary trace fully removed (`git diff
+--stat tb/timing_tb.sv` shows no diff), new `known_issues.json` entry.
+`make test` 36/36 (no Harte/cosim re-run needed -- pure documentation).
+**This closes Stage 3 of the timing-gaps-largest-first plan** (both
+`a6_bcc_w_not_taken` and `a7_bkpt`, plus the real `a6_bcc_b_not_taken`
+test bug found along the way). See `~/.claude/plans/compressed-
+hopping-cocoa.md`. Stage 4 (`a4_neg_mem_idx` r/p/w MISMATCH) is next.
