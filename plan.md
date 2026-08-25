@@ -2729,3 +2729,91 @@ trace fully removed (`git diff --stat tb/timing_tb.sv` shows no diff).
 `~/.claude/plans/compressed-hopping-cocoa.md`. Stage 6 (the
 register-only "+1" cluster, ~24 tests) is next -- the last stage of
 this plan.
+
+## Phase 179 (timing-gaps-largest-first plan, Stage 6 -- closes the plan's tractable Stages 1-6) -- the +1/-1 tail: a genuine structural floor, plus 2 more real fixes
+
+Cross-checked the plan's own predicted "shared root cause" hypothesis
+for the ~24-member register-only "+1" cluster before writing anything.
+Traced two diverse representatives directly (`a3_add_rn_dn`, ADD Dn,Dn;
+`a4_clr_dn`, CLR Dn) and found an identical signature both times:
+`dec_internal_stall_ticks_fixed` reads 0 throughout dispatch (no
+whitelist entry fires or could fire -- this cluster is *too fast*
+relative to the manual, and Phase 162 Part D's own mechanism can only
+ever add ticks, never remove them below the pipeline's own structural
+minimum), and the pipeline shows the absolute minimum possible
+`instr_ack`->`ex_valid`->`wb_valid`->commit-visible sequence: exactly 1
+tick per stage, 3 ticks/12-tick dispatch latency, the same 3-clock
+register-direct floor this whole project's whitelist mechanism is
+built around. The manual's own NCC=2 for these simplest ops implies
+the *entire* fetch+dispatch+EX+commit sequence fits in 2 real clocks
+on actual silicon -- but a full, pin-accurate opcode fetch alone
+already costs 2 clocks in this project's own Phase-160-calibrated
+S-state model, leaving zero room for dispatch+EX+commit at all.
+Confirms the plan's own Context-section prediction and matches Phase
+162 Parts D/E's own prior conclusion exactly: not fixable without
+redesigning the fetch/dispatch pipeline's own overlap model (real
+68030 silicon almost certainly overlaps the next instruction's fetch
+with this one's own EX/commit; this project's deliberately-isolated
+"no overlap with the preceding instruction" measurement convention,
+matching NCC's own definition, cannot reflect that overlap by
+construction).
+
+Full corpus sweep of all 32 `gap=+1` tests split cleanly into two
+sub-clusters by r/w-touching status: **22 pure register-only** members
+(the structural floor above) and **8 bus-touching** members (`a7_trap_n`,
+`a7_illegal`, `a1_fea_anind`, `a1_fea_anpostinc`, `a6_link_w`,
+`a4_tst_mem`, `a2_move_ea_xxxw`, `a2_move_ea_d16an`) -- a *different*,
+already-established mechanism (each extra real bus cycle pays its own
+ordinary S0/S1 dispatch overhead beyond the manual's additive-table
+model, same character as `a0_validate`/`a3_addi_mem`'s own findings).
+Documented all 30 (the two representatives got the full derivation,
+the other 28 reference them) in `known_issues.json`.
+
+**Found 2 more genuinely fixable cases while auditing the full
+corpus's remaining non-zero, non-KNOWN gaps** (not originally in the
+plan's own "+1 cluster" framing -- these were `-1`, the opposite
+direction, only surfaced by Phase 172's `watch_kind=3` conversions):
+`a2_move_an_usp` (MOVE An,USP, manual NCC=4) and `a7_trapv_notrap`
+(TRAPV V=0, manual NCC=4) both measured 3 clocks -- genuinely fixable
+via the same additive whitelist mechanism as Stages 1/3, unlike the
++1 cluster's own structural floor. Added two new entries in
+`rtl/eu_seq.sv`: `dec_is_move_usp` (mirrors the already-whitelisted
+read-direction `dec_reads_usp` entry exactly, no taken/not-taken split
+to worry about) and a raw `instr_word==16'h4E76 && !flag_v` match for
+TRAPV's own not-trapping path specifically (`dec_is_trapv` is
+deliberately only ever set for the TRAP-*taken* case by this decode
+block's own existing logic -- confirmed by reading it directly before
+writing the gating condition -- so gating on `!flag_v` is the exact
+mirror image, guaranteeing this can never fire for the taken path, a
+real exception dispatch already correctly measured separately, or for
+the unrelated TRAPcc opcode).
+
+**Results**: `a2_move_an_usp` gap -1->0, `a7_trapv_notrap` gap -1->0
+(both exact matches). Full corpus re-run confirms exactly these 2
+tests changed gap. **`gap (known excluded)` is now min=0, max=0,
+mean=0.00 across all 54 currently-unexplained-by-name tests** -- every
+single gap in the corpus without an explicit architectural-cluster
+`known_issues.json` tag is now an exact match. `make test` 36/36, `make
+cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep
+-- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0, bit-identical to baseline.
+
+**This closes Stages 1-6 of the timing-gaps-largest-first plan.**
+Summary across the whole plan: 2 real, previously-undiscovered RTL
+timing bugs fixed via the established internal-stall mechanism
+(`a6_dbcc_true`, both `Bcc`-not-taken forms) plus 2 more found during
+Stage 6's own final audit (`MOVE An,USP`, `TRAPV`-no-trap); 1 real
+test-construction bug found and fixed (`a6_bcc_b_not_taken` had never
+tested a real `Bcc.B` opcode since Phase 161, due to vasm's own silent
+zero-displacement-branch substitution); 2 confirmed non-bugs
+definitively resolved via direct trace after being left open in Phase
+171 (`a4_tas_mem`) and newly investigated (`a7_bkpt`); 2 manifest/
+documentation-only fixes (`a4_neg_mem_idx`'s MISMATCH, `a0_validate`'s
+own +2); and the entire remaining +1/-1 tail (30 tests) characterized
+and documented as two distinct, well-understood, already-established
+mechanisms. Only the large, already-extensively-investigated
+architectural clusters (readahead speculative-prefetch, `ext_count==2`
+second-fetch, RMW-dispatch-floor, `briefidx`/`andi` alignment) remain
+-- Stage 7's own explicit decision point, not started automatically per
+the plan's own framing. See `~/.claude/plans/compressed-hopping-
+cocoa.md` for the full plan and Stage 7's own scope description.

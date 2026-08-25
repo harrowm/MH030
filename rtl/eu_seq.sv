@@ -6904,6 +6904,24 @@ module eu_seq (
         // separate dec_is_move_usp flag instead).
         if (dec_valid && dec_reads_usp)
             dec_internal_stall_ticks_fixed = 8'd4; // MOVE USP,An NCC=4-3clk=1clk=4t
+        // MOVE An,USP (write direction) -- timing-gaps-largest-first
+        // plan, Stage 6. Same NCC=4 as the read direction above, mirrors
+        // its own precedent exactly; dec_is_move_usp is set only for this
+        // one instruction shape (no taken/not-taken split to worry about).
+        if (dec_valid && dec_is_move_usp)
+            dec_internal_stall_ticks_fixed = 8'd4; // MOVE An,USP NCC=4-3clk=1clk=4t
+        // TRAPV, not-trapping path only (V=0 -> falls through, no
+        // exception) -- timing-gaps-largest-first plan, Stage 6. Uses a
+        // raw opcode match (mirrors MOVEC's own precedent above) rather
+        // than dec_is_trapv, which this decode block deliberately only
+        // sets for the TRAP-TAKEN case (see its own "trap if V flag set"
+        // decode comment) -- gating on !flag_v here is the exact mirror-
+        // image, guaranteeing this can never fire for the taken path
+        // (a real exception dispatch, an entirely different and already
+        // correctly-measured cost) or for TRAPcc (a different opcode
+        // pattern, unaffected by this instr_word-specific match).
+        if (dec_valid && instr_word == 16'h4E76 && !flag_v)
+            dec_internal_stall_ticks_fixed = 8'd4; // TRAPV (no trap) NCC=4-3clk=1clk=4t
         // ADDA.W/SUBA.W/CMPA.W, register-direct source (Dn or An) --
         // dec_sext_src is set only for f_mode==000/001 (register-direct
         // source, sign-extended 16->32) among all three ops' own shared

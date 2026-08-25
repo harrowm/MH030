@@ -142,5 +142,129 @@
   "a6_jsr": {
     "reason": "same pre-adjusted-expect_p speculative-readahead mechanism as a6_jmp (gap=+7, own desc field already documents measured p=3 not manual's p=2)",
     "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+  },
+  "a3_add_rn_dn": {
+    "reason": "gap=+1 (small, register-only), r/p/w clean. Traced directly (a3_add_rn_dn and a4_clr_dn cross-checked, identical signature both times): dec_internal_stall_ticks_fixed reads 0 throughout dispatch (no whitelist entry fires, correctly -- this cluster is TOO FAST relative to the manual, not too slow, so Phase 162 Part D's own add-only stall mechanism structurally cannot apply here) and the pipeline shows the minimum possible instr_ack->ex_valid->wb_valid->commit-visible sequence, exactly 1 tick per stage, 3 ticks/12 ticks total dispatch latency -- the same 3-clock register-direct floor this whole project's own whitelist mechanism is built around. The manual's own NCC=2 for these simplest single-cycle ops implies the ENTIRE fetch+dispatch+EX+commit sequence fits in 2 clocks on real silicon -- but a full, pin-accurate opcode fetch alone already costs 2 clocks in this project's own Phase-160-calibrated S-state model, leaving zero room for dispatch+EX+commit at all. This is the same conclusion Phase 162 Parts D/E already reached (register-only 'too fast' gaps were closed to the extent safely possible; residual positive gaps for the very simplest NCC=2 ops reflect real 68030 silicon's own instruction-fetch/dispatch pipeline overlap, which this project's own isolated 'no overlap with the preceding instruction' measurement convention (Phase 159's own NCC-matching definition) cannot reproduce without redesigning the fetch/dispatch pipeline itself -- out of scope, see the timing-gaps-largest-first plan's own Stage 7 decision point)",
+    "ref": "timing-gaps-largest-first plan, Stage 6 (direct trace); Phase 162 Parts D/E"
+  },
+  "a1_fea_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a1_fea_an": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_adda_l": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_and_dn_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_eor_dn_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_or_dn_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_sub_rn_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_suba_l": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_cmp_rn_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_moveq": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_addq_rn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a3_subq_rn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a6_nop": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_addx_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_subx_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_clr_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_neg_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_negx_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_not_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_tst_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a2_move_rn_dn": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a2_move_rn_an": {
+    "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a4_tst_mem": {
+    "reason": "gap=+1 (small, bus-touching -- uses MEASURED_INSTR_ONLY), r/p/w clean. Same 'each real bus cycle pays its own ordinary S0/S1 dispatch/setup overhead beyond the manual's idealized additive-table model' character already established for a0_validate_move_l_d16anxn_hex and the RMW-to-memory dispatch-floor cluster -- just a smaller magnitude here since only one extra bus cycle (a single data read or write) is involved, not two or three. Not a new, separately-fixable mechanism",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a7_trap_n": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a7_illegal": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a1_fea_anind": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a1_fea_anpostinc": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a6_link_w": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a2_move_ea_xxxw": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
+  },
+  "a2_move_ea_d16an": {
+    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
+    "ref": "timing-gaps-largest-first plan, Stage 6"
   }
 }
