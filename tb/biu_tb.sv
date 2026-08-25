@@ -2213,15 +2213,19 @@ module biu_tb;
 
         // P8-5: DS asserts during IACK (68030 IACK is a normal CPU Space read)
         // The peripheral identifies the cycle via FC=111 + AS + DS + A[19:16]=1111
+        // Bus-cycle round-trip overhead investigation (plan.md, follows
+        // Phase 207): IACK is a plain read, so AS# and DS# now assert
+        // together at S2 (not a separate S3, now unreachable) -- see
+        // CLAUDE.md's S-State Signal Timing section.
         begin
-            $display("--- IACK: DS# asserts at S3 (FC=111 CPU Space read) ---");
+            $display("--- IACK: DS# asserts at S2 (FC=111 CPU Space read) ---");
             iack_test_vec    = 8'd77;
             test_mem_sel     = MUX_IACK;
             eu_iack_level_tb = 3'd6;
             eu_iack_req_tb   = 1'b1;
-            wait_for_state(7'd65, 50);   // ST_IACK_S3
-            check("DS_n=0 IACK@S3", ext_ds_n === 1'b0);
-            check("AS_n=0 IACK@S3", ext_as_n === 1'b0);
+            wait_for_state(7'd64, 50);   // ST_IACK_S2
+            check("DS_n=0 IACK@S2", ext_ds_n === 1'b0);
+            check("AS_n=0 IACK@S2", ext_as_n === 1'b0);
             check("FC=111 IACK",    ext_fc   === 3'b111);
             for (int t = 0; t < 100; t++) begin
                 @(posedge clk_4x);

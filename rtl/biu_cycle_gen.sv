@@ -464,7 +464,12 @@ module biu_cycle_gen #(
                 if (state == ST_INIT_PC_S4  || state == ST_INIT_PC_S5)  init_pc_r  <= ext_d_in;
             end
             // ST_INIT_PC_S7 is a single transient (now 2-tick) state -- must
-            // gate on state_adv, not a fixed phase_r value (Phase 160 Stage 1).
+            // gate on state_adv, not a fixed phase_r value (Phase 160 Stage
+            // 1). Bus-cycle round-trip overhead investigation (plan.md,
+            // follows Phase 207): init PC fetch keeps its own real S7
+            // (matches ST_READ's own choice -- only S1/S3 are skipped for
+            // read-shaped cycles, see the transition table above), so this
+            // condition is UNCHANGED from before this phase.
             if (state == ST_INIT_PC_S7 && state_adv) init_done_r <= 1'b1;
         end
     end
@@ -738,12 +743,15 @@ module biu_cycle_gen #(
             // WRITE and RMW's own write phase no longer visit S7 (bus-cycle
             // round-trip overhead investigation, plan.md follows Phase
             // 160/205/206: both now terminate at S6), so this must also
-            // fire at ST_WRITE_S6/ST_RMW_WRITE_S6 or these latches would
+            // fire at their own new terminal states or these latches would
             // never clear for those cycle types again. Every other cycle
             // type (RMW's own read phase, IACK, CAS2, coprocessor, BKPT,
-            // burst, MMU) still has its own real S7, unaffected -- is_S7
-            // itself is deliberately left meaning exactly "in an S7 state,"
-            // not redefined to lie about the new terminal states.
+            // burst, init) still has its own real S7, unaffected -- Phase
+            // 207 confirmed IACK/init SSP/PC fetches follow ST_READ's own
+            // S1+S3-skip-only pattern, not the WRITE-shape S7 skip, so they
+            // need no addition here -- is_S7 itself is deliberately left
+            // meaning exactly "in an S7 state," not redefined to lie about
+            // the new terminal states.
             if (is_S7 || state == ST_WRITE_S6 || state == ST_RMW_WRITE_S6) begin
                 berr_abort_r        <= 1'b0;
                 berr_is_halt_retry_r <= 1'b0;
@@ -980,10 +988,22 @@ module biu_cycle_gen #(
                 end
             end
 
-            ST_INIT_SSP_S0: state_nxt = ST_INIT_SSP_S1;
-            ST_INIT_SSP_S1: state_nxt = ST_INIT_SSP_S2;
-            ST_INIT_SSP_S2: state_nxt = ST_INIT_SSP_S3;
-            ST_INIT_SSP_S3: state_nxt = ST_INIT_SSP_S4;
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160/205/206/207): init SSP/PC fetches are architecturally
+            // plain reads (MC68030UM.pdf Figure 7-65 shows the identical
+            // S0/S2/S4 labeling as an ordinary async read), so the SAME
+            // pattern already used for ordinary READ applies: skip S1 and
+            // S3 (both folded into S0/S2 via the shared pin block), KEEP S7
+            // (matches ST_READ's own choice -- S7 removal is the WRITE-shape
+            // pattern, needed there because AS/DS genuinely stagger so S3
+            // can't be skipped; reads skip S1+S3 instead and never touch
+            // S7 at all, still reaching the same correct 6-state/3-clock
+            // total). A first attempt at this edit mistakenly combined BOTH
+            // patterns (skipped S1, S3, AND S7), which would have given an
+            // invalid, odd 5-state cycle -- caught before building anything
+            // by re-deriving from ST_READ's own already-proven transitions.
+            ST_INIT_SSP_S0: state_nxt = ST_INIT_SSP_S2;
+            ST_INIT_SSP_S2: state_nxt = ST_INIT_SSP_S4;
             // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
             // ST_READ_S4/S5 comment above for the full reasoning).
             ST_INIT_SSP_S4: state_nxt = ST_INIT_SSP_S5;
@@ -993,10 +1013,8 @@ module biu_cycle_gen #(
             ST_INIT_SSP_S6: state_nxt = ST_INIT_SSP_S7;
             ST_INIT_SSP_S7: state_nxt = ST_INIT_PC_S0;
 
-            ST_INIT_PC_S0: state_nxt = ST_INIT_PC_S1;
-            ST_INIT_PC_S1: state_nxt = ST_INIT_PC_S2;
-            ST_INIT_PC_S2: state_nxt = ST_INIT_PC_S3;
-            ST_INIT_PC_S3: state_nxt = ST_INIT_PC_S4;
+            ST_INIT_PC_S0: state_nxt = ST_INIT_PC_S2;
+            ST_INIT_PC_S2: state_nxt = ST_INIT_PC_S4;
             // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
             // ST_READ_S4/S5 comment above for the full reasoning).
             ST_INIT_PC_S4: state_nxt = ST_INIT_PC_S5;
@@ -1076,10 +1094,22 @@ module biu_cycle_gen #(
             // the case statement -- see the comment there.
             ST_WRITE_S6: state_nxt = ST_IDLE;
 
-            ST_IACK_S0: state_nxt = ST_IACK_S1;
-            ST_IACK_S1: state_nxt = ST_IACK_S2;
-            ST_IACK_S2: state_nxt = ST_IACK_S3;
-            ST_IACK_S3: state_nxt = ST_IACK_S4;
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160/205/206/207): IACK is architecturally a plain read
+            // cycle (MC68030UM.pdf 7.4.1.1: "the interrupt acknowledge cycle
+            // is a read cycle... differs from the asynchronous read cycle
+            // described in 7.3.1... [only] in that it accesses the CPU
+            // address space" -- Figure 7-44/7-45 both show the same S0/S2/S4
+            // labeling), so the SAME pattern already used for ordinary READ
+            // applies: skip S1 and S3, KEEP S7 (matches ST_READ's own
+            // choice -- S7 removal is the WRITE-shape pattern, not used for
+            // reads; combining both would give an invalid odd 5-state
+            // cycle, caught before building anything by re-deriving from
+            // ST_READ's own already-proven transitions). cyc_rw=1 for IACK
+            // already makes the shared SP_S2 block's own DS-for-reads
+            // conditional fire correctly with no further change needed.
+            ST_IACK_S0: state_nxt = ST_IACK_S2;
+            ST_IACK_S2: state_nxt = ST_IACK_S4;
             // Phase 160 Stage 1: S4 always proceeds to S5 (see the identical
             // ST_READ_S4/S5 comment above for the full reasoning). Pulled
             // forward from Stage 4's original scope because biu_tb.sv
@@ -1380,7 +1410,11 @@ module biu_cycle_gen #(
             // fired, guaranteeing nothing is silently missed the way that
             // first attempt did. is_rmw_write (used by the branch below)
             // already covers ST_RMW_WRITE_S6 unchanged, since that state is
-            // still visited, just S7 no longer is. Every other cycle
+            // still visited, just S7 no longer is. IACK and init SSP/PC
+            // fetches (Phase 207) keep their own real S7 -- read-shaped
+            // cycles skip S1+S3 instead, matching ST_READ's own pattern --
+            // so they need no addition here; sphase==SP_S7 already covers
+            // them via their own unchanged S7 visit. Every other cycle
             // type's own real S7 is completely unaffected.
             if (sphase == SP_S7 || state == ST_WRITE_S6 ||
                 state == ST_RMW_WRITE_S6) begin
