@@ -7007,6 +7007,28 @@ module eu_seq (
                 default: ; // 3'b000 = BFTST: see marker-overcounting note above
             endcase
         end
+        // DBcc (cc=True): the "no branch, no decrement" path only --
+        // reliable-baseline follow-up plan, Stage 1. Traced directly
+        // (temporary $display on instr_ack/ex_is_dbcc/wb_valid) and
+        // confirmed this RTL dispatches DBcc through the exact same
+        // 1-word... no, 2-word/ext_count==1, 3-clock/12-tick baseline as
+        // every other register-direct instruction in this whitelist,
+        // computing the condition-true/no-op outcome combinationally in
+        // one EX cycle -- real 68030 microcode needs more serial time
+        // (NCC=8) even for this "do nothing" path. Deliberately gated on
+        // eval_cc(dec_branch_cond,...) evaluating TRUE at decode time
+        // (the same flag_n/z/v/c signals and eval_cc() function already
+        // used combinationally elsewhere in this decode block, e.g. Scc's
+        // own dec_imm computation above) so this can NEVER fire for
+        // either cc=false path (count-not-expired/branch-taken, whose own
+        // real branch redirect costs measure close to NCC=8 already via
+        // natural bus timing -- MISMATCH is a separate, already-KNOWN
+        // readahead artifact, not this stall's concern; or count-expired,
+        // which already matches the manual exactly with zero stall and
+        // must not be disturbed).
+        if (dec_valid && dec_is_dbcc &&
+            eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c))
+            dec_internal_stall_ticks_fixed = 8'd20; // DBcc(cc=True) NCC=8-3clk=5clk=20t
     end
 
     // LSL/LSR/ASR register-count forms: arm a one-cycle "resolving" flag

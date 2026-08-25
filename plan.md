@@ -2511,3 +2511,36 @@ anything got faster. `a4_neg_mem_idx`'s own untraced r/p/w mismatch and
 `a4_tas_mem`'s own already-flagged extra-bus-cycle finding remain
 explicitly out of scope, unchanged. See `~/.claude/plans/compressed-
 hopping-cocoa.md` for the full approved plan.
+
+## Phase 173 (timing-gaps-largest-first plan, Stage 1) -- `a6_dbcc_true` (-5) root-caused and fixed
+
+Traced directly (temporary `$display` on `instr_ack`/`ex_is_dbcc`/
+`wb_valid`/`flag_z`, fully removed before committing): DBcc with cc=true
+dispatches through the identical 3-clock/12-tick baseline every other
+simple register-direct instruction in this whitelist shares (`instr_ack`
+-> `ex_valid` next tick -> `wb_valid` the tick after -> detected one more
+tick later, matching Phase 172's own established convention) -- real
+68030 microcode needs more serial time (NCC=8) even for this "do
+nothing" path; this RTL computes the condition-true/no-op outcome
+combinationally in one EX cycle, same "internal microcode ceiling"
+character as every other `dec_internal_stall_ticks_fixed` entry.
+
+Added a new whitelist entry in `rtl/eu_seq.sv`, gated on
+`dec_is_dbcc && eval_cc(dec_branch_cond, flag_n, flag_z, flag_v,
+flag_c)` evaluating true at decode time -- reuses the exact
+`eval_cc()`/live-CCR-flag pattern Scc's own `dec_imm` computation
+already relies on for real correctness (not just timing), giving
+confidence this decode-time CCR read is already hazard-safe in this
+pipeline. Deliberately excludes both cc=false paths (count-not-expired/
+branch-taken, whose own real redirect cost is a separate, already-KNOWN
+readahead artifact; count-expired, which already matched the manual
+exactly with zero stall) -- verified directly that neither's own
+measurement moved.
+
+Results: `a6_dbcc_true` now measures exactly `manual=8, measured=8,
+gap=0` (was -5). Full corpus re-run confirms this is the *only* test
+whose gap changed. `make test` 36/36, `make cosim_grp` 8/8, `make
+cosim_memind` 12/12, full 124-suite Harte sweep -- PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline. See `~/.claude/plans/compressed-hopping-cocoa.md` for the
+full 6-stage plan. Stage 2 (`a4_tas_mem`, -4) is next.
