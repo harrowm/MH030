@@ -2544,3 +2544,48 @@ cosim_memind` 12/12, full 124-suite Harte sweep -- PASS 702142, FAIL 2
 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
 to baseline. See `~/.claude/plans/compressed-hopping-cocoa.md` for the
 full 6-stage plan. Stage 2 (`a4_tas_mem`, -4) is next.
+
+## Phase 174 (timing-gaps-largest-first plan, Stage 2) -- `a4_tas_mem` (-4) definitively resolved: no bug, documented
+
+Finished Phase 171's own open investigation via direct trace
+(`eu_req`/`sf_cyc_req`/`ic_cg_req`/`grant_eu`/`grant_ifu`/
+`biu_cycle_gen`'s own `state`/`mem_rmw`/`tas_run_r`, temporary
+`$display`, fully removed before committing). **Phase 171's own
+"mystery separate 16-tick bus cycle, possibly IFU-vs-EU arbitration"
+hypothesis is disproven, not confirmed**: `grant_eu` fires the very
+next tick after `eu_req` first asserts (tick174->175 in the traced
+run), with zero contention from `grant_ifu` in between -- the
+arbitration path is genuinely instant here, ruling out a Track-C/D-style
+dispatch-arbitration bug.
+
+The real, now fully-accounted-for breakdown of the measured 10-clock
+total (vs. manual NCC=14): opcode fetch (2 clocks, ordinary) + normal
+S0/S1 dispatch/setup latency (~2.5 clocks, the same shape every
+instruction in this pipeline pays) + the locked read+write RMW cycle
+itself (6 clocks, continuously AS-asserted the whole way, confirmed
+pin-accurate -- matches CLAUDE.md's own documented RMW protocol
+exactly). The RTL computes TAS's own read-then-decide-then-write
+sequence combinationally, with no gap between the read data arriving
+and the write dispatching; real 68030 microcode most likely needs
+genuine additional serial time to evaluate the read byte's own top bit
+before committing the write -- the same "internal microcode ceiling"
+character as the register-only `dec_internal_stall_ticks_fixed`
+cluster, just the first instance found in a bus-touching RMW
+instruction instead of a pure register op.
+
+**Deliberately not fixed**: `dec_internal_stall_ticks_fixed` only
+applies to register-only, non-bus-touching decode-time stalls. An
+analogous fix here would mean extending TAS's own locked RMW FSM
+(`eu_seq.sv`'s `tas_run_r`/`mem_rmw` machinery) between the read ack
+and the write dispatch -- the exact mechanism the CAS/CAS2/BERR-abort
+protection rollout (Phases 108-114) depends on being correct. A
+disproportionate correctness risk for a single -4 gap on a
+comparatively rare instruction; documented in `known_issues.json`
+instead.
+
+Results: no RTL change, `tb/timing_tb.sv`'s temporary trace fully
+removed (`git diff --stat` shows no diff), new `known_issues.json`
+entry. `make test` 36/36 (no Harte/cosim re-run needed -- pure
+documentation, zero RTL touched). See `~/.claude/plans/compressed-
+hopping-cocoa.md`. Stage 3 (`a6_bcc_w_not_taken` -3, `a7_bkpt` -3) is
+next.
