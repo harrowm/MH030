@@ -31,9 +31,15 @@ New in this tool, not present in either predecessor:
     issues.json ({test_name: {"reason": ..., "ref": ...}}) -- already-
     investigated, documented non-bugs (e.g. CHK's own -5 gap, a6_andi_to_sr/
     ccr's own p=1-not-2 combined-fetch alignment property) are tagged
-    [KNOWN: reason] in the report instead of looking like unexplained
-    anomalies. Summary stats are reported BOTH with and without known-issue
-    rows included, so neither view is hidden.
+    [KNOWN: reason] (reason truncated for readability -- see known_issues.json
+    for the full derivation) instead of looking like unexplained anomalies.
+    Exact matches (gap=0) are tagged MATCH; a non-zero gap with no
+    known_issues.json entry is tagged UNEXPLAINED so it stands out. Rows are
+    sorted by |gap| descending so the largest remaining gaps -- known or not
+    -- are always at the top. The summary's own gap stat is computed over
+    ALL tests that produced a figure (not split into an "all" vs "known
+    excluded" pair -- with every currently-unexplained gap closed, that
+    split stopped being informative).
   - Optional per-entry "manual_ref" field (e.g. ["ALU", "ADD Rn,Dn"], or a
     list of such pairs for a composite row) cross-checks the desc-parsed
     manual total against scripts/timing_tables.py's own structured ncc_
@@ -255,11 +261,32 @@ def main():
             ))
 
     # ── Report ──────────────────────────────────────────────────────────
+    # Sorted by |gap| descending (unresolved gaps first, ties by name) --
+    # the largest remaining deviations, known or not, are always at the top
+    # rather than buried in file/alphabetical order.
+    rows.sort(key=lambda r: (-abs(r['gap']) if r['gap'] is not None else 1, r['name']))
+
+    REASON_MAXLEN = 100
+
+    def short_reason(text):
+        text = text.strip()
+        if len(text) <= REASON_MAXLEN:
+            return text
+        cut = text.rfind(' ', 0, REASON_MAXLEN)
+        if cut <= 0:
+            cut = REASON_MAXLEN
+        return text[:cut] + '…'
+
     print(f"{'stage':16s} {'test':28s} {'manual':>7s} {'measured':>9s} {'gap':>5s}  {'status'}")
     for row in rows:
         manual_s = f"{row['manual']:7d}" if row['manual'] is not None else "      ?"
         meas_s = f"{row['measured']:9d}" if row['measured'] is not None else "        ?"
-        gap_s = f"{row['gap']:+5d}" if row['gap'] is not None else "    ?"
+        if row['gap'] is None:
+            gap_s = "    ?"
+        elif row['gap'] == 0:
+            gap_s = "    0"
+        else:
+            gap_s = f"{row['gap']:+5d}"
         status = ""
         if row['hang']:
             status = "HANG"
@@ -267,8 +294,13 @@ def main():
             status = "MISMATCH(r/p/w)"
         elif row['ref_note']:
             status = f"REF_MISMATCH({row['ref_note']})"
+        elif row['gap'] == 0:
+            status = "MATCH"
+        elif row['gap'] is not None and not row['known']:
+            status = "UNEXPLAINED"
         if row['known']:
-            status = (status + " " if status else "") + f"[KNOWN: {row['known'].get('reason', '')}]"
+            status = (status + " " if status else "") + \
+                f"[KNOWN: {short_reason(row['known'].get('reason', ''))}]"
         print(f"{row['stage']:16s} {row['name']:28s} {manual_s} {meas_s} {gap_s}  {status}")
         if args.verbose and (row['hang'] or row['rpw_ok'] is False):
             for line in row['stdout'].splitlines()[-12:]:
@@ -276,18 +308,27 @@ def main():
 
     # ── Summary ─────────────────────────────────────────────────────────
     all_gaps = [r['gap'] for r in rows if r['gap'] is not None]
-    clean_gaps = [r['gap'] for r in rows if r['gap'] is not None and not r['known']]
     mismatches = [r['name'] for r in rows if r['hang'] or r['rpw_ok'] is False]
+    matches = [r for r in rows if r['gap'] == 0]
+    known_nonzero = [r for r in rows if r['gap'] not in (None, 0) and r['known']]
+    unexplained = [r for r in rows if r['gap'] not in (None, 0) and not r['known']]
 
-    print(f"\n{len(rows)} tests run, {len(all_gaps)} produced a gap figure")
     if mismatches:
-        print(f"{len(mismatches)} r/p/w MISMATCH or HANG: {', '.join(mismatches)}")
+        # A real r/p/w bus-cycle-COUNT mismatch (measured resource counts
+        # differ from the manifest's own expect_r/p/w) or a simulation
+        # timeout -- distinct from the gap column, which is about total
+        # CLOCK count once r/p/w already agree. Still surfaced even when
+        # [KNOWN] (e.g. the IFU speculative-readahead artifact reliably
+        # produces p=4 instead of the manual's own idealized p=2) so a
+        # NEW, undocumented r/p/w mismatch can never silently blend in.
+        print(f"\n{len(mismatches)} r/p/w MISMATCH or HANG: {', '.join(mismatches)}")
     if all_gaps:
         n = len(all_gaps)
-        print(f"gap (all):            min={min(all_gaps)} max={max(all_gaps)} mean={sum(all_gaps)/n:.2f}  (n={n})")
-    if clean_gaps:
-        n = len(clean_gaps)
-        print(f"gap (known excluded):  min={min(clean_gaps)} max={max(clean_gaps)} mean={sum(clean_gaps)/n:.2f}  (n={n})")
+        print(f"gap: min={min(all_gaps)} max={max(all_gaps)} mean={sum(all_gaps)/n:.2f}  (n={n})")
+    print(f"{len(matches)} exact matches, {len(known_nonzero)} known non-zero (documented), "
+          f"{len(unexplained)} unexplained non-zero")
+    if unexplained:
+        print(f"  unexplained: {', '.join(r['name'] for r in unexplained)}")
 
     if args.json:
         with open(args.json, 'w') as f:
