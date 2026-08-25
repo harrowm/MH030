@@ -734,13 +734,24 @@ module biu_cycle_gen #(
                     fault_is_rmw_r <= is_rmw_write;
                 end
             end
-            // Clear berr_abort_r and berr_is_halt_retry_r at S7
-            if (is_S7) begin
+            // Clear berr_abort_r and berr_is_halt_retry_r at S7 -- plain
+            // WRITE no longer visits S7 (bus-cycle round-trip overhead
+            // investigation, plan.md follows Phase 160/205: WRITE now
+            // terminates at S6), so this must also fire at ST_WRITE_S6 or
+            // these latches would never clear for a plain write again.
+            // Every other cycle type (RMW_WRITE included) still has its own
+            // real S7, unaffected -- is_S7 itself is deliberately left
+            // meaning exactly "in an S7 state," not redefined to lie about
+            // ST_WRITE_S6.
+            if (is_S7 || state == ST_WRITE_S6) begin
                 berr_abort_r        <= 1'b0;
                 berr_is_halt_retry_r <= 1'b0;
             end
             if (state == ST_IDLE && retry_r && !in_retry_r) in_retry_r <= 1'b1;
-            if (in_retry_r && (state == ST_READ_S7 || state == ST_WRITE_S7)) begin
+            // Same reasoning: ST_WRITE_S7 is unreachable for plain writes
+            // now, so a write's own retry-completion clear must key off its
+            // new terminal state, ST_WRITE_S6, instead.
+            if (in_retry_r && (state == ST_READ_S7 || state == ST_WRITE_S6)) begin
                 in_retry_r <= 1'b0; retry_r <= 1'b0;
             end
             // fault_valid is latched and held per BIU-090; cleared only by reset
@@ -1029,8 +1040,16 @@ module biu_cycle_gen #(
             ST_READ_S6: state_nxt = ST_READ_S7;
             ST_READ_S7: state_nxt = ST_IDLE;
 
-            ST_WRITE_S0: state_nxt = ST_WRITE_S1;
-            ST_WRITE_S1: state_nxt = ST_WRITE_S2;
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160/205): WRITE now skips S1 too -- S1's own block lost
+            // its only real function (ECS#, now asserted at S0 -- see the
+            // shared SP_S0/S1 pin block) when the READ-cycle fix moved it,
+            // leaving S1 a genuine no-op for writes already; this just stops
+            // visiting it. AS# still asserts one full state (2 ticks) after
+            // the address is driven, exactly matching MC68030UM.pdf 7.3.2's
+            // own State 1 timing -- S0 alone already provides that setup
+            // margin, S1 was never load-bearing for it.
+            ST_WRITE_S0: state_nxt = ST_WRITE_S2;
             ST_WRITE_S2: state_nxt = ST_WRITE_S3;
             ST_WRITE_S3: state_nxt = ST_WRITE_S4;
             // Phase 160 Stage 2: S4 always proceeds to S5 (see the identical
@@ -1042,8 +1061,19 @@ module biu_cycle_gen #(
                 else if (vpa_terminate)                  state_nxt = ST_WRITE_S6;
                 else                                     state_nxt = ST_WRITE_S4;
             end
-            ST_WRITE_S6: state_nxt = ST_WRITE_S7;
-            ST_WRITE_S7: state_nxt = ST_IDLE;
+            // WRITE now skips S7 entirely -- real MC68030UM.pdf 7.3.2 has no
+            // state beyond its own S5 (our S6, which already negates AS#/DS#
+            // exactly matching real State 5): "negates AS and DS during
+            // S5...START NEXT CYCLE" immediately, no extra state for
+            // internal ack bookkeeping. S7 stays a real, distinct state for
+            // every OTHER cycle type (READ, RMW, IACK, burst, init, MMU,
+            // coprocessor, BKPT, CAS2) -- none of their own transition
+            // tables changed. The completion-dispatch logic this skips is
+            // duplicated (deliberately, not restructured, to leave the
+            // proven SP_S7 arm below completely untouched for everyone
+            // still using it) into a new ST_WRITE_S6-gated block right after
+            // the case statement -- see the comment there.
+            ST_WRITE_S6: state_nxt = ST_IDLE;
 
             ST_IACK_S0: state_nxt = ST_IACK_S1;
             ST_IACK_S1: state_nxt = ST_IACK_S2;
@@ -1321,8 +1351,25 @@ module biu_cycle_gen #(
                     ext_as_n = (is_burst && bc_burst_beat != 2'd3) ? 1'b0 : 1'b1;
                     ext_ds_n = 1'b1;
                 end
-                SP_S7: begin
-                    if (is_iack) begin
+                default: ; // SP_NONE (SP_S7's own body moved below the case
+                           // -- see the standalone if right after endcase)
+            endcase
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160/205): the S7 completion-dispatch body (unchanged
+            // below) now also runs when state==ST_WRITE_S6, since plain
+            // WRITE terminates there instead of visiting its own S7 (see
+            // the ST_WRITE_S6 transition above). Moved out of the case
+            // statement itself, rather than duplicating one branch of it,
+            // after an initial attempt that duplicated only the grant_eu
+            // branch broke coprocessor writes (cyc_is_coproc_r's own
+            // branch, below, never got a chance to fire) -- this way every
+            // branch (IACK/init/CAS2/coprocessor/BKPT/burst/RMW/MMU/EU/IFU)
+            // applies identically regardless of which trigger fired,
+            // guaranteeing nothing is silently missed the way that first
+            // attempt did. Every other cycle type's own real S7 is
+            // completely unaffected (state != ST_WRITE_S6 for any of them).
+            if (sphase == SP_S7 || state == ST_WRITE_S6) begin
+                if (is_iack) begin
                         eu_iack_vec  = iack_vec_r;
                         eu_iack_avec = iack_avec_r;
                         if (!berr_abort_r) eu_iack_ack = 1'b1;
@@ -1408,9 +1455,7 @@ module biu_cycle_gen #(
                         ifu_rdata = captured_rdata;
                         if (!berr_abort_r) ifu_ack  = 1'b1; else ifu_berr = 1'b1;
                     end
-                end
-                default: ; // SP_NONE
-            endcase
+            end
             // RMW atomic lock: AS# must stay asserted continuously from read-S2
             // through write-S1; the case above deasserts it at SP_S6/S7 and
             // leaves it low at SP_S0/S1 only if it was already in a cycle.

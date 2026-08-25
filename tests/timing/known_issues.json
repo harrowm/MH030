@@ -1,4 +1,12 @@
 {
+  "a4_clr_mem": {
+    "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Direct, expected consequence of the WRITE-cycle S-state fix (plan.md, follows the READ-cycle fix): ordinary WRITE cycles now skip 2 no-real-hardware-equivalent states (ECS delay + the internal-ack-only S7), saving 2 ticks (0.5 clock) per write, same mechanism as a1_fea_anpredec's own READ-side finding. CLR.L (An) is a pure single-write instruction, so it lands slightly below the manual's own rounded-average NCC -- expected, not a bug (MC68030UM.pdf 11-25's own rounding wording, same citation as the READ-side entries below).",
+    "ref": "plan.md, bus-cycle round-trip overhead investigation, WRITE-cycle stage"
+  },
+  "a6_pea": {
+    "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Same cause as a4_clr_mem -- PEA is a pure single-write instruction (pushes an address), now 2 ticks faster from the WRITE-cycle S-state fix.",
+    "ref": "plan.md, bus-cycle round-trip overhead investigation, WRITE-cycle stage"
+  },
   "a1_fea_anpredec": {
     "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Direct, expected consequence of the bus-cycle round-trip overhead fix (plan.md, follows Phase 160): ordinary READ cycles now skip 2 no-real-hardware-equivalent states (ECS delay + AS/DS stagger), saving 2 ticks (0.5 clock) per read. This test's own single data read now lands slightly below the manual's own rounded average -- the manual's NCC values are explicitly \"the AVERAGE of the odd-word-aligned case and the even-word-aligned case (rounded up to an integral number of clocks)\" (MC68030UM.pdf 11-25), so a specific, deterministic (even-aligned) simulated case landing under that rounded average is expected, not a bug.",
     "ref": "plan.md, bus-cycle round-trip overhead investigation, Stage 1"
