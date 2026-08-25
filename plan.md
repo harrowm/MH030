@@ -2697,3 +2697,35 @@ Results: manifest + `known_issues.json` only, no RTL touched. `make
 test` 36/36 (no Harte/cosim re-run needed). See `~/.claude/plans/
 compressed-hopping-cocoa.md`. Stage 5 (`a0_validate_move_l_d16anxn_hex`
 +2) is next.
+
+## Phase 178 (timing-gaps-largest-first plan, Stage 5) -- `a0_validate_move_l_d16anxn_hex` (+2) confirmed non-bug, documented
+
+Traced Phase 159 Stage 0's own original calibration test directly
+(`instr_ack`/AS/FC/address, temporary `$display`, fully removed before
+committing) rather than assume the plan's own predicted "compounding
+of known mechanisms" shape. Confirmed via a first attempt that
+initially self-mismeasured (my own manual invocation added
+`+instr_len=4`, which artificially excluded the extension word's own
+fetch from `p_count` -- the manifest has no `instr_len` field at all
+for this test, so the real, correctly-measured `r/p/w=1/2/0` already
+matches the manual exactly, with zero MISMATCH; caught and corrected
+before drawing any conclusion from the wrong number).
+
+With r/p/w confirmed clean, the full timeline shows exactly 3 real bus
+cycles: opcode+full-format-extension-word combined into one fetch, a
+*separate* fetch for the 16-bit base displacement word (this RTL's IFU
+doesn't combine these the way it does for brief-format/simpler EA
+modes), then the actual EA data read. Each pays its own ordinary S0/S1
+dispatch/setup overhead -- the manual's own additive per-row model
+(`fea NCC=7 + MOVE-op NCC=2 = 9`) doesn't fully account for 3 separate
+real bus-cycle dispatches costing more than an idealized 2-row sum. Same
+"compounding of known mechanisms" character already documented for
+`a3_addi_mem`'s own +7 finding and the RMW-to-memory dispatch-floor
+cluster -- not a new, independently-fixable mechanism.
+
+Results: `known_issues.json` entry only, no RTL touched, temporary
+trace fully removed (`git diff --stat tb/timing_tb.sv` shows no diff).
+`make test` 36/36 (no Harte/cosim re-run needed). See
+`~/.claude/plans/compressed-hopping-cocoa.md`. Stage 6 (the
+register-only "+1" cluster, ~24 tests) is next -- the last stage of
+this plan.
