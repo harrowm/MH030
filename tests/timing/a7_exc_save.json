@@ -3,13 +3,12 @@
     "name": "a7_trapv_notrap",
     "hex": "tests/timing/a7_trapv_notrap.hex",
     "target_pc": "0x200",
-    "watch_reg": 2,
-    "watch_val": "0xcafebabe",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "EXCEPTION_RELATED 'TRAPV (No Trap)': TRAPV (No Trap) NCC=4(0/1/0) -- V=0 (ccr cleared) -> TRAPV does not trap, falls through normally",
-    "instr_len": 2
+    "desc": "EXCEPTION_RELATED 'TRAPV (No Trap)': TRAPV (No Trap) NCC=4(0/1/0) -- V=0 (ccr cleared) -> TRAPV does not trap, falls through normally; watch_kind=3 (retirement pulse, no marker needed)",
+    "instr_len": 2,
+    "watch_kind": 3
   },
   {
     "name": "a7_bkpt",
@@ -17,10 +16,10 @@
     "target_pc": "0x200",
     "watch_reg": 2,
     "watch_val": "0xcafebabe",
-    "expect_r": 0,
+    "expect_r": 1,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "EXCEPTION_RELATED 'BKPT': BKPT NCC=9(1/0/0) -- Phase 157's own BKPT implementation issues a real CPU-space (FC=111) read for the DSACK'd bus-protocol outcome, confirmed via direct AS-fall trace -- but tb/timing_tb.sv's own is_data_fc classification (FC in {101,001}, established back in Stage A0/A1 when only ordinary supervisor/user data spaces had ever come up) doesn't recognize FC=111 as a countable read, so expect_r=0 here reflects what this harness can observe, not the true r=1 architectural total; a genuine, first-of-its-kind harness gap, not an RTL bug -- Phase 157's own known no-live-substitution scope boundary is a separate, already-documented limitation that would also affect p if this test could see far enough",
+    "desc": "EXCEPTION_RELATED 'BKPT': BKPT NCC=9(1/0/0) -- Phase 157's own BKPT implementation issues a real CPU-space (FC=111) read for the DSACK'd bus-protocol outcome, confirmed via direct AS-fall trace. reliable-baseline plan: tb/timing_tb.sv's own is_data_fc classification now recognizes FC=111 as a countable read (it previously didn't, a genuine harness completeness gap -- expect_r used to read 0, not the true r=1), so this is now a real, complete r/p/w check. Phase 157's own known no-live-substitution scope boundary is a separate, already-documented limitation, unrelated to this fix.",
     "instr_len": 2
   },
   {

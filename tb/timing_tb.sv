@@ -181,7 +181,13 @@ module timing_tb;
     int r_count = 0, p_count = 0, w_count = 0;
 
     wire is_prog_fc = (ext_fc == 3'b110) || (ext_fc == 3'b010);
-    wire is_data_fc = (ext_fc == 3'b101) || (ext_fc == 3'b001);
+    // FC=111 (CPU space, e.g. BKPT's own DSACK'd bus-protocol read --
+    // Phase 157) is counted as a data-space read here too, reliable-
+    // baseline plan: this corpus has no other CPU-space cycle (IACK/
+    // coprocessor) to conflict with, so this is a safe, narrow
+    // completeness fix for what was previously a real harness gap
+    // (a7_bkpt's own expect_r=0 didn't reflect its true r=1 total).
+    wire is_data_fc = (ext_fc == 3'b101) || (ext_fc == 3'b001) || (ext_fc == 3'b111);
     // Phase 161 Part A Stage A1: a program-space fetch belongs to the
     // instruction under test iff its own address falls within that
     // instruction's own byte span (target_pc .. target_pc+target_len-1) --
@@ -262,12 +268,58 @@ module timing_tb;
     end
 
     always_ff @(posedge clk_4x) begin
-        if (t_start_seen && !t_end_seen &&
+        if (watch_kind != 3 && t_start_seen && !t_end_seen &&
             watch_current() == watch_val &&
             watch_prev_r != watch_val) begin
             t_end_seen <= 1'b1;
             t_end      <= sim_ticks;
             $display("  [tick=%0d] WATCH kind=%0d reg=%0d == %h (retirement)", sim_ticks, watch_kind, watch_reg, watch_val);
+        end
+    end
+
+    // kind 3: retirement-pulse tracking -- no register/CCR/memory side
+    // effect required (NOP, Bcc-not-taken, DBcc cc=true, TRAPV no-trap,
+    // MOVE An,USP, JMP/JSR/BSR/Bcc-taken's own retirement). Sound because
+    // wb_valid <= ex_valid unconditionally whenever not stalled
+    // (rtl/eu_seq.sv, WB stage latch) and instr_ack/wb_valid are EX-stage
+    // pipeline events, not PC/fetch-position signals -- they do not have
+    // the "decode races ahead of retirement" hazard this project has hit
+    // repeatedly elsewhere. In this project's own "taken branch lands
+    // directly on the instruction under test" convention, the branch's
+    // own dispatch has already happened before t_start (the target's own
+    // opcode-fetch AS-fall), so the first instr_ack seen after t_start is
+    // unambiguously the target instruction's own dispatch; pipeline is
+    // strictly in-order (single EX slot), so the first wb_valid pulse
+    // strictly after that dispatch is latched is unambiguously the target
+    // instruction's own retirement.
+    // wb_valid_r (one more registered tick past raw wb_valid) is used
+    // below, not wb_valid directly: a direct trace (a4_ext_dn) found
+    // eu_regfile's own committed value becomes observable exactly one
+    // tick AFTER wb_valid itself first pulses (an extra flip-flop hop
+    // downstream of wb_valid) -- kind=0/1/2's own value-watch technique
+    // therefore always detects completion on that later tick, not the
+    // wb_valid tick itself. Delaying kind=3 by the same one tick makes it
+    // measure the identical "commit observable" instant kind=0/1/2 always
+    // have, instead of introducing a new, inconsistent-by-one-tick
+    // convention relative to the whole rest of the (already-trusted)
+    // corpus.
+    logic dispatched_seen_r;
+    logic wb_valid_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) dispatched_seen_r <= 1'b0;
+        else if (t_start_seen && u_top.eu_instr_ack) dispatched_seen_r <= 1'b1;
+    end
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) wb_valid_r <= 1'b0;
+        else        wb_valid_r <= u_top.u_eu.u_seq.wb_valid;
+    end
+
+    always_ff @(posedge clk_4x) begin
+        if (watch_kind == 3 && t_start_seen && !t_end_seen &&
+            dispatched_seen_r && wb_valid_r) begin
+            t_end_seen <= 1'b1;
+            t_end      <= sim_ticks;
+            $display("  [tick=%0d] WATCH kind=3 (retirement pulse)", sim_ticks);
         end
     end
 

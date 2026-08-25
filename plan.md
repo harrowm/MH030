@@ -2348,3 +2348,166 @@ priority list; can return to this with a dedicated pass later.
 
 No RTL changed; temporary trace fully removed (`git diff --stat tb/
 timing_tb.sv` shows no diff). `make test` 36/36 sanity check.
+
+## Phase 172 -- Reliable marker-free timing baseline (`watch_kind=3`: retirement-pulse tracking)
+
+User asked for a systematic guarantee that *every* timing test properly
+excludes marker-instruction overhead from its own measurement, before
+deciding what to prioritize next -- explicitly sequenced ahead of any
+further gap-closing work. Planned via `EnterPlanMode`/`ExitPlanMode`
+(approved plan: `~/.claude/plans/compressed-hopping-cocoa.md`).
+
+### Audit
+
+`MEASURED_INSTR_ONLY` (Phase 163) already solves marker inflation for
+bus-touching instructions; `watch_kind` 0/1/2 (Dn/An/CCR, Phase 166)
+already solves it for anything writing a register or CCR. A corpus-wide
+sweep (every `r=0,w=0` manifest entry, cross-checked against each test's
+own `.s` source) found the remaining gap: instructions with **no**
+observable Dn/An/CCR/memory effect at all still relied on a trailing
+marker with nothing to stop its own dispatch cost folding into
+`MEASURED` -- `a6_nop`, `a6_bcc_b_not_taken`, `a6_bcc_w_not_taken`,
+`a6_dbcc_true` (DBcc's own `wb_writes_reg` is explicitly suppressed when
+cc=true, `rtl/eu_seq.sv:9542`), `a7_trapv_notrap`, and `a2_move_an_usp`
+(writes USP, unreadable via any existing `watch_kind`, previously needing
+a 2-instruction marker chain). The same sweep also flagged
+`a6_andi_to_sr`/`a6_andi_to_ccr` as suspicious (using `watch_kind=0`
+with a marker despite writing CCR directly, and using an all-1s AND
+mask that's a pure CCR no-op) -- see below, this turned out to be a false
+positive with an important lesson attached.
+
+### `watch_kind=3` design
+
+New value-free completion signal in `tb/timing_tb.sv`: watch for the
+first `wb_valid` pulse strictly after the first `instr_ack` pulse
+observed since `t_start`. Grounded via direct code reads before
+implementing, not assumed: `u_top.eu_instr_ack` fires exactly once for
+the target's own decode->EX dispatch, and in this project's own "taken
+branch lands directly on the instruction under test" convention, the
+branch's own dispatch has already happened before `t_start` -- so the
+first `instr_ack` after `t_start` is unambiguously the target's own.
+`wb_valid` (`rtl/eu_seq.sv:9538`, `wb_valid <= ex_valid;` unconditionally
+whenever not stalled) pulses for *every* completing instruction,
+register-writing or not -- confirmed by reading the WB-stage latch
+directly, not assumed. Pipeline is strictly in-order (single EX slot),
+so the first `wb_valid` after the dispatch latch arms is unambiguously
+the target's own retirement.
+
+**Cross-validation caught a real 1-tick systematic offset before this
+was trusted for anything**: a first implementation (watching raw
+`wb_valid` directly) measured `a4_ext_dn` (an already-trusted,
+`watch_kind=0` register test) at 17 ticks against kind=0's own 18 --
+not the required exact match. Direct trace (temporary `$display`,
+removed before committing) found `eu_regfile`'s own committed value
+becomes observable exactly one tick *after* `wb_valid` itself first
+pulses (an extra flip-flop hop downstream) -- kind=0/1/2's own
+value-watch technique therefore always detects completion one tick
+later than raw `wb_valid`. Fixed by delaying kind=3's own detection by
+one registered tick (`wb_valid_r`) to match kind=0's convention exactly,
+rather than introduce a new, inconsistent-by-one-tick technique
+relative to the whole rest of the corpus. Re-validated: `a4_ext_dn` and
+`a2_swap` (a second, independent register-only test) both now measure
+bit-identical tick counts under kind=0 and kind=3.
+
+### Conversions
+
+Converted the 6 confirmed zero-effect tests to `watch_kind=3`,
+simplifying each `.s` source back to bare setup+branch+instruction+stop
+with no trailing marker, and updated their JSON manifests
+(`watch_kind=3`, `watch_reg`/`watch_val` dropped). `a6_dbcc_true` needed
+its `land:` label kept (as filler data after the never-reached branch
+target) since the assembler still needs it to resolve the displacement
+even though it's never executed. `scripts/timing_benchmark.py` needed a
+small fix (`run_one()` assumed `watch_reg`/`watch_val` always present in
+every manifest entry -- made both optional, since kind=3 doesn't need
+them).
+
+True (now-reliable) gap numbers, replacing the marker-inflated originals:
+`a6_nop` +6->+1, `a6_bcc_b_not_taken` +4->**0 (exact)**,
+`a6_bcc_w_not_taken` +7->-3, `a6_dbcc_true` +5->-5,
+`a7_trapv_notrap` +4->-1, `a2_move_an_usp` +4->-1. None of these residual
+gaps have grounded root-cause reasoning yet -- deliberately NOT added to
+`known_issues.json` (reserved for confirmed non-bugs, not guesses) --
+left as real, now-trustworthy findings for a future prioritization pass,
+per the user's own explicit sequencing.
+
+### `a6_andi_to_sr`/`a6_andi_to_ccr`: investigated, NOT a marker bug -- reverted
+
+Attempted the same fix (switch to `watch_kind=2`, pick an AND mask that
+clears a real bit instead of the original all-1s no-op) and it measured
+a wildly different number (3 clocks vs the original marker-based 13) --
+suspicious given Phase 162 Stage D5 already documented a genuine
+~13-clock unstalled baseline for ANDI/MOVE-to-SR due to IFU
+prefetch-queue-refill after an SR/CCR write. Traced directly (temporary
+`$display`, removed before committing) rather than trust either number:
+confirmed ANDI-to-SR genuinely forces the IFU to refill its queue **one
+word at a time** afterward (three separate single-word fetches visible
+in the trace, vs. the normal 2-words-at-once pattern), and this refill
+is what blocks the marker's own dispatch -- exactly the cost NCC's own
+"no overlap with the following instruction" definition means to
+capture. `watch_kind=2` fires at ANDI's own internal CCR commit,
+*before* that refill completes, and would have silently under-measured
+this instruction by ~10 clocks. **Reverted the `watch_kind=2` attempt,
+restored both `.s` files to their original marker-based form unchanged**,
+and added an explanatory comment to both so this isn't "fixed" again by
+mistake. Empirically, `a6_andi_to_ccr` (CCR-only, no S/M/T bits) shows
+the identical single-word-refill pattern and identical 13-clock total as
+`a6_andi_to_sr` -- this RTL doesn't distinguish CCR-only writes from
+full-SR writes for this behavior, so both were reverted the same way.
+
+This finding also killed the plan's own originally-scoped step 6
+(convert `a6_bcc_taken`/`a6_dbcc_false_notexp`/`a6_bsr`/`a6_jmp`/`a6_jsr`
+from "land on marker at redirect target" to `watch_kind=3` on the
+branch's own retirement) -- the same underlying principle applies: these
+instructions' own manual NCC rows explicitly count the redirected
+target's own opcode fetch (`p=2` or `p=3`) as part of the branch's own
+cost. Confirmed via a read-only experiment against the existing,
+unmodified `a6_jmp.hex`: `+watch_kind=3` measures 3 clocks (fires at
+JMP's own retirement, before the target fetch even begins) vs. the
+existing land-on-marker technique's 13 clocks. Abandoned this step
+entirely -- no files touched for it. **General lesson recorded for
+future timing-test work**: `watch_kind` 0/1/2/3 all fire at an
+instruction's own internal EX->WB retirement; for instruction classes
+whose own manual NCC total is defined to include a real cost that
+happens strictly *after* that point (IFU queue-refill following an
+SR/CCR write; the redirected target's own opcode fetch following a taken
+branch/jump), all four kinds systematically under-measure, and the
+"marker inflation" framing does not apply -- the marker or landing-pad
+technique is the *correct* one for these, not a bug.
+
+### `a7_bkpt` r-count completeness fix
+
+Separate, smaller, well-scoped item found earlier this session (not a
+marker issue): `tb/timing_tb.sv`'s `is_data_fc` classification
+(`FC in {101,001}`) never recognized FC=111 (CPU space) as a countable
+read, so `a7_bkpt`'s own real CPU-space read (Phase 157's own BKPT
+implementation, confirmed via direct trace) was invisible to `r_count`
+-- `expect_r=0` reflected what the harness could see, not the true
+`r=1` architectural total. Fixed by adding FC=111 to `is_data_fc` (safe
+project-wide: this corpus has no other CPU-space cycle -- IACK/
+coprocessor -- to conflict with). `a7_bkpt`'s r/p/w check now passes
+cleanly (no more MISMATCH); new gap=-3 (was +3), also left undocumented
+in `known_issues.json` pending future root-cause work.
+
+### Verification
+
+Full corpus re-run (`scripts/timing_benchmark.py` over all 10 manifests,
+126 tests) diffed programmatically against a saved pre-change baseline:
+exactly the 7 intended conversions changed gap (`a2_move_an_usp`,
+`a6_bcc_b_not_taken`, `a6_bcc_w_not_taken`, `a6_dbcc_true`, `a6_nop`,
+`a7_trapv_notrap`, `a7_bkpt`), all 119 other tests byte-for-byte
+unchanged -- confirms zero collateral impact from the `is_data_fc`
+widening or the new `watch_kind=3` mechanism. `make test` 36/36 (every
+change this phase is testbench/`.s`/JSON-manifest only -- no RTL
+touched, so no Harte/cosim gate needed, matching this project's own
+established convention for pure-tooling changes).
+
+### Results
+
+`gap (known excluded)` mean improved 0.70 -> 0.19 (n=89) purely from
+correcting previously-inflated numbers, not from any new fix --
+reflecting that the baseline is now measurably more reliable, not that
+anything got faster. `a4_neg_mem_idx`'s own untraced r/p/w mismatch and
+`a4_tas_mem`'s own already-flagged extra-bus-cycle finding remain
+explicitly out of scope, unchanged. See `~/.claude/plans/compressed-
+hopping-cocoa.md` for the full approved plan.

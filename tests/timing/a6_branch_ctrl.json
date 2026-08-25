@@ -14,25 +14,23 @@
     "name": "a6_bcc_b_not_taken",
     "hex": "tests/timing/a6_bcc_b_not_taken.hex",
     "target_pc": "0x200",
-    "watch_reg": 2,
-    "watch_val": "0xcafebabe",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "COND_BRANCH 'Bcc.B (Not Taken)': Bcc.B (Not Taken) NCC=4(0/1/0) -- Z=1 makes BNE not-taken, so the marker executes normally",
-    "instr_len": 2
+    "desc": "COND_BRANCH 'Bcc.B (Not Taken)': Bcc.B (Not Taken) NCC=4(0/1/0) -- watch_kind=3 (retirement pulse, no marker needed; Bcc never writes CCR)",
+    "instr_len": 2,
+    "watch_kind": 3
   },
   {
     "name": "a6_bcc_w_not_taken",
     "hex": "tests/timing/a6_bcc_w_not_taken.hex",
     "target_pc": "0x200",
-    "watch_reg": 2,
-    "watch_val": "0xcafebabe",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "COND_BRANCH 'Bcc.W (Not Taken)': Bcc.W (Not Taken) NCC=6(0/1/0)",
-    "instr_len": 4
+    "desc": "COND_BRANCH 'Bcc.W (Not Taken)': Bcc.W (Not Taken) NCC=6(0/1/0) -- watch_kind=3 (retirement pulse, no marker needed)",
+    "instr_len": 4,
+    "watch_kind": 3
   },
   {
     "name": "a6_dbcc_false_notexp",
@@ -61,13 +59,12 @@
     "name": "a6_dbcc_true",
     "hex": "tests/timing/a6_dbcc_true.hex",
     "target_pc": "0x200",
-    "watch_reg": 2,
-    "watch_val": "0xcafebabe",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "COND_BRANCH 'DBcc (cc=True)': DBcc (cc=True) NCC=8(0/1/0) -- Z=1 (cc true) -> DBcc always falls through without decrementing D0 or branching",
-    "instr_len": 4
+    "desc": "COND_BRANCH 'DBcc (cc=True)': DBcc (cc=True) NCC=8(0/1/0) -- Z=1 (cc true) -> DBcc always falls through without decrementing D0 or branching; watch_kind=3 (retirement pulse, no marker needed)",
+    "instr_len": 4,
+    "watch_kind": 3
   },
   {
     "name": "a6_andi_to_sr",
@@ -168,13 +165,12 @@
     "name": "a6_nop",
     "hex": "tests/timing/a6_nop.hex",
     "target_pc": "0x200",
-    "watch_reg": 2,
-    "watch_val": "0xcafebabe",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "CONTROL_INSTR 'NOP': NOP NCC=2(0/1/0)",
-    "instr_len": 2
+    "desc": "CONTROL_INSTR 'NOP': NOP NCC=2(0/1/0) -- watch_kind=3 (retirement pulse, no marker needed)",
+    "instr_len": 2,
+    "watch_kind": 3
   },
   {
     "name": "a6_pea",

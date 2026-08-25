@@ -199,11 +199,10 @@
     "hex": "tests/timing/a2_move_an_usp.hex",
     "target_pc": "0x200",
     "instr_len": 2,
-    "watch_reg": 2,
-    "watch_val": "0x9abc",
     "expect_r": 0,
     "expect_p": 1,
     "expect_w": 0,
-    "desc": "Special-Purpose MOVE table 'MOVE An,USP' NCC=4(0/1/0), MC68030UM.pdf 11-39 -- watched via a 2-instruction marker reading USP back through A3 into D2 (USP isn't directly observable)"
+    "desc": "Special-Purpose MOVE table 'MOVE An,USP' NCC=4(0/1/0), MC68030UM.pdf 11-39 -- watch_kind=3 (retirement pulse); USP isn't directly observable via any value-based watch_kind, previously needed a 2-instruction marker chain",
+    "watch_kind": 3
   }
 ]

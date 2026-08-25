@@ -146,12 +146,17 @@ def run_one(entry, timeout=30):
         str(SIM_BIN),
         f"+hexfile={hexpath.relative_to(REPO)}",
         f"+target_pc={to_int(entry['target_pc']):x}",
-        f"+watch_reg={entry['watch_reg']}",
-        f"+watch_val={to_int(entry['watch_val']):x}",
         f"+expect_r={entry['expect_r']}",
         f"+expect_p={entry['expect_p']}",
         f"+expect_w={entry['expect_w']}",
     ]
+    # watch_reg/watch_val are unused by watch_kind=3 (retirement-pulse
+    # tracking, reliable-baseline plan) -- omit them entirely rather than
+    # require every manifest entry to carry now-meaningless dummy values.
+    if 'watch_reg' in entry:
+        args.append(f"+watch_reg={entry['watch_reg']}")
+    if 'watch_val' in entry:
+        args.append(f"+watch_val={to_int(entry['watch_val']):x}")
     if 'instr_len' in entry:
         args.append(f"+instr_len={entry['instr_len']}")
     if 'watch_kind' in entry:
