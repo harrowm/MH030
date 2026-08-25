@@ -1,0 +1,365 @@
+[
+  {
+    "name": "seq2_and_pair",
+    "hex": "tests/timing/seq2_and_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two AND Dn,Dn back to back. ALU 'AND Dn,Dn' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_or_pair",
+    "hex": "tests/timing/seq2_or_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two OR Dn,Dn back to back. ALU 'OR Dn,Dn' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_eor_pair",
+    "hex": "tests/timing/seq2_eor_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two EOR Dn,Dn back to back (second toggles back to original). ALU 'EOR Dn,Dn' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_sub_pair",
+    "hex": "tests/timing/seq2_sub_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two SUB Rn,Dn back to back. ALU 'SUB Rn,Dn' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_cmp_pair",
+    "hex": "tests/timing/seq2_cmp_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two CMP Rn,Dn back to back (compare-only, CCR side effect, no destination write -- confirms the retirement-pulse mechanism fires for CCR-only writers too). ALU 'CMP Rn,Dn' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_asl_imm_pair",
+    "hex": "tests/timing/seq2_asl_imm_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two ASL #1,Dn back to back. SHIFT_ROTATE 'ASL #(data),Dy' NCC=4(0/1/0) each. Also checks dec_internal_stall_ticks's two-stage resolving load doesn't misbehave under real back-to-back dispatch."
+  },
+  {
+    "name": "seq2_lsl_reg_pair",
+    "hex": "tests/timing/seq2_lsl_reg_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      6,
+      6
+    ],
+    "desc": "Two LSL Dx,Dy (register count) back to back. SHIFT_ROTATE '%LSd Dx,Dy' (count<=32) NCC=6(0/1/0) each."
+  },
+  {
+    "name": "seq2_rol_imm_pair",
+    "hex": "tests/timing/seq2_rol_imm_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      6,
+      6
+    ],
+    "desc": "Two ROL #1,Dn back to back. SHIFT_ROTATE 'ROd #(data),Dy' NCC=6(0/1/0) each."
+  },
+  {
+    "name": "seq2_bfchg_pair",
+    "hex": "tests/timing/seq2_bfchg_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      14,
+      14
+    ],
+    "desc": "Two BFCHG Dn{0:8} back to back (second toggles back). BIT_FIELD 'BFCHG Dn' NCC=14(0/1/0) each."
+  },
+  {
+    "name": "seq2_bfffo_pair",
+    "hex": "tests/timing/seq2_bfffo_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      20,
+      20
+    ],
+    "desc": "Two BFFFO Dn,Dm back to back (same field scanned twice, idempotent). BIT_FIELD 'BFFFO Dn' NCC=20(0/1/0) each."
+  },
+  {
+    "name": "seq2_move_dn_dn_pair",
+    "hex": "tests/timing/seq2_move_dn_dn_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two MOVE.L Dn,Dn back to back. MOVE 'Rn,Dn' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_movea_pair",
+    "hex": "tests/timing/seq2_movea_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      2,
+      2
+    ],
+    "desc": "Two MOVEA.L Dn,An back to back. MOVE 'Rn,An' NCC=2(0/1/0) each."
+  },
+  {
+    "name": "seq2_swap_pair",
+    "hex": "tests/timing/seq2_swap_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two SWAP Dn back to back (second undoes the first). MOVE_SPECIAL 'SWAP Dn' NCC=4(0/1/0) each."
+  },
+  {
+    "name": "seq2_subi_pair",
+    "hex": "tests/timing/seq2_subi_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two SUBI.L #(data),Dn back to back -- imm=20 (not 5), same ADDQ/SUBQ quick-immediate-folding avoidance as the original a3 tests. ALU_IMM 'SUBI #(data),Dn' NCC=2 + FIEA(#imm.L,Dn)=2 = 4 each."
+  },
+  {
+    "name": "seq2_cmpi_pair",
+    "hex": "tests/timing/seq2_cmpi_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two CMPI.L #(data),Dn back to back. ALU_IMM 'CMPI #(data),Dn' NCC=2 + FIEA(#imm.L,Dn)=2 = 4 each."
+  },
+  {
+    "name": "seq2_andi_pair",
+    "hex": "tests/timing/seq2_andi_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two ANDI.L #(data),Dn back to back (second is idempotent). ALU_IMM 'ANDI #(data),Dn' NCC=2 + FIEA(#imm.L,Dn)=2 = 4 each (same reasoning as a3_andi_dn's own established figure)."
+  },
+  {
+    "name": "seq2_ori_pair",
+    "hex": "tests/timing/seq2_ori_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two ORI.L #(data),Dn back to back (second is idempotent). ALU_IMM 'ORI #(data),Dn' NCC=2 + FIEA(#imm.L,Dn)=2 = 4 each."
+  },
+  {
+    "name": "seq2_eori_pair",
+    "hex": "tests/timing/seq2_eori_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 6,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      4,
+      4
+    ],
+    "desc": "Two EORI.L #(data),Dn back to back (second toggles back). ALU_IMM 'EORI #(data),Dn' NCC=2 + FIEA(#imm.L,Dn)=2 = 4 each."
+  },
+  {
+    "name": "seq2_neg_predec_pair",
+    "hex": "tests/timing/seq2_neg_predec_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      8,
+      8
+    ],
+    "desc": "Two NEG.L -(An) at different addresses ($3004 then $3000), back to back. SINGLE_OP '*NEG Mem' NCC=4 + FEA(-(An))=4 = 8 each."
+  },
+  {
+    "name": "seq2_neg_postinc_pair",
+    "hex": "tests/timing/seq2_neg_postinc_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 2,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      7,
+      7
+    ],
+    "desc": "Two NEG.L (An)+ at different addresses ($3000 then $3004), back to back. SINGLE_OP '*NEG Mem' NCC=4 + FEA((An)+)=3 = 7 each."
+  },
+  {
+    "name": "seq2_neg_idx_pair",
+    "hex": "tests/timing/seq2_neg_idx_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 2,
+    "seq_isolated_ncc": [
+      10,
+      10
+    ],
+    "desc": "Two NEG.L (d8,An,Xn) indexed, different displacements, back to back -- Phase 201's own correction found this EA mode's isolated gap is FLAT (not the originally-mis-measured x3), confirming here whether that holds under real sequencing too. SINGLE_OP '*NEG Mem' NCC=4 + FEA((d8,An,Xn))=6 = 10 each."
+  },
+  {
+    "name": "seq2_dbf_loop",
+    "hex": "tests/timing/seq2_dbf_loop.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 8,
+    "seq_isolated_ncc": [
+      2,
+      8,
+      2,
+      8,
+      2,
+      8,
+      2,
+      13
+    ],
+    "desc": "A real 4-pass DBF loop (ADDQ.L#1,Dn / DBF), not two copies of the same isolated instruction -- the first genuine steady-state loop measurement in this corpus. ALU_IMM 'ADDQ #(data),Rn' NCC=2 each (x4) + COND_BRANCH 'DBcc(cc=False,Count Not Expired)' NCC=8 (x3 taken) + 'DBcc(cc=False,Count Expired)' NCC=13 (x1, final fall-through) = 8+24+13=45 manual total."
+  },
+  {
+    "name": "seq2_jsr_rts_pair",
+    "hex": "tests/timing/seq2_jsr_rts_pair.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "seq_len": 3,
+    "seq_isolated_ncc": [
+      7,
+      14,
+      2
+    ],
+    "desc": "A genuine call/return: JSR (An) to a real subroutine containing only RTS, then an ADD after the return -- the first real call/return sequence in this corpus (earlier BSR/JSR investigations, Phase 163 Track B, only ever measured the redirect in isolation). CONTROL_INSTR '%JSR' NCC=7 + 'RTS' NCC=14 + ALU 'ADD Rn,Dn' NCC=2 = 23 manual total."
+  },
+  {
+    "name": "seq2_chain4",
+    "hex": "tests/timing/seq2_chain4.hex",
+    "target_pc": "0x200",
+    "instr_len": 8,
+    "seq_len": 4,
+    "seq_isolated_ncc": [
+      2,
+      7,
+      2,
+      2
+    ],
+    "desc": "4-instruction heterogeneous chain: ADD Rn,Dn(2) / NEG.L(An)(7) / MOVE.L Dn,Dn(2) / SUB Rn,Dn(2). Manual sum=13."
+  },
+  {
+    "name": "seq2_chain6",
+    "hex": "tests/timing/seq2_chain6.hex",
+    "target_pc": "0x200",
+    "instr_len": 12,
+    "seq_len": 6,
+    "seq_isolated_ncc": [
+      2,
+      2,
+      7,
+      4,
+      2,
+      4
+    ],
+    "desc": "6-instruction heterogeneous chain: ADD(2)/AND(2)/NEG.L(An)(7)/ASL#1,Dn(4)/MOVE.L(2)/CLR.L(An)(4). Manual sum=21."
+  },
+  {
+    "name": "seq2_chain8",
+    "hex": "tests/timing/seq2_chain8.hex",
+    "target_pc": "0x200",
+    "instr_len": 16,
+    "seq_len": 8,
+    "seq_isolated_ncc": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      7,
+      4
+    ],
+    "desc": "8-instruction heterogeneous chain covering the whole register ALU family plus two memory RMW ops. Manual sum=23."
+  },
+  {
+    "name": "seq2_hot_add_x8",
+    "hex": "tests/timing/seq2_hot_add_x8.hex",
+    "target_pc": "0x200",
+    "instr_len": 16,
+    "seq_len": 8,
+    "seq_isolated_ncc": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "desc": "8x unrolled ADD Rn,Dn (register-only steady state, not a loop -- straight-line repetition to see whether the incremental cost found for instruction 2 in the pilot corpus holds flat for instructions 3-8 too, or keeps changing). Manual sum=16."
+  },
+  {
+    "name": "seq2_hot_neg_x4",
+    "hex": "tests/timing/seq2_hot_neg_x4.hex",
+    "target_pc": "0x200",
+    "instr_len": 8,
+    "seq_len": 4,
+    "seq_isolated_ncc": [
+      7,
+      7,
+      7,
+      7
+    ],
+    "desc": "4x unrolled NEG.L (An) at 4 distinct addresses (RMW steady state, not a loop -- checks whether bus-contention-limited partial overlap found for the RMW pilot pair holds flat across more repetitions or degrades/improves further). Manual sum=28."
+  }
+]

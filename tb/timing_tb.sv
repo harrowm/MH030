@@ -284,7 +284,15 @@ module timing_tb;
     end
 
     always_ff @(posedge clk_4x) begin
-        if (watch_kind != 3 && t_start_seen && !t_end_seen &&
+        // seq_len>1 runs never pass +watch_reg/+watch_val (they use the
+        // retirement-pulse counter below instead) -- gate this whole block
+        // off in that mode, since the resulting default reg=0/val=0 can
+        // spuriously edge-match a real D0 transition through zero in the
+        // sequence under test (found via seq2_dbf_loop, whose own DBcc
+        // counter genuinely passes through D0==0), truncating the
+        // SEQ_CHECKPOINT collection early. seq_len<=1 (every existing
+        // single-instruction test's own default) is unaffected.
+        if (seq_len <= 1 && watch_kind != 3 && t_start_seen && !t_end_seen &&
             watch_current() == watch_val &&
             watch_prev_r != watch_val) begin
             t_end_seen <= 1'b1;
