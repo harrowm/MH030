@@ -2671,3 +2671,29 @@ Results: no RTL change, temporary trace fully removed (`git diff
 `a6_bcc_w_not_taken` and `a7_bkpt`, plus the real `a6_bcc_b_not_taken`
 test bug found along the way). See `~/.claude/plans/compressed-
 hopping-cocoa.md`. Stage 4 (`a4_neg_mem_idx` r/p/w MISMATCH) is next.
+
+## Phase 177 (timing-gaps-largest-first plan, Stage 4) -- `a4_neg_mem_idx` r/p/w MISMATCH resolved: manifest bug, not RTL
+
+Confirmed the plan's own predicted shape via direct measurement:
+`a4_neg_mem_idx`'s own MISMATCH was `measured p=1` against the
+manifest's own `expect_p=2` (the naive additive sum of NEG Mem's
+`fea(d8,An,Xn)=6(1/1/0)` plus NEG Mem's own row) -- exactly the same
+"opcode+brief-extension-word fetched together in one combined bus read"
+alignment property already documented for `a1_fea_briefidx`. Fixed by
+correcting `expect_p` to 1 in `tests/timing/a4_bcd_single.json`,
+matching that test's own established precedent (the manifest itself is
+corrected, not just flagged).
+
+With r/p/w now clean, a small residual clock gap remains (manual=10,
+measured=11, gap=+1) -- documented in `known_issues.json` as the same
+RMW-to-memory dispatch floor already established for the plain-(An)
+cluster (`a3_add_dn_ea`/`a4_neg_mem`/etc, typically ~+4), just smaller
+in magnitude here since it composes with the brief-indexed EA's own
+separate, already-documented timing character rather than acting
+alone -- the same "compounding of two known mechanisms" shape already
+seen in `a3_addi_mem`'s own +7 finding.
+
+Results: manifest + `known_issues.json` only, no RTL touched. `make
+test` 36/36 (no Harte/cosim re-run needed). See `~/.claude/plans/
+compressed-hopping-cocoa.md`. Stage 5 (`a0_validate_move_l_d16anxn_hex`
++2) is next.
