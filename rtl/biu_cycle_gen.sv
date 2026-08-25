@@ -994,10 +994,23 @@ module biu_cycle_gen #(
             ST_INIT_PC_S6: state_nxt = ST_INIT_PC_S7;
             ST_INIT_PC_S7: state_nxt = ST_IDLE;
 
-            ST_READ_S0: state_nxt = ST_READ_S1;
-            ST_READ_S1: state_nxt = ST_READ_S2;
-            ST_READ_S2: state_nxt = ST_READ_S3;
-            ST_READ_S3: state_nxt = ST_READ_S4;
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160): ordinary READ now skips S1 and S3 -- MC68030UM.pdf
+            // 7.3.1 only has 6 states (S0-S5) for a real 0-wait read; our own
+            // S1 (ECS-only, now folded into S0 above) and S3 (DS-only, now
+            // folded into S2 above) had no real-hardware equivalent. This
+            // brings ordinary READ down to exactly 6 states (S0,S2,S4,S5,S6,
+            // S7), matching the real chip's own state count and preserving
+            // the even-state-count/whole-real-clock invariant Phase 160
+            // established (6 is even, same as the un-skipped 8; skipping only
+            // one of S1/S3 would give an invalid odd 7-state cycle). ST_READ_S1
+            // and ST_READ_S3 become unreachable for ordinary reads but stay
+            // declared/used by other cycle types (WRITE/IACK/RMW/burst/init)
+            // via the shared sphase decode -- deliberately NOT touched this
+            // round; see plan.md for why WRITE's own second savings source
+            // isn't yet safely available.
+            ST_READ_S0: state_nxt = ST_READ_S2;
+            ST_READ_S2: state_nxt = ST_READ_S4;
             // Phase 160 Stage 1: S4 always proceeds to S5 -- DSACK is sampled
             // once per full S4+S5 real clock (at S5's own end), never
             // mid-clock. The old "S4 may skip straight to S6" path gave a
@@ -1252,27 +1265,40 @@ module biu_cycle_gen #(
                 SP_S0: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw;
-                    // ECS# deasserted at S0; it asserts for all of S1 (below).
+                    // Bus-cycle round-trip overhead investigation (plan.md,
+                    // follows Phase 160): MC68030UM.pdf 7.3.1 State 0 asserts
+                    // ECS# in the SAME state the address is driven (one-half
+                    // clock, same as this state's own dwell under Phase 160's
+                    // state_adv pacing) -- moved here from the old SP_S1 (a
+                    // never-manual-verified extra half-clock traced back to
+                    // output.txt's own unchecked design conversation, not a
+                    // real hardware requirement; see CLAUDE.md's own S-State
+                    // Signal Timing section for the full correction).
+                    ext_ecs_n = 1'b0;
                     if (bc_cbreq_assert) ext_cbreq_n = 1'b0;
                 end
                 SP_S1: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw;
-                    // Phase 160 Stage 1: ECS# asserts for the whole of S1 (now
-                    // correctly 2 ticks = 1/2 real clock on its own, matching
-                    // real silicon's S0+S1 half-clock pairing), giving the same
-                    // 1/2-CLK setup margin before AS# asserts at S2 that the
-                    // pre-fix "2nd half of a 4-tick S1" check gave -- no
-                    // mid-state phase_r threshold is needed anymore since S1's
-                    // own dwell already IS that half-clock. See plan.md
-                    // Phase 160 Stage 1.
-                    ext_ecs_n = 1'b0;
-                    // OCS# deasserted here; it asserts coincident with AS# at S2.
+                    // ECS# already negated by default here (matches real S1:
+                    // "the ECS...signal is negated during S1") -- only cycle
+                    // types that still visit S1 (WRITE/IACK/RMW/burst/init;
+                    // ordinary READ now skips straight from S0 to S2, see the
+                    // ST_READ_S0 transition below) reach this state at all.
                     if (bc_cbreq_assert) ext_cbreq_n = 1'b0;
                 end
                 SP_S2: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw; ext_ocs_n = !cyc_is_op; ext_as_n = 1'b0;
+                    // MC68030UM.pdf 7.3.1 State 1: "the processor asserts
+                    // AS...The processor also asserts DS also during S1" --
+                    // real reads assert AS and DS together; real WRITES do
+                    // NOT (7.3.2: AS at S1, data placed at S2, DS only at S3
+                    // -- DS can't assert before data is actually on the bus,
+                    // a genuine hardware requirement, not compressible). Gated
+                    // on cyc_rw so writes are completely unaffected (still get
+                    // DS from the unchanged SP_S3 block below).
+                    if (cyc_rw) ext_ds_n = 1'b0;
                 end
                 SP_S3: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz; ext_rw = cyc_rw;

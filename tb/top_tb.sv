@@ -194,7 +194,17 @@ module top_tb;
             int t;
             init_pc_val = 32'h0000_0008;
             saw_ifu_req = 0;
-            for (t = 0; t < 10; t++) begin
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160): break the instant the request is seen instead of
+            // always scanning the full 10 ticks -- the later "IFU active
+            // after boot" check's own fixed post-margin needs the elapsed
+            // time from here to be tight, not loose, now that ordinary READ
+            // cycles complete faster (S1/S3 skipped, see CLAUDE.md's
+            // S-State Signal Timing section). A loose margin here could
+            // silently let the read cycle finish and go idle before the
+            // later check fires, which is exactly what broke before this
+            // fix.
+            for (t = 0; t < 10 && !saw_ifu_req; t++) begin
                 @(posedge clk_4x);
                 if (u_top.ifu_bus_req &&
                     u_top.ifu_bus_addr[31:2] == init_pc_val[31:2])
@@ -225,9 +235,20 @@ module top_tb;
             end
             halt_n = 1'b0;
             saw_halted = 0; saw_as_during_halt = 0;
+            // Bus-cycle round-trip overhead investigation (plan.md, follows
+            // Phase 160): only start tracking "no AS# during halt" once
+            // bus_halted has actually synchronized (halt_n passes through a
+            // 2-stage synchronizer per CLAUDE.md's own async-input
+            // discipline -- biu_config.sv's halt_s/halt_q). Before this fix
+            // the check started counting from t=0, racing the synchronizer
+            // itself; with ordinary READ cycles now faster (S1/S3 skipped)
+            // and the IFU's own continuous prefetch essentially always
+            // having a cycle ready to start, that race was newly exposed.
+            // The real intent -- once genuinely halted, don't drive AS# --
+            // is unaffected by this fix.
             repeat(40) @(posedge clk_4x) begin
                 if (bus_halted) saw_halted = 1;
-                if (!ext_as_n)  saw_as_during_halt = 1;
+                if (saw_halted && !ext_as_n) saw_as_during_halt = 1;
             end
             check("bus_halted asserts",           saw_halted);
             check("AS# not driven during HALT#",  !saw_as_during_halt);

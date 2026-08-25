@@ -1126,21 +1126,23 @@ module biu_tb;
         eu_is_op_tb = 1'b1;
         eu_req_tb   = 1'b1;
 
-        // State numbers per biu_cycle_gen enum
+        // State numbers per biu_cycle_gen enum. Bus-cycle round-trip
+        // overhead investigation (plan.md, follows Phase 160): ordinary
+        // READ now skips S1/S3 and asserts ECS at S0 (not S1) and DS
+        // together with AS at S2 (not a separate S3) -- matches
+        // MC68030UM.pdf 7.3.1's real 6-state (S0-S5) read cycle; see
+        // CLAUDE.md's S-State Signal Timing section for the derivation.
+        // S3 (state 21) is now unreachable for ordinary reads.
         wait_for_state(7'd18, 20);   // ST_READ_S0
         check("addr at S0",         ext_a    === addr);
         check("FC at S0",           ext_fc   === fc);
-        check("ECS_n high at S0",   ext_ecs_n === 1'b1);
+        check("ECS_n low at S0",    ext_ecs_n === 1'b0);
         check("AS_n high at S0",    ext_as_n  === 1'b1);
         check("DS_n high at S0",     ext_ds_n  === 1'b1);
 
         wait_for_state(7'd20, 20);   // ST_READ_S2
         check("AS_n low at S2",     ext_as_n  === 1'b0);
-        check("DS_n high at S2",    ext_ds_n  === 1'b1);
-
-        wait_for_state(7'd21, 20);   // ST_READ_S3
-        check("DS_n low at S3",     ext_ds_n  === 1'b0);
-        check("AS_n low at S3",     ext_as_n  === 1'b0);
+        check("DS_n low at S2",     ext_ds_n  === 1'b0);
 
         wait_for_state(7'd24, 50);   // ST_READ_S6
         check("AS_n high at S6",    ext_as_n  === 1'b1);
@@ -2109,9 +2111,13 @@ module biu_tb;
         // the peripheral sees the byte on the right D[31:0] pin position.
         $display("=== BIU: Byte-lane control and DS# timing ===");
 
-        // P8-1: DS asserts at S3, deasserts at S6 (longword read)
+        // P8-1: DS asserts at S2 (together with AS), deasserts at S6
+        // (longword read). Bus-cycle round-trip overhead investigation
+        // (plan.md, follows Phase 160): ordinary reads now assert DS at S2
+        // together with AS, not a separate S3 (see CLAUDE.md's S-State
+        // Signal Timing section).
         begin
-            $display("--- DS# timing: low@S3, high@S6 ---");
+            $display("--- DS# timing: low@S2, high@S6 ---");
             p4_direct   = 1;
             p4_eu_addr  = 32'h0000_0000;
             p4_eu_siz   = 2'b00;   // LW
@@ -2120,9 +2126,9 @@ module biu_tb;
             p4_eu_is_op = 1'b0;
             wait_bus_idle;
             p4_eu_req = 1;
-            wait_for_state(7'd21, 30);   // ST_READ_S3
-            check("DS_n=0 @S3",  ext_ds_n === 1'b0);
-            check("AS_n=0 @S3",  ext_as_n === 1'b0);
+            wait_for_state(7'd20, 30);   // ST_READ_S2
+            check("DS_n=0 @S2",  ext_ds_n === 1'b0);
+            check("AS_n=0 @S2",  ext_as_n === 1'b0);
             wait_for_state(7'd24, 30);   // ST_READ_S6
             check("DS_n=1 @S6",  ext_ds_n === 1'b1);
             check("AS_n=1 @S6",  ext_as_n === 1'b1);
@@ -2452,14 +2458,14 @@ module biu_tb;
             eu_coproc_addr_tb = 32'h0002_1000;
             wait_bus_idle;
             eu_coproc_req_tb = 1'b1;
-            // Sample bus signals at S2 (when AS first asserts)
+            // Sample bus signals at S2 (AS and, for reads, DS assert
+            // together here now -- see CLAUDE.md's S-State Signal Timing
+            // section; S3 is unreachable for ordinary reads)
             wait_for_state(7'd20, 50);   // ST_READ_S2
             check("FC=111",  ext_fc  === 3'b111);
             check("AS low",  ext_as_n === 1'b0);
             check("A[19:16]=0010",
                   ext_a[19:16] === 4'b0010);
-            // Sample at S3 (DS asserts)
-            wait_for_state(7'd21, 20);   // ST_READ_S3
             check("DS low",  ext_ds_n === 1'b0);
             check("RW=1",    ext_rw   === 1'b1);
             for (int t = 0; t < 100; t++) begin
@@ -2544,14 +2550,15 @@ module biu_tb;
             eu_bkpt_addr_tb = 32'h0000_000C;
             wait_bus_idle;
             eu_bkpt_req_tb = 1'b1;
-            // Sample bus signals at S2 (AS asserts) and S3 (DS asserts)
+            // Sample bus signals at S2 (AS and, for reads, DS assert
+            // together here now -- S3 is unreachable for ordinary reads,
+            // see CLAUDE.md's S-State Signal Timing section)
             wait_for_state(7'd20, 50);   // ST_READ_S2
             check("FC=111",         ext_fc     === 3'b111);
             check("AS low",         ext_as_n   === 1'b0);
             check("A[19:16]=0000",  ext_a[19:16] === 4'b0000);
             check("A[4:2]=bkpt#3",  ext_a[4:2] === 3'b011);
             check("A[1:0]=00",      ext_a[1:0] === 2'b00);
-            wait_for_state(7'd21, 20);   // ST_READ_S3
             check("DS low",  ext_ds_n === 1'b0);
             check("RW=1",    ext_rw   === 1'b1);
             check("SIZ=word", ext_siz === 2'b10);
@@ -2838,38 +2845,37 @@ module biu_tb;
             eu_is_op_tb = 1'b1;    // operand cycle → OCS# should assert
             eu_req_tb   = 1'b1;
 
-            // --- Phase 160 Stage 1: ECS# asserts for the whole of S1 ---
-            // S0 and S1 now each hold for exactly 2 ticks (real 68030 pairs
-            // 2 named S-states per external clock); ECS# fills S1's own
-            // entire (now-correct) 2-tick dwell instead of a sub-tick
-            // fraction of it, giving the same 1/2-CLK setup margin before
-            // AS# at S2 that the old "2nd half of a 4-tick S1" check gave.
-            // See plan.md Phase 160 Stage 1 and the matching RTL comment in
-            // biu_cycle_gen.sv's SP_S1 output arm.
-            $display("--- ECS# asserts for all of S1 ---");
+            // --- Bus-cycle round-trip overhead investigation (plan.md,
+            // follows Phase 160): ECS# now asserts during S0 itself (both
+            // ticks), matching MC68030UM.pdf 7.3.1 State 0 ("the processor
+            // drives ECS low, indicating the beginning of an external
+            // cycle... During S0, the processor places a valid address...")
+            // -- not a separate S1 (a never-manual-verified extra half-clock
+            // this investigation traced to output.txt's own unchecked
+            // design conversation). Ordinary READ now skips S1 entirely
+            // (state 19 is unreachable for reads), going straight from S0
+            // to S2, where AS# and DS# both assert together (matches real
+            // State 1: "the processor asserts AS...The processor also
+            // asserts DS also during S1"). See CLAUDE.md's S-State Signal
+            // Timing section for the full derivation. ---
+            $display("--- ECS# asserts for all of S0 ---");
 
-            // S0: ECS# must be deasserted (high) for both of its ticks
+            // S0: ECS# asserted (low) for both of its ticks
             wait_for_state(7'd18, 20);   // ST_READ_S0, first tick
-            check("ECS_n high S0-t0", ext_ecs_n === 1'b1);
+            check("ECS_n low  S0-t0", ext_ecs_n === 1'b0);
             @(posedge clk_4x);  // S0 second tick
-            check("ECS_n high S0-t1", ext_ecs_n === 1'b1);
+            check("ECS_n low  S0-t1", ext_ecs_n === 1'b0);
 
-            // S1: ECS# asserted for both of its ticks
-            @(posedge clk_4x);  // S1 first tick
-            check("ECS_n low  S1-t0", ext_ecs_n === 1'b0);
-            @(posedge clk_4x);  // S1 second tick
-            check("ECS_n low  S1-t1", ext_ecs_n === 1'b0);
-
-            // S2: ECS# deasserts; AS# asserts
+            // S2 (S1 skipped for reads): ECS# deasserted; AS#+DS# assert
             @(posedge clk_4x);  // S2
             check("ECS_n high at S2",  ext_ecs_n === 1'b1);
             check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 
-            // --- P14-2: OCS# asserts coincident with AS# at S2, not at S1 ---
+            // --- OCS# still asserts coincident with AS# at S2 (unchanged
+            // by this investigation -- OCS#'s own timing is a separate,
+            // out-of-scope question, documented but not acted on) ---
             $display("--- OCS# asserts coincident with AS# at S2 ---");
 
-            // Restart a fresh read for clean S1 check
-            // (current cycle is already at S2; let it finish then issue a new one)
             eu_req_tb = 1'b0;
             wait_bus_idle;
             eu_addr_tb  = 32'h0000_0100;
@@ -2879,10 +2885,10 @@ module biu_tb;
             eu_is_op_tb = 1'b1;
             eu_req_tb   = 1'b1;
 
-            wait_for_state(7'd19, 20);   // ST_READ_S1, phase 0
-            check("OCS_n high at S1",  ext_ocs_n === 1'b1);
+            wait_for_state(7'd18, 20);   // ST_READ_S0
+            check("OCS_n high at S0",  ext_ocs_n === 1'b1);
 
-            wait_for_state(7'd20, 20);   // ST_READ_S2, phase 0
+            wait_for_state(7'd20, 20);   // ST_READ_S2 (S1 skipped)
             check("OCS_n low  at S2",  ext_ocs_n === 1'b0);
             check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 

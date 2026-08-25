@@ -1,4 +1,20 @@
 {
+  "a1_fea_anpredec": {
+    "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Direct, expected consequence of the bus-cycle round-trip overhead fix (plan.md, follows Phase 160): ordinary READ cycles now skip 2 no-real-hardware-equivalent states (ECS delay + AS/DS stagger), saving 2 ticks (0.5 clock) per read. This test's own single data read now lands slightly below the manual's own rounded average -- the manual's NCC values are explicitly \"the AVERAGE of the odd-word-aligned case and the even-word-aligned case (rounded up to an integral number of clocks)\" (MC68030UM.pdf 11-25), so a specific, deterministic (even-aligned) simulated case landing under that rounded average is expected, not a bug.",
+    "ref": "plan.md, bus-cycle round-trip overhead investigation, Stage 1"
+  },
+  "a1_fea_d16an": {
+    "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Same cause as a1_fea_anpredec -- one data read, now 2 ticks faster from the same READ-cycle S-state fix.",
+    "ref": "plan.md, bus-cycle round-trip overhead investigation, Stage 1"
+  },
+  "a1_fea_xxxw": {
+    "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Same cause as a1_fea_anpredec -- one data read, now 2 ticks faster from the same READ-cycle S-state fix.",
+    "ref": "plan.md, bus-cycle round-trip overhead investigation, Stage 1"
+  },
+  "a6_dbcc_false_exp": {
+    "reason": "gap=-2 (manual=13, measured=11), r/p/w clean. Same cause as a1_fea_anpredec, compounded across 2 read cycles (opcode fetch + the DBcc's own count-expired fall-through path) each saving 2 ticks from the READ-cycle S-state fix -- 4 ticks (1 clock) total, but rounding/state-transition timing lands the net effect at -2 clocks rather than a clean -1.",
+    "ref": "plan.md, bus-cycle round-trip overhead investigation, Stage 1"
+  },
   "a0_validate_move_l_d16anxn_hex": {
     "reason": "gap=+2 (manual=9, measured=11), r/p/w clean. Traced directly: this instruction genuinely needs 2 separate program-space bus cycles (the opcode+full-format-extension-word combined into ONE fetch, then a SEPARATE fetch for the 16-bit base displacement word, since this RTL's IFU doesn't combine them the way it does for brief-format/simpler cases), then the actual EA data read as a third bus cycle. Each of these 3 real bus cycles pays its own ordinary S0/S1 dispatch/setup overhead, which the manual's own additive per-row model (fea NCC=7 + MOVE-op NCC=2) doesn't fully account for -- the same 'each additional bus cycle costs its own dispatch overhead beyond the naive additive sum' pattern already extensively documented elsewhere (a3_addi_mem's own 'compounding of two known mechanisms' +7 finding, the RMW-to-memory dispatch-floor cluster). Not a new, separately-fixable mechanism -- this is Phase 159 Stage 0's own original calibration test, and its own r/p/w breakdown (1/2/0) already matches the manual exactly, confirming the underlying bus-cycle-count model is correct; only the total clock accounting differs from the manual's idealized additive table",
     "ref": "timing-gaps-largest-first plan, Stage 5"
