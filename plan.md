@@ -3044,3 +3044,145 @@ blast-radius module in the project, and this investigation found no
 genuine slack to exploit (not just insufficient confidence to
 proceed), no RTL was touched. `make test` 36/36 sanity check
 (unaffected -- no RTL change this phase).
+
+## Phase 183 -- Burst mode timing redesign: ~2.4x too slow, closed to ~1.5x, plus two real pin-level correctness bugs found and fixed along the way
+
+Following the burst-timing investigation (read MC68030UM.pdf 7.3.4
+Synchronous Read Cycle and 7.3.7 Burst Operation Cycles directly): real
+burst beat 0 is 4 states (S0-S3, 2 clocks, matching an ordinary
+synchronous read's own shape -- "very similar... except that CBREQ is
+asserted"); each subsequent beat is just 2 states (a bare sample+hold
+pair, no address/AS/DS/FC/SIZ re-setup at all, since "the processor
+maintains AS, DS, R/W, A0-A31, FC0-FC2, SIZ0-SIZ1 in their current
+state throughout the burst operation"). Real 4-beat total: 10 states =
+5 clocks. This RTL's own `ST_BURST_*`/`ST_BWRITE_*` states were never
+touched by the earlier async READ/WRITE/RMW/IACK/init compression
+work (Phases 205-208) -- beat 0 used the OLD 8-state model (23 states
+total for a 4-beat burst), empirically measured at 48 ticks (12
+clocks) via a controlled trace of `tb/biu_tb.sv`'s own PCB-1 test --
+roughly 2.4x too slow, proportionally the largest gap found in this
+whole timing-accuracy effort.
+
+**Two real, previously-undiscovered pin-level correctness bugs found
+while designing the fix**, both confirmed via direct trace before
+being fixed:
+
+1. **AS and DS both fully negated between every burst beat**, not
+   just DS -- contradicting the manual's explicit "maintains AS, DS...
+   throughout the burst operation." `SP_S6`'s own combinational pin
+   block had an existing burst-aware hold override for AS
+   (`ext_as_n=(is_burst&&beat!=3)?0:1`) but DS had no equivalent --
+   it unconditionally negated (`ext_ds_n=1'b1`) every single beat.
+   This is why the old `ST_BURST_NEXT_S3` state (a full address/AS/DS
+   re-assert, mirroring an ordinary read's own S1-equivalent) looked
+   like real necessary work: it was silently compensating for this
+   bug, not doing genuinely new setup (real hardware needs zero
+   re-setup for continuation beats -- the whole address/AS/DS/FC/SIZ
+   bus stays valid and unchanged).
+
+2. **The burst address bus increments per beat** (`biu_burst_ctrl.sv`'s
+   own `burst_addr_r <= burst_addr_r + 32'd4`), contradicting the
+   manual's own explicit text: "the address bus of the MC68030 remains
+   driven to a constant value for the duration of a burst transfer
+   operation... If an external memory system requires incrementing...
+   this function must be performed by external hardware." **Found,
+   confirmed, but deliberately NOT fixed this pass** -- `cyc_addr`
+   feeds this incrementing value directly onto `ext_a`, and
+   `tb/mem_model.sv` has no burst-continuation logic of its own at
+   all (confirmed by direct read); freezing the address correctly
+   would require also teaching the testbench memory model to track
+   its own internal beat offset against a fixed base (matching what
+   real "external hardware" would need to do), a genuine but separate
+   correctness fix, out of scope for the timing mandate this phase
+   was scoped to. Documented for a future phase.
+
+**Redesign** (`rtl/biu_cycle_gen.sv`): beat 0 now skips S1 (ECS-delay
+only) and S3 (DS-stagger only), matching the ordinary-read compression
+pattern exactly (`S0->S2->S4->S5`). `SP_S6` gained the missing DS-hold
+override (identical formula to the existing AS one, now that Bug 1 is
+understood and fixed). S7 is eliminated for burst specifically -- its
+own `SP_S7`-mapped completion body was already an empty no-op for
+`is_burst` (burst completion runs entirely through
+`biu_burst_ctrl.sv`'s own `eu_burst_ack`/`berr`, not that shared
+dispatch body) -- and S6 already exists as the necessary 1-cycle-later
+checkpoint where `berr_abort_r` (set combinationally the same cycle S5
+samples `berr_s`, so needs a full cycle to become a valid registered
+read) has settled, so S6 now also owns the "loop back for another
+beat, or done" decision S7 used to make. Continuation beats loop
+directly back through the SAME S4/S5/S6 triple beat 0 itself ends on
+-- no separate `NEXT_S3`-`NEXT_S7` family needed at all, since
+`biu_burst_ctrl.sv`'s own `at_burst_data`/`at_burst_s7` inputs already
+treated the old first-beat and continuation-beat state pairs
+interchangeably. `at_burst_s7_wire`'s own definition was redirected
+from S7 to S6 (port name on `biu_burst_ctrl.sv` left unchanged --
+purely a same-file wire-level redefinition of which state drives it).
+`berr_abort_r`'s own clear condition gained `state==ST_BURST_S6` /
+`state==ST_BWRITE_S6` (S7's own equivalent clear no longer fires for
+burst, mirroring the same addition WRITE/RMW_WRITE already needed when
+THEIR OWN S7 was eliminated, Phases 206-207). The old
+`ST_BURST_S1/S3/S7`/`ST_BURST_NEXT_S3-S7` enum values (and their
+`ST_BWRITE_*` mirrors) are now permanently unreachable -- deliberately
+left declared rather than renumbering the whole hand-numbered enum for
+a dead-code removal.
+
+**State-count math**: beat 0 = 5 states (S0,S2,S4,S5,S6), each
+continuation beat = 3 states (S4,S5,S6, looped) -- each individually
+odd, but the WHOLE multi-beat cycle's own total (5+3+3+3=14, a
+complete IDLE-to-IDLE span) is even, which is what Phase 160's own
+invariant actually requires (a complete bus cycle occupies a whole
+number of real clocks) -- not that every internal sub-chunk must
+independently be even, a subtlety not previously exercised by any
+single-bus-cycle fix. 14 states = 28 ticks = 7 clocks (bus-state-
+machine time alone), plus ~2 ticks of already-characterized dispatch
+overhead (matching the earlier RMW-dispatch-floor investigation's own
+finding) = 30 ticks predicted.
+
+**Found a second real bug while verifying**: with AS/DS now correctly
+held continuously across all 4 beats, `tb/mem_model.sv`'s own read
+response logic broke -- it only ever latches `d_latch` (the value
+returned on `ext_d_in`) ONCE, on the `MS_IDLE`-to-`active` transition,
+then keeps returning that same latched value for as long as `active`
+stays true. The OLD (buggy) AS/DS-toggle-between-beats behavior had
+been *accidentally* resetting the model back to `MS_IDLE` between
+every beat, which is the only reason it ever re-latched fresh data for
+beats 1-3 -- once Bug 1 was fixed, `active` never dropped between
+beats, so the model kept returning beat 0's own value for all four
+reads (confirmed directly: PCB-1's own rdata1/2/3 checks failed,
+reading back rdata0's value). Fixed with a minimal, narrowly-scoped
+addition: re-latch whenever the address on the bus changes while still
+`active` (using this project's own still-incrementing `burst_addr`,
+Bug 2 above, as the trigger) -- a scenario that never occurred before
+this fix (ordinary non-burst cycles never change address mid-`active`),
+so existing non-burst timing is provably unaffected. A second,
+unrelated pre-existing test bug was also found and fixed:
+`tb/biu_tb.sv`'s own "BERR on beat 2" test hardcoded a wait for the
+now-eliminated `ST_BURST_NEXT_S4` state number (43) -- fixed to wait
+for the beat-1-tagged visit to the now-shared `ST_BURST_S4` (checking
+`bc_burst_beat==1` alongside the state, since a plain state match would
+now hit beat 0's own visit immediately).
+
+**Results**: `tb/biu_tb.sv` (the primary, most detailed burst-specific
+test suite: P7-*/PCB-*/P21-* series) 0 failures. Full 4-beat burst
+measured at **30 ticks (7.5 clocks), down from 48 (12 clocks) -- a
+37.5% reduction, exactly matching the hand-derived 28+2 tick
+prediction**. `make test` 36/36 (including `cache`, which exercises
+I-cache/D-cache burst linefill directly, and `biu_int`), `cosim_grp`
+8/8, `cosim_memind` 12/12, full 124-suite Harte sweep -- PASS 702142,
+FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline (expected: Harte's own corpus never enables
+IBE/DBE, so it never exercises burst mode at all -- this is the
+zero-collateral-damage gate, not a burst-correctness gate; `biu_tb.sv`
+and `cache_tb.sv`'s own I-cache/D-cache burst tests are what actually
+exercise the new logic).
+
+**Remaining, documented, deliberately not chased further**: the
+address-increment bug (Bug 2 above) stays unfixed, since fixing it
+needs a coordinated change to `tb/mem_model.sv`'s own burst-
+continuation model too; the real 5-clock theoretical minimum isn't
+fully reached (measured 7.5 clocks) since `berr_abort_r`'s own genuine
+1-cycle settle requirement still costs one real state (S6) per beat
+that the manual's own idealized 2-state-per-beat model doesn't need --
+not chased further given the risk/value tradeoff of touching
+`biu_cycle_gen.sv`'s berr-detection machinery any further, matching
+this project's own established caution around that specific mechanism
+(Phases 108-114's own delicate BERR-abort history).

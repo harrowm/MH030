@@ -1935,8 +1935,20 @@ module biu_tb;
             eu_burst_req_tb  = 1'b1;
             eu_burst_addr_tb = 32'h0000_0100;
             eu_burst_fc_tb   = 3'b101;
-            // Wait until beat 1's NEXT_S4 (state 7'd43), then inject BERR
-            wait_for_state(7'd43, 100);   // ST_BURST_NEXT_S4
+            // Wait until beat 1's own S4 visit, then inject BERR. Burst
+            // mode timing investigation (plan.md): beats no longer have
+            // their own dedicated NEXT_S4 state -- every beat loops back
+            // through the SAME ST_BURST_S4 (state 7'd38), distinguished
+            // only by u_cycle_gen.bc_burst_beat, so a plain wait_for_state
+            // would match beat 0's own visit immediately; wait for the
+            // beat-1-tagged visit specifically instead.
+            for (t = 0; t < 100 && !(s_state === 7'd38 && u_cycle_gen.bc_burst_beat === 2'd1); t++)
+                @(posedge clk_4x);
+            if (!(s_state === 7'd38 && u_cycle_gen.bc_burst_beat === 2'd1)) begin
+                $display("FAIL  [%0t] beat-1 S4 timeout: state=%0d beat=%0d",
+                         $time, s_state, u_cycle_gen.bc_burst_beat);
+                fail_count++;
+            end
             berr_tb = 1;
             saw_berr2 = 0;
             for (t = 0; t < 30; t++) begin

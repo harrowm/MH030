@@ -562,17 +562,28 @@ module biu_cycle_gen #(
     // -----------------------------------------------------------------------
     // Burst state decode signals fed to biu_burst_ctrl
     // -----------------------------------------------------------------------
+    // Burst mode timing investigation (plan.md): S4/S5 are now reused
+    // directly for every beat (no separate NEXT_S4/S5 copies -- see the
+    // transition-table comment below), so this needs no change; it
+    // already fires correctly on every beat's own sample+latch pair.
     logic at_burst_data_phase;
     assign at_burst_data_phase =
         (state == ST_BURST_S4)       | (state == ST_BURST_S5)       |
-        (state == ST_BURST_NEXT_S4)  | (state == ST_BURST_NEXT_S5)  |
-        (state == ST_BWRITE_S4)      | (state == ST_BWRITE_S5)      |
-        (state == ST_BWRITE_NEXT_S4) | (state == ST_BWRITE_NEXT_S5);
+        (state == ST_BWRITE_S4)      | (state == ST_BWRITE_S5);
 
+    // Burst mode timing investigation (plan.md): fires from S6 now, not
+    // S7 -- S7 is eliminated for burst (its own completion body was
+    // already an empty no-op for is_burst; S6 already exists as the
+    // 1-cycle-later checkpoint where berr_abort_r has settled, so it now
+    // also owns the loop-vs-done decision S7 used to make). The PORT NAME
+    // on biu_burst_ctrl.sv (at_burst_s7) is left unchanged -- purely a
+    // wire-level redefinition of which state drives it, not a new
+    // mechanism; renaming the port for a same-session clarity-only change
+    // was judged not worth the added diff/risk across two files for zero
+    // functional difference.
     logic at_burst_s7_wire;
     assign at_burst_s7_wire =
-        (state == ST_BURST_S7)      | (state == ST_BURST_NEXT_S7) |
-        (state == ST_BWRITE_S7)     | (state == ST_BWRITE_NEXT_S7);
+        (state == ST_BURST_S6) | (state == ST_BWRITE_S6);
 
     // VPA termination: VPA# asserted (vpa_s=0, active-low) AND E-clock is at
     // count 9 (E falls on this same clock edge: 9→0 transition fires at phase_r==3).
@@ -744,15 +755,17 @@ module biu_cycle_gen #(
             // round-trip overhead investigation, plan.md follows Phase
             // 160/205/206: both now terminate at S6), so this must also
             // fire at their own new terminal states or these latches would
-            // never clear for those cycle types again. Every other cycle
-            // type (RMW's own read phase, IACK, CAS2, coprocessor, BKPT,
-            // burst, init) still has its own real S7, unaffected -- Phase
-            // 207 confirmed IACK/init SSP/PC fetches follow ST_READ's own
-            // S1+S3-skip-only pattern, not the WRITE-shape S7 skip, so they
-            // need no addition here -- is_S7 itself is deliberately left
-            // meaning exactly "in an S7 state," not redefined to lie about
-            // the new terminal states.
-            if (is_S7 || state == ST_WRITE_S6 || state == ST_RMW_WRITE_S6) begin
+            // never clear for those cycle types again. Burst mode timing
+            // investigation (plan.md, follows the async work): burst/BWRITE
+            // no longer visit S7 either (eliminated -- see the transition-
+            // table comment above), terminating at S6 instead, same
+            // reasoning as WRITE/RMW_WRITE. Every OTHER cycle type (RMW's
+            // own read phase, IACK, CAS2, coprocessor, BKPT, init) still has
+            // its own real S7, unaffected -- is_S7 itself is deliberately
+            // left meaning exactly "in an S7 state," not redefined to lie
+            // about the new terminal states.
+            if (is_S7 || state == ST_WRITE_S6 || state == ST_RMW_WRITE_S6 ||
+                state == ST_BURST_S6 || state == ST_BWRITE_S6) begin
                 berr_abort_r        <= 1'b0;
                 berr_is_halt_retry_r <= 1'b0;
             end
@@ -1231,11 +1244,60 @@ module biu_cycle_gen #(
             ST_CAS2_W2_S6: state_nxt = ST_CAS2_W2_S7;
             ST_CAS2_W2_S7: state_nxt = ST_IDLE;
 
-            // Burst read: beat 0 (S0-S7) then beats 1-3 (NEXT_S3-S7 reused)
-            ST_BURST_S0: state_nxt = ST_BURST_S1;
-            ST_BURST_S1: state_nxt = ST_BURST_S2;
-            ST_BURST_S2: state_nxt = ST_BURST_S3;
-            ST_BURST_S3: state_nxt = ST_BURST_S4;
+            // Burst mode timing investigation (plan.md, follows the async
+            // bus-cycle round-trip overhead investigation): MC68030UM.pdf
+            // 7.3.4/7.3.7 read directly. Real burst beat 0 is 4 states
+            // (S0-S3, matching an ordinary synchronous read's own shape,
+            // "very similar... except that CBREQ is asserted") -- our own
+            // S1 (ECS-only) and S3 (DS-stagger-only) have no real-hardware
+            // equivalent here either, same reasoning as the ordinary READ
+            // compression above. Real beats 1-3 are each just 2 states
+            // (S4/S5, S6/S7, S8/S9 in the manual's own numbering) -- a
+            // bare sample+hold pair, with NO address/AS/DS/FC/SIZ re-setup
+            // at all, since "the processor maintains AS, DS, R/W, A0-A31,
+            // FC0-FC2, SIZ0-SIZ1 in their current state throughout the
+            // burst operation" (7.3.7). Our own former ST_BURST_NEXT_S3
+            // (a full SP_S3-shaped re-assert of address/AS/DS) was
+            // therefore real, necessary-looking work masking a genuine,
+            // separate pin-level bug found while investigating this (see
+            // the SP_S6 fix below): DS was unconditionally negated every
+            // beat via SP_S6's own old unconditional `ext_ds_n=1'b1`
+            // (AS already had a burst-aware hold; DS never did), so
+            // NEXT_S3's own DS re-assert was compensating for that bug,
+            // not doing genuinely new setup. With DS's own hold fixed
+            // below, NEXT_S3 becomes truly redundant -- beats 1-3 now
+            // loop directly back to S4 (the same sample+hold pair beat 0
+            // itself ends on), reusing one shared state pair for every
+            // beat instead of a separate NEXT_* copy. S7 is also
+            // eliminated (for burst specifically): its own SP_S7-mapped
+            // completion body was already an empty no-op for is_burst
+            // (burst completion is handled entirely through
+            // biu_burst_ctrl.sv's own eu_burst_ack/berr, gated on
+            // at_burst_s7_wire below) -- S6 already needs to exist as a
+            // 1-tick-later "berr_abort_r has now settled" checkpoint
+            // (berr_abort_r is SET combinationally the same cycle S5
+            // samples berr_s, so S7's own check of it needed to be a
+            // registered-value read one cycle later; S6 already is that
+            // cycle), so S6 now also owns the loop-vs-done decision S7
+            // used to make, with zero net state-count cost. Beat 0 is now
+            // 5 states (S0,S2,S4,S5,S6) and each continuation beat is 3
+            // (S4,S5,S6, looped) -- each individually odd, but the WHOLE
+            // multi-beat cycle's own total (5+3+3+3=14, a full IDLE-to-
+            // IDLE span) is even, which is what Phase 160's own invariant
+            // actually requires (a complete bus cycle occupies a whole
+            // number of real clocks) -- not that every internal sub-chunk
+            // must independently be even. A full 4-beat burst: 14 states
+            // = 28 ticks = 7 clocks, down from 23 states/46 ticks/11.5
+            // clocks (real minimum is 10 states/5 clocks; the remaining
+            // gap is berr_abort_r's own genuine 1-cycle settle
+            // requirement, not chased further -- see plan.md for the
+            // full derivation). ST_BURST_S1/S3/S7 and the entire
+            // ST_BURST_NEXT_S3-S7 family (and their ST_BWRITE_* mirrors)
+            // are now permanently unreachable -- deliberately left
+            // declared (not renumbering the whole hand-numbered enum for
+            // a dead-code removal) rather than actually removed.
+            ST_BURST_S0: state_nxt = ST_BURST_S2;
+            ST_BURST_S2: state_nxt = ST_BURST_S4;
             // Phase 160 Stage 4: S4 always proceeds to S5 (see the identical
             // ST_READ_S4/S5 comment above for the full reasoning).
             ST_BURST_S4: state_nxt = ST_BURST_S5;
@@ -1244,52 +1306,25 @@ module biu_cycle_gen #(
                 else if (sterm_active || !dsack_wait)    state_nxt = ST_BURST_S6;
                 else                                     state_nxt = ST_BURST_S4;
             end
-            ST_BURST_S6: state_nxt = ST_BURST_S7;
-            ST_BURST_S7: begin
+            ST_BURST_S6: begin
                 if (!berr_abort_r && bc_cback_ok && bc_burst_beat < 2'd3)
-                                                           state_nxt = ST_BURST_NEXT_S3;
-                else                                       state_nxt = ST_IDLE;
-            end
-            ST_BURST_NEXT_S3: state_nxt = ST_BURST_NEXT_S4;
-            ST_BURST_NEXT_S4: state_nxt = ST_BURST_NEXT_S5;
-            ST_BURST_NEXT_S5: begin
-                if      (berr_s)                         state_nxt = ST_BURST_NEXT_S6;
-                else if (sterm_active || !dsack_wait)    state_nxt = ST_BURST_NEXT_S6;
-                else                                     state_nxt = ST_BURST_NEXT_S4;
-            end
-            ST_BURST_NEXT_S6: state_nxt = ST_BURST_NEXT_S7;
-            ST_BURST_NEXT_S7: begin
-                if (!berr_abort_r && bc_burst_beat < 2'd3) state_nxt = ST_BURST_NEXT_S3;
+                                                           state_nxt = ST_BURST_S4;
                 else                                       state_nxt = ST_IDLE;
             end
 
-            // MOVE16 burst write: same structure, RW=0
-            ST_BWRITE_S0: state_nxt = ST_BWRITE_S1;
-            ST_BWRITE_S1: state_nxt = ST_BWRITE_S2;
-            ST_BWRITE_S2: state_nxt = ST_BWRITE_S3;
-            ST_BWRITE_S3: state_nxt = ST_BWRITE_S4;
+            // MOVE16 burst write: same structure, RW=0. See the burst-read
+            // comment above for the full derivation (identical for writes).
+            ST_BWRITE_S0: state_nxt = ST_BWRITE_S2;
+            ST_BWRITE_S2: state_nxt = ST_BWRITE_S4;
             ST_BWRITE_S4: state_nxt = ST_BWRITE_S5;
             ST_BWRITE_S5: begin
                 if      (berr_s)                      state_nxt = ST_BWRITE_S6;
                 else if (sterm_active || !dsack_wait) state_nxt = ST_BWRITE_S6;
                 else                                  state_nxt = ST_BWRITE_S4;
             end
-            ST_BWRITE_S6: state_nxt = ST_BWRITE_S7;
-            ST_BWRITE_S7: begin
+            ST_BWRITE_S6: begin
                 if (!berr_abort_r && bc_cback_ok && bc_burst_beat < 2'd3)
-                                                           state_nxt = ST_BWRITE_NEXT_S3;
-                else                                       state_nxt = ST_IDLE;
-            end
-            ST_BWRITE_NEXT_S3: state_nxt = ST_BWRITE_NEXT_S4;
-            ST_BWRITE_NEXT_S4: state_nxt = ST_BWRITE_NEXT_S5;
-            ST_BWRITE_NEXT_S5: begin
-                if      (berr_s)                      state_nxt = ST_BWRITE_NEXT_S6;
-                else if (sterm_active || !dsack_wait) state_nxt = ST_BWRITE_NEXT_S6;
-                else                                  state_nxt = ST_BWRITE_NEXT_S4;
-            end
-            ST_BWRITE_NEXT_S6: state_nxt = ST_BWRITE_NEXT_S7;
-            ST_BWRITE_NEXT_S7: begin
-                if (!berr_abort_r && bc_burst_beat < 2'd3) state_nxt = ST_BWRITE_NEXT_S3;
+                                                           state_nxt = ST_BWRITE_S4;
                 else                                       state_nxt = ST_IDLE;
             end
 
@@ -1388,9 +1423,20 @@ module biu_cycle_gen #(
                 SP_S6: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw; ext_ocs_n = 1'b1;
-                    // Burst: hold AS asserted until the final beat's S6
+                    // Burst: hold AS and DS asserted until the final beat's
+                    // S6 (MC68030UM.pdf 7.3.7: "the processor maintains AS,
+                    // DS... in their current state throughout the burst
+                    // operation"). DS previously had no such hold -- it
+                    // unconditionally negated here every beat, a real,
+                    // previously-undiscovered pin-level bug found while
+                    // investigating burst timing (confirmed via direct
+                    // trace: DS toggled off-and-on between every beat,
+                    // matching neither the manual's own "held throughout"
+                    // text nor AS's own already-correct behavior on this
+                    // exact line). Both now share the identical burst-aware
+                    // hold condition.
                     ext_as_n = (is_burst && bc_burst_beat != 2'd3) ? 1'b0 : 1'b1;
-                    ext_ds_n = 1'b1;
+                    ext_ds_n = (is_burst && bc_burst_beat != 2'd3) ? 1'b0 : 1'b1;
                 end
                 default: ; // SP_NONE (SP_S7's own body moved below the case
                            // -- see the standalone if right after endcase)

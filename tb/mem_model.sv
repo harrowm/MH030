@@ -70,6 +70,7 @@ module mem_model #(
     mem_state_t ms, ms_nxt;
     int         wait_cnt;
     logic [31:0] d_latch;
+    logic [31:0] last_latched_addr;  // burst mode timing investigation, plan.md
     logic        active;    // AS and DS both asserted
 
     assign active = !ext_as_n & !ext_ds_n;
@@ -127,6 +128,7 @@ module mem_model #(
                                 d_latch <= read_lane(mem[word_addr], ext_a[1:0]);
                             else
                                 d_latch <= 32'hDEAD_DEAD;
+                            last_latched_addr <= ext_a;
                         end
                     end
                 end
@@ -135,6 +137,31 @@ module mem_model #(
                         wait_cnt <= wait_cnt - 1;
                 end
                 MS_ACK: begin
+                    // Burst mode timing investigation (plan.md): real burst
+                    // hardware holds AS/DS continuously across all beats
+                    // (MC68030UM.pdf 7.3.7), unlike this project's own
+                    // pre-fix behavior which toggled AS/DS between every
+                    // beat -- that toggle used to (accidentally) drop
+                    // `active` back to 0 between beats, resetting `ms` to
+                    // MS_IDLE and letting the block above re-latch fresh
+                    // data for each beat's own new address. With AS/DS now
+                    // correctly held throughout, `active` never drops
+                    // between beats, so this model needs its own explicit
+                    // re-latch trigger: if the address on the bus changes
+                    // while still active (this project's own burst_addr
+                    // still increments per-beat, a separate, deliberately
+                    // NOT-fixed-this-round finding -- see plan.md), treat
+                    // it as a new beat and re-latch. A genuine wait-state
+                    // retry within the SAME beat has an unchanged address,
+                    // so this is a no-op there, preserving existing
+                    // non-burst read/write timing exactly.
+                    if (ext_rw && active && ext_a != last_latched_addr) begin
+                        if (word_addr < DEPTH)
+                            d_latch <= read_lane(mem[word_addr], ext_a[1:0]);
+                        else
+                            d_latch <= 32'hDEAD_DEAD;
+                        last_latched_addr <= ext_a;
+                    end
                     // Write: capture the correct lane from the BIU's write bus
                     if (!ext_rw && active && ext_d_oe && word_addr < DEPTH) begin
                         case (PORT_WIDTH)
