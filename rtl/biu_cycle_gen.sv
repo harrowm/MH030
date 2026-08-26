@@ -444,6 +444,45 @@ module biu_cycle_gen #(
     assign rmw_as_hold = (state == ST_RMW_READ_S6)  | (state == ST_RMW_READ_S7) |
                          (state == ST_RMW_WRITE_S0) | (state == ST_RMW_WRITE_S1);
 
+    // CAS2 timing investigation (plan.md): CAS2 chains 4 sub-cycles
+    // (R1,W1,R2,W2) with zero bus release (MC68030UM.pdf 7.3.3: "does not
+    // issue a bus grant... during this operation") -- the same
+    // indivisible-AS-hold requirement rmw_as_hold already implements for
+    // ordinary RMW's own single read-write transition, generalized here
+    // to CAS2's 3 internal transitions. Only AS is held -- DS legitimately
+    // toggles between phases, matching rmw_as_hold's own already-Harte-
+    // verified behavior for ordinary RMW (the "indivisible" lock governs
+    // bus ownership via AS, not per-transfer DS). Confirmed via direct
+    // trace before this fix: AS was fully negating between every CAS2
+    // sub-phase, a real, previously-undiscovered pin-level bug (the same
+    // class as burst mode's own DS-continuity bug, just AS instead of DS
+    // and CAS2 instead of burst).
+    //
+    // Rather than hand-deriving the exact per-state hold/release condition
+    // (error-prone given CAS2's own multiple conditional exit points --
+    // berr abort from any phase, or R2's own early exit when no write2 is
+    // needed), this reuses the transition table's own already-correct
+    // "are we leaving the CAS2 sequence this cycle" decision directly:
+    // hold AS whenever state_nxt is ALSO a CAS2 state (i.e. state_nxt !=
+    // ST_IDLE), for every CAS2 state except R1's own genuine start
+    // (before AS has ever asserted, where the default negated behavior is
+    // correct, matching an ordinary read's own S0).
+    wire is_cas2_r1_next = (state_nxt == ST_CAS2_R1_S0) | (state_nxt == ST_CAS2_R1_S2) |
+                           (state_nxt == ST_CAS2_R1_S4) | (state_nxt == ST_CAS2_R1_S5) |
+                           (state_nxt == ST_CAS2_R1_S6);
+    wire is_cas2_w1_next = (state_nxt == ST_CAS2_W1_S0) | (state_nxt == ST_CAS2_W1_S2) |
+                           (state_nxt == ST_CAS2_W1_S3) | (state_nxt == ST_CAS2_W1_S4) |
+                           (state_nxt == ST_CAS2_W1_S5) | (state_nxt == ST_CAS2_W1_S6);
+    wire is_cas2_r2_next = (state_nxt == ST_CAS2_R2_S0) | (state_nxt == ST_CAS2_R2_S2) |
+                           (state_nxt == ST_CAS2_R2_S4) | (state_nxt == ST_CAS2_R2_S5) |
+                           (state_nxt == ST_CAS2_R2_S6);
+    wire is_cas2_w2_next = (state_nxt == ST_CAS2_W2_S0) | (state_nxt == ST_CAS2_W2_S2) |
+                           (state_nxt == ST_CAS2_W2_S3) | (state_nxt == ST_CAS2_W2_S4) |
+                           (state_nxt == ST_CAS2_W2_S5) | (state_nxt == ST_CAS2_W2_S6);
+    wire is_cas2_next = is_cas2_r1_next | is_cas2_w1_next | is_cas2_r2_next | is_cas2_w2_next;
+    logic cas2_as_hold;
+    assign cas2_as_hold = is_cas2 && is_cas2_next && (state != ST_CAS2_R1_S0);
+
     // bus_lock: suppress DMA during RMW, CAS2, and burst sequences
     assign bus_lock = (state == ST_RMW_READ_S0)  | (state == ST_RMW_READ_S1)  |
                       (state == ST_RMW_READ_S2)  | (state == ST_RMW_READ_S3)  |
@@ -759,13 +798,17 @@ module biu_cycle_gen #(
             // investigation (plan.md, follows the async work): burst/BWRITE
             // no longer visit S7 either (eliminated -- see the transition-
             // table comment above), terminating at S6 instead, same
-            // reasoning as WRITE/RMW_WRITE. Every OTHER cycle type (RMW's
-            // own read phase, IACK, CAS2, coprocessor, BKPT, init) still has
-            // its own real S7, unaffected -- is_S7 itself is deliberately
-            // left meaning exactly "in an S7 state," not redefined to lie
-            // about the new terminal states.
+            // reasoning as WRITE/RMW_WRITE. CAS2 timing investigation
+            // (plan.md, follows burst): all 4 CAS2 sub-phases (R1/W1/R2/W2)
+            // also no longer visit S7, same reasoning again. Every OTHER
+            // cycle type (RMW's own read phase, IACK, coprocessor, BKPT,
+            // init) still has its own real S7, unaffected -- is_S7 itself
+            // is deliberately left meaning exactly "in an S7 state," not
+            // redefined to lie about the new terminal states.
             if (is_S7 || state == ST_WRITE_S6 || state == ST_RMW_WRITE_S6 ||
-                state == ST_BURST_S6 || state == ST_BWRITE_S6) begin
+                state == ST_BURST_S6 || state == ST_BWRITE_S6 ||
+                state == ST_CAS2_R1_S6 || state == ST_CAS2_W1_S6 ||
+                state == ST_CAS2_R2_S6 || state == ST_CAS2_W2_S6) begin
                 berr_abort_r        <= 1'b0;
                 berr_is_halt_retry_r <= 1'b0;
             end
@@ -1184,11 +1227,31 @@ module biu_cycle_gen #(
             // and the BERR-abort clear, both below.
             ST_RMW_WRITE_S6: state_nxt = ST_IDLE;
 
-            // CAS2: R1→(W1 if do_write1)→R2→(W2 if do_write2)→IDLE
-            ST_CAS2_R1_S0: state_nxt = ST_CAS2_R1_S1;
-            ST_CAS2_R1_S1: state_nxt = ST_CAS2_R1_S2;
-            ST_CAS2_R1_S2: state_nxt = ST_CAS2_R1_S3;
-            ST_CAS2_R1_S3: state_nxt = ST_CAS2_R1_S4;
+            // CAS2 timing investigation (plan.md, follows the burst mode
+            // work): MC68030UM.pdf 7.3.3 (Asynchronous RMW Cycle) confirmed
+            // directly -- CAS/CAS2 "use read-modify-write bus cycles" and
+            // the flowchart's own read portion (State 0/1: ECS+addr+RMC at
+            // S0, AS+DS together at S1) matches an ordinary read exactly,
+            // while the write portion (re-asserting ECS/OCS, address,
+            // R/W=write, then AS, then DS) matches an ordinary write's own
+            // S1-then-S3 stagger exactly -- the same two already-proven
+            // patterns from Phases 205-207, applied here for the first time
+            // to CAS2's own 4 chained sub-cycles (R1,W1,R2,W2), none of
+            // which were touched by that earlier work. R1/R2 (reads) skip
+            // S1/S3; W1/W2 (writes) skip S1 only (S3 is real, required
+            // hold time before DS can assert, same as every other write).
+            // S7 is eliminated for all 4 phases, same reasoning as burst's
+            // own S7 removal: each phase's own completion-dispatch body
+            // (below) was the only real use of S7, and S6 already exists
+            // as the 1-cycle-later checkpoint where berr_abort_r (set
+            // combinationally the same cycle S5 samples berr_s) has
+            // settled, so S6 now also makes the "continue to the next
+            // phase, or done" decision S7 used to make -- for R1/W1/R2
+            // this can go to a REAL next phase OR to IDLE (abort, or R2's
+            // own no-write2 early exit); W2 always ends at IDLE.
+            // R1: read at addr1
+            ST_CAS2_R1_S0: state_nxt = ST_CAS2_R1_S2;
+            ST_CAS2_R1_S2: state_nxt = ST_CAS2_R1_S4;
             // Phase 160 Stage 3: S4 always proceeds to S5 (see the identical
             // ST_READ_S4/S5 comment above for the full reasoning).
             ST_CAS2_R1_S4: state_nxt = ST_CAS2_R1_S5;
@@ -1197,13 +1260,12 @@ module biu_cycle_gen #(
                 else if (sterm_active || !dsack_wait)  state_nxt = ST_CAS2_R1_S6;
                 else                                   state_nxt = ST_CAS2_R1_S4;
             end
-            ST_CAS2_R1_S6: state_nxt = ST_CAS2_R1_S7;
-            ST_CAS2_R1_S7:
+            ST_CAS2_R1_S6:
                 if      (berr_abort_r)       state_nxt = ST_IDLE;
                 else if (eu_cas2_do_write1)  state_nxt = ST_CAS2_W1_S0;
                 else                         state_nxt = ST_CAS2_R2_S0;
-            ST_CAS2_W1_S0: state_nxt = ST_CAS2_W1_S1;
-            ST_CAS2_W1_S1: state_nxt = ST_CAS2_W1_S2;
+            // W1: write at addr1 (no bus release -- cas2_as_hold below)
+            ST_CAS2_W1_S0: state_nxt = ST_CAS2_W1_S2;
             ST_CAS2_W1_S2: state_nxt = ST_CAS2_W1_S3;
             ST_CAS2_W1_S3: state_nxt = ST_CAS2_W1_S4;
             ST_CAS2_W1_S4: state_nxt = ST_CAS2_W1_S5;
@@ -1212,27 +1274,24 @@ module biu_cycle_gen #(
                 else if (!dsack_wait) state_nxt = ST_CAS2_W1_S6;
                 else                  state_nxt = ST_CAS2_W1_S4;
             end
-            ST_CAS2_W1_S6: state_nxt = ST_CAS2_W1_S7;
-            ST_CAS2_W1_S7:
+            ST_CAS2_W1_S6:
                 if (berr_abort_r) state_nxt = ST_IDLE;
                 else              state_nxt = ST_CAS2_R2_S0;
-            ST_CAS2_R2_S0: state_nxt = ST_CAS2_R2_S1;
-            ST_CAS2_R2_S1: state_nxt = ST_CAS2_R2_S2;
-            ST_CAS2_R2_S2: state_nxt = ST_CAS2_R2_S3;
-            ST_CAS2_R2_S3: state_nxt = ST_CAS2_R2_S4;
+            // R2: read at addr2
+            ST_CAS2_R2_S0: state_nxt = ST_CAS2_R2_S2;
+            ST_CAS2_R2_S2: state_nxt = ST_CAS2_R2_S4;
             ST_CAS2_R2_S4: state_nxt = ST_CAS2_R2_S5;
             ST_CAS2_R2_S5: begin
                 if      (berr_s)                       state_nxt = ST_CAS2_R2_S6;
                 else if (sterm_active || !dsack_wait)  state_nxt = ST_CAS2_R2_S6;
                 else                                   state_nxt = ST_CAS2_R2_S4;
             end
-            ST_CAS2_R2_S6: state_nxt = ST_CAS2_R2_S7;
-            ST_CAS2_R2_S7:
+            ST_CAS2_R2_S6:
                 if      (berr_abort_r)      state_nxt = ST_IDLE;
                 else if (eu_cas2_do_write2) state_nxt = ST_CAS2_W2_S0;
                 else                        state_nxt = ST_IDLE;
-            ST_CAS2_W2_S0: state_nxt = ST_CAS2_W2_S1;
-            ST_CAS2_W2_S1: state_nxt = ST_CAS2_W2_S2;
+            // W2: write at addr2 (always the final phase)
+            ST_CAS2_W2_S0: state_nxt = ST_CAS2_W2_S2;
             ST_CAS2_W2_S2: state_nxt = ST_CAS2_W2_S3;
             ST_CAS2_W2_S3: state_nxt = ST_CAS2_W2_S4;
             ST_CAS2_W2_S4: state_nxt = ST_CAS2_W2_S5;
@@ -1241,8 +1300,7 @@ module biu_cycle_gen #(
                 else if (!dsack_wait) state_nxt = ST_CAS2_W2_S6;
                 else                  state_nxt = ST_CAS2_W2_S4;
             end
-            ST_CAS2_W2_S6: state_nxt = ST_CAS2_W2_S7;
-            ST_CAS2_W2_S7: state_nxt = ST_IDLE;
+            ST_CAS2_W2_S6: state_nxt = ST_IDLE;
 
             // Burst mode timing investigation (plan.md, follows the async
             // bus-cycle round-trip overhead investigation): MC68030UM.pdf
@@ -1460,10 +1518,17 @@ module biu_cycle_gen #(
             // fetches (Phase 207) keep their own real S7 -- read-shaped
             // cycles skip S1+S3 instead, matching ST_READ's own pattern --
             // so they need no addition here; sphase==SP_S7 already covers
-            // them via their own unchanged S7 visit. Every other cycle
-            // type's own real S7 is completely unaffected.
+            // them via their own unchanged S7 visit. Burst/BWRITE's own S6
+            // needs no addition here either -- their completion is handled
+            // entirely separately via biu_burst_ctrl.sv's own eu_burst_ack/
+            // eu_m16_ack (the is_burst branch below is a deliberate no-op).
+            // CAS2 timing investigation (plan.md, follows burst): CAS2's
+            // own completion DOES depend on this body (the is_cas2 branch
+            // below), so its 4 new S6 terminal states are added here.
             if (sphase == SP_S7 || state == ST_WRITE_S6 ||
-                state == ST_RMW_WRITE_S6) begin
+                state == ST_RMW_WRITE_S6 ||
+                state == ST_CAS2_R1_S6 || state == ST_CAS2_W1_S6 ||
+                state == ST_CAS2_R2_S6 || state == ST_CAS2_W2_S6) begin
                 if (is_iack) begin
                         eu_iack_vec  = iack_vec_r;
                         eu_iack_avec = iack_avec_r;
@@ -1474,11 +1539,12 @@ module biu_cycle_gen #(
                     end else if (is_cas2) begin
                         if (berr_abort_r) begin
                             // BERR on any CAS2 sub-cycle aborts the entire atomic sequence.
-                            // The state machine redirects to IDLE from the current sub-S7;
-                            // fire eu_berr here so the EU knows the operation failed.
+                            // The state machine redirects to IDLE from the current sub-S6
+                            // (was S7, eliminated -- plan.md); fire eu_berr here so the EU
+                            // knows the operation failed.
                             eu_berr = 1'b1;
-                        end else if ((state == ST_CAS2_W2_S7) ||
-                                     (state == ST_CAS2_R2_S7 && !eu_cas2_do_write2)) begin
+                        end else if ((state == ST_CAS2_W2_S6) ||
+                                     (state == ST_CAS2_R2_S6 && !eu_cas2_do_write2)) begin
                             eu_cas2_ack = 1'b1;
                         end
                         // eu_cas2_rdata1/2 already driven from captured registers above
@@ -1556,6 +1622,10 @@ module biu_cycle_gen #(
             // leaves it low at SP_S0/S1 only if it was already in a cycle.
             // Override here to keep it low during the read→write gap states.
             if (rmw_as_hold) ext_as_n = 1'b0;
+            // CAS2 atomic lock (plan.md): same idea, generalized across
+            // CAS2's own 4 chained sub-cycles -- see cas2_as_hold's own
+            // declaration comment for the full derivation.
+            if (cas2_as_hold) ext_as_n = 1'b0;
         end
     end
 

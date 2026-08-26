@@ -3186,3 +3186,111 @@ not chased further given the risk/value tradeoff of touching
 `biu_cycle_gen.sv`'s berr-detection machinery any further, matching
 this project's own established caution around that specific mechanism
 (Phases 108-114's own delicate BERR-abort history).
+
+## Phase 184 -- CAS2 timing redesign: 31% reduction, plus a real AS-continuity bug found and fixed (same class as burst's DS bug)
+
+Following up the burst mode timing work (Phase 183), the user asked
+what else could be improved; CAS2 (the dual-address atomic compare-
+and-swap, "the most complex" cycle type per this project's own module
+hierarchy notes) was identified as the clear next candidate -- it
+still used the original, never-compressed 8-state-per-sub-cycle model
+across all 4 of its chained phases (R1, W1, R2, W2), never touched by
+any of Phases 205-208 or the burst work, empirically measured at 64
+ticks (16 clocks) via a controlled trace of `tb/biu_tb.sv`'s own P5-3
+test.
+
+Read MC68030UM.pdf 7.3.3 (Asynchronous Read-Modify-Write Cycle)
+directly: CAS/CAS2 "use read-modify-write bus cycles," and the
+flowchart's own read portion (State 0/1: ECS+addr+RMC at S0, AS+DS
+together at S1) matches an ordinary read exactly, while the write
+portion (re-asserting ECS/OCS, address, R/W=write, then AS, then DS)
+matches an ordinary write's own S1-then-S3 stagger exactly -- the same
+two patterns already proven safe in Phases 205-207, this time applied
+to CAS2's own 4 sub-cycles for the first time. This made CAS2
+meaningfully lower-risk than burst's own redesign: no new state-
+sharing/looping mechanism needed (unlike burst's beats, CAS2's own 4
+phases are NOT identical repeats -- R1/R2 read different addresses,
+W1/W2 write different data -- so each phase keeps its own dedicated
+states, just compressed the same way ordinary reads/writes already
+were).
+
+**Found a real, previously-undiscovered pin-level correctness bug
+while designing the fix, confirmed via direct trace before touching
+anything**: AS was fully negating between every CAS2 sub-phase (R1,
+W1, R2, W2), contradicting the manual's own "does not issue a bus
+grant... during this operation" / "4 bus cycles without releasing the
+bus" (CLAUDE.md's own description) requirement -- the same CLASS of
+bug burst mode had with DS, just AS instead of DS and CAS2 instead of
+burst. Root cause: `rmw_as_hold` (the existing, already-Harte-verified
+mechanism holding AS continuously across ordinary RMW's own single
+read-write transition) only ever covered `ST_RMW_READ_S6/S7`/
+`ST_RMW_WRITE_S0/S1` -- CAS2's own states were never added to it,
+despite CAS2 needing the identical "indivisible, no bus release"
+treatment across 3 internal transitions instead of RMW's 1. Confirmed
+via direct trace: `as_n` reads 1 (negated) at the start of every phase
+after R1 (W1's own S0, R2's own S0, W2's own S0), only reasserting at
+each phase's own S2.
+
+Also confirmed via re-derivation (checking `rmw_as_hold`'s own NAME
+and scope) that DS is NOT supposed to be held for RMW-style sequences
+-- only AS is (the "indivisible" lock governs bus ownership via AS,
+not per-transfer DS) -- so unlike burst's fix, CAS2 needed no DS
+changes, only AS.
+
+**Redesign** (`rtl/biu_cycle_gen.sv`): R1/R2 (reads) skip S1/S3
+(matching ordinary READ's own compression); W1/W2 (writes) skip S1
+only (S3 stays -- real, required hold time before DS can assert, same
+as every other write). S7 is eliminated for all 4 phases -- the
+completion-dispatch body's own `is_cas2` branch was the only real use
+of S7, and S6 already exists as the necessary 1-cycle-later checkpoint
+where `berr_abort_r` has settled, so S6 now also makes each phase's
+own "continue to the next phase, or done" decision. New `cas2_as_hold`
+mechanism (mirroring `rmw_as_hold`'s own existing pattern but
+generalized across 3 transitions instead of 1): rather than hand-
+deriving the exact per-state hold/release condition for each of
+CAS2's own multiple conditional exit points (berr abort from any
+phase, or R2's own early exit when no write2 is needed) -- judged too
+error-prone to get right by inspection for a security-relevant atomic
+instruction -- it reuses the transition table's own already-correct
+"are we leaving the CAS2 sequence this cycle" decision directly: hold
+AS whenever `state_nxt` is ALSO a CAS2 state, for every CAS2 state
+except R1's own genuine start (before AS has ever asserted, where the
+default negated behavior is correct). `berr_abort_r`'s own clear
+condition and the completion-dispatch trigger both gained CAS2's 4 new
+S6 terminal states (mirroring the same additions burst's own S6
+needed in Phase 183).
+
+**State-count math**: R1/R2 = 5 states each (S0,S2,S4,S5,S6), W1/W2 =
+6 states each (S0,S2,S3,S4,S5,S6) -- total 22 states = 44 ticks,
+matching the empirical measurement exactly with zero surprises (unlike
+burst, CAS2 needs no extra per-phase dispatch/arbitration overhead,
+since it's one continuous `eu_cas2_req` sequence with no re-
+arbitration between its own sub-phases, so the tick count is pure
+state-machine time).
+
+**Results**: `tb/biu_tb.sv` 0 failures on the first attempt (unlike
+burst mode, which needed 2 rounds of bug-fixing before all tests
+passed -- CAS2's own lower architectural risk paid off in a cleaner
+implementation). CAS2 four-cycle atomic measured at **44 ticks (11
+clocks), down from 64 (16 clocks) -- a 31% reduction**, matching the
+hand-derived state count exactly. `make test` 36/36 (including
+`atomic`, the dedicated CAS2 test suite), `cosim_grp` 8/8,
+`cosim_memind` 11/11 (matches the Makefile's own actual target count),
+full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline.
+Confirmed CAS2 itself has zero Harte coverage (68020+-only instruction,
+Harte's corpus is 68000-captured, same as memory-indirect EA and other
+68020+-only features) -- the Harte sweep here is the "zero collateral
+damage" gate for everything else the change touches that IS Harte-
+covered (TAS, ordinary RMW-shaped ALU-memory ops), not a CAS2-
+correctness gate; `tb/biu_tb.sv`'s own dedicated CAS2 tests and
+`tb/atomic_tb.sv` are what actually verify CAS2's own correctness.
+
+**Combined result across the last two phases (burst + CAS2)**: two
+independent, previously-undiscovered pin-level continuity bugs found
+and fixed (burst's DS, CAS2's AS), both the same underlying class
+(shared `SP_S0`-`S7` pin logic's own per-state defaults silently
+undoing a multi-cycle atomic/locked sequence's own continuity
+requirement, unless explicitly overridden) -- worth keeping in mind as
+a pattern if any OTHER multi-phase locked cycle type is examined in
+the future.
