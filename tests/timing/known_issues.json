@@ -7,21 +7,13 @@
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
-  "a1_fea_anind": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
-  },
-  "a1_fea_anpostinc": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
-  },
   "a1_fea_anpredec": {
     "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Direct, expected consequence of the bus-cycle round-trip overhead fix (plan.md, follows Phase 160): ordinary READ cycles now skip 2 no-real-hardware-equivalent states (ECS delay + AS/DS stagger), saving 2 ticks (0.5 clock) per read. This test's own single data read now lands slightly below the manual's own rounded average -- the manual's NCC values are explicitly \"the AVERAGE of the odd-word-aligned case and the even-word-aligned case (rounded up to an integral number of clocks)\" (MC68030UM.pdf 11-25), so a specific, deterministic (even-aligned) simulated case landing under that rounded average is expected, not a bug.",
     "ref": "plan.md, bus-cycle round-trip overhead investigation, Stage 1"
   },
   "a1_fea_briefidx": {
-    "reason": "gap=-2, r/p/w clean (p=1, not the naive-sum p=2 -- this RTL fetches opcode+brief-extension-word together in one bus read, same already-documented pattern as a1_fea_d16an). Falls under the already-documented 'internal microcode' ceiling: real 68030 silicon's own microcode sequencer charges brief-indexed EA decode extra internal time (needing the opcode already decoded before acting on the extension word's own scale/index fields) that this project's simplified comb-decode/1-cycle-EX pipeline doesn't reproduce -- closing this needs a fundamentally deeper pipeline, not a targeted fix",
-    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A1); cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+    "reason": "gap=-3 (manual=8, measured=5), r/p/w clean (p=1, not the naive-sum p=2 -- this RTL fetches opcode+brief-extension-word together in one bus read, same already-documented pattern as a1_fea_d16an). Falls under the already-documented 'internal microcode' ceiling: real 68030 silicon's own microcode sequencer charges brief-indexed EA decode extra internal time (needing the opcode already decoded before acting on the extension word's own scale/index fields) that this project's simplified comb-decode/1-cycle-EX pipeline doesn't reproduce -- closing this needs a fundamentally deeper pipeline, not a targeted fix. Originally documented at gap=-2 -- the single combined opcode+extension-word bus read got 1 further tick faster from the READ-cycle S-state compression (Phase 205, which landed after this entry was first written), refreshed here to gap=-3; same mechanism, larger magnitude.",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A1); cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section; refreshed post-Phase-205"
   },
   "a1_fea_d16an": {
     "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Same cause as a1_fea_anpredec -- one data read, now 2 ticks faster from the same READ-cycle S-state fix.",
@@ -36,16 +28,16 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a1_fea_imml": {
-    "reason": "gap=+2, r/p/w clean -- smaller-magnitude instance of the same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (MOVE.L #imm32,Dn's own long immediate)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "gap=+1, r/p/w clean -- smaller-magnitude instance of the same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (MOVE.L #imm32,Dn's own 3-word instruction, same 2-words-per-IFU-fetch shortfall). Originally documented at gap=+2 -- refreshed after the READ-cycle S-state compression (Phase 205, which landed after this entry was first written) shrank the opcode-fetch component further; same mechanism.",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a1_fea_immw": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a1_fea_xxxl": {
-    "reason": "gap=+4 (manual=7, measured=11). fea (xxx).L's own manual row already implies p=1 (a single combined 32-bit longword program fetch for the absolute address) -- but this RTL's IFU only ever fills 2 words per bus cycle, so when the queue starts empty (the common post-branch case every timing test hits), the first fetch delivers only opcode+addr_hi, forcing a genuinely separate second fetch for addr_lo. Same root cause as item 2's own already-investigated, confirmed-unavoidable ext_count==2 finding (Phase 165) for long-immediate ALU ops, just manifesting for absolute-long addressing instead of an immediate operand",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "gap=+2 (manual=7, measured=9). fea (xxx).L's own manual row already implies p=1 (a single combined 32-bit longword program fetch for the absolute address) -- but this RTL's IFU only ever fills 2 words per bus cycle, so when the queue starts empty (the common post-branch case every timing test hits), the first fetch delivers only opcode+addr_hi, forcing a genuinely separate second fetch for addr_lo. Same root cause as item 2's own already-investigated, confirmed-unavoidable ext_count==2 finding (Phase 165) for long-immediate ALU ops, just manifesting for absolute-long addressing instead of an immediate operand. Originally documented at gap=+4 (measured=11) -- both read cycles got faster from the READ-cycle S-state compression (Phase 205, which landed after this entry was first written), refreshed here to gap=+2; same mechanism.",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a1_fea_xxxw": {
     "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Same cause as a1_fea_anpredec -- one data read, now 2 ticks faster from the same READ-cycle S-state fix.",
@@ -68,36 +60,28 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a2_move_ea_briefidx": {
-    "reason": "gap=-1, r/p/w clean -- same internal-microcode-ceiling character as a1_fea_briefidx (indexed-EA decode overhead real silicon pays that this pipeline's own combinational EA computation doesn't need); small magnitude, not chased further to avoid artificially slowing down a genuinely-correct fast dispatch path for zero functional benefit",
-    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
-  },
-  "a2_move_ea_d16an": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
+    "reason": "gap=-2 (manual=7, measured=5), r/p/w clean -- same internal-microcode-ceiling character as a1_fea_briefidx (indexed-EA decode overhead real silicon pays that this pipeline's own combinational EA computation doesn't need); small magnitude, not chased further to avoid artificially slowing down a genuinely-correct fast dispatch path for zero functional benefit. Originally documented at gap=-1 -- the combined opcode+extension-word bus read got 1 further tick faster from the READ-cycle S-state compression (Phase 205, which landed after this entry was first written), refreshed here to gap=-2; same mechanism, larger magnitude (same shift as a1_fea_briefidx's own sibling refresh).",
+    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section; refreshed post-Phase-205"
   },
   "a2_move_ea_xxxl": {
-    "reason": "same genuine-second-IFU-fetch mechanism as a1_fea_xxxl (gap=+4, absolute-long destination needs 2 extension words, first fetch only ever delivers the first)",
-    "ref": "plan.md Phase 165 (item 2)"
-  },
-  "a2_move_ea_xxxw": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
+    "reason": "same genuine-second-IFU-fetch mechanism as a1_fea_xxxl (gap=+2, refreshed from the originally-documented +4 after the READ-cycle S-state compression, Phase 205 -- absolute-long destination needs 2 extension words, first fetch only ever delivers the first)",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a2_move_rn_an": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
   "a2_move_rn_anind": {
-    "reason": "gap=+2 (manual=4, measured=6), r/p/w clean. This RTL's own plain-write BIU dispatch has a shared, EA-mode-independent ~6-clock floor -- confirmed exact for CLR.L (a0) (manual=6 including its own explicit cea((An))=2 addition, measured=6). MOVE Rn,(An)'s own manual row is self-contained at NCC=4 with NO cea/fea addition (unlike CLR's row), implying real 68030 microcode genuinely executes MOVE's own EA-then-write sequence 2 clocks faster than CLR's -- a genuine per-instruction microcode difference this project's shared, uniform write-dispatch path can't distinguish. Can't be fixed by shrinking the shared floor (would break CLR's own currently-exact measurement) or via dec_internal_stall_ticks_fixed (that mechanism only applies to register-only, non-bus-touching instructions) without a genuinely new, instruction-specific dispatch-latency mechanism -- same architectural-ceiling character as the briefidx cases above",
-    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+    "reason": "gap=+1 (manual=4, measured=5), r/p/w clean. This RTL's own plain-write BIU dispatch has a shared, EA-mode-independent floor slightly above the manual's own idealized NCC row, same general character as the RMW-to-memory cluster but for a pure write (no read phase). Originally documented at gap=+2 (measured=6) -- refreshed after the WRITE-cycle S-state compression (Phase 206, which landed after this entry was first written) shrank the write itself by 1 tick; same mechanism.",
+    "ref": "closed bus-pipelining-overlap plan; refreshed post-Phase-206"
   },
   "a2_move_rn_anpostinc": {
-    "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+2, r/p/w clean)",
-    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+    "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+1, r/p/w clean, refreshed from the originally-documented +2 after the WRITE-cycle S-state compression, Phase 206)",
+    "ref": "closed bus-pipelining-overlap plan; refreshed post-Phase-206"
   },
   "a2_move_rn_anpredec": {
-    "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+2, r/p/w clean)",
-    "ref": "cycle-accuracy-closing-plan-v2's own 'Documented but explicitly NOT scheduled' section"
+    "reason": "same shared plain-write dispatch floor as a2_move_rn_anind (gap=+1, r/p/w clean, refreshed from the originally-documented +2 after the WRITE-cycle S-state compression, Phase 206)",
+    "ref": "closed bus-pipelining-overlap plan; refreshed post-Phase-206"
   },
   "a2_move_rn_dn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -120,8 +104,8 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a3_add_dn_ea": {
-    "reason": "gap=+4, r/p/w clean -- the shared RMW-to-memory bus-dispatch floor (this project's own measured, EA-mode-independent ~11-clock floor for a plain-(An) RMW cycle), extensively investigated and partially closed (real, sub-clock/absorbed improvements) by the closed bus-pipelining-overlap plan's own Tracks A-D. Not a new gap",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+    "reason": "gap=+2 (manual=7, measured=9), r/p/w clean -- the shared RMW-to-memory bus-dispatch floor (this project's own measured, EA-mode-independent floor for a plain-(An) RMW cycle), extensively investigated and partially closed (real, sub-clock/absorbed improvements) by the closed bus-pipelining-overlap plan's own Tracks A-D. Originally documented at gap=+4 (an ~11-clock floor) -- the READ/WRITE-cycle S-state compression (Phases 205-206, which landed after this entry was first written) shrank the floor itself to ~9 clocks, refreshed here to gap=+2; same floor, smaller magnitude, not a new gap.",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); refreshed post-Phase-206"
   },
   "a3_add_rn_dn": {
     "reason": "gap=+1 (small, register-only), r/p/w clean. Traced directly (a3_add_rn_dn and a4_clr_dn cross-checked, identical signature both times): dec_internal_stall_ticks_fixed reads 0 throughout dispatch (no whitelist entry fires, correctly -- this cluster is TOO FAST relative to the manual, not too slow, so Phase 162 Part D's own add-only stall mechanism structurally cannot apply here) and the pipeline shows the minimum possible instr_ack->ex_valid->wb_valid->commit-visible sequence, exactly 1 tick per stage, 3 ticks/12 ticks total dispatch latency -- the same 3-clock register-direct floor this whole project's own whitelist mechanism is built around. The manual's own NCC=2 for these simplest single-cycle ops implies the ENTIRE fetch+dispatch+EX+commit sequence fits in 2 clocks on real silicon -- but a full, pin-accurate opcode fetch alone already costs 2 clocks in this project's own Phase-160-calibrated S-state model, leaving zero room for dispatch+EX+commit at all. This is the same conclusion Phase 162 Parts D/E already reached (register-only 'too fast' gaps were closed to the extent safely possible; residual positive gaps for the very simplest NCC=2 ops reflect real 68030 silicon's own instruction-fetch/dispatch pipeline overlap, which this project's own isolated 'no overlap with the preceding instruction' measurement convention (Phase 159's own NCC-matching definition) cannot reproduce without redesigning the fetch/dispatch pipeline itself -- out of scope, see the timing-gaps-largest-first plan's own Stage 7 decision point)",
@@ -136,20 +120,20 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a3_addi_dn": {
-    "reason": "gap=+4, r/p/w clean -- the genuine-second-IFU-fetch cost for a long immediate operand (ext_count==2), confirmed unavoidable in item 2/Phase 165 (the 3rd word needed can't arrive with the first 2-word IFU fetch when the queue starts empty)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "gap=+3 (manual=4, measured=7), r/p/w clean -- the genuine-second-IFU-fetch cost for a long immediate operand (ext_count==2), confirmed unavoidable in item 2/Phase 165 (the 3rd word needed can't arrive with the first 2-word IFU fetch when the queue starts empty). Originally documented at gap=+4 -- the opcode's own first-fetch read got 1 tick faster from the READ-cycle S-state compression (Phase 205, which landed after this entry was first written), refreshed here to gap=+3; same mechanism.",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a3_addi_mem": {
-    "reason": "gap=+7 -- the compounding of two already-investigated, already-accepted mechanisms: the genuine-second-IFU-fetch cost for ADDI's own long immediate (item 2/Phase 165, same as a1_fea_xxxl) plus the shared RMW-to-memory bus-dispatch floor (Tracks A-D, closed bus-pipelining-overlap plan). Not a new, separately-fixable gap",
-    "ref": "plan.md Phase 165 and the closed bus-pipelining-overlap plan (Tracks A-D)"
+    "reason": "gap=+4 (manual=9, measured=13), r/p/w clean -- the compounding of two already-investigated, already-accepted mechanisms: the genuine-second-IFU-fetch cost for ADDI's own long immediate (item 2/Phase 165, same as a1_fea_xxxl) plus the shared RMW-to-memory bus-dispatch floor (Tracks A-D, closed bus-pipelining-overlap plan). Originally documented at gap=+7 -- both component mechanisms' own magnitudes shrank after the READ/WRITE/RMW-cycle S-state compression (Phases 205-207, which landed after this entry was first written), refreshed here to the current measured value. Same two mechanisms, not a new gap.",
+    "ref": "plan.md Phase 165 and the closed bus-pipelining-overlap plan (Tracks A-D); refreshed post-Phase-207"
   },
   "a3_addq_mem": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+2, r/p/w clean, refreshed from the originally-documented +4 after the READ/WRITE-cycle S-state compression, Phases 205-206)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); refreshed post-Phase-206"
   },
   "a3_addq_postinc": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean) -- confirmed flat regardless of (An) vs (An)+ EA mode (Phase 169's own correction of the earlier, wrong item-5 finding)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); plan.md Phase 169"
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+2, r/p/w clean, refreshed from the originally-documented +4 after the READ/WRITE-cycle S-state compression, Phases 205-206) -- confirmed flat regardless of (An) vs (An)+ EA mode (Phase 169's own correction of the earlier, wrong item-5 finding)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); plan.md Phase 169; refreshed post-Phase-206"
   },
   "a3_addq_rn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -160,12 +144,12 @@
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
   "a3_and_dn_ea": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+2, r/p/w clean, refreshed from the originally-documented +4 after the READ/WRITE-cycle S-state compression, Phases 205-206)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); refreshed post-Phase-206"
   },
   "a3_andi_dn": {
-    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+3, r/p/w clean, refreshed from the originally-documented +4 after the READ-cycle S-state compression, Phase 205)",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a3_cmp_rn_dn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -176,16 +160,16 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a3_cmpi_dn": {
-    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+3, r/p/w clean, refreshed from the originally-documented +4 after the READ-cycle S-state compression, Phase 205)",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a3_eor_dn_dn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
   "a3_eori_dn": {
-    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+3, r/p/w clean, refreshed from the originally-documented +4 after the READ-cycle S-state compression, Phase 205)",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a3_moveq": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -196,8 +180,8 @@
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
   "a3_ori_dn": {
-    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+3, r/p/w clean, refreshed from the originally-documented +4 after the READ-cycle S-state compression, Phase 205)",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a3_sub_rn_dn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -212,8 +196,8 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a3_subi_dn": {
-    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+4, r/p/w clean)",
-    "ref": "plan.md Phase 165 (item 2)"
+    "reason": "same ext_count==2 genuine-second-fetch mechanism as a3_addi_dn (gap=+3, r/p/w clean, refreshed from the originally-documented +4 after the READ-cycle S-state compression, Phase 205)",
+    "ref": "plan.md Phase 165 (item 2); refreshed post-Phase-205"
   },
   "a3_subq_rn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -235,10 +219,6 @@
     "reason": "gap=-1 (manual=6, measured=5), r/p/w clean. Direct, expected consequence of the WRITE-cycle S-state fix (plan.md, follows the READ-cycle fix): ordinary WRITE cycles now skip 2 no-real-hardware-equivalent states (ECS delay + the internal-ack-only S7), saving 2 ticks (0.5 clock) per write, same mechanism as a1_fea_anpredec's own READ-side finding. CLR.L (An) is a pure single-write instruction, so it lands slightly below the manual's own rounded-average NCC -- expected, not a bug (MC68030UM.pdf 11-25's own rounding wording, same citation as the READ-side entries below).",
     "ref": "plan.md, bus-cycle round-trip overhead investigation, WRITE-cycle stage"
   },
-  "a4_cmpm": {
-    "reason": "gap=+3, r/p/w clean -- CMPM (An)+,(An)+'s own dual-read dispatch cost, already investigated and improved (real, sub-clock-granularity gain) by Track C of the closed bus-pipelining-overlap plan. Not a new gap",
-    "ref": "closed bus-pipelining-overlap plan (Track C)"
-  },
   "a4_ext_dn": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
@@ -252,16 +232,16 @@
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
   "a4_neg_mem": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+2, r/p/w clean, refreshed from the originally-documented +4 after the READ/WRITE-cycle S-state compression, Phases 205-206)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); refreshed post-Phase-206"
   },
   "a4_neg_mem_idx": {
-    "reason": "was a real r/p/w MISMATCH (measured p=1, manifest's own expect_p=2 was the naive additive sum of NEG Mem's fea(d8,An,Xn)=6(1/1/0) + NEG Mem's own row) -- fixed by correcting expect_p to 1, the same already-documented combined opcode+brief-extension-word single-bus-read alignment property as a1_fea_briefidx (timing-gaps-largest-first plan, Stage 4). After that fix, r/p/w is clean and a small residual clock gap remains (manual=10, measured=11, gap=+1) -- smaller than the ~+4 RMW-to-memory dispatch-floor cluster's own typical magnitude for plain-(An) forms (a3_add_dn_ea/a4_neg_mem/etc), consistent with this being the SAME dispatch floor composing with the brief-indexed EA's own separate, already-documented timing character (same shape as a3_addi_mem's own 'compounding of two known mechanisms' +7 finding) rather than a new, independent mechanism",
-    "ref": "timing-gaps-largest-first plan, Stage 4"
+    "reason": "was a real r/p/w MISMATCH (measured p=1, manifest's own expect_p=2 was the naive additive sum of NEG Mem's fea(d8,An,Xn)=6(1/1/0) + NEG Mem's own row) -- fixed by correcting expect_p to 1, the same already-documented combined opcode+brief-extension-word single-bus-read alignment property as a1_fea_briefidx (timing-gaps-largest-first plan, Stage 4). r/p/w is clean; the residual clock gap is now gap=-1 (manual=10, measured=9) -- this instruction's own two read cycles (opcode+ext, then the indexed data read) got faster from the READ-cycle S-state compression (Phase 205, which landed after this entry was first written) enough to flip the sign from the originally-documented gap=+1 (measured=11) to a small negative gap, consistent with this being the SAME RMW-to-memory dispatch floor composing with the brief-indexed EA's own separate, already-documented (now READ-cycle-shrunk) timing character -- not a new, independent mechanism.",
+    "ref": "timing-gaps-largest-first plan, Stage 4; refreshed post-Phase-205"
   },
   "a4_neg_mem_predec": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+3, r/p/w clean) -- confirmed flat regardless of (An) vs -(An) EA mode (Phase 169's own correction of the earlier, wrong item-5 finding)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); plan.md Phase 169"
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+1, r/p/w clean, refreshed from the originally-documented +3 after the READ/WRITE-cycle S-state compression, Phases 205-206) -- confirmed flat regardless of (An) vs -(An) EA mode (Phase 169's own correction of the earlier, wrong item-5 finding)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); plan.md Phase 169; refreshed post-Phase-206"
   },
   "a4_negx_dn": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -299,10 +279,6 @@
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
     "ref": "timing-gaps-largest-first plan, Stage 6"
   },
-  "a4_tst_mem": {
-    "reason": "gap=+1 (small, bus-touching -- uses MEASURED_INSTR_ONLY), r/p/w clean. Same 'each real bus cycle pays its own ordinary S0/S1 dispatch/setup overhead beyond the manual's idealized additive-table model' character already established for a0_validate_move_l_d16anxn_hex and the RMW-to-memory dispatch-floor cluster -- just a smaller magnitude here since only one extra bus cycle (a single data read or write) is involved, not two or three. Not a new, separately-fixable mechanism",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
-  },
   "a4_unpk_dn": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
@@ -314,10 +290,6 @@
   "a5_bchg_dn_dn": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
-  },
-  "a5_bchg_dn_mem": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea, smaller magnitude (gap=+2, r/p/w clean)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
   },
   "a5_bchg_imm_dn": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
@@ -363,10 +335,6 @@
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
-  "a5_bset_dn_mem": {
-    "reason": "same RMW-to-memory dispatch floor as a5_bchg_dn_mem (gap=+2, r/p/w clean)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
-  },
   "a5_btst_dn_dn": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
@@ -380,8 +348,8 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a5_lsl_mem": {
-    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+4, r/p/w clean)",
-    "ref": "closed bus-pipelining-overlap plan (Tracks A-D)"
+    "reason": "same RMW-to-memory dispatch floor as a3_add_dn_ea (gap=+2, r/p/w clean, refreshed from the originally-documented +4 after the READ/WRITE-cycle S-state compression, Phases 205-206)",
+    "ref": "closed bus-pipelining-overlap plan (Tracks A-D); refreshed post-Phase-206"
   },
   "a5_rol_imm_dy": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
@@ -436,20 +404,16 @@
     "ref": "plan.md, +1clk stall-constant recalibration"
   },
   "a6_jmp": {
-    "reason": "gap=+5, r/p/w shows no MISMATCH only because expect_p was pre-adjusted to 3 (not the manual's own row value of 2) -- same speculative-linear-readahead mechanism as a6_bcc_taken/a6_bsr, already documented in this test's own desc field; JMP has no not-taken alternative to prefetch so the divergence is smaller than the conditional-branch cases",
-    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+    "reason": "gap=+3 (manual=8, measured=11), r/p/w shows no MISMATCH only because expect_p was pre-adjusted to 3 (not the manual's own row value of 2) -- same speculative-linear-readahead mechanism as a6_bcc_taken/a6_bsr, already documented in this test's own desc field; JMP has no not-taken alternative to prefetch so the divergence is smaller than the conditional-branch cases. Originally documented at gap=+5 -- the read-side savings from the READ-cycle S-state compression (Phase 205, which landed after this entry was first written) shrank this to gap=+3, refreshed here; same mechanism.",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6); refreshed post-Phase-205"
   },
   "a6_jsr": {
-    "reason": "same pre-adjusted-expect_p speculative-readahead mechanism as a6_jmp (gap=+7, own desc field already documents measured p=3 not manual's p=2)",
-    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6)"
+    "reason": "same pre-adjusted-expect_p speculative-readahead mechanism as a6_jmp (gap=+3, own desc field already documents measured p=3 not manual's p=2). Originally documented at gap=+7 -- refreshed to gap=+3 after the READ/WRITE-cycle S-state compression (Phases 205-206, which landed after this entry was first written) shrank both the opcode-fetch and return-address-push components; both JMP and JSR now land at the identical +3 gap despite JSR's own extra push cycle, since that push is also 1 tick cheaper post-Phase-206 -- same mechanism, not a new coincidence.",
+    "ref": "originally documented in this test's own desc field (Phase 161 Part A Stage A6); refreshed post-Phase-206"
   },
   "a6_lea": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
-  },
-  "a6_link_w": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
   },
   "a6_nop": {
     "reason": "same register-only dispatch-floor finding as a3_add_rn_dn (gap=+1, r/p/w clean)",
@@ -460,16 +424,16 @@
     "ref": "plan.md, bus-cycle round-trip overhead investigation, WRITE-cycle stage"
   },
   "a7_bkpt": {
-    "reason": "gap=-3 (manual=9, measured=6), r/p/w clean (fixed by the reliable-baseline plan's FC=111 counting fix, Phase 172). Same character as a4_tas_mem's own -4 finding (timing-gaps-largest-first plan, Stage 2): direct trace confirms BKPT's own CPU-space (FC=111) read cycle is genuinely pin-accurate (a normal, correctly-timed DSACK'd bus cycle) -- the shortfall is entirely in BKPT's own dispatch FSM (bkpt_start_r/bkpt_run_r, Phase 157's own dedicated mechanism mirroring the FPU coprocessor stub), which asserts eu_bkpt_req the very next tick with no extra internal decision time, while real 68030 microcode almost certainly needs more serial time to set up a CPU-space cycle. Deliberately NOT fixed: BKPT is already a deliberately scoped-down implementation (Phase 157: no live opcode substitution attempted) and a comparatively rare, debugger-only instruction; extending its own dispatch FSM's timing for a single -3 gap is a disproportionate risk/value tradeoff, same reasoning as a4_tas_mem",
-    "ref": "timing-gaps-largest-first plan, Stage 3b"
+    "reason": "gap=-4 (manual=9, measured=5), r/p/w clean (fixed by the reliable-baseline plan's FC=111 counting fix, Phase 172). Same character as a4_tas_mem's own -5 finding (timing-gaps-largest-first plan, Stage 2): direct trace confirms BKPT's own CPU-space (FC=111) read cycle is genuinely pin-accurate (a normal, correctly-timed DSACK'd bus cycle) -- the shortfall is entirely in BKPT's own dispatch FSM (bkpt_start_r/bkpt_run_r, Phase 157's own dedicated mechanism mirroring the FPU coprocessor stub), which asserts eu_bkpt_req the very next tick with no extra internal decision time, while real 68030 microcode almost certainly needs more serial time to set up a CPU-space cycle. Originally documented at gap=-3 (measured=6) -- BKPT's own CPU-space read is an ordinary read cycle, so the READ-cycle S-state compression (Phase 205, which landed after this entry was first written) shaved one further tick off it, refreshed here to gap=-4. Deliberately NOT fixed: BKPT is already a deliberately scoped-down implementation (Phase 157: no live opcode substitution attempted) and a comparatively rare, debugger-only instruction; extending its own dispatch FSM's timing for a single-instruction gap is a disproportionate risk/value tradeoff, same reasoning as a4_tas_mem.",
+    "ref": "timing-gaps-largest-first plan, Stage 3b; refreshed post-Phase-205"
   },
   "a7_illegal": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
+    "reason": "gap=-4 (manual=20, measured=16), r/p/w clean. Same character as a7_bkpt's own -4 finding (both dispatch via an internal exception mechanism, not the ordinary EX/WB pipeline `dec_internal_stall_ticks_fixed` covers): the illegal-instruction trap's own dispatch FSM issues its exception-frame push sequence with no extra internal decision time between recognizing the illegal opcode and beginning the push, while real 68030 microcode almost certainly needs more serial time to do so. Was previously mis-tagged with a4_tst_mem's own unrelated 'small bus-cycle-dispatch-overhead, gap=+1' boilerplate (a copy-paste error, not a real shared mechanism -- a7_illegal's actual gap has never been close to +1) -- corrected here to its own real value and mechanism. Deliberately NOT fixed, same reasoning as a7_bkpt/a4_tas_mem: a disproportionate risk to the shared exception-dispatch machinery (Phases 108/134) for a single-instruction gap.",
+    "ref": "corrected mis-attribution; same character as a7_bkpt (timing-gaps-largest-first plan, Stage 3b)"
   },
   "a7_trap_n": {
-    "reason": "same small bus-cycle-dispatch-overhead finding as a4_tst_mem (gap=+1, r/p/w clean)",
-    "ref": "timing-gaps-largest-first plan, Stage 6"
+    "reason": "gap=-4 (manual=20, measured=16), r/p/w clean. Same character as a7_illegal/a7_bkpt's own -4 findings: TRAP #n's own dispatch FSM issues its exception-frame push sequence with no extra internal decision time, while real 68030 microcode almost certainly needs more serial time to do so. Was previously mis-tagged with a4_tst_mem's own unrelated 'small bus-cycle-dispatch-overhead, gap=+1' boilerplate (a copy-paste error, not a real shared mechanism) -- corrected here to its own real value and mechanism. Deliberately NOT fixed, same reasoning as a7_illegal/a7_bkpt/a4_tas_mem.",
+    "ref": "corrected mis-attribution; same character as a7_bkpt (timing-gaps-largest-first plan, Stage 3b)"
   },
   "a7_trapv_notrap": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",

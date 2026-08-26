@@ -2923,3 +2923,45 @@ Left undocumented-further as a follow-up, not chased down this phase.
 
 See `~/.claude/plans/compressed-hopping-cocoa.md` for the plan this
 continues.
+
+## Phase 181 -- known_issues.json staleness refresh (documentation only, no RTL/testbench change)
+
+Following Phase 180's recalibration, the user asked to review every
+timing-corpus test whose gap isn't 0 or +1. Doing that review
+surfaced a real, systemic documentation-debt finding: most of the
+`known_issues.json` entries for the bus-touching/RMW/ext_count==2/
+readahead clusters were written *before* the READ/WRITE/RMW-cycle
+S-state compression (Phases 205-207), which shrank the underlying
+measurements by 1-2 clocks per affected read/write, and were never
+re-validated afterward. A systematic sweep (parsing each entry's own
+leading `gap=X` claim and comparing against the live measured value)
+found 21 entries with a directly wrong number within the "not 0/+1"
+set the user asked about, plus 14 more found on a full 120-test sweep
+prompted by spot-checking two additional drifted entries noticed
+while fixing the first 21: 9 of those 14 had actually become full
+exact matches (gap=0) while still carrying a stale non-zero
+explanation (all pre-dating this session), 5 had drifted numbers
+(same mechanism, smaller magnitude), and 2 (`a7_illegal`/`a7_trap_n`)
+turned out to be flat-out mis-tagged with an unrelated test's own
+boilerplate ("same small dispatch-overhead finding as a4_tst_mem,
+gap=+1") despite their own real gap being -4 with a completely
+different mechanism (matching `a7_bkpt`'s own exception-dispatch-FSM
+character instead) -- a copy-paste error, not just numeric drift.
+
+Fixed all of it: 21 numeric refreshes (Phase 180's own scope),
+9 entries removed entirely (established precedent from Phase 202:
+once a gap becomes an exact match, the explanation is deleted, not
+left stale), 5 more numeric refreshes, and 2 entries rewritten with
+their own correct mechanism and number. One stray editing artifact
+(a leftover "wait actually both are +3, see note" fragment
+accidentally left in a first draft of the `a6_jsr` rewrite) was
+caught by re-reading the file before finalizing and fixed immediately.
+
+Verified via a full re-parse of all 120 tests: 0 remaining `gap=X`
+mismatches anywhere in the file (excluding legitimate same-mechanism
+cross-references to a *different* test's own number, none of which
+remain wrong either), 0 unexplained non-zero gaps. `known_issues.json`
+now has 110 entries (was 119: +46 from Phase 180's own recalibration
+tagging, -9 from this phase's removals, net effect of both phases
+combined). Documentation-only change -- no RTL or testbench files
+touched, `git diff --stat rtl/ tb/` empty, `make test` unaffected.
