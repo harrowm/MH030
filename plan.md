@@ -3294,3 +3294,103 @@ undoing a multi-cycle atomic/locked sequence's own continuity
 requirement, unless explicitly overridden) -- worth keeping in mind as
 a pattern if any OTHER multi-phase locked cycle type is examined in
 the future.
+
+## Phase 185 -- DIVS.L/DIVU.L/MULS.L/MULU.L too-fast timing stall + a real sign-bit decode bug found and fixed along the way
+
+Following up the burst/CAS2 timing work (Phases 183-184), the user
+asked how DIVS.L (presumed one of the longest-running instructions)
+compares to real 68030 timing. Measured: `eu_mul_div.sv` is explicitly
+documented "purely combinational" -- DIVS.L/DIVU.L/MULS.L/MULU.L all
+computed in 3 clocks flat, vs. the manual's own NCC of 90/78/44/44 --
+a 30x/26x/15x/15x speedup. User: "add the stall... check all
+instructions to see if there are any other gaps like this."
+
+Implemented the stall via the existing Phase 162 `dec_internal_stall_
+ticks_fixed` mechanism in `eu_seq.sv`, gated on `dec_is_muldivl` +
+`dec_unit`/`dec_md_op`, using the established "+1clk recal" convention
+(target = manual_NCC + 1 clock). **Two mechanism-level fixes were
+required, not just a new whitelist entry**: (1) the whitelist's own
+tick counter (`dec_internal_stall_ticks_fixed`/`internal_stall_cnt_r`)
+was `logic [7:0]` (max 255 ticks) -- DIVS.L's own 91-clock target needs
+352 ticks, exceeding the old ceiling; widened both to `[15:0]`
+(`ex_internal_stall_ticks_resolved`, used only by shift/rotate's
+two-stage resolve mechanism, deliberately left at `[7:0]`, unaffected).
+(2) `div_trap` was a bare combinational expression with no one-shot
+protection -- once `ex_valid` can be artificially held for ~350 ticks,
+it would re-fire every tick instead of once, the identical bug class
+Phase 202 already found and fixed for `chk_trap`. Added the matching
+`div_trap_raw`/`div_trap_fired_r` one-shot latch (clears on `!ex_valid`,
+sets once and stays set until then), mirroring `chk_trap_raw`/
+`chk_trap_fired_r` exactly, including the same Icarus forward-reference
+workaround (declare + driving `always_ff` early in the file, `assign`
+at its natural later position).
+
+**While verifying DIVS.L's own stall selection (`dec_md_op==DIV_SL`),
+found a real, previously-undiscovered correctness bug, not a timing
+bug**: DIVU.L and MULS.L measured their new stalls correctly, but
+DIVS.L measured 79 clocks (DIVU.L's own value) instead of 91. Traced
+to the decode itself: `eu_seq.sv`'s `3'b110` case arm (MULU.L/MULS.L/
+DIVU.L/DIVS.L) read the signed/unsigned flag from `ext_data[6]` --
+empirically confirmed wrong via real vasm-assembled output (`DIVS.L
+D1,D2` = `2802`, `DIVU.L D1,D2` = `2002`, differing at exactly bit 11,
+both with bit 6 = 0) and a definitive discriminating execution test
+(dividend=-17, divisor=3 through `vvp sim/timing` computed the
+UNSIGNED result `0x5555554f` instead of the correct signed `0xfffffffb`
+for a real-encoded DIVS.L). Real 68020 extension-word layout for this
+family: bits 14:12=Dh/Dr, **11=sign (1=signed)**, 10=size (MUL-only,
+64-bit), 2:0=Dl/Dq -- bit 6 has no meaning here at all. This means
+every real-encoded DIVS.L in this RTL silently computed the DIVU.L
+result. Harte has zero coverage of the `.L` MUL/DIV forms (68000-
+captured corpus; `.L` mul/div is 68020+-only), which is why 184 prior
+phases never caught this -- and every existing hand-crafted test in
+`tb/alu_reg_tb.sv` for the "signed" forms (MUL-03/MUL-04/DIV-02) had
+independently set bit 6 (matching the RTL's own wrong convention),
+so they were self-consistently validating a fiction the whole time.
+
+User: "fix the decode bug first." **Fixed in `rtl/eu_seq.sv`**: both
+occurrences of `ext_data[6] ? MUL_SL/DIV_SL : MUL_UL/DIV_UL` changed
+to `ext_data[11] ?  ...`, with a detailed comment explaining the real
+bit layout, how it was confirmed, and why nothing caught it before.
+**Fixed in `tb/alu_reg_tb.sv`**: recomputed all three affected
+extension-word literals precisely (clear bit 6, set bit 11): MUL-03
+`0x6045`->`0x6805`, MUL-04 `0x6445`->`0x6C05`, DIV-02 `0x3042`->
+`0x3802`, with comments updated to cite the new bit position. (The
+three UNSIGNED-form tests needed no literal change -- 0 in either bit
+position is still 0 -- but stand as a useful contrast.)
+
+Also fixed a self-inflicted testbench-margin mistake found while
+building this: a first attempt blanket-widened `alu_reg_tb.sv`'s
+SHARED `run_instr()` settle margin (`repeat(15)`->`repeat(370)`) to
+accommodate the new MUL/DIV stalls -- this affects every unrelated
+ADD/SUB/ADDA/etc. test in the file too, and the cumulative extra time
+blew through the file's own global timeout. Reverted `run_instr()` to
+its original `repeat(15)`; added a dedicated `wait_muldivl_stall`
+task (`repeat(370) @(posedge clk)`) called only after the ~8 specific
+`.L Dn,Dn` MUL/DIV test invocations that need it; widened the global
+watchdog by a modest amount (`#500000`->`#530000`) rather than the
+first overcorrected `#700000` attempt.
+
+Added 4 new permanent timing-corpus tests (`tests/timing/a3_divs_l_
+dn_dn`, `a3_divu_l_dn_dn`, `a3_muls_l_dn_dn`, `a3_mulu_l_dn_dn`, each
+`<OP>.L Dn,Dn` via the established `a3_*.s` template), covering all
+four instructions the user named. All four now measure exactly
+gap=+1 (the honest +1clk-recal convention), confirming both the stall
+mechanism and the sign-bit decode fix are correct together. Added all
+4 to `known_issues.json` under the same "+1clk-recal, reporting
+consistency" convention documented for the other 40 whitelist entries.
+
+**Deliberately left out of scope, documented in the RTL's own new
+comment**: the memory-EA form of MULS.L/MULU.L/DIVS.L/DIVU.L
+(`MUL/DIV.L <ea>,Dn` where `<ea>` is a memory operand, not just `Dn,Dn`)
+is entirely unimplemented -- `dec_is_muldivl` is only ever set under
+`f_mode==3'b000` (register-direct). This is a separate, pre-existing
+correctness gap, not touched or worsened by this phase, noted here so
+it isn't lost.
+
+**Results**: `make test` 36/36 (including `alu_reg`, clean on the
+corrected literals), `cosim_grp` 8/8, `cosim_memind` 12/12 (all
+targets, including the memind15/24 additions), full 124-suite Harte
+sweep (mandatory -- `eu_seq.sv` decode changed) -- PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical
+to baseline. `plan.md`'s "systematic sweep for other too-fast gaps"
+item (the user's own second ask) remains open, tracked separately.

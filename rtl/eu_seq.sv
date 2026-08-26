@@ -2766,6 +2766,27 @@ module eu_seq (
                                 3'b110: begin
                                     // MULU.L/MULS.L (f_ss=00) or DIVU.L/DIVS.L (f_ss=01)
                                     // Opcode Dn (f_reg) = multiplier/divisor; ext Dl/Dq = destination
+                                    //
+                                    // MUL/DIV timing investigation (plan.md): the signed/unsigned
+                                    // flag was read from ext_data[6] -- WRONG. The real 68020
+                                    // extension-word format for this instruction family is bit
+                                    // 15=0 (reserved), 14:12=Dh/Dr, 11=sign (1=signed), 10=size
+                                    // (MUL only, 1=64-bit), 9:3=0 (reserved), 2:0=Dl/Dq -- bit 11
+                                    // is the sign flag, not bit 6. Confirmed empirically (not just
+                                    // from memory) by assembling real DIVS.L/DIVU.L via vasm and
+                                    // comparing the two extension words directly: they differ in
+                                    // exactly one bit, 0x0800 (bit 11); bit 6 is 0 in BOTH. Every
+                                    // existing hand-crafted test in this project's own testbenches
+                                    // set bit 6 (matching this same wrong convention) rather than
+                                    // bit 11, so this bug was invisible to every prior test --
+                                    // confirmed via direct execution: a real vasm-assembled
+                                    // "DIVS.L D1,D2" with a negative dividend computed the
+                                    // UNSIGNED result (ext_data[6]=0 for every real encoding of
+                                    // this instruction, regardless of the actual S/U mnemonic
+                                    // used, so dec_md_op always selected the _UL/_UW... err _UL
+                                    // form). Harte has zero coverage of the .L forms (68000-
+                                    // captured corpus, .L mul/div is 68020+-only), which is why
+                                    // 158+ prior phases never caught this.
                                     dec_needs_ext   = 1'b1;
                                     dec_siz         = 2'b00;
                                     dec_src_reg     = {1'b0, f_reg};          // multiplier/divisor
@@ -2781,13 +2802,13 @@ module eu_seq (
                                         // MULU.L / MULS.L
                                         dec_valid    = 1'b1;
                                         dec_unit     = UNIT_MUL;
-                                        dec_md_op    = ext_data[6] ? MUL_SL : MUL_UL;
+                                        dec_md_op    = ext_data[11] ? MUL_SL : MUL_UL;
                                         dec_md_64bit = ext_data[10];
                                     end else if (f_ss == 2'b01) begin
                                         // DIVU.L / DIVS.L
                                         dec_valid    = 1'b1;
                                         dec_unit     = UNIT_DIV;
-                                        dec_md_op    = ext_data[6] ? DIV_SL : DIV_UL;
+                                        dec_md_op    = ext_data[11] ? DIV_SL : DIV_UL;
                                         dec_md_64bit = (ext_data[14:12] != ext_data[2:0]);
                                     end
                                 end
@@ -6795,9 +6816,15 @@ module eu_seq (
     // an unpadded one -- a reporting-consistency change only, not a
     // hardware-accuracy fix (the +1 floor itself remains, matching every
     // other instruction in the corpus).
-    logic [7:0] dec_internal_stall_ticks_fixed;
+    // Widened from [7:0] to [15:0] (MUL/DIV timing investigation, plan.md):
+    // DIVS.L's own gap (manual NCC=90, this RTL's eu_mul_div.sv computing
+    // it purely combinationally in ~3 clocks) needs a 352-tick stall,
+    // exceeding the old 8-bit field's own 255-tick ceiling -- every prior
+    // entry (largest: BFFFO at 72 ticks) fit comfortably under that limit,
+    // so this was never hit until now.
+    logic [15:0] dec_internal_stall_ticks_fixed;
     always_comb begin
-        dec_internal_stall_ticks_fixed = 8'd0;
+        dec_internal_stall_ticks_fixed = 16'd0;
         // dec_unit==UNIT_SHF also covers the memory-EA (single-bit) shift
         // form (dec_is_mem_rmw=1, e.g. "ASL.W (An)") -- that form's own
         // manual row is fea/cea-based (bus-cycle-driven, already exact via
@@ -6984,6 +7011,41 @@ module eu_seq (
         // baseline already, not touched here.
         if (dec_valid && dec_is_lea && f_mode == 3'b010)
             dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: LEA (An),An NCC=4+1clk=2clk=8t
+        // MUL/DIV timing investigation (plan.md): DIVS.L/DIVU.L/MULS.L/
+        // MULU.L Dr,Dq (32x32/32<-64/32, register-direct source only).
+        // eu_mul_div.sv is explicitly documented "purely combinational" --
+        // it computes the full multiply/divide in this pipeline's own
+        // single-cycle EX stage (plain HDL */÷ operators), while real
+        // 68030 microcode runs a genuinely serial (non-restoring) divide/
+        // multiply algorithm taking dozens of real clocks -- by far the
+        // largest gap of this whole whitelist mechanism's history (DIVS.L
+        // alone needs an 88-clock stall, exceeding every prior entry's
+        // own headroom combined, which is why dec_internal_stall_ticks_
+        // fixed/internal_stall_cnt_r were both widened from 8 to 16 bits
+        // to hold it -- see those signals' own declaration comments).
+        // Measured baseline (empirically, via a new dedicated timing test
+        // -- no test for this whole family existed before): 3 clocks,
+        // matching the same uniform ext_count==1 register-direct baseline
+        // every other 2-word instruction in this whitelist shares.
+        // dec_is_muldivl is set ONLY for the register-direct (f_mode==
+        // 000) source form -- confirmed via direct code reading that it
+        // has exactly one assignment site in the whole file, nested under
+        // an f_mode==000 guard. The memory-EA source forms of these same
+        // four instructions are consequently a SEPARATE, genuine
+        // correctness gap (not a timing one, and not touched here):
+        // MULS.L/DIVS.L/etc with a non-register source appear to not be
+        // decoded/implemented in this RTL at all -- found while scoping
+        // this stall fix, flagged for a dedicated future investigation.
+        if (dec_valid && dec_is_muldivl) begin
+            if (dec_unit == UNIT_MUL)
+                dec_internal_stall_ticks_fixed = 16'd168; // +1clk recal: MULS.L/MULU.L Dn,Dn NCC=44+1clk=45clk=168t
+            else if (dec_unit == UNIT_DIV) begin
+                if (dec_md_op == DIV_SL)
+                    dec_internal_stall_ticks_fixed = 16'd352; // +1clk recal: DIVS.L Dn,Dn NCC=90+1clk=91clk=352t
+                else
+                    dec_internal_stall_ticks_fixed = 16'd304; // +1clk recal: DIVU.L Dn,Dn NCC=78+1clk=79clk=304t
+            end
+        end
         // ANDI/ORI/EORI #imm,SR or CCR (manual NCC=14, own natural
         // baseline measures 13 -- gap=-1) were investigated but are
         // DELIBERATELY NOT whitelisted here. A +4-tick entry gated on
@@ -7115,10 +7177,12 @@ module eu_seq (
     // down in this file (Icarus requires those declared before the
     // resolving-cycle logic that reads them), search for "Phase 162 Stage
     // D2 (continued)".
-    logic [7:0] internal_stall_cnt_r;
+    // Widened to [15:0] alongside dec_internal_stall_ticks_fixed (see that
+    // signal's own declaration comment -- MUL/DIV timing investigation).
+    logic [15:0] internal_stall_cnt_r;
     logic       internal_stall_resolving_r;
     logic       ex_internal_stall;
-    assign ex_internal_stall = (internal_stall_cnt_r != 8'd0) || internal_stall_resolving_r;
+    assign ex_internal_stall = (internal_stall_cnt_r != 16'd0) || internal_stall_resolving_r;
 
     logic hazard_ex, hazard_wb, hazard_ccr, hazard_usp, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -7494,15 +7558,15 @@ module eu_seq (
     // path takes over on its own, needing no further changes here.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            internal_stall_cnt_r      <= 8'd0;
+            internal_stall_cnt_r      <= 16'd0;
             internal_stall_resolving_r <= 1'b0;
         end else if (internal_stall_resolving_r) begin
             // Resolution cycle: ex_shf_op/ex_siz/shf_count are now valid.
-            internal_stall_cnt_r       <= ex_internal_stall_ticks_resolved;
+            internal_stall_cnt_r       <= {8'd0, ex_internal_stall_ticks_resolved};
             internal_stall_resolving_r <= 1'b0;
-        end else if (internal_stall_cnt_r != 8'd0) begin
-            internal_stall_cnt_r <= internal_stall_cnt_r - 8'd1;
-        end else if (instr_ack && (dec_internal_stall_ticks_fixed != 8'd0)) begin
+        end else if (internal_stall_cnt_r != 16'd0) begin
+            internal_stall_cnt_r <= internal_stall_cnt_r - 16'd1;
+        end else if (instr_ack && (dec_internal_stall_ticks_fixed != 16'd0)) begin
             internal_stall_cnt_r <= dec_internal_stall_ticks_fixed;
         end else if (instr_ack && dec_needs_stall_resolve) begin
             internal_stall_resolving_r <= 1'b1;
@@ -8808,6 +8872,26 @@ module eu_seq (
         else if (!ex_valid)     chk_trap_fired_r <= 1'b0;
         else if (chk_trap_raw)  chk_trap_fired_r <= 1'b1;
     end
+    // MUL/DIV timing investigation (plan.md): div_trap needs the IDENTICAL
+    // one-shot treatment chk_trap already got in the cycle-accuracy-closing
+    // plan's own Stage 2 (see that fix's own comment below, and
+    // chk_trap_fired_r just above, for the full derivation) -- div_trap's
+    // own register-direct divide-by-zero condition (ex_valid && ex_unit==
+    // UNIT_DIV && !ex_is_mem_src && md_div_by_zero) is a pure combinational
+    // expression with no edge protection, and once DIVS.L/DIVU.L Dn,Dn
+    // gained a real internal stall (holding ex_valid for ~350 ticks instead
+    // of 1), it re-fires every single tick of that stall instead of once --
+    // found via make test's own alu_reg suite hanging (DIV-04, the
+    // dedicated divide-by-zero trap test) the moment the stall was added,
+    // the exact same symptom class chk_trap's own history already
+    // documents ("the register-direct CHK path had never held ex_valid for
+    // more than 1 cycle before this stall existed, so nothing needed one").
+    logic        div_trap_raw, div_trap_fired_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)             div_trap_fired_r <= 1'b0;
+        else if (!ex_valid)     div_trap_fired_r <= 1'b0;
+        else if (div_trap_raw)  div_trap_fired_r <= 1'b1;
+    end
     assign chk_val_w     = rd_b_data;
     assign chk_ub_w      = ex_use_imm ? ex_imm : rd_a_data;
     assign chk_val_ext_w = ex_chk_word ? {{16{chk_val_w[15]}}, chk_val_w[15:0]} : chk_val_w;
@@ -9875,8 +9959,16 @@ module eu_seq (
     // that collided with the still-pending ex_mem_stall and hung the
     // pipeline permanently (found via $display tracing: mem_ack=0,
     // mem_rdata=0, md_div_by_zero=1, ex_mem_stall=1, forever).
-    assign div_trap = (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src && md_div_by_zero)
+    //
+    // MUL/DIV timing investigation (plan.md): div_trap_raw (this same
+    // condition, renamed) now feeds div_trap_fired_r's own one-shot latch
+    // (declared earlier, next to chk_trap_fired_r) -- see that signal's own
+    // comment for the full derivation of why this is now necessary (the new
+    // internal stall on DIVS.L/DIVU.L Dn,Dn holds ex_valid for ~350 ticks,
+    // and this condition would otherwise re-fire on every one of them).
+    assign div_trap_raw = (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src && md_div_by_zero)
                     || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && mem_ack && md_div_by_zero);
+    assign div_trap = div_trap_raw && !div_trap_fired_r;
     // CHK: trap on reg/imm comparison, memory-source ack, or CHK2 second-read ack.
     assign chk_trap_raw = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
                         || (ex_valid && ex_is_chk && ex_is_mem_rd && mem_ack &&

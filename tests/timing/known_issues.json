@@ -438,5 +438,21 @@
   "a7_trapv_notrap": {
     "reason": "gap=+1 (recalibration, not a new finding). This instruction's own dec_internal_stall_ticks_fixed whitelist entry (eu_seq.sv) was recalibrated +4 ticks (+1 clock), per the user's explicit request, so it now reports the same honest +1 dispatch-floor gap that unpadded register-direct instructions like a3_add_rn_dn already show. Before this recalibration the constant was calibrated as manual_NCC_ticks - empirically_measured_baseline, which happened to exactly cancel the same +1 floor rather than genuinely eliminating it (traced and confirmed real: an isolated instruction has no predecessor bus activity to overlap its own opcode fetch with -- MC68030UM.pdf Section 11.3.3 explicitly assumes overlap with a PREVIOUS instruction, unavailable in isolation). This is a reporting-consistency change only, not a hardware-accuracy change -- the underlying RTL behavior at this gap size is unchanged, only the previously-misleading exact-looking gap=0 is now honest.",
     "ref": "plan.md, +1clk stall-constant recalibration"
+  },
+  "a3_divs_l_dn_dn": {
+    "reason": "gap=+1 (manual NCC=90, measured=91), r/p/w clean. Same +1clk-recal reporting-consistency convention as every other dec_internal_stall_ticks_fixed whitelist entry -- see the file-level header comment in eu_seq.sv for the derivation. DIVS.L is the longest-running instruction in the manual's own table; eu_mul_div.sv is purely combinational, so without the artificial stall this measured 3 clocks (a 30x speedup) before this fix.",
+    "ref": "MUL/DIV timing + sign-bit decode bug investigation"
+  },
+  "a3_divu_l_dn_dn": {
+    "reason": "gap=+1 (manual NCC=78, measured=79), r/p/w clean. Same +1clk-recal convention as DIVS.L above.",
+    "ref": "MUL/DIV timing + sign-bit decode bug investigation"
+  },
+  "a3_muls_l_dn_dn": {
+    "reason": "gap=+1 (manual NCC=44, measured=45), r/p/w clean. Same +1clk-recal convention as DIVS.L above.",
+    "ref": "MUL/DIV timing + sign-bit decode bug investigation"
+  },
+  "a3_mulu_l_dn_dn": {
+    "reason": "gap=+1 (manual NCC=44, measured=45), r/p/w clean. Same +1clk-recal convention as MULS.L/DIVS.L above.",
+    "ref": "MUL/DIV timing + sign-bit decode bug investigation"
   }
 }

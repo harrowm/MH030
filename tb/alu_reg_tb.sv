@@ -246,6 +246,22 @@ module alu_reg_tb;
         repeat(15) @(posedge clk);
     endtask
 
+    // "MUL/DIV timing investigation" (plan.md): DIVS.L/DIVU.L/MULS.L/
+    // MULU.L Dn,Dn each gained a new dec_internal_stall_ticks_fixed entry
+    // (up to 352 ticks for DIVS.L) matching the manual's own real NCC
+    // timing. A first attempt widened run_instr()'s own SHARED settle
+    // margin from 15 to 370 to clear this -- wrong: that task is used by
+    // every instruction test in this file (dozens of unrelated ADD/SUB/
+    // ADDA/ADDQ/etc calls), so the blanket widening added ~355 ticks to
+    // EVERY call, not just the handful that need it, and the cumulative
+    // extra time blew even a widened #700000 global watchdog. Reverted
+    // run_instr() to its original 15-tick margin; this dedicated task
+    // instead adds the extra wait ONLY after the specific MUL/DIV .L
+    // Dn,Dn calls that actually need it.
+    task automatic wait_muldivl_stall;
+        repeat(370) @(posedge clk);
+    endtask
+
     // Load Dn via CLR.L Dn followed by ADDI.L #val,Dn.
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);
         run_instr(16'h4280 | {13'h0, n}, 1'b0, 32'h0);
@@ -421,6 +437,7 @@ module alu_reg_tb;
         set_dn(3'd1, 32'd6);
         begin
             run_instr(16'h4C00, 1'b1, {16'h0, 16'h2001});
+            wait_muldivl_stall;
             chk("MUL-01a: D1=42",       dut.u_rf.d_reg[1], 32'd42);
             chk("MUL-01b: D2 untouch",  dut.u_rf.d_reg[2], 32'h0);
             chk1("MUL-01c: N=0", sr_out[3], 1'b0);
@@ -434,19 +451,22 @@ module alu_reg_tb;
         set_dn(3'd2, 32'd3);
         set_dn(3'd3, 32'h8000_0000);
         run_instr(16'h4C02, 1'b1, {16'h0, 16'h4403});
+        wait_muldivl_stall;
         chk("MUL-02a: D3=0x80000000", dut.u_rf.d_reg[3], 32'h8000_0000);
         chk("MUL-02b: D4=1",          dut.u_rf.d_reg[4], 32'd1);
         chk1("MUL-02c: N=0", sr_out[3], 1'b0);
         chk1("MUL-02d: Z=0", sr_out[2], 1'b0);
 
         $display("--- MULS.L D4,D5 (32-bit signed: -2×3=-6) ---");
-        // Opcode 0x4C04; ext Dh=D6(110), sz=0, sign=1, Dl=D5(101) = 0x6045
+        // Opcode 0x4C04; ext Dh=D6(110), sz=0, sign=1(bit11), Dl=D5(101) = 0x6805
+        // (real 68020 sign flag is ext bit 11, not bit 6 -- see eu_seq.sv decode fix)
         set_dn(3'd4, 32'hFFFF_FFFE);  // -2
         set_dn(3'd5, 32'd3);
         begin
             logic [31:0] d6_before;
             d6_before = dut.u_rf.d_reg[6];
-            run_instr(16'h4C04, 1'b1, {16'h0, 16'h6045});
+            run_instr(16'h4C04, 1'b1, {16'h0, 16'h6805});
+            wait_muldivl_stall;
             chk("MUL-03a: D5=-6",       dut.u_rf.d_reg[5], 32'hFFFF_FFFA);
             chk("MUL-03b: D6 untouch",  dut.u_rf.d_reg[6], d6_before);
             chk1("MUL-03c: N=1", sr_out[3], 1'b1);
@@ -454,10 +474,11 @@ module alu_reg_tb;
         end
 
         $display("--- MULS.L D4,D6:D5 (64-bit signed: -2×3=0xFFFFFFFF_FFFFFFFA) ---");
-        // Opcode 0x4C04; ext Dh=D6(110), sz=1, sign=1, Dl=D5(101) = 0x6445
+        // Opcode 0x4C04; ext Dh=D6(110), sz=1, sign=1(bit11), Dl=D5(101) = 0x6C05
         set_dn(3'd4, 32'hFFFF_FFFE);  // -2
         set_dn(3'd5, 32'd3);
-        run_instr(16'h4C04, 1'b1, {16'h0, 16'h6445});
+        run_instr(16'h4C04, 1'b1, {16'h0, 16'h6C05});
+        wait_muldivl_stall;
         chk("MUL-04a: D5=0xFFFFFFFA", dut.u_rf.d_reg[5], 32'hFFFF_FFFA);
         chk("MUL-04b: D6=0xFFFFFFFF", dut.u_rf.d_reg[6], 32'hFFFF_FFFF);
         chk1("MUL-04c: N=1", sr_out[3], 1'b1);
@@ -468,6 +489,7 @@ module alu_reg_tb;
         set_dn(3'd0, 32'd7);
         set_dn(3'd1, 32'd100);
         run_instr(16'h4C40, 1'b1, {16'h0, 16'h2001});
+        wait_muldivl_stall;
         chk("DIV-01a: D1(Dq)=14", dut.u_rf.d_reg[1], 32'd14);
         chk("DIV-01b: D2(Dr)=2",  dut.u_rf.d_reg[2], 32'd2);
         chk1("DIV-01c: N=0", sr_out[3], 1'b0);
@@ -476,10 +498,11 @@ module alu_reg_tb;
         chk1("DIV-01f: C=0", sr_out[0], 1'b0);
 
         $display("--- DIVS.L D1,D3:D2 (17÷-3=quot -5 rem 2) ---");
-        // Opcode 0x4C41 (f_reg=D1); ext Dr=D3(011), sign=1, Dq=D2(010) = 0x3042
+        // Opcode 0x4C41 (f_reg=D1); ext Dr=D3(011), sign=1(bit11), Dq=D2(010) = 0x3802
         set_dn(3'd1, 32'hFFFF_FFFD);  // -3
         set_dn(3'd2, 32'd17);
-        run_instr(16'h4C41, 1'b1, {16'h0, 16'h3042});
+        run_instr(16'h4C41, 1'b1, {16'h0, 16'h3802});
+        wait_muldivl_stall;
         chk("DIV-02a: D2(Dq)=-5", dut.u_rf.d_reg[2], 32'hFFFF_FFFB);
         chk("DIV-02b: D3(Dr)=2",  dut.u_rf.d_reg[3], 32'd2);
         chk1("DIV-02c: N=1", sr_out[3], 1'b1);
@@ -491,6 +514,7 @@ module alu_reg_tb;
         set_dn(3'd0, 32'd3);
         set_dn(3'd1, 32'd10);
         run_instr(16'h4C40, 1'b1, {16'h0, 16'h1001});
+        wait_muldivl_stall;
         chk("DIV-03: D1(Dq)=3", dut.u_rf.d_reg[1], 32'd3);
 
         $display("--- DIVU.L divide-by-zero → div_trap ---");
@@ -507,6 +531,7 @@ module alu_reg_tb;
         // Opcode 0x4C00; ext Dh=D1(001), sz=0, sign=0, Dl=D0(000) = 0x1000
         set_dn(3'd0, 32'd0);
         run_instr(16'h4C00, 1'b1, {16'h0, 16'h1000});
+        wait_muldivl_stall;
         chk("MUL-05a: D0=0", dut.u_rf.d_reg[0], 32'h0);
         chk1("MUL-05b: Z=1", sr_out[2], 1'b1);
         chk1("MUL-05c: N=0", sr_out[3], 1'b0);
@@ -697,7 +722,12 @@ module alu_reg_tb;
     end
 
     initial begin
-        #500000;
+        // "MUL/DIV timing investigation" (plan.md): widened slightly --
+        // the ~6 MUL/DIV .L Dn,Dn tests each now cost ~370 extra ticks
+        // (3700 extra time units) via the dedicated wait_muldivl_stall
+        // task, not a blanket per-call increase (see that task's own
+        // comment for why the first attempt at this was wrong).
+        #530000;
         $display("FAIL: TIMEOUT");
         $finish;
     end

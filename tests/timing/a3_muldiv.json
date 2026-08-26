@@ -1,0 +1,50 @@
+[
+  {
+    "name": "a3_divs_l_dn_dn",
+    "hex": "tests/timing/a3_divs_l_dn_dn.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "watch_reg": 2,
+    "watch_val": "0x22e09",
+    "expect_r": 0,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "DIVS.L Dr,Dq (32/32->32): DIVS.L Dn,Dn NCC=90(0/1/0) -- longest-running arithmetic instruction in the manual's own table"
+  },
+  {
+    "name": "a3_divu_l_dn_dn",
+    "hex": "tests/timing/a3_divu_l_dn_dn.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "watch_reg": 2,
+    "watch_val": "0x22e09",
+    "expect_r": 0,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "DIVU.L Dr,Dq (32/32->32): DIVU.L Dn,Dn NCC=78(0/1/0)"
+  },
+  {
+    "name": "a3_muls_l_dn_dn",
+    "hex": "tests/timing/a3_muls_l_dn_dn.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "watch_reg": 2,
+    "watch_val": "0x35d",
+    "expect_r": 0,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "MULS.L Dr,Dq (32x32): MULS.L Dn,Dn NCC=44(0/1/0)"
+  },
+  {
+    "name": "a3_mulu_l_dn_dn",
+    "hex": "tests/timing/a3_mulu_l_dn_dn.hex",
+    "target_pc": "0x200",
+    "instr_len": 4,
+    "watch_reg": 2,
+    "watch_val": "0x35d",
+    "expect_r": 0,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "MULU.L Dr,Dq (32x32): MULU.L Dn,Dn NCC=44(0/1/0)"
+  }
+]
