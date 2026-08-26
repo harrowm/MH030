@@ -2817,3 +2817,109 @@ second-fetch, RMW-dispatch-floor, `briefidx`/`andi` alignment) remain
 -- Stage 7's own explicit decision point, not started automatically per
 the plan's own framing. See `~/.claude/plans/compressed-hopping-
 cocoa.md` for the full plan and Stage 7's own scope description.
+
+## Phase 180 -- Stall-constant recalibration: uniform +1clk reporting consistency across the whole `dec_internal_stall_ticks_fixed` whitelist
+
+Following the Stage 6 finding above (the register-only cluster's own
++1 gap is a genuine, unfixable structural floor -- an isolated
+instruction has no predecessor bus activity to overlap its own opcode
+fetch with, and MC68030UM.pdf Section 11.3.3 explicitly states its own
+"two clock periods per bus cycle" NCC model assumes overlap with a
+PREVIOUS instruction, unavailable in isolation), the user asked
+directly why `a5_rol_imm_dy` (and every other stall-padded instruction
+in the whitelist) reports an *exact* gap=0 instead of showing the same
+honest +1 that unpadded instructions like `a3_add_rn_dn` show. Traced
+`a5_rol_imm_dy` directly and confirmed: every one of the ~40 constants
+in `eu_seq.sv`'s `dec_internal_stall_ticks_fixed` mechanism was
+calibrated as `manual_NCC_ticks - empirically_measured_baseline`, an
+algebraic identity that mathematically cancels the +1 floor regardless
+of whether the baseline used for calibration was itself "correct" --
+it was never genuinely modeling extra real microcode time to close a
++1 gap, it was silently absorbing that same +1 floor into its own
+target the same way the register-only cluster's raw, unpadded gap
+shows honestly.
+
+**Explicitly not a hardware-accuracy question**: removing the stalls
+entirely would be a real regression (Phase 162 Part D's own legitimate
+fix for combinational-vs-iterative shift/bit-field timing -- confirmed
+via Stage D0's pre-stall measurements showing large genuine negative
+gaps, e.g. BFFFO at -12 clocks with zero stall). The +1 floor itself
+is separately confirmed unfixable (Stage 6 above, Phase 159 Stage 0).
+Given both of those are settled, the user asked for a pure reporting-
+consistency change: recalibrate every constant +4 ticks (+1 clock) so
+every whitelist-covered instruction reports the same honest +1 gap
+every unpadded instruction already shows, rather than a misleadingly-
+exact 0 that happens to hide the identical floor.
+
+**Implementation**: all 40 individual `dec_internal_stall_ticks_fixed`
+constant assignments in `rtl/eu_seq.sv` (shift/rotate register+
+immediate forms x8, EXG/MOVE-CCR-Dn/MOVE-SR-Dn/SWAP x4, ABCD/SBCD/NBCD
+x3, EXT.W/L/EXTB.L, Scc Dn, TAS Dn, dynamic BCHG/BCLR/BSET Dn,Dn,
+static BCHG/BCLR/BSET #(data),Dn, MOVEC Cr,Rn read, PACK/UNPK x2,
+MOVE.B/W #(data),Dn, MOVE Dn,CCR, MOVE USP,An, MOVE An,USP, TRAPV
+no-trap, ADDA.W/SUBA.W/CMPA.W, BTST, BFTST Dn, CHK Dn,Dn no-exception,
+LEA (An),An, the 7-entry bit-field case statement (BFCHG/BFCLR/BFSET/
+BFEXTS/BFEXTU/BFINS/BFFFO), DBcc(cc=True), Bcc.B/Bcc.W not-taken) each
+had their raw `8'dNNN` value increased by exactly 4, with each
+constant's own trailing comment rewritten to show the new
+`NCC+1clk=Xclk=Yt` derivation instead of the old `NCC-3clk=Xclk=Yt`
+one. A new file-level header comment was added directly above the
+`always_comb` block explaining the "+1clk recal" convention once,
+rather than repeating the full rationale in all 40 individual
+comments (each just tags itself `// +1clk recal: ...`).
+ANDI/ORI/EORI to SR/CCR remains deliberately excluded (its own
+existing comment already explains why: a separately-verified, +4-tick
+whitelist attempt genuinely delayed WB commit as designed but the
+total measured clock count didn't move at all, fully absorbed by a
+different, IFU-refill-driven mechanism -- untouched by this session).
+
+**Verification found 3 real testbench margin regressions**, the same
+class already anticipated from Phase 202's own CHK-stall precedent
+(larger internal stalls can exceed a fixed `repeat(N)` post-`instr_ack`
+settle margin that was previously just barely sufficient) -- each
+traced to the specific instruction whose own stall grew, not guessed
+at: `tb/ctrl_flow_tb.sv`'s `run_instr()` (`repeat(8)`->`repeat(16)`,
+covering SWAP/EXT/EXG/Scc's 4->8-tick growth, caught by SWAP/EXT.W/
+EXT.L/EXTB.L/SEQ/SNE/EXG D3,D5/EXG A2,A3/EXG D2,A4 all reading stale
+pre-stall values); `tb/ea_modes_tb.sv`'s `run_instr()` (`repeat(10)`
+->`repeat(20)`, covering LEA (An),An's 4->8-tick growth, caught by
+"basic-EA LEA(An) A3" reading a stale A3); `tb/system_tb.sv`'s
+`run_instr()` (`repeat(16)`->`repeat(24)`, covering MOVEC Cr,Rn's
+12->16-tick growth, caught by all 7 MOVEC-0N read-direction checks
+reading stale zeros). All 3 fixed with a comment citing the
+recalibration and the specific instruction that exposed the gap.
+
+**Results**: `make test` 36/36 (clean after the 3 margin fixes),
+`make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte
+sweep (mandatory -- the recalibration touches shift/rotate, BCD,
+bit-field, bit-manipulation, MOVEC, PACK/UNPK, CHK, LEA, Scc, TAS,
+branch/DBcc timing across dozens of heavily-Harte-covered instruction
+families) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly),
+SKIP 281221, TIMEOUT 0, bit-identical to baseline. Re-ran
+`scripts/timing_benchmark.py` and confirmed exactly the 40 targeted
+constants' own tests moved from gap=0 (MATCH) to gap=+1, all now
+reporting the identical honest floor as `a3_add_rn_dn`; 0 previously-
+non-zero-gap tests changed. Added all 46 newly-non-exact test names
+(some constants cover 2 test cases, e.g. both SWAP directions) to
+`tests/timing/known_issues.json` with a shared, standardized
+explanation of the recalibration and its "reporting consistency, not
+hardware-accuracy" framing. Corpus-wide: 11 exact matches (was 51,
+all of which moved to the documented +1 tier -- expected and
+intended, not a regression), 109 known non-zero (was 63), 0
+unexplained non-zero (unchanged), gap mean=0.76 (was ~0.3, expected
+to rise since every previously-hidden +1 floor is now visible in the
+raw mean the same way the unpadded cluster's own +1 already was).
+
+**Pre-existing, unrelated staleness noted but left out of scope**:
+`a7_bkpt`/`a7_illegal`/`a7_trap_n`'s own `known_issues.json` entries
+record gap values (-3, "same as a4_tst_mem gap=+1") that no longer
+match their current measured gaps (-4 each) -- confirmed via `git
+diff` that this session's own JSON rewrite didn't touch their string
+content, so the staleness predates this session and is unrelated to
+the stall-constant recalibration (none of these three instructions
+touch `dec_internal_stall_ticks_fixed` at all; they dispatch via
+exception/CPU-space mechanisms this recalibration didn't change).
+Left undocumented-further as a follow-up, not chased down this phase.
+
+See `~/.claude/plans/compressed-hopping-cocoa.md` for the plan this
+continues.

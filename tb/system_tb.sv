@@ -285,7 +285,12 @@ module system_tb;
         end
         instr_valid = 1'b0;
         ext_valid   = 1'b0;
-        repeat(16) @(posedge clk);
+        // "+1clk recal": MOVEC Cr,Rn's own dec_internal_stall_ticks_fixed
+        // entry grew from 12 to 16 ticks (recalibration, see that
+        // mechanism's own header comment in eu_seq.sv) -- this fixed
+        // post-ack margin's old headroom no longer clears the new floor.
+        // Widened 16->24.
+        repeat(24) @(posedge clk);
     endtask
 
     task automatic set_dn(input int n, input logic [31:0] val);

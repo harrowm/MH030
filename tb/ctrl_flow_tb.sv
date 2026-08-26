@@ -281,7 +281,12 @@ module ctrl_flow_tb;
         end
         instr_valid = 1'b0;
         ext_valid   = 1'b0;
-        repeat(8) @(posedge clk);
+        // "+1clk recal": every dec_internal_stall_ticks_fixed constant in
+        // eu_seq.sv grew by 4 ticks (recalibration, see that mechanism's
+        // own header comment) -- SWAP/EXT/EXG/Scc's own entries all used
+        // here went 4->8 ticks, exceeding this fixed post-ack margin's
+        // old headroom. Widened 8->16 to stay clear of the new floor.
+        repeat(16) @(posedge clk);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);

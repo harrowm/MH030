@@ -279,7 +279,12 @@ module ea_modes_tb;
         // dec_internal_stall_ticks_fixed) -- this fixed post-ack margin
         // predates that stall and was too tight for it, caught by the
         // "basic-EA LEA(An) A3" check reading a stale (still-zero) A3.
-        repeat(10) @(posedge clk);
+        // "+1clk recal" widened from 10 to 20: every dec_internal_stall_
+        // ticks_fixed constant grew by 4 ticks (recalibration, see
+        // eu_seq.sv's own header comment on that mechanism), including
+        // LEA (An),An's own entry (4->8 ticks) -- widened with the same
+        // margin ratio as before to stay clear of the new floor.
+        repeat(20) @(posedge clk);
     endtask
 
     // Load Dn: CLR.L Dn + ADDI.L #val,Dn

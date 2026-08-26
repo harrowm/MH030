@@ -6778,6 +6778,23 @@ module eu_seq (
     // from an immediate or a register (no separate rows exist), so it's
     // also decode-time-only via dec_shf_imm_cnt/dec_use_reg_cnt requiring
     // no distinction at all.
+    // "+1clk recal" (this file-wide): every constant below was originally
+    // calibrated as manual_NCC_ticks - empirically_measured_baseline, which
+    // exactly cancels this RTL's own genuine, unfixable +1 clock dispatch
+    // floor (traced and confirmed real -- see plan.md's own writeup: an
+    // isolated instruction has no predecessor bus activity to overlap its
+    // own opcode fetch with, and MC68030UM.pdf Section 11.3.3 explicitly
+    // states its own "two clock periods per bus cycle" NCC model assumes
+    // overlap with a PREVIOUS instruction, never available in isolation).
+    // Un-padded instructions like plain register-direct ADD show this
+    // floor honestly as a measured +1 gap; every stall-padded instruction
+    // here was silently absorbing the identical floor into its own
+    // calibration instead, reporting a misleadingly-exact 0. Recalibrated
+    // uniformly (+4 ticks = +1 clock on every constant) so every
+    // instruction in this whitelist now reports the same honest +1 gap as
+    // an unpadded one -- a reporting-consistency change only, not a
+    // hardware-accuracy fix (the +1 floor itself remains, matching every
+    // other instruction in the corpus).
     logic [7:0] dec_internal_stall_ticks_fixed;
     always_comb begin
         dec_internal_stall_ticks_fixed = 8'd0;
@@ -6789,12 +6806,12 @@ module eu_seq (
         if (dec_valid && dec_unit == UNIT_SHF && !dec_is_mem_rmw) begin
             case (dec_shf_op)
                 SHF_ASL: dec_internal_stall_ticks_fixed =
-                    dec_use_reg_cnt ? 8'd20 : 8'd4; // reg:NCC=8-3clk=5clk=20t; imm:NCC=4-3clk=1clk=4t
-                SHF_ASR: if (!dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd4; // imm:NCC=4=4t (reg form via resolve, below)
-                SHF_LSL, SHF_LSR: if (!dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd4; // imm:NCC=4=4t (reg form via resolve)
+                    dec_use_reg_cnt ? 8'd24 : 8'd8; // +1clk recal: reg:NCC=8+1clk=6clk=24t; imm:NCC=4+1clk=2clk=8t
+                SHF_ASR: if (!dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: imm:NCC=4+1clk=2clk=8t (reg form via resolve, below)
+                SHF_LSL, SHF_LSR: if (!dec_use_reg_cnt) dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: imm:NCC=4+1clk=2clk=8t (reg form via resolve)
                 SHF_ROL, SHF_ROR: dec_internal_stall_ticks_fixed =
-                    dec_use_reg_cnt ? 8'd20 : 8'd12; // reg:NCC=8=20t; imm:NCC=6-3clk=3clk=12t
-                SHF_ROXL, SHF_ROXR: dec_internal_stall_ticks_fixed = 8'd36; // NCC=12 -3clk=9clk=36t (imm or reg, one row)
+                    dec_use_reg_cnt ? 8'd24 : 8'd16; // +1clk recal: reg:NCC=8+1clk=6clk=24t; imm:NCC=6+1clk=4clk=16t
+                SHF_ROXL, SHF_ROXR: dec_internal_stall_ticks_fixed = 8'd40; // +1clk recal: NCC=12+1clk=10clk=40t (imm or reg, one row)
                 default: ;
             endcase
         end
@@ -6805,10 +6822,10 @@ module eu_seq (
         // register-direct instruction (Stage D0's own established
         // pattern), each needing just N=(manual-3)*4 ticks.
         if (dec_valid) begin
-            if (dec_is_exg)          dec_internal_stall_ticks_fixed = 8'd4;  // EXG NCC=4-3clk=4t
-            else if (dec_is_move_ccr_r) dec_internal_stall_ticks_fixed = 8'd4;  // MOVE CCR,Dn NCC=4
-            else if (dec_is_move_sr_r)  dec_internal_stall_ticks_fixed = 8'd4;  // MOVE SR,Dn NCC=4
-            else if (dec_is_swap)    dec_internal_stall_ticks_fixed = 8'd4;  // SWAP Dn NCC=4
+            if (dec_is_exg)          dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: EXG NCC=4+1clk=8t
+            else if (dec_is_move_ccr_r) dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: MOVE CCR,Dn NCC=4+1clk=8t
+            else if (dec_is_move_sr_r)  dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: MOVE SR,Dn NCC=4+1clk=8t
+            else if (dec_is_swap)    dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: SWAP Dn NCC=4+1clk=8t
         end
         // Stage D5 (plan.md): the remaining small (-1/-3) register-only
         // negative-gap entries left after D2-D4 -- ABCD/SBCD Dn,Dn, EXT,
@@ -6826,19 +6843,19 @@ module eu_seq (
         // value alone is never enough on its own).
         if (dec_valid && dec_unit == UNIT_BCD && !dec_is_abcd_sbcd_mem) begin
             case (dec_bcd_op)
-                BCD_ADD: dec_internal_stall_ticks_fixed = 8'd4;  // ABCD Dn,Dn NCC=4
-                BCD_SUB: dec_internal_stall_ticks_fixed = 8'd4;  // SBCD Dn,Dn NCC=4
-                BCD_NEG: if (!dec_is_mem_rd) dec_internal_stall_ticks_fixed = 8'd12; // NBCD Dn NCC=6-3clk=3clk=12t
+                BCD_ADD: dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: ABCD Dn,Dn NCC=4+1clk=8t
+                BCD_SUB: dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: SBCD Dn,Dn NCC=4+1clk=8t
+                BCD_NEG: if (!dec_is_mem_rd) dec_internal_stall_ticks_fixed = 8'd16; // +1clk recal: NBCD Dn NCC=6+1clk=4clk=16t
                 default: ;
             endcase
         end
-        if (dec_valid && dec_sext)     dec_internal_stall_ticks_fixed = 8'd4;  // EXT.W/EXT.L/EXTB.L NCC=4
-        if (dec_valid && dec_is_scc_dn) dec_internal_stall_ticks_fixed = 8'd4; // Scc Dn NCC=4
+        if (dec_valid && dec_sext)     dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: EXT.W/EXT.L/EXTB.L NCC=4+1clk=8t
+        if (dec_valid && dec_is_scc_dn) dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: Scc Dn NCC=4+1clk=8t
         if (dec_valid && dec_is_tas && !dec_is_mem_rd)
-            dec_internal_stall_ticks_fixed = 8'd4;  // TAS Dn NCC=4
+            dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: TAS Dn NCC=4+1clk=8t
         if (dec_valid && dec_unit == UNIT_BIT && dec_bit_from_reg &&
             !dec_is_mem_rd && dec_writes_reg)
-            dec_internal_stall_ticks_fixed = 8'd12; // dynamic BCHG/BCLR/BSET Dn,Dn NCC=6-3clk=3clk=12t
+            dec_internal_stall_ticks_fixed = 8'd16; // +1clk recal: dynamic BCHG/BCLR/BSET Dn,Dn NCC=6+1clk=4clk=16t
         // Cycle-accuracy-closing plan.md, item 1: register-only "too fast"
         // regressions found via a fresh clock survey after Phase 163 Stage
         // 1's own ext_valid fix (documented there as "left for a possible
@@ -6856,7 +6873,7 @@ module eu_seq (
         // data point yet and is deliberately left untouched.
         if (dec_valid && dec_unit == UNIT_BIT && !dec_bit_from_reg &&
             !dec_is_mem_rd && dec_writes_reg)
-            dec_internal_stall_ticks_fixed = 8'd12; // BCHG/BCLR/BSET #(data),Dn NCC=6-3clk=3clk=12t
+            dec_internal_stall_ticks_fixed = 8'd16; // +1clk recal: BCHG/BCLR/BSET #(data),Dn NCC=6+1clk=4clk=16t
         // MOVEC Cr,Rn (read direction) -- decoded via a fixed opcode match
         // (16'h4E7A, mirrors the decode block's own comment: "Rc→Rn uses
         // dec_use_imm", so no dedicated dec_is_X flag exists for this
@@ -6864,15 +6881,15 @@ module eu_seq (
         // direction) -- same re-derive-the-raw-opcode-check precedent as
         // every fixed-encoding entry elsewhere in this project.
         if (dec_valid && instr_word == 16'h4E7A)
-            dec_internal_stall_ticks_fixed = 8'd12; // MOVEC Cr,Rn NCC=6-3clk=3clk=12t
+            dec_internal_stall_ticks_fixed = 8'd16; // +1clk recal: MOVEC Cr,Rn NCC=6+1clk=4clk=16t
         // PACK/UNPK Dy,Dx,#(data) -- register form only (dec_is_pack_mem=0
         // is the memory -(Ay),-(Ax) form, already excluded); BCD_EXT table
         // gives PACK NCC=6, UNPK NCC=8, matching this project's own
         // separately-measured -3/-5 clean-list gaps exactly.
         if (dec_valid && dec_is_pack && !dec_is_pack_mem)
-            dec_internal_stall_ticks_fixed = 8'd12; // PACK Dy,Dx,#(data) NCC=6-3clk=3clk=12t
+            dec_internal_stall_ticks_fixed = 8'd16; // +1clk recal: PACK Dy,Dx,#(data) NCC=6+1clk=4clk=16t
         if (dec_valid && dec_is_unpk && !dec_is_pack_mem)
-            dec_internal_stall_ticks_fixed = 8'd20; // UNPK Dy,Dx,#(data) NCC=8-3clk=5clk=20t
+            dec_internal_stall_ticks_fixed = 8'd24; // +1clk recal: UNPK Dy,Dx,#(data) NCC=8+1clk=6clk=24t
         // MOVE.B/W #(data),Dn -- re-derives the exact decode condition from
         // the MOVE/MOVEA block above (f_group∈{1,3} byte/word, dst=Dn,
         // f_mode=111/f_reg=100 immediate source) using only module-level
@@ -6888,7 +6905,7 @@ module eu_seq (
         // deliberately excluded here.
         if (dec_valid && f_move_sz != 2'b00 && f_move_dst_mode == 3'b000 &&
             f_mode == 3'b111 && f_reg == 3'b100)
-            dec_internal_stall_ticks_fixed = 8'd4; // MOVE.B/W #(data),Dn NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: MOVE.B/W #(data),Dn NCC=4+1clk=2clk=8t
         // Cycle-accuracy-closing plan.md, item 3: 7 more register-only
         // "too fast" gaps, all newly surfaced by item 3's own marker-free
         // watch_kind=1/2 redesign (previously hidden -- with a trailing
@@ -6898,18 +6915,18 @@ module eu_seq (
         // confirmed against the identical 3-clock/12-tick 1-word
         // register-direct baseline this whole whitelist already uses.
         if (dec_valid && dec_is_move_ccr_w)
-            dec_internal_stall_ticks_fixed = 8'd4; // MOVE Dn,CCR NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: MOVE Dn,CCR NCC=4+1clk=2clk=8t
         // MOVE USP,An (read direction) -- dec_reads_usp is unique to this
         // one decode site (the write direction, MOVE An,USP, uses the
         // separate dec_is_move_usp flag instead).
         if (dec_valid && dec_reads_usp)
-            dec_internal_stall_ticks_fixed = 8'd4; // MOVE USP,An NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: MOVE USP,An NCC=4+1clk=2clk=8t
         // MOVE An,USP (write direction) -- timing-gaps-largest-first
         // plan, Stage 6. Same NCC=4 as the read direction above, mirrors
         // its own precedent exactly; dec_is_move_usp is set only for this
         // one instruction shape (no taken/not-taken split to worry about).
         if (dec_valid && dec_is_move_usp)
-            dec_internal_stall_ticks_fixed = 8'd4; // MOVE An,USP NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: MOVE An,USP NCC=4+1clk=2clk=8t
         // TRAPV, not-trapping path only (V=0 -> falls through, no
         // exception) -- timing-gaps-largest-first plan, Stage 6. Uses a
         // raw opcode match (mirrors MOVEC's own precedent above) rather
@@ -6921,7 +6938,7 @@ module eu_seq (
         // correctly-measured cost) or for TRAPcc (a different opcode
         // pattern, unaffected by this instr_word-specific match).
         if (dec_valid && instr_word == 16'h4E76 && !flag_v)
-            dec_internal_stall_ticks_fixed = 8'd4; // TRAPV (no trap) NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: TRAPV (no trap) NCC=4+1clk=2clk=8t
         // ADDA.W/SUBA.W/CMPA.W, register-direct source (Dn or An) --
         // dec_sext_src is set only for f_mode==000/001 (register-direct
         // source, sign-extended 16->32) among all three ops' own shared
@@ -6933,20 +6950,20 @@ module eu_seq (
         // identical correction, matching this whole family's own uniform
         // NCC=4 row.
         if (dec_valid && dec_sext_src)
-            dec_internal_stall_ticks_fixed = 8'd4; // ADDA.W/SUBA.W/CMPA.W Rn,An NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: ADDA.W/SUBA.W/CMPA.W Rn,An NCC=4+1clk=2clk=8t
         // BTST #(data),Dn / BTST Dn,Dn -- dec_writes_reg=0 (BTST never
         // writes back) is what distinguishes this from the already-
         // whitelisted BCHG/BCLR/BSET entries above, which share the same
         // dec_unit==UNIT_BIT / dec_bit_from_reg split but always write.
         if (dec_valid && dec_unit == UNIT_BIT && dec_bit_op == BIT_TST && !dec_is_mem_rd)
-            dec_internal_stall_ticks_fixed = 8'd4; // BTST #(data)/Dn,Dn NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: BTST #(data)/Dn,Dn NCC=4+1clk=2clk=8t
         // BFTST Dn -- the one bit-field register-form op (3'b000) the
         // Stage D3 whitelist above deliberately left out, per its own
         // "3'b000 = BFTST: see marker-overcounting note above" comment;
         // item 3's own watch_kind=2 redesign finally gives it a clean
         // data point instead of a marker-inflated one.
         if (dec_valid && dec_is_bf && dec_bf_reg_ea && dec_bf_op == 3'b000)
-            dec_internal_stall_ticks_fixed = 8'd20; // BFTST Dn NCC=8-3clk=5clk=20t
+            dec_internal_stall_ticks_fixed = 8'd24; // +1clk recal: BFTST Dn NCC=8+1clk=6clk=24t
         // CHK Dn,Dn (no exception): re-enabled (Cycle-accuracy-closing
         // plan.md, Stage 2) now that `chk_trap` (below) is edge-triggered
         // via `chk_trap_fired_r` -- see that signal's own comment for the
@@ -6958,7 +6975,7 @@ module eu_seq (
         // #(data),Dn form (untested, different baseline); !dec_is_mem_rd
         // excludes CHK's own memory-source forms.
         if (dec_valid && dec_is_chk && !dec_use_imm && !dec_is_mem_rd)
-            dec_internal_stall_ticks_fixed = 8'd20; // CHK Dn,Dn NCC=8-3clk=5clk=20t
+            dec_internal_stall_ticks_fixed = 8'd24; // +1clk recal: CHK Dn,Dn NCC=8+1clk=6clk=24t
         // LEA (An),An -- f_mode==3'b010 is LEA's own plain register-
         // indirect form specifically (the ONE-word, no-extension-word
         // shape matching this whole whitelist's shared baseline); LEA's
@@ -6966,7 +6983,7 @@ module eu_seq (
         // an extension word and so have a structurally different natural
         // baseline already, not touched here.
         if (dec_valid && dec_is_lea && f_mode == 3'b010)
-            dec_internal_stall_ticks_fixed = 8'd4; // LEA (An),An NCC=4-3clk=1clk=4t
+            dec_internal_stall_ticks_fixed = 8'd8; // +1clk recal: LEA (An),An NCC=4+1clk=2clk=8t
         // ANDI/ORI/EORI #imm,SR or CCR (manual NCC=14, own natural
         // baseline measures 13 -- gap=-1) were investigated but are
         // DELIBERATELY NOT whitelisted here. A +4-tick entry gated on
@@ -7015,13 +7032,13 @@ module eu_seq (
         // not chased down as part of this stage.
         if (dec_valid && dec_is_bf && dec_bf_reg_ea) begin
             case (dec_bf_op)
-                3'b010:  dec_internal_stall_ticks_fixed = 8'd44; // BFCHG NCC=14 -3clk=11clk=44t
-                3'b100:  dec_internal_stall_ticks_fixed = 8'd44; // BFCLR NCC=14
-                3'b110:  dec_internal_stall_ticks_fixed = 8'd44; // BFSET NCC=14
-                3'b011:  dec_internal_stall_ticks_fixed = 8'd28; // BFEXTS NCC=10 -3clk=7clk=28t
-                3'b001:  dec_internal_stall_ticks_fixed = 8'd28; // BFEXTU NCC=10
-                3'b111:  dec_internal_stall_ticks_fixed = 8'd36; // BFINS NCC=12 -3clk=9clk=36t
-                3'b101:  dec_internal_stall_ticks_fixed = 8'd68; // BFFFO NCC=20 -3clk=17clk=68t
+                3'b010:  dec_internal_stall_ticks_fixed = 8'd48; // +1clk recal: BFCHG NCC=14+1clk=12clk=48t
+                3'b100:  dec_internal_stall_ticks_fixed = 8'd48; // +1clk recal: BFCLR NCC=14+1clk=12clk=48t
+                3'b110:  dec_internal_stall_ticks_fixed = 8'd48; // +1clk recal: BFSET NCC=14+1clk=12clk=48t
+                3'b011:  dec_internal_stall_ticks_fixed = 8'd32; // +1clk recal: BFEXTS NCC=10+1clk=8clk=32t
+                3'b001:  dec_internal_stall_ticks_fixed = 8'd32; // +1clk recal: BFEXTU NCC=10+1clk=8clk=32t
+                3'b111:  dec_internal_stall_ticks_fixed = 8'd40; // +1clk recal: BFINS NCC=12+1clk=10clk=40t
+                3'b101:  dec_internal_stall_ticks_fixed = 8'd72; // +1clk recal: BFFFO NCC=20+1clk=18clk=72t
                 default: ; // 3'b000 = BFTST: see marker-overcounting note above
             endcase
         end
@@ -7046,7 +7063,7 @@ module eu_seq (
         // must not be disturbed).
         if (dec_valid && dec_is_dbcc &&
             eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c))
-            dec_internal_stall_ticks_fixed = 8'd20; // DBcc(cc=True) NCC=8-3clk=5clk=20t
+            dec_internal_stall_ticks_fixed = 8'd24; // +1clk recal: DBcc(cc=True) NCC=8+1clk=6clk=24t
         // Bcc not-taken (condition evaluates FALSE -> fall through, no
         // branch) -- timing-gaps-largest-first plan, Stage 3. Same
         // "internal microcode ceiling" shape as DBcc(cc=True) above,
@@ -7071,9 +7088,9 @@ module eu_seq (
         if (dec_valid && dec_is_branch &&
             !eval_cc(dec_branch_cond, flag_n, flag_z, flag_v, flag_c)) begin
             if (f_disp8 != 8'h00 && f_disp8 != 8'hFF)
-                dec_internal_stall_ticks_fixed = 8'd4;  // Bcc.B not-taken NCC=4-3clk=1clk=4t
+                dec_internal_stall_ticks_fixed = 8'd8;  // +1clk recal: Bcc.B not-taken NCC=4+1clk=2clk=8t
             else if (f_disp8 == 8'h00)
-                dec_internal_stall_ticks_fixed = 8'd12; // Bcc.W not-taken NCC=6-3clk=3clk=12t
+                dec_internal_stall_ticks_fixed = 8'd16; // +1clk recal: Bcc.W not-taken NCC=6+1clk=4clk=16t
         end
     end
 
