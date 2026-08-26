@@ -2965,3 +2965,82 @@ now has 110 entries (was 119: +46 from Phase 180's own recalibration
 tagging, -9 from this phase's removals, net effect of both phases
 combined). Documentation-only change -- no RTL or testbench files
 touched, `git diff --stat rtl/ tb/` empty, `make test` unaffected.
+
+## Phase 182 -- "RMW-to-memory dispatch floor" full-chain investigation (Stage 3's deferred avenue, investigation only, no RTL change)
+
+Following up the explanation given for the RMW-to-memory dispatch
+floor (`a3_add_dn_ea`/`a3_addq_mem`/etc, gap=+2), the user asked to
+investigate the one avenue explicitly left untried in the original
+bus-cycle round-trip overhead plan's own Stage 3 ("S7 completion-
+dispatch overlap... targets the ~2-tick idle-to-S0 dispatch gap for
+back-to-back cycles specifically... deferred as highest risk").
+
+Traced `add.l d1,(a0)` with temporary full-chain instrumentation
+(`eu_seq`'s `mem_req`/`mem_ack`/`mem_rmw_run_r`, `biu_cache_if`'s own
+`state`/`eu_req`/`eu_ack`, `biu_sizing_fsm`'s own `sf`/`cyc_req`/
+`eu_ack`, `biu_cycle_gen`'s own `state`/`eu_req`, `biu_arbiter`'s
+`grant_eu` -- all removed before finalizing, `git diff --stat
+tb/timing_tb.sv` empty). Confirmed via the full chain (not just
+`biu_cycle_gen` in isolation, which the original single-instruction
+explanation was based on) that Tracks A/C/D's own combinational fast
+paths already fire essentially back-to-back through the whole EU ->
+`biu_cache_if` -> `biu_sizing_fsm` -> `biu_cycle_gen` pipeline: the
+read's own ack (tick 154) triggers `eu_seq`'s `mem_rmw_run_r` flip
+the very next tick (155, presenting the write's own address/data/
+direction combinationally the same tick), `biu_cache_if` sees this
+live and is already back at `CI_IDLE` with the write request visible
+that same tick (155), registers into `CI_WRITE` the tick after (156,
+a single, unavoidable synchronous register-update delay), and
+`biu_sizing_fsm` forwards `cyc_req=1` to `biu_cycle_gen` the SAME
+tick (156) -- meaning `biu_cycle_gen`'s own `eu_req` input becomes
+valid starting tick 156.
+
+**The critical finding**: `biu_cycle_gen`'s own `state` register is
+ALREADY sitting in `ST_IDLE` starting that exact same tick (156) --
+the dispatch-chain latency and `ST_IDLE`'s own mandatory 2-tick
+minimum hold (Phase 160's `state_adv` pacing) land on literally the
+SAME 2-tick window, with zero slack between them. `eu_req` isn't
+"arriving late while `biu_cycle_gen` waits" -- it's already valid on
+`ST_IDLE`'s very first tick, and `biu_cycle_gen` still can't dispatch
+`ST_WRITE_S0` until 158 purely because `state_adv` requires `ST_IDLE`
+to hold for its own full 2 ticks before any transition-decision is
+evaluated, exactly the same structural mechanism Phase 163 item 4
+already investigated (from a different entry point, the `ext_count==
+2` IFU-dispatch case) and found not safely bypassable without
+breaking the uniform synchronous-advance discipline the whole FSM
+depends on ("every other S-state-pair transition [is] state_adv-
+gated... internally inconsistent" to special-case just one).
+
+This is a genuine, independent re-confirmation of item 4's own
+conclusion from a completely different transition (EU-driven RMW
+read-to-write, not IFU-driven prefetch dispatch) -- not just repeating
+the same reasoning, but tracing a different concrete scenario and
+landing on the identical structural bottleneck. `ST_READ_S7`'s own
+transition-decision (evaluated using tick-155's inputs, where
+`eu_req` is still 0) genuinely cannot jump directly to `ST_WRITE_S0`
+either, since the request isn't valid until one tick later than S7's
+own decision point -- ruling out the specific "jump straight from S7
+to the next cycle's S0" mechanism Stage 3 originally proposed, for
+this transition at least.
+
+Also confirmed, for completeness, that the OTHER 8-tick gap within
+the measured window (opcode-fetch-ack to data-read-dispatch,
+`eu.mem_req` staying 0 through tick 141 and only asserting at 142)
+is a fundamentally different, non-comparable case: it has a genuine
+decode-dependent latency (the data-read request can't be formed until
+the just-fetched opcode has actually been decoded), unlike the
+read-to-write transition where the write's own address/direction are
+already fully known the instant the read was dispatched.
+
+**Conclusion: no RTL change** -- the remaining ~4-tick (154->158)
+read-to-write dispatch gap is genuinely irreducible with this
+project's own single-state-register, uniformly-paced FSM design:
+~1 tick of unavoidable `eu_seq` registration, ~1 tick of unavoidable
+`biu_cache_if`/`biu_sizing_fsm` dispatch-chain registration (both
+already at their fast-path minimum per Tracks A/C/D), and 2 ticks of
+`ST_IDLE`'s own mandatory hold (confirmed, independently, not safely
+removable). Given `biu_cycle_gen.sv` remains the single highest-
+blast-radius module in the project, and this investigation found no
+genuine slack to exploit (not just insufficient confidence to
+proceed), no RTL was touched. `make test` 36/36 sanity check
+(unaffected -- no RTL change this phase).
