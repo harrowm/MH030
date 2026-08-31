@@ -3909,3 +3909,79 @@ code paths, not a direct correctness check on the new instructions
 themselves). **Closes Stage 7.** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 7-stage backlog. Stage 8 (instruction-fetch FC hardcoding) is next.
+
+## Phase 193 (open-items backlog Stage 8): instruction-fetch FC hardcoding
+
+`biu_cycle_gen.sv`'s ordinary instruction-fetch dispatch (`grant_ifu`
+branch) hardcoded `cyc_fc=3'b110` (Supervisor Program Space)
+unconditionally for every instruction fetch, regardless of the CPU's
+real current mode -- already flagged by Phase 162 Stage 2 as blocking
+the I-cache's own FC-aware tag from ever discriminating user vs.
+supervisor fetches, and as a "deeper, chip-wide, out-of-scope gap" at
+the time. Confirmed via direct code reading before touching anything
+that FC[1:0] is a constant `10` for program space regardless of mode
+(010 user / 110 supervisor -- only FC[2], the S-bit, ever toggles), so
+the fix is purely "thread the live S-bit through," no other FC bits
+need to vary.
+
+Found, via a full grep for every hardcoded `3'b110` site touching
+instruction fetches (not just the one the plan named), that this was
+actually **three** separate hardcodes, not one: (1) `biu_cycle_gen.sv`'s
+own `grant_ifu` dispatch (had no `ifu_fc` input port at all -- the
+value was a bare literal with no way to override it externally); (2)
+`m68030_biu.sv`'s own `biu_icache_if` instantiation, feeding a literal
+`3'b110` into that module's `ifu_fc` input (used for both the cache-tag
+FC bit and MMU-translation FC -- the Phase 162 Stage 2 fix made this
+input *exist*, but never made it *live*); (3) `m68030_biu.sv`'s own
+`cg_burst_fc_mux`, whose own icache-burst-request fallback branch
+independently hardcoded the same literal (no `ic_burst_fc` output
+exists on `biu_icache_if.sv` to carry a per-request value, so this is
+governed by the same caller-side constant). All three needed fixing
+together for the fix to be complete -- fixing only #1 would have left
+the I-cache's own tag/MMU-FC and its burst path still supervisor-only.
+
+**Plumbing** (mirrors `eu_seq.sv`'s own already-established `mem_fc =
+{sr_live[13], 1'b0, 1'b1}` convention for ordinary data accesses,
+just with FC[1:0]=`10` for program space instead of `01` for data
+space): `m68030_biu.sv` gained a new `s_bit` input port and a single
+`ifu_fc_computed = {s_bit, 2'b10}` wire, consumed at all 3 sites above
+(`biu_cycle_gen.sv` needed a matching new `ifu_fc` input port to
+receive it). `m68030_top.sv` wires `.s_bit(eu_sr_out[13])` into
+`u_biu` -- `eu_sr_out` (the EU's own live SR, "read by exception ctrl,
+BIU FC" per `m68030_eu.sv`'s own pre-existing port comment, which had
+never actually been wired to the BIU for that second stated purpose
+until now) was already available at the top level for exception fault
+capture, so no new cross-module signal needed inventing. Blast radius
+confirmed small before starting: `grep` showed `m68030_biu`/
+`biu_cycle_gen` are each only ever instantiated in one place inside
+`rtl/` (`m68030_top.sv` and `m68030_biu.sv` respectively) plus one
+direct testbench instantiation (`tb/biu_int_tb.sv`, tied off to
+`s_bit=1'b1`, matching this project's own established default-
+supervisor testbench convention) -- unlike Phase 158 Stage 7's CIIN/
+CIOUT addition, which touched 12 testbenches via `m68030_top`'s own
+external port list, this stays internal to `m68030_biu.sv`'s own
+already-narrow instantiator set.
+
+Updated `biu_icache_if.sv`'s own now-stale header comments (both the
+`ic_burst_req` port comment and the `xl_fc` assignment comment), which
+had explicitly documented this exact gap as "a separate, deeper,
+chip-wide undertaking... zero such input exists anywhere," to instead
+record that Stage 8 closed it.
+
+Predicted, before running anything, that this fix would be functionally
+**inert for the entire Harte corpus**: Harte never sets `TC.E=1` (no
+MMU translation ever happens) and never enables the I-cache (`CACR`
+stays 0 unless explicitly poked, which Harte doesn't do) -- so FC
+itself has zero observable consequence for any Harte test's own final-
+state comparison, even though ~4.3% of tests do genuinely clear S
+during execution (Phase 112's own finding). Confirmed exactly as
+predicted: the full sweep came back bit-identical to baseline.
+
+Results: `make test` 36/36 clean on the first attempt (no missed port
+tie-off), `cosim_grp` 8/8, `cosim_memind` 13/13, full 124-suite Harte
+sweep (mandatory -- chip-wide blast radius, the highest-value Harte
+gate in this whole backlog per the plan's own framing) -- PASS 702142,
+FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline, zero regressions. **Closes Stage 8.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+6-stage backlog. Stage 9 (CAS/CAS2 real bus-level lock) is next.

@@ -66,24 +66,16 @@ module biu_icache_if (
     input  logic        cg_berr,
 
     // Burst-linefill request, muxed by m68030_biu.sv into biu_cycle_gen's
-    // own eu_burst_req/addr/fc port. FC is fixed at the caller (Supervisor
-    // Program Space, matching cg_addr's own ordinary-read FC convention).
-    // Phase 158 Stage 2 finding (confirmed, out of scope for this stage):
-    // biu_cycle_gen.sv's own ordinary ifu_req path (line ~666) ALSO
-    // hardcodes cyc_fc=3'b110 for every instruction fetch, unconditionally
-    // -- real 68030 silicon uses FC=010 (User Program) vs 110 (Supervisor
-    // Program) depending on the CPU's actual current mode, but nothing in
-    // this project's own instruction-fetch pipeline threads the S-bit that
-    // far today. This module's own new ifu_fc input (below) is wired to
-    // the SAME still-hardcoded 3'b110 constant for now, consolidating what
-    // were two independent hardcoded-FC sites (this file's own former
-    // xl_fc literal, fixed this stage, plus biu_cycle_gen.sv's own) into
-    // one clearly-flagged constant -- genuine dynamic S-bit-awareness for
-    // instruction fetches is a separate, deeper, chip-wide undertaking
-    // (would need to thread supervisor/user mode into the whole
-    // instruction-fetch address/FC path, currently zero such input exists
-    // anywhere in it), documented in plan.md/CLAUDE.md as a confirmed,
-    // real, but out-of-scope gap for a future phase.
+    // own eu_burst_req/addr/fc port. FC now comes from m68030_biu.sv's
+    // own live ifu_fc_computed wire (open-items backlog Stage 8,
+    // plan.md), fed through this module's ifu_fc input below -- fixed
+    // the chip-wide gap this comment used to document (Phase 158 Stage 2
+    // found it, deferred it as "a separate, deeper, chip-wide
+    // undertaking"; Stage 8 threads the real S-bit, from eu_sr_out[13]
+    // at m68030_top.sv, all the way down through m68030_biu.sv's own new
+    // s_bit port into both this module's cache-tag/MMU-translation FC
+    // and biu_cycle_gen.sv's own ordinary ifu_req dispatch, closing all
+    // 3 of the hardcoded-3'b110 sites this finding originally covered).
     output logic         ic_burst_req,
     output logic [31:0]  ic_burst_addr,
     input  logic [31:0]  ic_burst_rdata0,
@@ -599,11 +591,9 @@ module biu_icache_if (
         // Phase 150 (plan.md): MMU translation request, defaults
         xl_va  = fill_base_r;
         // Phase 158 Stage 2: was a separate hardcoded 3'b110 literal here;
-        // now driven from the new ifu_fc input instead, consolidating to a
-        // single source of truth with the fetch path's own FC (still tied
-        // to the same 3'b110 constant at the call site today — see the
-        // ic_burst_req port comment above for the full "genuine dynamic
-        // S-bit-awareness is a separate, deeper, out-of-scope gap" writeup).
+        // now driven from the ifu_fc input, which open-items backlog
+        // Stage 8 (plan.md) made genuinely live (varies with the real
+        // S-bit) — see the ic_burst_req port comment above.
         xl_fc  = ifu_fc;
         xl_rw  = 1'b1;     // instruction fetches are always reads
         xl_req = 1'b0;

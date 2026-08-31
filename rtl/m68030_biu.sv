@@ -189,6 +189,13 @@ module m68030_biu #(
     output logic [31:0] ifu_rdata,
     output logic        ifu_ack,
     output logic        ifu_berr,
+    // open-items backlog Stage 8 (plan.md): live S-bit for instruction-
+    // fetch FC (010 user / 110 supervisor program space) -- was
+    // hardcoded 3'b110 everywhere below, which blocked the I-cache's
+    // own FC-aware tag (Phase 162 Stage 2) from ever actually
+    // discriminating user vs. supervisor fetches, and gave every
+    // instruction-fetch MMU translation the wrong FC under user mode.
+    input  logic        s_bit,
 
     // -----------------------------------------------------------------------
     // Control registers (written by EU via MOVEC)
@@ -789,22 +796,30 @@ module m68030_biu #(
     // not bypass it) -- u_arb's own eu_req input is fed sf_cyc_req|
     // dc_burst_req (see its own instantiation above) so grant_eu correctly
     // reflects either downstream request path.
+    // open-items backlog Stage 8 (plan.md): live S-bit-derived FC for
+    // instruction fetches (010 user / 110 supervisor program space --
+    // FC[1:0] is always "10" for program space, only FC[2]=S toggles).
+    // Replaces the 3 separate hardcoded 3'b110 sites this file and
+    // biu_cycle_gen.sv used to have for the ordinary ifu_req path, the
+    // I-cache's own cache-tag/MMU-translation FC, and the I-cache burst
+    // FC fallback.
+    wire [2:0]   ifu_fc_computed = {s_bit, 2'b10};
+
     wire         cg_burst_req_mux  = eu_burst_req | (dc_burst_req && grant_eu) | (ic_burst_req && grant_ifu);
     wire [31:0]  cg_burst_addr_mux = eu_burst_req ? eu_burst_addr :
                                      (dc_burst_req && grant_eu) ? dc_burst_addr : ic_burst_addr;
     wire [2:0]   cg_burst_fc_mux   = eu_burst_req ? eu_burst_fc :
-                                     (dc_burst_req && grant_eu) ? dc_burst_fc : 3'b110; // Supervisor Program Space, matches ordinary ifu_req's own fixed FC
+                                     (dc_burst_req && grant_eu) ? dc_burst_fc : ifu_fc_computed;
 
     biu_icache_if u_icache (
         .clk_4x         (clk_4x),
         .rst_n          (rst_n),
         .ifu_addr       (ifu_addr),
-        // Phase 158 Stage 2: tied to the same hardcoded Supervisor Program
-        // Space constant biu_cycle_gen.sv's own ordinary ifu_req path uses
-        // (3'b110) -- see biu_icache_if.sv's own header comment for why
-        // genuine dynamic S-bit-awareness for instruction fetches is a
-        // separate, deeper, out-of-scope gap, not fixed this stage.
-        .ifu_fc         (3'b110),
+        // open-items backlog Stage 8 (plan.md): now genuinely live,
+        // varying with the CPU's real S-bit -- was hardcoded 3'b110
+        // (see biu_icache_if.sv's own header comment, now stale, for
+        // the original Phase 158 Stage 2 deferral this closes).
+        .ifu_fc         (ifu_fc_computed),
         .ifu_req        (ifu_req),
         .ifu_rdata      (ifu_rdata),
         .ifu_ack        (ifu_ack),
@@ -954,6 +969,7 @@ module m68030_biu #(
         .eu_retry        (eu_retry),
         // IFU instruction prefetch (now behind biu_icache_if, see u_icache above)
         .ifu_addr        (ic_cg_addr),
+        .ifu_fc          (ifu_fc_computed),
         .ifu_req         (ic_cg_req),
         .ifu_rdata       (ic_cg_rdata),
         .ifu_ack         (ic_cg_ack),

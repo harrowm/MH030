@@ -66,6 +66,10 @@ module biu_cycle_gen #(
 
     // Internal — Instruction Fetch Unit
     input  logic [31:0] ifu_addr,
+    input  logic [2:0]  ifu_fc,    // open-items backlog Stage 8 (plan.md):
+                                    // live S-bit-derived FC (010 user /
+                                    // 110 supervisor program space),
+                                    // replacing the old hardcoded 3'b110
     input  logic        ifu_req,
     output logic [31:0] ifu_rdata,
     output logic        ifu_ack,
@@ -743,7 +747,7 @@ module biu_cycle_gen #(
             cyc_rw    = is_rmw_write ? 1'b0 : eu_rw;
             cyc_wdata = eu_wdata;
         end else if (grant_ifu) begin
-            cyc_addr = ifu_addr; cyc_fc = 3'b110; cyc_siz = 2'b10;
+            cyc_addr = ifu_addr; cyc_fc = ifu_fc; cyc_siz = 2'b10;
         end
     end
 

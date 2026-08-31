@@ -213,6 +213,9 @@ module biu_int_tb;
         .ifu_rdata       (ifu_rdata),
         .ifu_ack         (ifu_ack),
         .ifu_berr        (ifu_berr),
+        .s_bit           (1'b1),       // supervisor (matches this project's
+                                        // established default-supervisor
+                                        // testbench convention)
         .cacr            (32'h0),      // caches disabled
         .caar            (32'h0),
         .tc              (32'h0),      // MMU disabled

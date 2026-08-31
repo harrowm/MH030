@@ -804,6 +804,9 @@ module m68030_top #(
         .ifu_rdata       (ifu_rdata),
         .ifu_ack         (ifu_ack),
         .ifu_berr        (ifu_berr),
+        // open-items backlog Stage 8 (plan.md): live S-bit for
+        // instruction-fetch FC (010 user / 110 supervisor program space)
+        .s_bit           (eu_sr_out[13]),
         // Control registers (MMU/cache disabled)
         .cacr            (eu_cacr_out),
         .caar            (eu_caar_out),
