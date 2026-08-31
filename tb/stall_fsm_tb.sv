@@ -2383,51 +2383,102 @@ module stall_fsm_tb;
         // produce a wrong sum, not an obviously-broken value or a hang,
         // so only an exact-value check actually proves this.
         //
-        // Open-items backlog Stage 2 (plan.md) -- CONFIRMED REAL FINDING,
-        // DELIBERATELY NOT FIXED: the MOVEQ opcode below is 0x7201, which
-        // real MOVEQ encoding (0111 rrr 0 dddddddd) decodes as "MOVEQ
-        // #1,D1", NOT "MOVEQ #1,D7" as this comment (and every phase since
-        // 135) assumed. Confirmed via direct trace: D1 becomes 1, D7 stays
-        // 0, so the following MOVEC D7,CACR writes CACR=0 -- meaning this
-        // test has NEVER actually enabled the I-cache since it was
-        // written, despite its own name/purpose, despite its own checks
-        // passing this whole time (the DBF loop's own semantic
-        // correctness doesn't depend on caching actually happening, only
-        // on the hazard resolving, so a real-bus-cycle fetch every pass
-        // produces the identical D1/D2 checksum). Found while
-        // investigating the separate Phase 155 "PLOAD/CACR/IC_BURST0
-        // hang" finding -- CACR reading disabled was real, not a symptom
-        // of anything clearing it, just of it never having been set
-        // correctly in the first place.
+        // Open-items backlog Stages 2-3 (plan.md): the MOVEQ opcode below
+        // was 0x7201, which real MOVEQ encoding (0111 rrr 0 dddddddd)
+        // decodes as "MOVEQ #1,D1", NOT "MOVEQ #1,D7" as this comment
+        // (and every phase since 135) assumed. Confirmed via direct
+        // trace: D1 became 1, D7 stayed 0, so the following MOVEC D7,CACR
+        // wrote CACR=0 -- meaning this test never actually enabled the
+        // I-cache, despite its own name/purpose, despite its own checks
+        // passing the whole time (the DBF loop's own semantic correctness
+        // doesn't depend on caching actually happening, only on the
+        // hazard resolving, so a real-bus-cycle fetch every pass produces
+        // the identical D1/D2 checksum). Found while investigating the
+        // separate Phase 155 "PLOAD/CACR/IC_BURST0 hang" finding.
         //
-        // Fixing the opcode (0x7201 -> 0x7E01) genuinely enables the
-        // I-cache here for the first time -- and doing so exposes a
-        // SEPARATE, deeper, real bug in the downstream "Indexed-EA-no-
-        // extra-read" test: with caching genuinely active, that test's
-        // own setup instructions at 0x2DE4+ fetch as garbage (instr_word
-        // reading 0x4E71/0x0000 instead of the real CLR_L_D6/
-        // MOVEA_L_IMM_A0/etc. opcodes actually in ROM there), traced to
-        // biu_icache_if.sv's own I-cache line at idx=0xE/tag=0x2D showing
-        // valid_i=1 with a matching tag but wrong content, then
-        // transitioning through a fresh IC_SINGLE_0 miss-fill mid-
-        // sequence -- consistent with a fill for this line having been
-        // marked valid before genuinely completing (plausibly related to
-        // Phase 129's own "the fill is still allowed to complete... but
-        // IC_DONE now silently drops the ack" reasoning not fully
-        // covering a partially-abandoned multi-word IC_SINGLE_0..3
-        // sequence specifically), but not yet conclusively root-caused.
-        // This is a real, previously-undiscovered I-cache correctness gap
-        // -- invisible until now because NOTHING in this entire test file
-        // had ever successfully enabled the I-cache before. Deliberately
-        // left the opcode as its original (wrong-but-stable) 0x7201
-        // rather than risk landing a half-diagnosed fix to something this
-        // deep -- both findings need their own dedicated investigation.
-        rom[16'h2DA0/4] = {16'h7201, 16'h4E7B};  // MOVEQ #1,D7(intended)/D1(actual) ; MOVEC D7,CACR
+        // Fixed to 0x7E01 (reg=111=D7) -- Stage 2 first found that fixing
+        // this exposed what LOOKED LIKE a deep I-cache correctness bug in
+        // the downstream "Indexed-EA-no-extra-read" test (instr_word
+        // reading 0x4E71/0x0000 instead of the real opcodes actually in
+        // ROM at 0x2DE4+). Stage 3's own deeper trace (ext_d_in -- the
+        // RAW combinational rom[] read itself, before any cache logic --
+        // showing the SAME wrong data) proved this was never an RTL bug
+        // at all: RAW-hazard-with-Ihit's own 10-pass tight DBF loop takes
+        // many real clk_4x ticks, giving the I-cache's now-genuinely-
+        // active speculative readahead plenty of time to race into idx=
+        // 0xE (0x2DE0-0x2DEF) BEFORE "CLR-non-indexed-no-extra-read"'s
+        // and "Indexed-EA-no-extra-read"'s own rom[] writes (originally
+        // positioned just before each test's own check block, per this
+        // file's long-standing per-test-interleaved convention) had
+        // executed in SV program order -- exactly the "ROM write issued
+        // after simulated time already passed that address" class this
+        // project has hit repeatedly (I-4/I-5 Phase 131, T4c/T4d Phase
+        // 126, this session's own Stage 1 finding for cache_tb.sv), just
+        // newly exposed here via genuine readahead instead of direct PC
+        // execution. Fixed by moving both tests' own rom[] content up
+        // front (see below), before RAW-hazard-with-Ihit's own loop even
+        // starts -- a testbench-structural fix, not an RTL fix.
+        rom[16'h2DA0/4] = {16'h7E01, 16'h4E7B};  // MOVEQ #1,D7 ; MOVEC D7,CACR
         rom[16'h2DA4/4] = {16'h7002, CLR_L_D1};  // (CACR ext: icache_en=1) ; CLR.L D1
         rom[16'h2DA8/4] = {CLR_L_D2, 16'h7009};  // CLR.L D2 ; MOVEQ #9,D0 (10 passes)
         rom[16'h2DAC/4] = {ADDI_L_D1, 16'h0000}; // loop: ADDI.L #1,D1
         rom[16'h2DB0/4] = {16'h0001, ADD_L_D1_D2};
         rom[16'h2DB4/4] = {DBF_D0, 16'hFFF6};    // DBF D0,-10 (back to ADDI.L D1)
+
+        // Open-items backlog Stage 3 (plan.md): CLR-non-indexed-no-extra-
+        // read's and Indexed-EA-no-extra-read's own rom[] content
+        // (originally written just before each test's own "begin...end"
+        // check block, AFTER RAW-hazard-with-Ihit's own check code runs
+        // and consumes real simulated time) is written HERE instead --
+        // up front, before RAW-hazard-with-Ihit's own 10-pass DBF loop
+        // even starts running. Root-caused via direct trace: RAW-hazard-
+        // with-Ihit's own tight loop takes many real clk_4x ticks, giving
+        // the I-cache's genuine speculative readahead (now actually
+        // active for the first time in this file, per the MOVEQ opcode
+        // fix above) plenty of time to race ahead into idx=0xE (0x2DE0-
+        // 0x2DEF, the line spanning both tests' own tail/head) BEFORE
+        // these two tests' own rom[] writes had executed in SV program
+        // order -- confirmed via ext_d_in (the raw combinational rom[]
+        // read) itself showing wrong data for 0x2DE4/E8/EC, not a
+        // caching/RTL bug at all. Exactly the same "ROM write issued
+        // after simulated time already passed that address" class this
+        // project has hit repeatedly (I-4/I-5 Phase 131, T4c/T4d Phase
+        // 126, this session's own Stage 1 finding for cache_tb.sv) --
+        // just newly exposed here via genuine readahead instead of
+        // direct PC execution. This is a testbench-structural fix, not
+        // an RTL fix -- no RTL changed this stage.
+        rom[16'h2DC0/4] = {CLR_L_D6, CLR_L_D7};        // pre-clear both markers
+        rom[16'h2DC4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2DC8/4] = {16'h3B44, MOVEA_L_IMM_A1};
+        rom[16'h2DCC/4] = {16'h0000, 16'h3B50};
+        rom[16'h2DD0/4] = {CLR_L_PREDEC_A0, MOVE_L_IMM_D6};  // CLR.L -(A0): A0=$3B40, EA=$3B40
+        rom[16'h2DD4/4] = {16'hAAAA, 16'h5555};              // D6 marker value
+        rom[16'h2DD8/4] = {CLR_L_D16_A1, 16'h0010};          // CLR.L ($10,A1): EA=$3B60
+        rom[16'h2DDC/4] = {MOVE_L_IMM_D7, 16'hBBBB};
+        rom[16'h2DE0/4] = {16'h6666, NOP_OP};                // D7 marker value
+        rom[16'h2DE4/4] = {CLR_L_D6, CLR_L_D7};              // pre-clear both markers
+        rom[16'h2DE8/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2DEC/4] = {16'h3B70, MOVEA_L_IMM_A1};
+        rom[16'h2DF0/4] = {16'h0000, 16'h3B90};
+        rom[16'h2DF4/4] = {MOVE_L_IMM_D1, 16'h0000};
+        rom[16'h2DF8/4] = {16'h0004, MOVE_L_IMM_D2};
+        rom[16'h2DFC/4] = {16'h0000, 16'h0004};
+        rom[16'h2E00/4] = {CLR_L_IDX_A0, 16'h1808};          // CLR.L (8,A0,D1.L): EA=$3B70+$4+$8=$3B7C
+        rom[16'h2E04/4] = {MOVE_L_IMM_D6, 16'hAAAA};
+        rom[16'h2E08/4] = {16'h5555, MOVE_SR_IDX_A1};        // MOVE.W SR,(8,A1,D2.L): EA=$3B90+$4+$8=$3B9C
+        rom[16'h2E0C/4] = {16'h2808, MOVE_L_IMM_D7};
+        rom[16'h2E10/4] = {16'hBBBB, 16'h6666};
+        // PLOAD-ext-count's own rom[] content, same reason as above --
+        // moved up front to avoid the identical readahead-races-ahead
+        // race once tried too.
+        rom[16'h2E14/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h2E18/4] = {16'h3FA0, NOP_OP};
+        rom[16'h3FA0/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3FA4/4] = {16'h2000, 16'hF010};          // A0=0x2000 ; PLOAD (A0) opcode
+        rom[16'h3FA8/4] = {16'h6200, MOVE_L_IMM_D6};      // PLOAD ext word (mmu_op_type=011) ; MOVE.L #imm,D6
+        rom[16'h3FAC/4] = {16'h0000, 16'h5678};
+        rom[16'h3FB0/4] = {BRA_SELF, NOP_OP};
+
         begin
             int t;
             for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DA0; t++)
@@ -2464,15 +2515,8 @@ module stall_fsm_tb;
         // base-register mode (-(An), no extension word) and a
         // displacement mode ((d16,An), one extension word).
         // -------------------------------------------------------------
-        rom[16'h2DC0/4] = {CLR_L_D6, CLR_L_D7};        // pre-clear both markers
-        rom[16'h2DC4/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h2DC8/4] = {16'h3B44, MOVEA_L_IMM_A1};
-        rom[16'h2DCC/4] = {16'h0000, 16'h3B50};
-        rom[16'h2DD0/4] = {CLR_L_PREDEC_A0, MOVE_L_IMM_D6};  // CLR.L -(A0): A0=$3B40, EA=$3B40
-        rom[16'h2DD4/4] = {16'hAAAA, 16'h5555};              // D6 marker value
-        rom[16'h2DD8/4] = {CLR_L_D16_A1, 16'h0010};          // CLR.L ($10,A1): EA=$3B60
-        rom[16'h2DDC/4] = {MOVE_L_IMM_D7, 16'hBBBB};
-        rom[16'h2DE0/4] = {16'h6666, NOP_OP};                // D7 marker value
+        // (rom[] content for this test moved up front, alongside RAW-
+        // hazard-with-Ihit's own setup -- see the comment there.)
         begin
             int t, c0, c1, c3;
             for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DC0; t++)
@@ -2508,18 +2552,8 @@ module stall_fsm_tb;
         // ex_an_base's own mux routes An through rd_a specifically for
         // indexed writes, freeing rd_b for Xn without an RMW read.
         // -------------------------------------------------------------
-        rom[16'h2DE4/4] = {CLR_L_D6, CLR_L_D7};              // pre-clear both markers
-        rom[16'h2DE8/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h2DEC/4] = {16'h3B70, MOVEA_L_IMM_A1};
-        rom[16'h2DF0/4] = {16'h0000, 16'h3B90};
-        rom[16'h2DF4/4] = {MOVE_L_IMM_D1, 16'h0000};
-        rom[16'h2DF8/4] = {16'h0004, MOVE_L_IMM_D2};
-        rom[16'h2DFC/4] = {16'h0000, 16'h0004};
-        rom[16'h2E00/4] = {CLR_L_IDX_A0, 16'h1808};          // CLR.L (8,A0,D1.L): EA=$3B70+$4+$8=$3B7C
-        rom[16'h2E04/4] = {MOVE_L_IMM_D6, 16'hAAAA};
-        rom[16'h2E08/4] = {16'h5555, MOVE_SR_IDX_A1};        // MOVE.W SR,(8,A1,D2.L): EA=$3B90+$4+$8=$3B9C
-        rom[16'h2E0C/4] = {16'h2808, MOVE_L_IMM_D7};
-        rom[16'h2E10/4] = {16'hBBBB, 16'h6666};
+        // (rom[] content for this test moved up front, alongside RAW-
+        // hazard-with-Ihit's own setup -- see the comment there.)
         begin
             int t, c0, c1, c2;
             for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2DE4; t++)
@@ -2583,14 +2617,9 @@ module stall_fsm_tb;
         // "RAW-hazard-with-Ihit" (above) supposedly enabling it: that
         // test's own MOVEQ opcode was wrong (0x7201 = MOVEQ #1,D1, not
         // D7) -- fixed separately, in place, above.
+        // (rom[] content for this test moved up front, alongside
+        // Indexed-EA-no-extra-read's own setup -- see the comment there.)
         // -------------------------------------------------------------
-        rom[16'h2E14/4] = {JMP_ABS_L_OP, 16'h0000};
-        rom[16'h2E18/4] = {16'h3FA0, NOP_OP};
-        rom[16'h3FA0/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h3FA4/4] = {16'h2000, 16'hF010};          // A0=0x2000 ; PLOAD (A0) opcode
-        rom[16'h3FA8/4] = {16'h6200, MOVE_L_IMM_D6};      // PLOAD ext word (mmu_op_type=011) ; MOVE.L #imm,D6
-        rom[16'h3FAC/4] = {16'h0000, 16'h5678};
-        rom[16'h3FB0/4] = {BRA_SELF, NOP_OP};
         begin
             int t;
             for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'h0000_5678; t++)

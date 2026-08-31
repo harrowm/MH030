@@ -3565,3 +3565,87 @@ I-cache stale-fill bug it uncovers once fixed. See
 11-stage backlog. Stage 3 (DSACK wait-states-on-FSM-beats breadth) is
 next -- though the newly-found I-cache issue may warrant its own
 dedicated stage first; flagging for the user's own prioritization call.
+
+## Phase 188 -- Open-items backlog Stage 3: I-cache "stale-fill" bug root-caused fully -- confirmed to be a testbench-structural artifact, not an RTL bug
+
+User asked to insert this as the next stage immediately, ahead of the
+original Stage 3 (DSACK wait-states breadth). Picked up Phase 187's own
+partial trace (`ihit=1` with a matching tag but wrong content) and
+pushed it to a definitive conclusion via progressively deeper direct
+tracing, rather than accepting the earlier partial diagnosis.
+
+**First correction**: re-derived `biu_icache_if.sv`'s own `IC_SINGLE_0..
+3` state machine from the RTL directly and found `valid_i[idx_r]`/
+`tag_i[idx_r]` are ONLY EVER written at the LAST word (`IC_SINGLE_3`),
+by which point all 4 words should already be populated -- ruling out
+the plan's own original "premature valid bit" hypothesis before writing
+any fix. A `valid_i[14]`/`tag_i[14]`-change monitor (running from time 0,
+not gated to a narrow window like Phase 187's own trace) found the real
+picture: a first fill legitimately cached an UNRELATED page (I-6's own
+0x1700-page content) at idx=14; a SECOND, later fill correctly replaced
+the tag (0x17->0x2D, the real page this test needs) but only
+`data_i[14][0]` picked up fresh content -- words 1-3 stayed at their
+OLD, unrelated values, yet `tag_i`/`valid_i` both committed as if the
+whole line had refilled.
+
+**Traced the second fill's own 4 individual reads directly**
+(`cg_ack_rise`+`cg_rdata`, one line per completing word): word 0 read
+correctly (`0x66664e71`, matching its own real ROM content); words 1,
+2, 3 ALL read the identical `0x4e714e71` (two NOPs) -- not garbage/X,
+a specific, real, repeated value. Traced ONE level deeper into
+`biu_cycle_gen.sv`'s own shared read-cycle machinery (`ext_a`, the
+literal address pin value, and `ext_d_in`, the RAW combinational
+`rom[]` read feeding `captured_rdata`) and found **`ext_d_in` itself
+was already wrong** for `ext_a=0x2DE4` -- i.e. `rom[]`, this
+testbench's own flat combinational memory model
+(`rd_word=rom[ext_a[13:2]]`), genuinely held the wrong content at that
+address at the moment of the read. This conclusively rules out
+`biu_icache_if.sv`/`biu_cycle_gen.sv` as the culprit -- neither module
+could produce wrong data if the memory model itself is already serving
+the wrong bytes for a correctly-computed address.
+
+**Root cause, confirmed**: `tb/stall_fsm_tb.sv`'s own long-standing
+convention places each test's `rom[]` setup writes immediately before
+that test's own `begin...end` check block, INTERLEAVED with the
+PREVIOUS test's check code (which contains real `@(posedge clk_4x)`
+calls) -- unlike `tb/cache_tb.sv`'s own "everything up front" style.
+This has been safe for the file's entire history because, without a
+genuine I-cache, instruction fetch is always just-in-time and never
+races ahead of the testbench's own sequential `rom[]` writes. Once
+`RAW-hazard-with-Ihit`'s own MOVEQ opcode fix (Phase 187) made the
+I-cache genuinely active for the first time, its real speculative
+readahead -- given ample real time by that test's own 10-pass tight
+DBF loop -- raced ahead into idx=0xE (0x2DE0-0x2DEF, the exact line
+spanning `CLR-non-indexed-no-extra-read`'s own tail and `Indexed-EA-
+no-extra-read`'s own head) and cached it BEFORE those two tests' own
+`rom[]` writes had executed in SV program order (which only happens
+after ALL of RAW-hazard-with-Ihit's, and then CLR-non-indexed's, own
+check code completes) -- exactly the "ROM write issued after simulated
+time already passed that address" class this project has hit
+repeatedly (I-4/I-5 Phase 131, T4c/T4d Phase 126, this session's own
+Stage 1 finding for `cache_tb.sv`), just newly exposed here via genuine
+readahead instead of direct PC execution, and confirmed this time all
+the way down to the raw memory-model read rather than inferred.
+
+**Fix (testbench-only, zero RTL changes)**: relocated `CLR-non-indexed-
+no-extra-read`'s, `Indexed-EA-no-extra-read`'s, and `PLOAD-ext-count`'s
+own `rom[]` content to execute up front, immediately after `RAW-
+hazard-with-Ihit`'s own setup and before its loop even starts running
+-- each test's own `begin...end` check block stays exactly where it
+was in program order. `PLOAD-ext-count` needed the identical
+relocation too (found via a second, otherwise-identical failure after
+the first fix landed) -- its own `rom[]` writes were equally late and
+subject to the same race once the two tests ahead of it stopped
+absorbing readahead's own reach.
+
+Results: all 3 previously-affected checks (Indexed-EA-no-extra-read's
+own 4 checks, PLOAD-ext-count's own 2) now PASS cleanly, `make test`
+36/36, `cosim_grp` 8/8, `cosim_memind` 12/12 -- no Harte re-run needed
+(`git diff --stat rtl/` empty; the RTL fix from Phase 187 is unchanged
+by this stage). **Closes Stage 3, and with it, the loop Stage 2 opened
+-- `RAW-hazard-with-Ihit` now genuinely exercises the I-cache for the
+first time in this project's history, with every downstream test
+passing correctly under real caching.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+11-stage backlog. Stage 4 (DSACK wait-states-on-FSM-beats breadth) is
+next.
