@@ -3396,3 +3396,70 @@ to baseline. `plan.md`'s "systematic sweep for other too-fast gaps"
 item (the user's own second ask) remains open, tracked separately.
 
 **Systematic sweep for other "too fast" gaps (second half of the same user request, investigation only, no RTL change)**: every purely-combinational execution unit in the project was checked -- `eu_alu.sv`, `eu_shifter.sv`, `eu_bcd.sv`, `eu_bitops.sv`, `eu_bitfield.sv`, and `eu_mul_div.sv` (via `grep "purely combinational" rtl/*.sv`). All but `eu_mul_div.sv` already had their register-direct "instant computation vs. real serial microcode" gaps closed by Phase 162 Part D (shift/rotate, BCD, dynamic+static bit-manipulation, bit-field) -- `eu_mul_div.sv` (this phase) was the last and by far the largest (30x/26x/15x/15x) remaining instance of the class. Re-ran the full single-instruction timing corpus (`tests/timing/a*.json`, 125 tests) after this phase's own fix: gap min=-5 max=+4 mean=+0.76, **0 unexplained non-zero gaps** -- every one of the 15 remaining negative-gap tests is already present in `known_issues.json`, each a previously-characterized, unrelated finding (bus-cycle-granularity/measurement-technique quirks: `a4_tas_mem`'s write-phase AS-continuity invisibility, `a7_bkpt/illegal/trap_n`'s longword-vs-word exception-frame bus-transaction-count difference, `a1_fea_*`/`a2_move_ea_briefidx`'s below-rounded-average-NCC cases, `a6_andi_to_ccr/sr`'s absorbed-IFU-refill stall) -- none are a new instance of the "purely combinational unit computes instantly" pattern. **Conclusion: MUL/DIV was the only remaining gap of this specific class; the sweep found nothing else to fix.** This closes both halves of the user's original request.
+
+## Phase 186 -- Open-items backlog Stage 1: D-cache aliasing test timing sensitivity, root-caused (testbench artifact, confirmed) + a real new FC-aliasing test added
+
+First stage of the new 13-item open-items backlog plan
+(`~/.claude/plans/compressed-hopping-cocoa.md`). Re-investigated the
+Phase 158 Stage 2 finding: "a full MOVES-based D-cache aliasing test
+was built and passed on its own but caused an unexplained timing
+sensitivity elsewhere in `tb/cache_tb.sv` when inserted mid-sequence --
+reverted rather than chase a fragile test." Root-caused via direct
+`rom[]` inspection (temporary `$display`s, removed before finalizing)
+rather than guessing: the D-1..D-9 flowing ROM-address accumulator
+(starts at `a=32'h0000_0900`) physically **overlaps** the fixed,
+literal-address exception-handler blocks D-5/D-6 use (0x0780-0x0C00) --
+confirmed directly: `rom[0xA00/4]` currently holds
+`{MOVE_L_IMM_A0_IND,...}` (the flowing D-5 setup's own instruction),
+**not** `{MOVEA_L_IMM_A0,...}` (the fixed `D5_CONT_A` handler
+continuation's own intended content) -- a plain last-write-wins
+overwrite between two independently-grown ROM allocation schemes, not
+a simulation timing race at all. It's currently harmless purely by
+luck of exactly which bytes overlap and what the (unreachable, since
+the corrupting flowing code physically occupies the same address)
+`D5_CONT_A` continuation would have needed to do -- confirmed the
+*same* mechanism explains D-9's own documented relocation history too
+(its original placement between D-4b/D-5 corrupted D-6's own fault
+counter). **Concluded: testbench address-space-collision artifact, not
+an RTL bug** -- matches the plan's own explicitly-allowed outcome.
+Deliberately did not attempt to fix the file's own underlying address
+map (would mean either relocating the fixed handler blocks or starting
+the flowing accumulator much higher -- real, currently-passing-by-luck
+state, out of proportion risk for this stage's own scope).
+
+Delivered the actual value this investigation was blocking instead:
+built the MOVES-based D-cache FC-aliasing test properly, placed at a
+genuinely isolated, explicit-jump-only address (0x1900, confirmed free
+of every other test's own footprint via a full `rom[]` address survey)
+following D-9's own already-proven-safe convention -- redirected
+D-12's own final jump (0x0600, "on to I-5") through the new test
+instead, with the new test's own tail jumping onward to 0x0600 exactly
+as before. New `emit_set_sfc()` codegen helper (mirrors
+`emit_set_cacr`/`emit_set_caar`); new `MOVES_L_A0_D6`/`_EXT` opcode
+constants (derived and cross-checked in Python against
+`tb/system_tb.sv`'s own proven MOVES-01 example before use, given this
+session's own earlier hand-arithmetic mistakes). Test: a supervisor-FC
+read (cold miss, caches an FC=101-tagged entry) followed by two MOVES
+reads of the *same logical address* using SFC=1 (user data, FC=001) --
+the first MOVES read must be a genuine miss (proving the FC-aware tag
+prevents a false hit onto the supervisor entry), the second must hit
+(proving caching still works normally once installed under the
+alternate FC).
+
+**Found and fixed a real bug in the new test itself while verifying
+it** (not the RTL): the first attempt's "genuine miss" check on the
+MOVES read failed -- traced via a temporary signal dump and found
+`tag_d[4]` had genuinely transitioned from the fc=101-tagged entry to
+a fresh fc=001-tagged one (proving the RTL fix works correctly), yet
+the bus-activity counter it was checked against read a 0 delta. Root
+cause: `data_ds_count` (this file's own existing bus-cycle-count
+helper) is deliberately scoped to `ext_fc==3'b101` only (correct for
+every other test in this file, which all run in supervisor mode) --
+structurally blind to an fc=001 access. Added a new `user_ds_count`
+counter (identical shape, filtered on `ext_fc==3'b001`) and rewired
+the MOVES-read checks to use it. Results: all 6 new D-13 checks pass.
+`make test` 36/36, `cosim_grp` 8/8, `cosim_memind` 12/12 -- no Harte
+re-run needed (`git diff --stat rtl/` empty, testbench-only change).
+**Closes Stage 1.** See `~/.claude/plans/compressed-hopping-cocoa.md`
+for the remaining 12-stage backlog. Stage 2 (PLOAD/IC_BURST0/CACR
+hang investigation) is next.

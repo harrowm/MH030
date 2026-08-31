@@ -186,6 +186,15 @@ module cache_tb;
         if (!ext_ds_n && ext_ds_n_prev && ext_fc == 3'b101) data_ds_count <= data_ds_count + 1;
     end
 
+    // Same shape as data_ds_count but for fc=001 (user data) -- D-13's own
+    // MOVES-driven accesses use this FC, which data_ds_count deliberately
+    // excludes (scoped to fc=101 only, correct for every other test in this
+    // file, all of which run purely in supervisor mode).
+    int user_ds_count = 0;
+    always_ff @(posedge clk_4x) begin
+        if (!ext_ds_n && ext_ds_n_prev && ext_fc == 3'b001) user_ds_count <= user_ds_count + 1;
+    end
+
 
 
 
@@ -227,6 +236,15 @@ module cache_tb;
     localparam MOVEC_READ_OP  = 16'h4E7A;
     // MOVEC CACR,D6: ext word = (da=0<<15)|(rn=6<<12)|rc(0x002).
     localparam MOVEC_CACR_D6  = 16'h6002;
+    // MOVEC D7,SFC: same MOVEC_OP shape, rc=0x000 (SFC) instead of CACR's
+    // 0x002 -- (da=0<<15)|(rn=7<<12)|rc(0x000) = 0x7000.
+    localparam MOVEC_D7_SFC   = 16'h7000;
+    // MOVES.L (A0),D6 -- opcode 0000 1110 ss mmm rrr, ss=10(long),
+    // mmm=010((An)),rrr=000(A0) = 0x0E90; ext word (D/A=0,Rn=D6=110,dir=1
+    // load,reserved=0) = 0x6800 (format confirmed against tb/system_tb.sv's
+    // own MOVES-01 comment: "ext: D/A=0,Rn=D0=000,dir=1(load) = 0x0800").
+    localparam MOVES_L_A0_D6  = 16'h0E90;
+    localparam MOVES_L_A0_D6_EXT = 16'h6800;
     // MOVE.W #imm,(A0): 00_11_ddd_mmm_MMM_rrr, size=11(word), dst
     // reg=A0(000), dst mode=(An)=010, src mode=111(imm), src reg=100(word
     // imm) -> 0011_000_010_111_100 = 0x30BC. One extension word (the
@@ -392,6 +410,18 @@ module cache_tb;
         emit_set_caar = addr + 32'd12;
     endfunction
 
+    // Same shape again but targets SFC (rc=0x000) -- sets the function
+    // code MOVES loads (ea->Rn) use, per rtl/eu_seq.sv's mem_fc mux.
+    function automatic logic [31:0] emit_set_sfc(input logic [31:0] addr, input logic [31:0] value);
+        logic [31:0] a4, a8;
+        a4 = addr + 32'd4;
+        a8 = addr + 32'd8;
+        rom[addr[31:2]] = {MOVE_L_IMM_D7, value[31:16]};
+        rom[a4[31:2]]   = {value[15:0], MOVEC_OP};
+        rom[a8[31:2]]   = {MOVEC_D7_SFC, NOP_OP};
+        emit_set_sfc = addr + 32'd12;
+    endfunction
+
     initial begin
         rst_n = 0;
         repeat(20) @(posedge clk_4x);
@@ -450,6 +480,8 @@ module cache_tb;
         rom[16'h300C/4] = 32'h7777_8888;  // W4+C (woff=3, the whole-line-fill proof target)
         rom[16'h3200/4] = 32'hDEAD_1234;  // W6 (Phase 158 Stage 5: D-cache freeze write-hit-still-updates target)
         rom[16'h3300/4] = 32'h0000_0000;  // W7 (Phase 158 Stage 5: D-cache freeze write-miss-must-not-allocate target)
+        rom[16'h2440/4] = 32'hAAAA_BBBB;  // WFC (D-13: FC-aware D-cache tag aliasing target -- idx=4, tag=0x24,
+                                           // genuinely free of every other test's own addresses in this file)
 
         // D-5's own two independent handlers, one per fault -- an earlier
         // draft used ONE shared handler plus a register-indirect
@@ -707,7 +739,52 @@ module cache_tb;
                                                                // anything here.
             rom[p[31:2]] = {JMP_ABS_L_OP, 16'h0000};
             p4 = p + 32'd4;
-            rom[p4[31:2]] = {16'h0600, NOP_OP};              // on to I-5
+            rom[p4[31:2]] = {16'h1900, NOP_OP};              // on to D-13 (which itself continues to I-5)
+        end
+
+        // ===================================================================
+        // D-13: FC-aware D-cache tag prevents supervisor/user aliasing
+        // (Stage 1 of the open-items backlog plan). Placed at its own
+        // isolated, explicit-jump-only address rather than folded into the
+        // D-1..D-9 flowing-accumulator region -- that region was directly
+        // confirmed (via a temporary rom[] dump) to already collide with
+        // the fixed-address D-5/D-6 exception-handler blocks (its own
+        // flowing setup writes land on 0xA00-0xA0F, squarely inside
+        // D-5_CONT_A's own fixed 0xA00-0xA1B footprint, last-write-wins
+        // silently clobbering it), which is the real, confirmed root cause
+        // of the "unexplained timing sensitivity inserting new code before
+        // D-5" symptom flagged (and reverted rather than diagnosed) back in
+        // Phase 158 Stage 2 and again for D-9's own original placement --
+        // not a genuine RTL/simulation timing race, a plain address
+        // collision between two independently-grown ROM allocation
+        // schemes. Confirmed harmless in the CURRENT file only by luck of
+        // exactly which bytes happen to overlap; not touched or "fixed"
+        // here (out of scope, high blast radius for a pre-existing,
+        // already-passing state) -- this test instead follows D-9's own
+        // already-proven-safe convention: an isolated fixed address (0x1900,
+        // confirmed free of every other test's own footprint), reached
+        // and left via explicit JMP only, never via the flowing accumulator.
+        // ===================================================================
+        begin
+            logic [31:0] q, q4;
+            q = 32'h0000_1900;
+            q = emit_set_cacr(q, 32'h0000_0100);   // dcache_en=1 (ED), matches D-1's own baseline
+            q = emit_set_sfc(q, 32'd1);            // SFC=1 (user data space), for the MOVES loads below
+
+            rom[q[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            q4 = q + 32'd4;
+            rom[q4[31:2]] = {16'h2440, CLR_L_D5};  // A0 = WFC ; clear D5 (settle before supervisor read)
+            q = q + 32'd8;
+            rom[q[31:2]] = {MOVE_L_A0_D5, CLR_L_D6};  // plain supervisor-FC read (FC=101) ; clear D6 (settle before MOVES #1)
+            q = q + 32'd4;
+            rom[q[31:2]] = {MOVES_L_A0_D6, MOVES_L_A0_D6_EXT};  // MOVES.L (A0),D6 #1 -- FC=SFC=user data (001); expect MISS
+            q = q + 32'd4;
+            rom[q[31:2]] = {CLR_L_D6, MOVES_L_A0_D6};  // clear D6 (settle before MOVES #2) ; MOVES.L (A0),D6 opcode
+            q4 = q + 32'd4;
+            rom[q4[31:2]] = {MOVES_L_A0_D6_EXT, JMP_ABS_L_OP};  // MOVES #2's own ext word ; JMP.L opcode
+            q = q + 32'd8;
+            rom[q[31:2]] = {16'h0000, 16'h0600};   // JMP.L 0x00000600 -- on to I-5 (D-12's own original target)
+            q = q + 32'd4;
         end
 
         // ===================================================================
@@ -1782,6 +1859,42 @@ module cache_tb;
                 @(posedge clk_4x);
             check32("D-12: MOVEC CACR,D6 masks CD/CED/CI/CEI + reserved bits to 0",
                     u_top.u_eu.u_rf.d_reg[6], 32'h0000_3313);
+        end
+
+        // D-13: FC-aware D-cache tag prevents supervisor/user aliasing (see
+        // the ROM-setup comment above for the full rationale/placement
+        // discussion). D6 currently holds 0x3313 (from D-12), unambiguous.
+        // Uses data_ds_count (fc=101) for the supervisor read and the new
+        // user_ds_count (fc=001) for the two MOVES reads -- confirmed via a
+        // temporary trace that data_ds_count's own fc=101-only filter
+        // (correct for every other test in this file) simply can't observe
+        // an fc=001 access at all, which is what a first attempt's "genuine
+        // miss" check on the MOVES read actually hit (data_ds_count read 0
+        // delta despite tag_d[4] directly confirmed, via the same trace, to
+        // have genuinely changed from the fc=101-tagged entry to a fresh
+        // fc=001-tagged one) -- a test-counter-scope bug, not an RTL bug.
+        begin
+            int fc0, fc1, fc2, fc3, e;
+            fc0 = data_ds_count;
+            wait_cleared_then_set(5, 32'hAAAA_BBBB, 20000, e);
+            fc1 = data_ds_count;
+            check32("D-13: supervisor-FC read loaded the correct value",
+                    u_top.u_eu.u_rf.d_reg[5], 32'hAAAA_BBBB);
+            check("D-13: supervisor-FC read was a genuine miss (cold)", fc1 - fc0 > 0);
+
+            fc1 = user_ds_count;
+            wait_cleared_then_set(6, 32'hAAAA_BBBB, 20000, e);
+            fc2 = user_ds_count;
+            check32("D-13: 1st MOVES (user-FC) read loaded the correct value",
+                    u_top.u_eu.u_rf.d_reg[6], 32'hAAAA_BBBB);
+            check("D-13: 1st MOVES (user-FC) read was a genuine miss -- FC-aware tag, no false alias hit onto the supervisor entry",
+                  fc2 - fc1 > 0);
+
+            wait_cleared_then_set(6, 32'hAAAA_BBBB, 20000, e);
+            fc3 = user_ds_count;
+            check32("D-13: 2nd MOVES (user-FC) read loaded the correct value",
+                    u_top.u_eu.u_rf.d_reg[6], 32'hAAAA_BBBB);
+            check32("D-13: 2nd MOVES (user-FC) read was a pure hit (0 bus cycles)", fc3 - fc2, 32'd0);
         end
 
         // ===================================================================
