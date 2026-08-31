@@ -4347,3 +4347,99 @@ green with the new checks genuinely exercised, not just tolerated).
 **Closes sub-stages 12a+12b.** Sub-stage 12c (genuine indirect
 descriptors) is next -- the largest, most novel piece, needing a new
 walker state.
+
+## Phase 198 (open-items backlog Stage 12, sub-stage 12c): genuine indirect descriptors -- closes Stage 12
+
+Per MC68030UM.pdf 9.5.3.2 (Indirection, already read during 12a/12b's
+own research): when a table search reaches a level with no further
+configured index field (all `TIx` fields exhausted) and the descriptor
+found there is DT=$2 (valid 4 byte) or DT=$3 (valid 8 byte), this does
+NOT mean "next level uses short/long format" (that interpretation only
+applies when a next level genuinely exists) -- it means the descriptor
+is INDIRECT: its own address field is a pointer to "the page descriptor
+of the indicated format" ($2=short, $3=long), needing one more fetch
+before the real PA is known. This project's own pre-existing shortcut
+at exactly this point ("no next level configured, treat as leaf
+directly") was architecturally wrong for this case -- it used the
+table-shaped descriptor's own address field AS the page frame directly,
+never dereferencing it.
+
+**Design, done by close reading before writing any code**: 4 separate
+insertion points needed the fix, not 1 -- `MS_WALK_A`'s own
+`tib==4'h0` shortcut (short-format level A), `MS_WALK_B`'s own
+`tic==4'h0` shortcut (short-format level B), `MS_WALK_C`'s own
+"must be a page descriptor, else fault" check (previously faulted
+unconditionally on DT!=01, now only faults on genuinely-invalid DT=00,
+routing DT=2/3 to the same new indirect path), and `MS_WALK_LONG2`'s
+own `no_next_level` branch (the long-format table case). Confirmed via
+Figure 9-17 (short indirect: address in the SAME single word,
+bits[31:2] not [31:4] -- a genuinely different field width than an
+ordinary table descriptor's own [31:4] table-address, since it points
+at one descriptor, not a whole aligned table) and Figure 9-18 (long
+indirect: DT in the first longword like every other long descriptor,
+but the address in the SECOND longword -- exactly the position
+ordinary long table/page descriptors already use for their own
+address field, so `MS_WALK_LONG2`'s existing `mmu_rdata`-at-this-point
+convention needed no change, just a new destination for it).
+
+New `MS_WALK_INDIRECT` state (`biu_mmu_if.sv`) and one new register
+(`walk_indirect_is_long_r`, capturing which of the two leaf formats to
+expect from the ORIGINAL indirect descriptor's own DT bit, since the
+manual is explicit real silicon never chains a second indirect
+dereference -- the target is always a genuine page descriptor).
+Dispatches into the state with `walk_req_addr_r <=
+{mmu_rdata[31:2],2'b00}` (or `walk_word1_r[0]` for the DT source in
+the long-format case, matching the file's own pre-existing
+"`walk_word1_r[0]`: DT=11 -> long" convention exactly). On ack: DT=00
+still faults (genuinely invalid); a long target (`walk_indirect_is_long_r`)
+re-enters the EXISTING `MS_WALK_LONG2` machinery unchanged (fetching
+its own second longword); a short target completes inline, reusing the
+identical extraction/U-M-write-back logic every other short-format
+page branch in this file already has (accepted a small amount of code
+duplication here rather than refactor shared logic across states under
+this much time pressure on this delicate a module). Added `(ms_state
+== MS_WALK_INDIRECT)` to `mmu_req`'s own OR-list (the only other
+state-aggregation site in the file, confirmed via grep before
+declaring the wiring complete).
+
+**Verification-first discipline paid off immediately**: `make test`
+came back 36/36 clean on the very first attempt after implementing --
+correctly predicted in advance, since NO existing test's own descriptor
+data happens to leave a `no_next_level` position at DT=2/3 (every
+existing "no next level" test case uses DT=1, an ordinary early-
+termination page, a completely different, already-correctly-handled
+branch). This meant the new mechanism itself was **entirely
+unexercised** by the existing suite -- built two new dedicated tests
+(MMU-20a/20b, `tb/mmu_tb.sv`) rather than trust an all-green run that
+never actually touched the new code path. MMU-20a (short indirect
+descriptor -> short-format page) passed cleanly on the first run.
+MMU-20b (long indirect descriptor, level A itself long-format ->
+long-format page) failed with only 1 bus cycle instead of 4 -- traced
+to a genuine bug in the TEST's own address arithmetic, not the RTL:
+used `idx*8` for the long-format level-A table address, but this
+project's own pre-existing `walk_a_addr_w`/`idx_b`/`idx_c` formulas all
+unconditionally use `<<2` (word-granular) regardless of the target
+level's own short/long format -- confirmed by re-checking MMU-18's own
+already-passing test, whose own comment explicitly says "crp_base +
+0x77*4" for an equally long-format level A. Fixed the test's own
+address constant to match this project's existing (if not literally
+`*8`-per-the-manual-generic-case) convention; both MMU-20a and MMU-20b
+passed cleanly afterward, directly proving both leaf-format resolution
+paths of the new indirect mechanism.
+
+Also updated `biu_mmu_if.sv`'s own module-header comment (previously
+documenting genuine indirect descriptors as "explicitly out of scope")
+to record that Stage 12 (all three sub-stages) closed it.
+
+Results: `make test` 36/36, `cosim_grp` 8/8, `cosim_memind` 13/13, full
+124-suite Harte sweep (mandatory -- `biu_mmu_if.sv` changed) -- PASS
+702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline, zero regressions (Harte never sets TC.E=1;
+the new MMU-20a/20b tests are the real, direct correctness gate for
+this new mechanism). **Closes sub-stage 12c, and with it, Stage 12 of
+the open-items backlog in full** (all three user-confirmed sub-
+features: S-bit enforcement, table-index LIMIT enforcement, genuine
+indirect descriptors). See `~/.claude/plans/compressed-hopping-cocoa.md`
+for the remaining 2 stages (13-14, BKPT live opcode substitution and
+cpSAVE/cpRESTORE full transfer protocol, both lower-value stub-scope
+items per the plan's own notes).

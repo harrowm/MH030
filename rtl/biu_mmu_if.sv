@@ -51,13 +51,15 @@
 //      ALWAYS read from mmu_rdata at the same bit positions regardless of
 //      short vs. long -- only the ADDRESS source (this word vs. a second
 //      one) differs. CRP/SRP's own DT lives at crp[33:32]/srp[33:32] (same
-//      relative position, Figure 9-9) -- only CRP is used (SRP selection is
-//      a separate, pre-existing gap, unrelated to this stage).
-// Genuine MMU-level indirect descriptors (DT=2/3 appearing at the final
-// configured table level, where no next level exists) are explicitly out of
-// scope -- the existing "no level configured, treat this table-shaped
-// descriptor as the leaf directly" shortcut (a documented, pre-existing
-// short-format simplification) is preserved unchanged for long format too.
+//      relative position, Figure 9-9) -- SRP selection was fixed separately
+//      (Phase 157 Stage 2). L/U+LIMIT+S ARE now checked (open-items backlog
+//      Stage 12, plan.md) -- see limit_violation() and the S-bit check
+//      inside MS_WALK_LONG2. Genuine MMU-level indirect descriptors (DT=2/3
+//      appearing at the final configured table level, where no next level
+//      exists) are ALSO now implemented (Stage 12c) via the new
+//      MS_WALK_INDIRECT state -- the old "no level configured, treat this
+//      table-shaped descriptor as the leaf directly" shortcut this comment
+//      used to describe is gone, replaced by a real dereference per 9.5.3.2.
 
 module biu_mmu_if (
     input  logic        clk_4x,
@@ -272,7 +274,8 @@ module biu_mmu_if (
         MS_WALK_DONE = 4'd6,
         MS_FAULT     = 4'd7,
         MS_UPDATE    = 4'd8,  // Phase 150 Stage 3 (plan.md): U/M bit write-back
-        MS_WALK_LONG2 = 4'd9  // Phase 150 Stage 6: 2nd longword of a long-format descriptor
+        MS_WALK_LONG2 = 4'd9, // Phase 150 Stage 6: 2nd longword of a long-format descriptor
+        MS_WALK_INDIRECT = 4'd10 // open-items backlog Stage 12c (plan.md): genuine indirect descriptor
     } ms_state_t;
 
     ms_state_t ms_state;
@@ -306,6 +309,17 @@ module biu_mmu_if (
     logic [31:0] walk_word1_r;
     logic [31:0] walk_word1_addr_r; // the first longword's own bus address
     logic        walk_long_is_page_r; // 1=page (DT=1), 0=table (DT=2/3)
+
+    // open-items backlog Stage 12c (plan.md): genuine indirect descriptor
+    // (9.5.3.2). Captured when a DT=2/3 descriptor is found at a level
+    // with no further configured index field -- per the manual this
+    // means "the address field points to the page descriptor of the
+    // indicated format," NOT "no next level, treat as leaf" (the old,
+    // now-corrected shortcut). 1=DT was $3 (the eventual leaf is
+    // long-format, needs a further MS_WALK_LONG2 fetch), 0=DT was $2
+    // (the leaf is short-format, complete in the one MS_WALK_INDIRECT
+    // fetch).
+    logic        walk_indirect_is_long_r;
 
     // Phase 150 Stage 3 (plan.md): U (Accessed, descriptor bit 3) / M
     // (Modified, descriptor bit 4) hardware write-back (BIU-086). Real
@@ -403,6 +417,7 @@ module biu_mmu_if (
             walk_word1_r        <= 32'h0;
             walk_word1_addr_r   <= 32'h0;
             walk_long_is_page_r <= 1'b0;
+            walk_indirect_is_long_r <= 1'b0;
             for (m = 0; m < ATC_SIZE; m++) begin
                 atc_valid[m]     <= 1'b0;
                 atc_ci[m]        <= 1'b0;
@@ -578,12 +593,17 @@ module biu_mmu_if (
                                     walk_req_addr_r      <= walk_req_addr_r + 32'd4;
                                     ms_state              <= MS_WALK_LONG2;
                                 end else if (tib == 4'h0) begin
-                                    // No level B defined → use current descriptor as leaf
-                                    walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
-                                                  (walk_va_r & ~page_mask);
-                                    walk_ci_r  <= 1'b0;
-                                    walk_wp_r  <= 1'b0;
-                                    ms_state   <= MS_WALK_DONE;
+                                    // open-items backlog Stage 12c (plan.md):
+                                    // no level B configured, and DT is 2/3
+                                    // (this default: case's own signature) --
+                                    // per 9.5.3.2 this is a genuine indirect
+                                    // descriptor, not "treat as leaf." The
+                                    // address field (bits[31:2], not the
+                                    // narrower [31:4] table-address width)
+                                    // points to the real page descriptor.
+                                    walk_req_addr_r         <= {mmu_rdata[31:2], 2'b00};
+                                    walk_indirect_is_long_r <= mmu_rdata[0]; // DT[0]: 0=$2(short) 1=$3(long)
+                                    ms_state                 <= MS_WALK_INDIRECT;
                                 end else begin
                                     // Compute level B address
                                     begin
@@ -653,11 +673,12 @@ module biu_mmu_if (
                                     walk_req_addr_r      <= walk_req_addr_r + 32'd4;
                                     ms_state              <= MS_WALK_LONG2;
                                 end else if (tic == 4'h0) begin
-                                    walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
-                                                  (walk_va_r & ~page_mask);
-                                    walk_ci_r  <= 1'b0;
-                                    walk_wp_r  <= 1'b0;
-                                    ms_state   <= MS_WALK_DONE;
+                                    // open-items backlog Stage 12c (plan.md):
+                                    // genuine indirect descriptor -- see the
+                                    // identical MS_WALK_A comment above.
+                                    walk_req_addr_r         <= {mmu_rdata[31:2], 2'b00};
+                                    walk_indirect_is_long_r <= mmu_rdata[0];
+                                    ms_state                 <= MS_WALK_INDIRECT;
                                 end else begin
                                     begin
                                         logic [4:0]  fc_lo;
@@ -711,6 +732,18 @@ module biu_mmu_if (
                                 ms_state <= MS_WALK_DONE;
                             end
                             end
+                        end else if (mmu_rdata[1:0] != 2'b00) begin
+                            // open-items backlog Stage 12c (plan.md):
+                            // DT=2/3 at level C (no level D is ever
+                            // modeled, so this is always "the last
+                            // configured index field") is a genuine
+                            // indirect descriptor per 9.5.3.2, not a
+                            // fault -- see the identical MS_WALK_A
+                            // comment above. Only DT=00 (genuinely
+                            // invalid) still faults, via the else below.
+                            walk_req_addr_r         <= {mmu_rdata[31:2], 2'b00};
+                            walk_indirect_is_long_r <= mmu_rdata[0];
+                            ms_state                 <= MS_WALK_INDIRECT;
                         end else begin
                             fault_is_berr_r <= 1'b0;  // Phase 150: purely logical fault
                             ms_state <= MS_FAULT;
@@ -763,11 +796,11 @@ module biu_mmu_if (
                             end
                         end else begin
                             // Table descriptor -- continue to the next
-                            // level, or (no next level configured) fall
-                            // back to the same "treat as leaf" shortcut the
-                            // short-format path already uses (a genuine
-                            // indirect descriptor, out of scope -- see this
-                            // file's own header comment).
+                            // level, or (no next level configured) a
+                            // genuine indirect descriptor per 9.5.3.2
+                            // (open-items backlog Stage 12c, plan.md --
+                            // closes the gap this comment used to
+                            // document as out of scope).
                             logic no_next_level;
                             logic [4:0]  next_fb_lo;
                             logic [3:0]  next_ti;
@@ -804,11 +837,21 @@ module biu_mmu_if (
                                 fault_is_berr_r <= 1'b0;
                                 ms_state <= MS_FAULT;
                             end else if (no_next_level) begin
-                                walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
-                                              (walk_va_r & ~page_mask);
-                                walk_ci_r  <= 1'b0;
-                                walk_wp_r  <= 1'b0;
-                                ms_state   <= MS_WALK_DONE;
+                                // open-items backlog Stage 12c (plan.md):
+                                // genuine indirect descriptor -- mmu_rdata
+                                // here is the SECOND longword (Figure
+                                // 9-18: the long-format indirect
+                                // descriptor's own address field lives in
+                                // its second word, same position ordinary
+                                // long table/page descriptors already use
+                                // it for). walk_word1_r[0] is the FIRST
+                                // longword's own DT[0] (already the
+                                // existing convention this block's own
+                                // "DT=11 -> next level is long" comment
+                                // below relies on).
+                                walk_req_addr_r         <= {mmu_rdata[31:2], 2'b00};
+                                walk_indirect_is_long_r <= walk_word1_r[0];
+                                ms_state                 <= MS_WALK_INDIRECT;
                             end else begin
                                 logic [31:0] next_base;
                                 next_base = {mmu_rdata[31:4], 4'h0};
@@ -830,6 +873,61 @@ module biu_mmu_if (
                                     walk_req_addr_r <= next_base + (idx_c << 2);
                                     ms_state <= MS_WALK_C;
                                 end
+                            end
+                        end
+                    end
+                end
+
+                // open-items backlog Stage 12c (plan.md): fetch the
+                // descriptor an indirect pointer (set up by MS_WALK_A/B/C
+                // or MS_WALK_LONG2's own "no next level configured, DT
+                // was $2/$3" branches above) points to. Per 9.5.3.2 this
+                // descriptor is always "the page descriptor of the
+                // indicated format" -- never itself another table or
+                // another indirect descriptor (real 68030 silicon does
+                // not chain indirect descriptors; confirmed by the
+                // manual's own text describing exactly one dereference).
+                MS_WALK_INDIRECT: begin
+                    if (mmu_berr) begin
+                        fault_is_berr_r <= 1'b1;  // real bus error
+                        ms_state <= MS_FAULT;
+                    end else if (mmu_ack_rise) begin
+                        if (mmu_rdata[1:0] == 2'b00) begin
+                            // Invalid descriptor at the indirect target
+                            fault_is_berr_r <= 1'b0;  // purely logical fault
+                            ms_state <= MS_FAULT;
+                        end else if (walk_indirect_is_long_r) begin
+                            // Long-format leaf (DT was $3): this word is
+                            // its own first longword -- fetch the second
+                            // (address) longword via the existing
+                            // MS_WALK_LONG2 machinery unchanged.
+                            walk_word1_r        <= mmu_rdata;
+                            walk_word1_addr_r   <= walk_req_addr_r;
+                            walk_long_is_page_r <= 1'b1;  // always resolves to a page
+                            walk_req_addr_r     <= walk_req_addr_r + 32'd4;
+                            ms_state             <= MS_WALK_LONG2;
+                        end else begin
+                            // Short-format leaf (DT was $2): this word IS
+                            // the complete page descriptor -- same
+                            // extraction/U-M-write-back logic as every
+                            // other short-format page branch in this file
+                            // (MS_WALK_A/B/C's own 2'b01 arms).
+                            walk_pa_r  <= (mmu_rdata & page_mask) |
+                                          (walk_va_r & ~page_mask);
+                            walk_ci_r  <= mmu_rdata[6];
+                            walk_wp_r  <= mmu_rdata[2];
+                            if (!walk_is_ptest_r && (!mmu_rdata[3] || (!walk_rw_r && !mmu_rdata[4]))) begin
+                                walk_desc_addr_r  <= walk_req_addr_r;
+                                update_wdata_r     <= mmu_rdata |
+                                                       (!mmu_rdata[3] ? 32'h8 : 32'h0) |
+                                                       ((!walk_rw_r && !mmu_rdata[4]) ? 32'h10 : 32'h0);
+                                walk_m_r           <= walk_rw_r ? mmu_rdata[4] : 1'b1;
+                                update_from_atc_r  <= 1'b0;
+                                ms_state <= MS_UPDATE;
+                            end else begin
+                                walk_desc_addr_r <= walk_req_addr_r;
+                                walk_m_r <= mmu_rdata[4];
+                                ms_state <= MS_WALK_DONE;
                             end
                         end
                     end
@@ -952,6 +1050,7 @@ module biu_mmu_if (
                           (ms_state == MS_WALK_B) ||
                           (ms_state == MS_WALK_C) ||
                           (ms_state == MS_WALK_LONG2) || // Phase 150 Stage 6
+                          (ms_state == MS_WALK_INDIRECT) || // open-items backlog Stage 12c
                           (ms_state == MS_UPDATE);
     assign mmu_req_addr = (ms_state == MS_UPDATE) ? walk_desc_addr_r : walk_req_addr_r;
     assign mmu_req_fc   = 3'b101;  // supervisor data space for all walk/update cycles

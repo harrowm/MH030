@@ -137,6 +137,41 @@ module mmu_tb;
     localparam logic [31:0] PA_SRP_VIA_CRP = 32'hC000_0050;
     localparam logic [31:0] PA_SRP_VIA_SRP = 32'hD000_0050;
 
+    // open-items backlog Stage 12c (plan.md): genuine indirect descriptor
+    // (MC68030UM 9.5.3.2). TIA=8,TIB=0 -- a single configured level, so
+    // level A's own descriptor, if DT=2/3, is the "no next level
+    // configured" case Stage 12c re-purposes from "treat as leaf" into
+    // "dereference once more." MMU-20a: short indirect descriptor
+    // pointing at a short-format page. MMU-20b: long indirect descriptor
+    // (level A itself long-format, CRP's own DT=3) pointing at a
+    // long-format page. Fresh bases (0x30000+) to avoid any collision
+    // with the file's own existing tests.
+    localparam logic [31:0] TC_INDIRECT = 32'h8C08_0000; // E=1,PS=12,IS=0,TIA=8,TIB=0,TIC=0
+
+    localparam logic [31:0] VA_IND_S       = 32'h0500_0123; // index=0x05, offset=0x123
+    localparam logic [63:0] CRP_IND_S      = 64'h7FFF_0000_0003_0002; // base=0x30000,DT=2(short)
+    localparam logic [31:0] ADDR_A_IND_S   = 32'h0003_0014; // 0x30000 + 0x05*4
+    localparam logic [31:0] DESC_A_IND_S   = 32'h0004_0002; // indirect ($2), target=0x40000
+    localparam logic [31:0] ADDR_IND_S_TGT = 32'h0004_0000;
+    localparam logic [31:0] DESC_IND_S_TGT = 32'h7000_0009; // short page, frame=0x70000000, U=1
+    localparam logic [31:0] PA_IND_S       = 32'h7000_0123;
+
+    localparam logic [31:0] VA_IND_L       = 32'h0600_0456; // index=0x06, offset=0x456
+    localparam logic [63:0] CRP_IND_L      = 64'h7FFF_0003_0003_1000; // base=0x31000,DT=3(long)
+    // Index multiplier is *4 (not *8) here, matching this project's own
+    // existing walk_a_addr_w/idx_b/idx_c formulas -- confirmed via
+    // MMU-18's own already-passing test (ADDR_A_LF's own comment: "crp_base
+    // + 0x77*4"), which already exercises a long-format level-A walk.
+    localparam logic [31:0] ADDR_A_IND_L   = 32'h0003_1018; // 0x31000 + 0x06*4
+    localparam logic [31:0] ADDR_A_IND_L_2 = ADDR_A_IND_L + 32'd4;
+    localparam logic [31:0] DESC_A_IND_L_1 = 32'h0000_0003; // 1st longword: indirect ($3, long target)
+    localparam logic [31:0] DESC_A_IND_L_2 = 32'h0004_1000; // 2nd longword: target=0x41000
+    localparam logic [31:0] ADDR_IND_L_TGT   = 32'h0004_1000;
+    localparam logic [31:0] ADDR_IND_L_TGT_2 = ADDR_IND_L_TGT + 32'd4;
+    localparam logic [31:0] DESC_IND_L_TGT_1 = 32'h0000_0009; // 1st longword: long page, U=1
+    localparam logic [31:0] DESC_IND_L_TGT_2 = 32'h8100_0000; // 2nd longword: page addr
+    localparam logic [31:0] PA_IND_L         = 32'h8100_0456;
+
     // -----------------------------------------------------------------------
     // Clock + reset
     // -----------------------------------------------------------------------
@@ -336,6 +371,12 @@ module mmu_tb;
             ADDR_B_LF_2: stub_rdata = DESC_B_LF_2;
             ADDR_A_SRP_CRP: stub_rdata = DESC_A_SRP_CRP;
             ADDR_A_SRP_SRP: stub_rdata = DESC_A_SRP_SRP;
+            ADDR_A_IND_S:     stub_rdata = DESC_A_IND_S;
+            ADDR_IND_S_TGT:   stub_rdata = DESC_IND_S_TGT;
+            ADDR_A_IND_L:     stub_rdata = DESC_A_IND_L_1;
+            ADDR_A_IND_L_2:   stub_rdata = DESC_A_IND_L_2;
+            ADDR_IND_L_TGT:   stub_rdata = DESC_IND_L_TGT_1;
+            ADDR_IND_L_TGT_2: stub_rdata = DESC_IND_L_TGT_2;
             default: stub_rdata = 32'h0;    // invalid DT=00 → fault
         endcase
     end
@@ -879,6 +920,43 @@ module mmu_tb;
             translate(VA_SRP, 3'b101, 1'b1, pa, fault, ci);
             check  ("MMU-19c: no fault (SRE=0,FC2=1)", !fault);
             check32("MMU-19c: SRE=0,FC2=1 uses CRP", pa, PA_SRP_VIA_CRP);
+        end
+
+        // ----------------------------------------------------------------
+        // MMU-20 (open-items backlog Stage 12c, plan.md): genuine
+        // indirect descriptors (9.5.3.2). A single-level walk (TIB=0)
+        // whose own level-A descriptor is DT=2/3 -- per the manual this
+        // means "dereference once more via the address field, using the
+        // page descriptor of the indicated format," not "no next level,
+        // use as leaf" (the old, now-corrected shortcut).
+        // ----------------------------------------------------------------
+        $display("--- MMU-20: genuine indirect descriptors ---");
+        begin
+            logic [31:0] pa; logic fault, ci;
+            int cnt_before, cnt_after;
+
+            // MMU-20a: short ($2) indirect descriptor -> short-format page.
+            tc  = TC_INDIRECT;
+            crp = CRP_IND_S;
+            cnt_before = walk_req_count_r;
+            translate(VA_IND_S, 3'b001, 1'b1, pa, fault, ci);
+            cnt_after = walk_req_count_r;
+            check  ("MMU-20a: no fault", !fault);
+            check32("MMU-20a: PA via short indirect descriptor", pa, PA_IND_S);
+            check32("MMU-20a: exactly 2 walk bus cycles (level-A + indirect target)",
+                    cnt_after - cnt_before, 32'd2);
+
+            // MMU-20b: long ($3) indirect descriptor (level A itself
+            // long-format) -> long-format page.
+            tc  = TC_INDIRECT;
+            crp = CRP_IND_L;
+            cnt_before = walk_req_count_r;
+            translate(VA_IND_L, 3'b001, 1'b1, pa, fault, ci);
+            cnt_after = walk_req_count_r;
+            check  ("MMU-20b: no fault", !fault);
+            check32("MMU-20b: PA via long indirect descriptor", pa, PA_IND_L);
+            check32("MMU-20b: exactly 4 walk bus cycles (2 for level-A + 2 for indirect target)",
+                    cnt_after - cnt_before, 32'd4);
         end
 
         $display("=== %0d failure(s) ===", fail_count);
