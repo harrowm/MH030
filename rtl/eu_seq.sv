@@ -4097,6 +4097,123 @@ module eu_seq (
                                 default: ;
                             endcase
                         end
+                    // ── MULU.L/MULS.L/DIVU.L/DIVS.L memory-EA forms ──
+                    // (open-items backlog Stage 7, plan.md): the
+                    // register-direct form above (f_mode==000, f_dn==110,
+                    // in the case(f_dn) block) only ever set
+                    // dec_is_muldivl for a Dn source -- the <ea>,Dl
+                    // memory-source forms were entirely undecoded.  Same
+                    // instruction family/signature (f_dn==110, f_ss ∈
+                    // {00=MUL,01=DIV}), disjoint from both the
+                    // register-direct case (claims f_mode==000 only,
+                    // handled above) and MOVEM's own f_dn==110 sibling
+                    // (requires f_ss[1]=1, always 0 here) -- confirmed via
+                    // a full-file grep for every f_dn==3'b110 site before
+                    // writing this, no other decode claims this space.
+                    //
+                    // The muldivl descriptor word (Dl/Dq/Dh/Dr/sign/size)
+                    // is always the FIRST extension word regardless of EA
+                    // mode (fixed position right after the opcode, same
+                    // as CMP2/CHK2's own "other data" word, Phase
+                    // 119/120); the EA's own extension word(s), if any,
+                    // follow it. For the register-indirect forms
+                    // ((An)/(An)+/-(An)) that need no EA extension word at
+                    // all, ext_count stays at 1 and the descriptor lives
+                    // in ext_data[15:0] -- identical to the register-direct
+                    // form's own extraction. For (d16,An)/abs.W/abs.L/
+                    // (d16,PC), ext_count>=2 and m68030_seq.sv's
+                    // eu_ext_data formula (unswapped, ext_count>=2 case)
+                    // puts q1 (the descriptor) in the HIGH half
+                    // ext_data[31:16] and q2 (the EA's own word) in the
+                    // LOW half ext_data[15:0] -- same layout MOVEM's own
+                    // 2-ext-word forms already use just above.
+                    //
+                    // Deliberately deferred to a later pass: the indexed
+                    // (d8,An,Xn)/(d8,PC,Xn) forms (would need the
+                    // dyn_bit_get_Dn 3rd-operand-deferred-register trick
+                    // for the Xn-vs-Dl/Dq register-port conflict, same
+                    // shape as CHK's own indexed form, Phase 84) and the
+                    // #imm form (would need a 2nd 32-bit immediate word on
+                    // top of the descriptor, genuinely 3 ext words) — see
+                    // plan.md for the full writeup.
+                    end else if ((f_dn == 3'b110) && !f_dir &&
+                                 (f_ss == 2'b00 || f_ss == 2'b01) &&
+                                 (f_mode == 3'b010 || f_mode == 3'b011 ||
+                                  f_mode == 3'b100)) begin
+                        // (An)/(An)+/-(An) — ext_count=1, descriptor in
+                        // ext_data[15:0] (same half the register-direct
+                        // form above reads).
+                        dec_needs_ext   = 1'b1;
+                        dec_siz         = 2'b00;
+                        dec_is_mem_src  = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_dst_reg     = {1'b0, ext_data[2:0]};   // Dl/Dq → rd_b
+                        dec_dest_reg    = {1'b0, ext_data[2:0]};
+                        dec_md_dst2     = ext_data[14:12];          // Dh/Dr
+                        dec_reads_dst   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_is_muldivl  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};            // An → rd_a
+                        dec_reads_src   = 1'b1;
+                        setup_mem_incdec(2'b00, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        if (f_ss == 2'b00) begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_MUL;
+                            dec_md_op    = ext_data[11] ? MUL_SL : MUL_UL;
+                            dec_md_64bit = ext_data[10];
+                        end else begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_DIV;
+                            dec_md_op    = ext_data[11] ? DIV_SL : DIV_UL;
+                            dec_md_64bit = (ext_data[14:12] != ext_data[2:0]);
+                        end
+                    end else if ((f_dn == 3'b110) && !f_dir &&
+                                 (f_ss == 2'b00 || f_ss == 2'b01) &&
+                                 (f_mode == 3'b101 ||
+                                  (f_mode == 3'b111 && (f_reg == 3'b000 ||
+                                                        f_reg == 3'b001 ||
+                                                        f_reg == 3'b010)))) begin
+                        // (d16,An)/abs.W/abs.L/(d16,PC) — ext_count>=2,
+                        // descriptor in ext_data[31:16] (HIGH half; q2 in
+                        // ext_data[15:0], abs.L's own q3 in q3_word).
+                        dec_needs_ext   = 1'b1;
+                        dec_siz         = 2'b00;
+                        dec_is_mem_src  = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_dst_reg     = {1'b0, ext_data[18:16]};  // Dl/Dq → rd_b
+                        dec_dest_reg    = {1'b0, ext_data[18:16]};
+                        dec_md_dst2     = ext_data[30:28];           // Dh/Dr
+                        dec_reads_dst   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_is_muldivl  = 1'b1;
+                        if (f_ss == 2'b00) begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_MUL;
+                            dec_md_op    = ext_data[27] ? MUL_SL : MUL_UL;
+                            dec_md_64bit = ext_data[26];
+                        end else begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_DIV;
+                            dec_md_op    = ext_data[27] ? DIV_SL : DIV_UL;
+                            dec_md_64bit = (ext_data[30:28] != ext_data[18:16]);
+                        end
+                        if (f_mode == 3'b101) begin
+                            dec_src_reg   = {1'b1, f_reg};          // An → rd_a
+                            dec_reads_src = 1'b1;
+                            dec_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else if (f_mode == 3'b111 && f_reg == 3'b000) begin
+                            dec_abs_ea_en  = 1'b1;
+                            dec_abs_ea_val = {{16{ext_data[15]}}, ext_data[15:0]};
+                        end else if (f_mode == 3'b111 && f_reg == 3'b001) begin
+                            dec_abs_ea_en  = 1'b1;
+                            dec_abs_ea_val = {ext_data[15:0], q3_word};
+                        end else if (f_mode == 3'b111 && f_reg == 3'b010) begin
+                            dec_abs_ea_en  = 1'b1;
+                            dec_abs_ea_val = decode_pc + 32'd4
+                                           + {{16{ext_data[15]}}, ext_data[15:0]};
+                        end
                     end
                 end
 
@@ -7027,16 +7144,32 @@ module eu_seq (
         // -- no test for this whole family existed before): 3 clocks,
         // matching the same uniform ext_count==1 register-direct baseline
         // every other 2-word instruction in this whitelist shares.
-        // dec_is_muldivl is set ONLY for the register-direct (f_mode==
-        // 000) source form -- confirmed via direct code reading that it
-        // has exactly one assignment site in the whole file, nested under
-        // an f_mode==000 guard. The memory-EA source forms of these same
-        // four instructions are consequently a SEPARATE, genuine
-        // correctness gap (not a timing one, and not touched here):
-        // MULS.L/DIVS.L/etc with a non-register source appear to not be
-        // decoded/implemented in this RTL at all -- found while scoping
-        // this stall fix, flagged for a dedicated future investigation.
-        if (dec_valid && dec_is_muldivl) begin
+        // dec_is_muldivl used to be set ONLY for the register-direct
+        // (f_mode==000) source form; the memory-EA source forms
+        // (MULS.L/DIVS.L/etc with a non-register source) were flagged
+        // here as "not decoded/implemented in this RTL at all." Open-
+        // items backlog Stage 7 (plan.md) implemented them -- and they
+        // ALSO set dec_is_muldivl (needed for the WB-stage Dh:Dl/Dr:Dq
+        // dual-register-write mechanism a few hundred lines down, which
+        // applies identically regardless of where the source operand
+        // came from). Explicitly excluding !dec_is_mem_src here: this
+        // register-direct-only stall calibration (measured against a
+        // purely-combinational 3-clock natural baseline with zero real
+        // bus activity) does not apply to the memory-EA forms, which
+        // already have real, natural bus-read timing baked in from the
+        // EA fetch itself -- applying it anyway caused a genuine
+        // correctness bug (found via cosim, tests/memind25.s), not just
+        // a timing one: holding ex_valid/dec_is_mem_src active for the
+        // full ~168-352 tick stall re-issued the memory read every
+        // cycle for the whole stall duration instead of once. A
+        // correctly-calibrated memory-EA stall (manual's own NCC row is
+        // the SAME 44/90/78 as the register-direct row, needing FIEA
+        // time from the specific EA mode added on top per the `**`
+        // table-footnote convention -- scripts/timing_tables.py's own
+        // ALU dict) is deliberately deferred as documented follow-up,
+        // matching the plan's own framing of this as secondary to
+        // correctness.
+        if (dec_valid && dec_is_muldivl && !dec_is_mem_src) begin
             if (dec_unit == UNIT_MUL)
                 dec_internal_stall_ticks_fixed = 16'd168; // +1clk recal: MULS.L/MULU.L Dn,Dn NCC=44+1clk=45clk=168t
             else if (dec_unit == UNIT_DIV) begin

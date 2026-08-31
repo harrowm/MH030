@@ -547,6 +547,30 @@ module m68030_seq (
     assign is_muldivl = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
                         (f_ss == 2'b00 || f_ss == 2'b01) && (f_mode == 3'b000);
 
+    // MULU.L/MULS.L/DIVU.L/DIVS.L memory-EA forms (open-items backlog
+    // Stage 7, plan.md): same signature as is_muldivl, just f_mode!=000
+    // selecting a memory EA instead of Dn. The muldivl descriptor word
+    // is always the first extension word (fixed position right after
+    // the opcode, same "other data" shape as CMP2/CHK2 -- Phase
+    // 119/120), so this is additive on is_muldivl's own baseline of 1,
+    // not a replacement classifier. (An)/(An)+/-(An) need no further EA
+    // word (baseline stays 1); (d16,An)/abs.W/(d16,PC) need 1 more (2
+    // total); abs.L needs 2 more (3 total) -- indexed (d8,An,Xn)/
+    // (d8,PC,Xn) and #imm forms deferred, not classified here.
+    logic is_muldivl_mem;
+    assign is_muldivl_mem = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
+                            (f_ss == 2'b00 || f_ss == 2'b01) &&
+                            (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100);
+    logic is_muldivl_2ext;
+    assign is_muldivl_2ext = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
+                             (f_ss == 2'b00 || f_ss == 2'b01) &&
+                             (f_mode == 3'b101 ||
+                              (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010)));
+    logic is_muldivl_3ext;
+    assign is_muldivl_3ext = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
+                             (f_ss == 2'b00 || f_ss == 2'b01) &&
+                             (f_mode == 3'b111) && (f_reg == 3'b001);
+
     // PEA — 1 ext word for (d16,An)/indexed/abs.W/PC-rel, 2 for abs.L
     logic is_pea;
     assign is_pea = (f_group == 4'h4) && !f_dir && (f_dn == 3'b100) &&
@@ -837,17 +861,17 @@ module m68030_seq (
                  (f_mode == 3'b101 || f_mode == 3'b110 ||
                   (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010 || f_reg == 3'b011))))
             ext_count = 3'd1;
-        else if (is_movem_3ext)
+        else if (is_movem_3ext || is_muldivl_3ext)
             ext_count = 3'd3;
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long ||
-                 is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10) ||
+                 is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10) || is_muldivl_2ext ||
                  ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b001))) // abs.L
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
                  is_move_idx_src || is_lea_idx || is_jmp_idx || is_jsr_idx || is_movem || is_movep ||
-                 is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl ||
+                 is_adda_suba_cmpa_imm || is_ori_andi_eori_sr || is_muldivl || is_muldivl_mem ||
                  is_rtd || is_stop_opcode || is_bf || is_pack_unpk || is_moves ||
                  (is_alu_mem_src && !is_alu_mem_src_long) ||
                  (is_addq_subq_ext && !is_addq_subq_ext_long) ||

@@ -3808,3 +3808,104 @@ correction this time -- unlike Stage 5's `PACK`). `make test` 36/36,
 Category D tally updated to 4 pairs. **Closes Stage 6.** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 8-stage backlog. Stage 7 (MUL/DIV memory-EA form) is next.
+
+## Phase 192 (open-items backlog Stage 7): MUL/DIV.L memory-EA form
+
+`dec_is_muldivl` (the shared MULU.L/MULS.L/DIVU.L/DIVS.L decode flag)
+was previously only ever set for the register-direct form
+(`f_mode==3'b000` inside `eu_seq.sv`'s `case(f_dn)` block for group
+4/`f_dn==110`) -- the `<ea>,Dl` memory-source forms of all four
+instructions were entirely undecoded, silently falling through to
+`dec_valid=0` (illegal instruction) for every other `f_mode` value.
+
+Read the register-direct decode and the sibling `MULU.W`/`MULS.W`
+memory-source block (group C, already fully EA-extended since Phase
+92/117) closely before writing anything, to confirm the mechanism:
+`md_src = ex_is_mem_src ? mem_rdata : ... : rd_a_data` and
+`md_dst = rd_b_data` (always) are already fully generic in the
+EX-stage MUL/DIV routing -- meaning the only work needed was decode
+(no EX-stage changes at all), mirroring `AND EA,Dn`'s own established
+2-port template (`dec_src_reg`=An→port A for the EA base,
+`dec_dst_reg`=Dl/Dq→port B for the accumulator) exactly, with zero
+register-port conflict for the non-indexed EA modes.
+
+Confirmed via a full `grep` for every `f_dn==3'b110` site in the file
+that no other decode claims `f_mode!=000` for this signature -- MOVEM's
+own `f_dn==110` sibling requires `f_ss[1]=1`, always 0 for MUL/DIV.L
+(`f_ss∈{00,01}`), so genuinely disjoint.
+
+**Scoped to the non-indexed EA modes only** (matching the plan's own
+"common memory EA modes" framing and this project's established
+lowest-risk-first staging): `(An)`/`(An)+`/`-(An)` (ext_count stays at
+1, descriptor in `ext_data[15:0]` — same half the register-direct form
+already reads), `(d16,An)`/`(xxx).W`/`(d16,PC)` (ext_count=2,
+`m68030_seq.sv`'s existing unswapped `eu_ext_data` formula puts the
+descriptor in the HIGH half `ext_data[31:16]` for any `ext_count>=2`
+instruction -- same "q1=other data, q2=EA descriptor" shape MOVEM and
+CMP2/CHK2 already established, Phase 119/120), and `(xxx).L`
+(ext_count=3, abs.L reconstructed from `ext_data[15:0]`+`q3_word`,
+matching MOVEM's own abs.L extraction exactly). Deliberately deferred:
+indexed `(d8,An,Xn)`/`(d8,PC,Xn)` (would need the `dyn_bit_get_Dn`
+3rd-operand-deferred-register trick for the Xn-vs-Dl/Dq port conflict,
+same shape as CHK's own indexed form, Phase 84) and the `#imm` form
+(would need a 2nd 32-bit immediate word on top of the descriptor,
+genuinely 3 ext words).
+
+New `is_muldivl_mem`/`is_muldivl_2ext`/`is_muldivl_3ext` classifiers in
+`m68030_seq.sv`, folded into the existing `ext_count` priority chain at
+the 1/2/3-word tiers alongside `is_muldivl`/`is_movem_2ext`/
+`is_movem_3ext`.
+
+**Found and fixed a real correctness bug via cosim, not just a missing
+test**: the pre-existing artificial-internal-stall whitelist entry for
+MUL/DIV.L (Phase 214/185, `dec_internal_stall_ticks_fixed`) is gated on
+`dec_is_muldivl` alone -- and since the new memory-EA decode also sets
+that flag (genuinely needed for the WB-stage Dh:Dl/Dr:Dq dual-register-
+write mechanism, unrelated to the stall), the new memory forms started
+incorrectly triggering the register-direct-calibrated ~168-352 tick
+stall too. First cosim run (`tests/memind25.s`) showed the memory
+operand's own address read 13-27 times in a row instead of once --
+traced to the stall holding `ex_valid`/`dec_is_mem_src` active for the
+whole artificial-stall duration, re-issuing the memory read every tick
+instead of once. Fixed by adding `&& !dec_is_mem_src` to the whitelist
+entry's own gate, with the register-direct-only calibration and the
+bug mechanism documented in place of the entry's old (now-stale)
+"memory-EA forms aren't implemented at all" comment. A correctly-
+calibrated memory-EA stall (the manual's own NCC row for `EA,Dn` is the
+*same* 44/90/78 as the register-direct row, needing FIEA time from the
+specific EA mode added on top per the `**` footnote convention,
+`scripts/timing_tables.py`'s own `ALU` dict) is deliberately left as
+documented follow-up -- this stage's priority was correctness, and the
+memory forms already have real, natural bus-read timing baked in from
+the EA fetch itself (unlike the purely-combinational register-direct
+form, which needs the artificial stall specifically because it has no
+natural bus activity to spend real time on).
+
+New `tests/memind25.s` (4 instructions: `MULU.L (A0),D2`, `MULS.L
+(A1)+,D3`, `DIVU.L ($8,A2),D4`, `DIVS.L ($300).L,D5`, covering register-
+indirect/autoincrement/displacement/absolute EA and both MUL+DIV,
+signed+unsigned), each result written to a distinct memory address
+afterward so the actual computed value -- not just the source read --
+is directly visible on the bus trace for `buscmp.py` (a pure
+compute-to-register instruction has nothing else to diff). Musashi's
+own reference computed all four results independently confirming the
+hand-derived expected values ($500, -6, 14, -5) before the DUT was even
+run. Needed 600 cycles to complete (the generic `winuae/tests/memind%_
+ref.log` pattern rule's own 300-cycle default cuts DIVS.L's real
+divide-microcode-heavy reference run short) -- added an explicit
+override rule. Wired into `make cosim_memind` as `buscmp-memind25`; the
+full bus trace (every read AND every write) matches Musashi exactly,
+no `--reads-only`/`--allow-adjacent-swap` tolerance needed.
+
+Results: `make test` 36/36, `cosim_grp` 8/8, `cosim_memind` 13/13 (was
+12/12), full 124-suite Harte sweep (mandatory -- `eu_seq.sv`/
+`m68030_seq.sv` changed, and the stall-whitelist fix touches shared
+EX/WB machinery) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, zero
+regressions (expected: Harte has zero coverage of `.L` MUL/DIV memory
+forms, a 68020+-only feature on a 68000-captured corpus -- this sweep
+is the collateral-damage gate for the shared decode/stall-whitelist
+code paths, not a direct correctness check on the new instructions
+themselves). **Closes Stage 7.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+7-stage backlog. Stage 8 (instruction-fetch FC hardcoding) is next.

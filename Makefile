@@ -427,6 +427,13 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # to special-case each one's own reason.
 winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
 	./tools/m68ksim tests/memind$*.hex 300 > $@
+# memind25 needs more than the generic 300-cycle default: DIVS.L's own
+# real (Musashi) divide microcode plus 4 chained MUL/DIV instructions
+# don't complete within 300 cycles -- this explicit rule (which make
+# prefers over the pattern rule above for this exact filename) overrides
+# with 600.
+winuae/tests/memind25_ref.log: tools/m68ksim tests/memind25.hex | winuae/tests
+	./tools/m68ksim tests/memind25.hex 600 > $@
 
 buscmp-memind2: $(SIM)/cosim_grp winuae/tests/memind2_ref.log tests/memind2.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind2.hex +grp=memind2 2>&1 \
@@ -501,10 +508,19 @@ buscmp-memind24: $(SIM)/cosim_grp winuae/tests/memind24_ref.log tests/memind24.h
 	    | grep "^BUS" > /tmp/_dut_memind24.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind24.log winuae/tests/memind24_ref.log \
 	    --dut-may-continue
+# memind25 (open-items backlog Stage 7, plan.md): MULU.L/MULS.L/DIVU.L/
+# DIVS.L memory-EA forms ((An)/(An)+/(d16,An)/(xxx).L) -- the first-ever
+# decode of these instructions' non-register source. Full comparison
+# (reads AND every computed-result write) matches Musashi exactly.
+buscmp-memind25: $(SIM)/cosim_grp winuae/tests/memind25_ref.log tests/memind25.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind25.hex +grp=memind25 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind25.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind25.log winuae/tests/memind25_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
-              buscmp-memind15 buscmp-memind24
+              buscmp-memind15 buscmp-memind24 buscmp-memind25
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py
