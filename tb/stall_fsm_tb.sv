@@ -2347,7 +2347,15 @@ module stall_fsm_tb;
         rom[16'h2D8C/4] = {16'h2430, 16'h1925};
         rom[16'h2D90/4] = {16'h0010, CLR_L_D5};
         rom[16'h2D94/4] = {ADDI_L_D5, 16'h0000};
-        rom[16'h2D98/4] = {16'd7002, NOP_OP};
+        // Redirect via JMP.L instead of falling through to RAW-hazard-
+        // with-Ihit's own fixed 0x2DA0 start -- exactly enough room
+        // (6 bytes) in the trailing-NOP gap before it. Routes through
+        // WS-MOVEP/WS-CAS first (own isolated addresses, since
+        // fall-through can't reach them directly -- see their own
+        // comment below), whose own tail JMPs back to 0x2DA0, preserving
+        // the original flow exactly.
+        rom[16'h2D98/4] = {16'd7002, JMP_ABS_L_OP};
+        rom[16'h2D9C/4] = {16'h0000, 16'h2E20};
         begin
             int elapsed0, elapsedX, t;
             wait_states = 0;
@@ -2360,6 +2368,85 @@ module stall_fsm_tb;
             run_and_check_timed("WS-Memind-2: wait_states=10, D5=7002", 5, 32'd7002, 4000, elapsedX);
             wait_states = 0;
             check("WS-Memind: wait states measurably lengthen memory-indirect EA's own bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // -------------------------------------------------------------
+        // WS-MOVEP: DSACK wait-states composing with MOVEP.L's own
+        // byte-interleaved store (4 individual byte bus cycles -- a
+        // genuinely different FSM beat shape from TAS/MOVEM/CAS2/
+        // memory-indirect EA's own already-covered patterns). Same
+        // opcode/ext shape as INT-mid-MOVEP above (MOVEP_L_D1_A0,
+        // disp=0x10), fresh addresses/data, own instances. Positioned
+        // before RAW-hazard-with-Ihit's own I-cache-enabling loop, so no
+        // readahead-race risk (Stage 3, plan.md) applies here.
+        // -------------------------------------------------------------
+        rom[16'h2E20/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2E24/4] = {16'h0000, 16'h3000};
+        rom[16'h2E28/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h2E2C/4] = {16'hAABB, 16'hCCDD};
+        rom[16'h2E30/4] = {MOVEP_L_D1_A0, 16'h0010};
+        rom[16'h2E34/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2E38/4] = {16'd8001, NOP_OP};
+        rom[16'h2E40/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2E44/4] = {16'h0000, 16'h3020};
+        rom[16'h2E48/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h2E4C/4] = {16'h1122, 16'h3344};
+        rom[16'h2E50/4] = {MOVEP_L_D1_A0, 16'h0010};
+        rom[16'h2E54/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2E58/4] = {16'd8002, NOP_OP};
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2E20; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVEP-1: wait_states=0, D5=8001", 5, 32'd8001, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2E40; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVEP-2: wait_states=10, D5=8002", 5, 32'd8002, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-MOVEP: wait states measurably lengthen MOVEP's own byte-interleaved bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // -------------------------------------------------------------
+        // WS-CAS: DSACK wait-states composing with single-address CAS.L's
+        // own indivisible RMW lock (a distinct decode path from TAS,
+        // 2-cycle read-then-write). Same opcode/ext shape as INT-mid-CAS
+        // above (CAS_L_D1D2_A0/CAS_EXT); D1 set to match the memory
+        // operand exactly so the compare always succeeds, same reasoning
+        // as INT-mid-CAS. Own fresh addresses/data/instances.
+        // -------------------------------------------------------------
+        rom[16'h3050/4] = 32'h1234_5678;
+        rom[16'h2E60/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2E64/4] = {16'h0000, 16'h3050};
+        rom[16'h2E68/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h2E6C/4] = {16'h1234, 16'h5678};
+        rom[16'h2E70/4] = {CAS_L_D1D2_A0, CAS_EXT};
+        rom[16'h2E74/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2E78/4] = {16'd8003, NOP_OP};
+        rom[16'h3060/4] = 32'h1234_5678;
+        rom[16'h2E80/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2E84/4] = {16'h0000, 16'h3060};
+        rom[16'h2E88/4] = {CLR_L_D1, ADDI_L_D1};
+        rom[16'h2E8C/4] = {16'h1234, 16'h5678};
+        rom[16'h2E90/4] = {CAS_L_D1D2_A0, CAS_EXT};
+        rom[16'h2E94/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2E98/4] = {16'd8004, JMP_ABS_L_OP};
+        rom[16'h2E9C/4] = {16'h0000, 16'h2DA0};  // back to RAW-hazard-with-Ihit's own start
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2E60; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-CAS-1: wait_states=0, D5=8003", 5, 32'd8003, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2E80; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-CAS-2: wait_states=10, D5=8004", 5, 32'd8004, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-CAS: wait states measurably lengthen single-address CAS's own bus cycles too",
                   elapsedX > elapsed0);
         end
 

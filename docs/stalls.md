@@ -475,12 +475,13 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   above — the mechanism is decode-agnostic by construction, but only spot-checked, not
   exhaustively swept the way Category I was. Remaining: MOVE16, ABCD/SBCD/PACK, BFINS,
   CMP2/CHK2, MOVE mem-mem, RTR/RTE, PFLUSH/PTEST/PMOVE64.
-- **DSACK wait-states-on-FSM-beats** (Category H) has 4 sources checked (TAS, MOVEM,
-  CAS2, memory-indirect EA). Given Phase 125's own absorption-effect finding, a new
-  source needs its own wait-state-value sanity check (don't assume `wait_states=3` or
-  `=10` transfers automatically) rather than a purely mechanical extension — Phase 126's
-  two additions both happened to work at `wait_states=10` on the first try, but that was
-  verified, not assumed.
+- **DSACK wait-states-on-FSM-beats** (Category H) has 6 sources checked (TAS, MOVEM,
+  CAS2, memory-indirect EA, MOVEP, single-address CAS -- Phase 188's own open-items
+  backlog Stage 4 added the last two). Given Phase 125's own absorption-effect finding,
+  a new source needs its own wait-state-value sanity check (don't assume `wait_states=3`
+  or `=10` transfers automatically) rather than a purely mechanical extension -- Stage 4's
+  own two additions both showed a clearly visible delta at `wait_states=10` on the first
+  try (MOVEP 167->255 ticks, CAS 137->209), but that was verified, not assumed.
 
 None of these block using the CPU today; they're the natural next increment if more
 confidence is wanted in the generic mechanisms specifically.

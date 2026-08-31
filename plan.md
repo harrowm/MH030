@@ -3649,3 +3649,43 @@ passing correctly under real caching.** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 11-stage backlog. Stage 4 (DSACK wait-states-on-FSM-beats breadth) is
 next.
+
+## Phase 189 -- Open-items backlog Stage 4: DSACK wait-states-on-FSM-beats breadth, MOVEP and single-address CAS
+
+Extended `docs/stalls.md`'s own Category H (DSACK wait-states composing
+with a multi-cycle FSM's own bus beats) from 4 sources (TAS, MOVEM,
+CAS2, memory-indirect EA) to 6, adding MOVEP.L's own byte-interleaved
+store (4 individual byte bus cycles -- a genuinely different beat
+shape) and single-address CAS.L's own indivisible RMW lock (a distinct
+decode path from TAS). New `WS-MOVEP`/`WS-CAS` tests in
+`tb/stall_fsm_tb.sv`, reusing the exact opcode/ext-word encodings
+already proven by `INT-mid-MOVEP`/`INT-mid-CAS` (Phase 126) -- each
+with 2 fresh instances (own addresses/data), `wait_states=0` vs `=10`,
+checking a measurable elapsed-tick delta (not assuming one transfers
+automatically, per Phase 125's own absorption-effect precedent).
+
+**Found and fixed a real placement mistake before the tests would run
+at all** (not an RTL or genuine test-logic bug): the new tests'
+addresses (0x2E20+) were unreachable by the DUT's own NOP-fall-through
+execution -- program TEXT order placed the new `rom[]` writes between
+`WS-Memind` and `RAW-hazard-with-Ihit`, but in ADDRESS order (and
+therefore actual PC flow) everything already routes RAW-hazard-with-
+Ihit -> CLR-non-indexed-no-extra-read -> Indexed-EA-no-extra-read ->
+PLOAD-ext-count's own permanent self-park, with nothing ever falling
+through to 0x2E20. Fixed by redirecting via explicit JMP.L (matching
+this project's own established "isolated address, explicit-jump-only"
+convention -- Stage 1's own D-13 test, D-9's own relocation): replaced
+`WS-Memind`'s own trailing NOP (in the exact 6-byte gap before RAW-
+hazard-with-Ihit's own fixed 0x2DA0 start) with a JMP to the new
+tests, whose own tail JMPs back to 0x2DA0, preserving the original
+flow exactly.
+
+Positioned entirely before `RAW-hazard-with-Ihit`'s own I-cache-
+enabling loop, so Stage 3's own readahead-race class doesn't apply
+here. Results: `WS-MOVEP` (167->255 ticks) and `WS-CAS` (137->209
+ticks) both show clean, unambiguous deltas on the first attempt once
+correctly wired up; `make test` 36/36, `cosim_grp` 8/8, `cosim_memind`
+12/12 -- no Harte re-run needed (testbench-only, `git diff --stat rtl/`
+empty). **Closes Stage 4.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+10-stage backlog. Stage 5 (Interrupt-mid-FSM breadth) is next.
