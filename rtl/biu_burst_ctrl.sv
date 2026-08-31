@@ -109,7 +109,7 @@ module biu_burst_ctrl (
                 cback_ok_r   <= 1'b0;
             end
             // Latch MOVE16 write parameters at IDLE
-            if (at_idle && eu_m16_req) begin
+            else if (at_idle && eu_m16_req) begin
                 burst_addr_r   <= eu_m16_addr;
                 burst_fc_r     <= eu_m16_fc;
                 burst_beat_r   <= 2'd0;
@@ -117,6 +117,20 @@ module biu_burst_ctrl (
                 m16_wdata_r[0] <= eu_m16_wdata0; m16_wdata_r[1] <= eu_m16_wdata1;
                 m16_wdata_r[2] <= eu_m16_wdata2; m16_wdata_r[3] <= eu_m16_wdata3;
             end
+            // open-items backlog Stage 10 (plan.md): burst_beat_r
+            // previously had no general reset-to-0 outside of a fresh
+            // burst dispatch above -- it stayed at its own last value
+            // (e.g. 3) forever after a burst completed, until the NEXT
+            // burst happened to overwrite it. Harmless for anything
+            // internal to this module (every consumer only reads
+            // burst_beat_r meaningfully *during* an active burst), but a
+            // real problem for the new testbench-only burst_beat output
+            // (see the port comment above) once external testbench code
+            // started using it as a per-beat memory-address offset --
+            // outside of a burst it needs to reliably read 0. Idle with
+            // no fresh burst request is exactly "not currently bursting."
+            else if (at_idle)
+                burst_beat_r <= 2'd0;
             // Capture read data at S4/S5 of burst read sub-cycles (when DSACK valid)
             if (at_burst_data && is_burst_read && data_capture_ok) begin
                 case (burst_beat_r)
@@ -126,12 +140,29 @@ module biu_burst_ctrl (
                     2'd3: burst_rdata_r[3] <= ext_d_in;
                 endcase
             end
-            // Advance beat counter and address at S7 of each sub-cycle.
-            // burst_beat_r is read here at its PRE-NBA value (before this clock's
-            // increment), which is what the eu_burst_ack registered logic also reads.
+            // Advance beat counter at S7 of each sub-cycle. burst_beat_r is
+            // read here at its PRE-NBA value (before this clock's
+            // increment), which is what the eu_burst_ack registered logic
+            // also reads.
+            //
+            // open-items backlog Stage 10 (plan.md): burst_addr_r itself
+            // is DELIBERATELY not incremented here anymore -- real 68030
+            // silicon "remains driven to a constant value" throughout a
+            // whole burst (MC68030UM.pdf 7.3.7's own State 1 text: "CBREQ
+            // is also asserted, indicating that the MC68030 can perform a
+            // burst operation into one of its caches and can read in four
+            // long words" with no re-driven address between beats;
+            // incrementing is explicitly "performed by external hardware,"
+            // never the processor itself). Confirmed via a full read of
+            // every consumer in this module before removing the
+            // increment: burst_rdata_r[]'s own indexing (above) and
+            // m16_wdata_mux's own indexing (below) already both key off
+            // burst_beat_r, never burst_addr_r -- nothing internal to
+            // this module depended on burst_addr_r's own incrementing at
+            // all; it was purely, incorrectly, re-driving the external
+            // pin value every beat.
             if (at_burst_s7 && burst_beat_r != 2'd3) begin
                 burst_beat_r <= burst_beat_r + 2'd1;
-                burst_addr_r <= burst_addr_r + 32'd4;
             end
             // OR-accumulate CBACK# during beat-0 S4/S5 (read and write bursts).
             // cback_s active-low: 0 = asserted = peripheral supports burst continuation.

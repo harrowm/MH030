@@ -4081,3 +4081,94 @@ own BERR-during-fill deferral is the closest prior example). **Closes
 Stage 9 as an investigation.** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 5-stage backlog. Stage 10 (burst-cycle address freeze) is next.
+
+## Phase 195 (open-items backlog Stage 10): burst-cycle address freeze
+
+Confirmed real bug from Phase 212's own already-completed investigation
+("The burst address bus increments per beat (`biu_burst_ctrl.sv`'s own
+`burst_addr_r += 4`), contradicting the manual's explicit... deliberately
+NOT fixed this pass"). Read `biu_burst_ctrl.sv` fully before touching
+anything: `burst_addr_r`'s own incrementing (line ~134, pre-fix) feeds
+`burst_addr` (the value driven onto the real address pins during a
+burst, confirmed by tracing `biu_cycle_gen.sv`'s own `cyc_addr =
+bc_burst_addr` for both `is_burst_read`/`is_burst_write`), but nothing
+*internal* to the module depends on it -- `burst_rdata_r[]`'s own 4-way
+indexing and `m16_wdata_mux`'s own selection both already key off
+`burst_beat_r` (a genuinely separate 0-3 counter), never off the
+address. **Fix in `rtl/biu_burst_ctrl.sv`**: removed the
+`burst_addr_r <= burst_addr_r + 32'd4;` line entirely -- `burst_addr`
+now correctly stays constant at the burst's own base address for the
+whole sequence, matching MC68030UM.pdf 7.3.7's own explicit "the
+address bus... remains driven to a constant value... incrementing...
+must be performed by external hardware."
+
+**Both testbench memory models needed a coordinated update**, as the
+plan itself anticipated: `tb/mem_model.sv`'s own read re-latch trigger
+(`ext_a != last_latched_addr`, added by Phase 212 specifically to
+detect "a new beat started" once AS/DS stopped toggling between beats)
+relied on the address changing -- with the address now frozen, it
+would never re-fire past beat 0, silently returning the SAME word for
+every beat. `tb/cache_tb.sv`'s own simpler model has the identical
+problem in a different shape: `rd_word = rom[ext_a[13:2]]` is purely
+combinational, directly address-indexed, so a frozen address means a
+frozen (stale, repeated) read value with no state-machine angle to
+even patch. **Fix**: added a new testbench-only `burst_beat_probe`
+input to `mem_model.sv` (documented explicitly as NOT a real chip pin
+-- real 68030 peripherals infer which beat they're serving from their
+OWN internal counter, since the real protocol never puts a beat index
+on the external bus either; this signal mirrors that, just observed
+via a hierarchical reference to the DUT's own already-existing
+`biu_burst_ctrl.sv` beat counter instead of needing genuine new
+peripheral-side logic) -- folded into `word_addr`'s own computation
+(`ext_a[31:2] + burst_beat_probe`) so each beat's own distinct word is
+served correctly again, and used in place of the address-change check
+for the re-latch trigger. `word_addr` reads exactly `ext_a[31:2] + 0`
+outside a burst (the probe idles at 0), so ordinary non-burst
+read/write timing is provably unaffected. `tb/cache_tb.sv` got the
+identical `beat_word_addr` treatment applied directly to its own
+combinational `rd_word`/write-capture expressions. Wired the new probe
+at all 6 `mem_model` instantiation sites across `tb/top_tb.sv` (1),
+`tb/biu_int_tb.sv` (1), and `tb/biu_tb.sv` (4 -- fast/slow/16-bit/8-bit
+port variants), each via a hierarchical reference to the correct DUT
+instance depth for that file (`u_top.u_biu.u_cg.u_bc.burst_beat`,
+`u_biu.u_cg.u_bc.burst_beat`, and `u_cycle_gen.u_bc.burst_beat`
+respectively, since the three files instantiate the DUT at three
+different levels -- `m68030_top`, `m68030_biu`, and `biu_cycle_gen`
+directly).
+
+**Found and fixed a second, real RTL bug via `make test`, not caught by
+design review alone**: `burst_beat_r` itself had no general reset to 0
+outside of a fresh burst dispatch -- it stayed at its own last value
+(e.g. 3, the final beat) *forever* after a burst completed, only ever
+overwritten by the NEXT burst's own dispatch. Harmless for everything
+already inside `biu_burst_ctrl.sv` (every existing consumer only reads
+`burst_beat_r` meaningfully *during* an active burst), but a real
+problem the moment external testbench code started treating it as a
+per-beat address offset outside of one too: `make test`'s first run
+showed 15+ failures in `biu_tb.sv` on checks with no visible
+connection to burst mode at all (byte-lane writes, BKPT's own
+replacement-opcode capture, plain `rdata1`/`rdata2` reads) -- traced to
+every ordinary access *after* the file's first burst test having its
+own address silently offset by the leftover stale beat count. Fixed by
+adding `else if (at_idle) burst_beat_r <= 2'd0;` to the same
+`state_adv`-gated block -- the bus returning to idle is exactly "not
+currently bursting," so this reliably clears the counter the moment a
+burst ends (or during any other ordinary idle gap) without disturbing
+the existing fresh-dispatch cases, which still take priority via the
+`else if` chain.
+
+Results: `make test` 36/36 (clean after the `burst_beat_r` reset fix;
+the first attempt genuinely failed 2 suites, both root-caused and
+fixed above -- `cache`'s own D-10 test, "a different offset in the
+same never-independently-fetched line must also come from the SAME
+burst fill," is the specific check proving beats still serve correct,
+distinct per-word data under the new frozen-address model), `cosim_grp`
+8/8, `cosim_memind` 13/13, full 124-suite Harte sweep (mandatory --
+`biu_burst_ctrl.sv` is chip-wide shared machinery, even though Harte
+itself never exercises burst mode since IBE/DBE default off) -- PASS
+702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT
+0, bit-identical to baseline, zero regressions. **Closes Stage 10.**
+See `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+4-stage backlog. Stage 11 (BERR-during-fill per-beat discrimination,
+the highest-risk remaining stage) is next; Stage 12 (MMU LIMIT/S bit)
+still needs the user's own confirmation before starting.

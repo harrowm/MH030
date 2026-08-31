@@ -852,7 +852,10 @@ module biu_tb;
         .dsack0_n    (dsack0_n_mem),
         .dsack1_n    (dsack1_n_mem),
         .ext_d_write (ext_d_out),   // BIU write data
-        .ext_d_oe    (ext_d_oe)
+        .ext_d_oe    (ext_d_oe),
+        // open-items backlog Stage 10 (plan.md): testbench-only, not a
+        // real pin -- see mem_model.sv's own port comment.
+        .burst_beat_probe (u_cycle_gen.u_bc.burst_beat)
     );
 
     // Slow memory (2 wait states, 32-bit port)
@@ -870,7 +873,8 @@ module biu_tb;
         .dsack0_n    (dsack0_n_slow),
         .dsack1_n    (dsack1_n_slow),
         .ext_d_write (ext_d_out),
-        .ext_d_oe    (ext_d_oe)
+        .ext_d_oe    (ext_d_oe),
+        .burst_beat_probe (u_cycle_gen.u_bc.burst_beat)
     );
 
     // 16-bit port memory (DSACK1=0, DSACK0=1 — BIU-013)
@@ -888,7 +892,8 @@ module biu_tb;
         .dsack0_n    (dsack0_n_16),
         .dsack1_n    (dsack1_n_16),
         .ext_d_write (ext_d_out),
-        .ext_d_oe    (ext_d_oe)
+        .ext_d_oe    (ext_d_oe),
+        .burst_beat_probe (u_cycle_gen.u_bc.burst_beat)
     );
 
     // 8-bit port memory (DSACK1=1, DSACK0=0 — BIU-013)
@@ -906,7 +911,8 @@ module biu_tb;
         .dsack0_n    (dsack0_n_8),
         .dsack1_n    (dsack1_n_8),
         .ext_d_write (ext_d_out),
-        .ext_d_oe    (ext_d_oe)
+        .ext_d_oe    (ext_d_oe),
+        .burst_beat_probe (u_cycle_gen.u_bc.burst_beat)
     );
 
     // -----------------------------------------------------------------------

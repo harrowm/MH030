@@ -269,7 +269,10 @@ module biu_int_tb;
         .dsack0_n    (mem_dsack0_n),
         .dsack1_n    (mem_dsack1_n),
         .ext_d_write (ext_d_out),
-        .ext_d_oe    (ext_d_oe)
+        .ext_d_oe    (ext_d_oe),
+        // open-items backlog Stage 10 (plan.md): testbench-only, not a
+        // real pin -- see mem_model.sv's own port comment.
+        .burst_beat_probe (u_biu.u_cg.u_bc.burst_beat)
     );
 
     assign dsack0_n = mem_dsack0_n;

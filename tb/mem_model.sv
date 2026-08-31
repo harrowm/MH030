@@ -42,7 +42,19 @@ module mem_model #(
 
     // Write data from BIU (valid when ext_d_oe=1 from cycle_gen)
     input  logic [31:0] ext_d_write, // write data to capture
-    input  logic        ext_d_oe     // 1 = BIU is driving write data
+    input  logic        ext_d_oe,    // 1 = BIU is driving write data
+
+    // open-items backlog Stage 10 (plan.md): testbench-only instrumentation,
+    // NOT a real chip pin. Real 68030 silicon freezes the address bus for
+    // the whole burst (MC68030UM.pdf 7.3.7) and a real peripheral tracks
+    // which beat it's serving with its OWN internal counter (incremented
+    // each time IT responds) -- something this bus-level model has no
+    // other way to observe now that ext_a itself no longer changes per
+    // beat. Callers wire this to the DUT's own already-existing internal
+    // beat counter (biu_burst_ctrl.sv's burst_beat, hierarchically
+    // referenced -- no new RTL port needed) purely as a simulation aid,
+    // exactly mirroring what real external hardware derives for itself.
+    input  logic [1:0]  burst_beat_probe
 );
 
     // -----------------------------------------------------------------------
@@ -71,16 +83,23 @@ module mem_model #(
     int         wait_cnt;
     logic [31:0] d_latch;
     logic [31:0] last_latched_addr;  // burst mode timing investigation, plan.md
+    logic [1:0]  last_beat_probe;    // open-items backlog Stage 10, plan.md
     logic        active;    // AS and DS both asserted
 
     assign active = !ext_as_n & !ext_ds_n;
 
-    // Address decomposition for sub-longword and narrow-port accesses
-    logic [31:0] word_addr;    // longword index (byte_addr >> 2)
+    // Address decomposition for sub-longword and narrow-port accesses.
+    // word_addr folds in burst_beat_probe (0 outside a burst, since
+    // biu_burst_ctrl.sv's own burst_beat_r sits at 0 whenever no burst is
+    // in progress) -- this is what actually serves each beat's own
+    // distinct word now that the real address bus (ext_a) stays frozen at
+    // the burst's own base address throughout, matching real 68030
+    // silicon (open-items backlog Stage 10, plan.md).
+    logic [31:0] word_addr;    // longword index (byte_addr >> 2) + beat offset
     logic [31:0] half_addr;    // halfword index (byte_addr >> 1)
     logic [31:0] byte_addr_w;  // byte index
 
-    assign word_addr   = ext_a[31:2];
+    assign word_addr   = ext_a[31:2] + {28'h0, burst_beat_probe};
     assign half_addr   = ext_a[31:1];
     assign byte_addr_w = ext_a[31:0];
 
@@ -129,6 +148,7 @@ module mem_model #(
                             else
                                 d_latch <= 32'hDEAD_DEAD;
                             last_latched_addr <= ext_a;
+                            last_beat_probe   <= burst_beat_probe;
                         end
                     end
                 end
@@ -147,20 +167,25 @@ module mem_model #(
                     // data for each beat's own new address. With AS/DS now
                     // correctly held throughout, `active` never drops
                     // between beats, so this model needs its own explicit
-                    // re-latch trigger: if the address on the bus changes
-                    // while still active (this project's own burst_addr
-                    // still increments per-beat, a separate, deliberately
-                    // NOT-fixed-this-round finding -- see plan.md), treat
-                    // it as a new beat and re-latch. A genuine wait-state
-                    // retry within the SAME beat has an unchanged address,
-                    // so this is a no-op there, preserving existing
-                    // non-burst read/write timing exactly.
-                    if (ext_rw && active && ext_a != last_latched_addr) begin
+                    // re-latch trigger. Open-items backlog Stage 10
+                    // (plan.md): the address itself is no longer usable
+                    // for this (burst_addr now correctly stays frozen at
+                    // the burst's own base address on the real bus,
+                    // matching real 68030 silicon) -- re-latch instead
+                    // whenever burst_beat_probe changes (testbench-only
+                    // instrumentation, see its own port comment above). A
+                    // genuine wait-state retry within the same beat has an
+                    // unchanged burst_beat_probe, so this is a no-op
+                    // there, preserving existing non-burst read/write
+                    // timing exactly -- burst_beat_probe reads a constant
+                    // 0 whenever no burst is in progress at all.
+                    if (ext_rw && active && burst_beat_probe != last_beat_probe) begin
                         if (word_addr < DEPTH)
                             d_latch <= read_lane(mem[word_addr], ext_a[1:0]);
                         else
                             d_latch <= 32'hDEAD_DEAD;
                         last_latched_addr <= ext_a;
+                        last_beat_probe   <= burst_beat_probe;
                     end
                     // Write: capture the correct lane from the BIU's write bus
                     if (!ext_rw && active && ext_d_oe && word_addr < DEPTH) begin
