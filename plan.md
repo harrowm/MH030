@@ -4172,3 +4172,79 @@ See `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 4-stage backlog. Stage 11 (BERR-during-fill per-beat discrimination,
 the highest-risk remaining stage) is next; Stage 12 (MMU LIMIT/S bit)
 still needs the user's own confirmation before starting.
+
+## Phase 196 (open-items backlog Stage 11): BERR-during-fill per-beat discrimination -- investigated, deferred
+
+Read Phase 158 Stage 8's own already-completed finding first (the
+predecessor investigation this stage's plan description quotes almost
+verbatim): real hardware faults on BERR only for the beat matching
+`woff_r` (the word the original requester actually asked for); a BERR
+on any OTHER beat just invalidates that one cache entry, no fault --
+but this project's burst mechanism always starts fetching at word
+offset 0 (no address-wraparound-to-the-requested-word the way real
+silicon's own burst addressing does per Figure 6-12), so "which beat is
+the requested one" isn't fixed at beat 0, it's wherever `woff_r`
+happens to fall among the 4 (linear, offset-0-first) beats.
+
+**Traced every `ic_burst_berr`/`dc_burst_berr` consumption site in both
+cache-if modules before designing anything** (4 each, in `IC_BURST0`/
+`IC_FILL_1B/2B/3B` and their D-cache siblings) -- every single one
+unconditionally sets the fault flag regardless of which beat failed,
+confirming the gap is real and unchanged since Phase 158.
+
+**Attempted to scope a smaller, safer first sub-piece** (per the plan's
+own "take it slow, one sub-piece at a time" framing) rather than the
+full fix at once: reasoned that a failing beat whose own linear index
+comes *after* `woff_r`'s own beat is architecturally safe to complete
+without faulting at all (the requester's own word was already
+successfully captured into `fill_rdata_r` in an earlier, successful
+beat -- confirmed by re-reading the capture logic, which already
+per-beat-conditionally latches `fill_rdata_r` exactly `if (woff_r ==
+<this beat's own index>)`, independent of whether later beats
+succeed), needing only a beat-index-vs-`woff_r` comparison and no
+retry mechanism at all -- deliberately deferring the harder case (a
+beat *before* `woff_r` fails, genuinely needing a retry to still reach
+the requested word) to a second sub-piece.
+
+**Found this narrower sub-piece is ALSO blocked, by a deeper, more
+fundamental gap than either this plan or Phase 158 anticipated**: it's
+only implementable at all for the *degraded* fallback path
+(`IC_FILL_1B/2B/3B`, individually-issued ordinary bus cycles, each with
+its own genuine per-request ack/berr). The primary, full-4-beat-burst-
+success path (`IC_BURST0`'s own main branch, and its D-cache sibling)
+has **no per-beat BERR signal at all** -- traced `ic_burst_berr`/
+`dc_burst_berr` back to their shared source, `biu_burst_ctrl.sv`'s own
+`eu_burst_berr`/`eu_m16_berr` (a single registered pulse, set once,
+with zero beat-index information attached, confirmed via its own
+`always_ff` block) -- meaning even the deliberately-narrowed "only
+fix the after-woff_r case" sub-piece needs new plumbing through the
+CORE burst state machine first (exporting which beat was in flight at
+the moment BERR fired, from `biu_burst_ctrl.sv`/`biu_cycle_gen.sv`
+upward through both cache-if modules) before any cache-if-level
+behavior change could even be attempted -- not a contained, single-
+module fix as a first-pass reading of the plan's own framing might
+suggest.
+
+**Decision: investigated and precisely re-scoped, not implemented this
+session** -- matching Stage 9's own precedent, and doubly warranted
+here given `biu_burst_ctrl.sv` is the exact module Stage 10 (this same
+session) just modified, and both cache-if modules are, per this
+project's own extensive documented history, the most heavily-tested,
+highest-blast-radius files in the codebase. Concrete next step for
+whoever picks this up: add a registered `burst_beat_at_berr` (or
+similar) output to `biu_burst_ctrl.sv`, capturing `burst_beat_r`'s own
+value in the same cycle `eu_burst_berr_r`/`eu_m16_berr_r` are set,
+threaded up through `m68030_biu.sv` into both cache-if modules'
+existing `ic_burst_berr`/`dc_burst_berr` consumption sites -- that one
+addition unlocks the "after-woff_r, no fault" sub-piece for the
+primary full-burst path too, closing the gap this stage's own
+investigation found between Phase 158's original framing and the
+degraded-path-only reality. The harder before-woff_r retry case
+remains separately deferred regardless. No RTL/testbench changed
+(`git diff --stat rtl/ tb/` empty). **Closes Stage 11 as an
+investigation.** See `~/.claude/plans/compressed-hopping-cocoa.md` for
+the remaining 3-stage backlog. Stage 12 (MMU LIMIT/S bit + genuine
+indirect descriptors) needs the user's own confirmation before
+starting; Stages 13-14 (BKPT live substitution, cpSAVE/cpRESTORE full
+protocol) are lower-value, stub-scope-matching items per the plan's
+own notes.
