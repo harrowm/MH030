@@ -229,8 +229,13 @@ module mmu_xlate_tb;
         // crp_base extraction masks off the low 4 bits unconditionally
         // (confirmed by direct reading of the RTL), so the walker never
         // actually inspects CRP's own DT bits; only the table it points at
-        // matters. crp[63:32] (limit) is unused by this simplified model.
-        rom[16'h3A00/4] = 32'h0000_0000;  // CRP hi (limit, unused)
+        // matters. Open-items backlog Stage 12 (plan.md): crp[63:32]
+        // (L/U+LIMIT) is no longer unused -- L/U=0/LIMIT=0 (the old value
+        // here) means "index must be <= 0," faulting the level-A index
+        // this test actually needs; set to L/U=0/LIMIT=$7FFF (permissive
+        // upper limit, matching what real 68030 firmware always sets when
+        // it doesn't want index limiting).
+        rom[16'h3A00/4] = 32'h7FFF_0000;  // CRP hi: L/U=0, LIMIT=$7FFF (permissive)
         rom[16'h3A04/4] = 32'h0000_3002;  // CRP lo: base=0x3000
 
         // Level-A table. VA=0x20001004, IS=5/TIA=15/PS=12 gives

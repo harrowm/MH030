@@ -1612,7 +1612,10 @@ module stall_fsm_tb;
             // check below failed outright) once Phase 150 wired real
             // translation into ordinary IFU/EU fetches for the first time.
             rom[16'h2304/4] = 32'h0000_80E0;  // TT0: LAB=0,LAM=0x00(exact top-byte 0x00 match, code-only),E=1,FCM=any
-            rom[16'h2308/4] = 32'h0000_0000;  // CRP hi (limit, unused)
+            // open-items backlog Stage 12 (plan.md): L/U=0/LIMIT=0 (the
+            // old value) faults on any nonzero level-A index; permissive
+            // L/U=0/LIMIT=$7FFF instead, matching real 68030 firmware.
+            rom[16'h2308/4] = 32'h7FFF_0000;  // CRP hi: L/U=0, LIMIT=$7FFF (permissive)
             rom[16'h230C/4] = 32'h0000_2002;  // CRP lo: base=0x2000, DT=10 (table)
 
             // D5 must be cleared first: an earlier test's own completion

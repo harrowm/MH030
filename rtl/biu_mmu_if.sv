@@ -128,6 +128,19 @@ module biu_mmu_if (
     wire [3:0]  tia    = tc[19:16];
     wire [3:0]  tib    = tc[15:12];
     wire [3:0]  tic    = tc[11:8];
+    // open-items backlog Stage 12 (plan.md): FCL (Function Code Lookup
+    // Enable), Figure 9-36 -- adjacent to the already-proven tc[30]=SRE
+    // (Phase 157 Stage 2), best-inference position given some ambiguity
+    // in the figure's own box-to-bit-position alignment (documented, not
+    // independently re-verified beyond this one source, same honesty
+    // this project applies elsewhere to lower-confidence bit positions,
+    // e.g. Phase 150 Stage 5's own PLOAD encoding caveat). Practical
+    // impact is minimal either way: this project never implements
+    // genuine FC-lookup-based root indexing, so FCL is otherwise
+    // unused/write-only everywhere -- its only consumer is gating the
+    // root-pointer LIMIT check below, per "When function code lookup is
+    // enabled... the limit field of CRP or SRP is ignored" (9.7.2).
+    wire        fcl    = tc[29];
 
     // Page mask (0 in page offset bits, 1 elsewhere)
     wire [31:0] page_mask = ~((32'h1 << ps) - 32'h1);
@@ -146,6 +159,28 @@ module biu_mmu_if (
     wire [63:0] active_root = use_srp ? srp : crp;
     // Root base (use lower 32-bit, bits[31:4] give base >> 4)
     wire [31:0] crp_base = {active_root[31:4], 4'h0};
+
+    // -----------------------------------------------------------------------
+    // open-items backlog Stage 12 (plan.md): L/U + LIMIT bounds check.
+    // Manual 9.5.1.1: "When the L/U bit is set, the LIMIT field contains
+    // the unsigned lower limit; the index value for the next level of the
+    // tree must be greater than or equal to the value in the LIMIT
+    // field. When the bit is cleared, the limit is an unsigned upper
+    // limit, and the index value must be less than or equal to the
+    // LIMIT." Applies to the root pointer (limiting the level-A index,
+    // Figure 9-9/9-35, gated by !fcl per 9.7.2) and to every long-format
+    // table descriptor (limiting the NEXT level's own index, Figure
+    // 9-11) -- short-format descriptors carry no L/U/LIMIT field at all
+    // (Figure 9-10), so this is only ever consulted when walk_long_r.
+    // -----------------------------------------------------------------------
+    function automatic logic limit_violation(
+        input logic        lu,
+        input logic [14:0] limit,
+        input logic [31:0] index
+    );
+        limit_violation = lu ? (index < {17'h0, limit})   // lower limit
+                              : (index > {17'h0, limit});  // upper limit
+    endfunction
 
     // -----------------------------------------------------------------------
     // TT match function
@@ -443,6 +478,17 @@ module biu_mmu_if (
                             end else begin
                                 ms_state <= MS_ATC_HIT;
                             end
+                        end else if (!fcl && limit_violation(active_root[63], active_root[62:48], idx_a_w)) begin
+                            // open-items backlog Stage 12 (plan.md): root
+                            // pointer's own L/U+LIMIT bounds the level-A
+                            // index (Figure 9-9/9-35), gated by !fcl
+                            // (9.7.2 -- "When function code lookup is
+                            // enabled... the limit field of CRP or SRP is
+                            // ignored"). Same fault path as an invalid
+                            // descriptor: a purely logical fault, no bus
+                            // access was even attempted yet.
+                            fault_is_berr_r <= 1'b0;
+                            ms_state        <= MS_FAULT;
                         end else begin
                             // ATC miss → start table walk level A
                             walk_req_addr_r <= walk_a_addr_w;
@@ -684,7 +730,20 @@ module biu_mmu_if (
                         fault_is_berr_r <= 1'b1;
                         ms_state <= MS_FAULT;
                     end else if (mmu_ack_rise) begin
-                        if (walk_long_is_page_r) begin
+                        // open-items backlog Stage 12 (plan.md): S bit
+                        // ("supervisor only table or page," 9.5.1.1)
+                        // applies to every long-format descriptor -- table
+                        // AND page, checked here uniformly since this is
+                        // the one place both branches consume
+                        // walk_word1_r (short-format descriptors carry no
+                        // S bit at all, Figures 9-10/9-12, so this whole
+                        // state is exactly the right, and only, place for
+                        // it). walk_fc_r[2] is this project's own S-bit-in-
+                        // FC convention (001/010=user, 101/110=supervisor).
+                        if (walk_word1_r[9] && !walk_fc_r[2]) begin
+                            fault_is_berr_r <= 1'b0;  // purely logical fault
+                            ms_state <= MS_FAULT;
+                        end else if (walk_long_is_page_r) begin
                             walk_pa_r  <= (mmu_rdata & page_mask) |
                                           (walk_va_r & ~page_mask);
                             walk_ci_r  <= walk_word1_r[6];
@@ -710,12 +769,41 @@ module biu_mmu_if (
                             // indirect descriptor, out of scope -- see this
                             // file's own header comment).
                             logic no_next_level;
+                            logic [4:0]  next_fb_lo;
+                            logic [3:0]  next_ti;
+                            logic [31:0] next_idx;
                             case (walk_level_r)
                                 2'd0:    no_next_level = (tib == 4'h0);
                                 2'd1:    no_next_level = (tic == 4'h0);
                                 default: no_next_level = 1'b1; // level C: no level D modeled
                             endcase
-                            if (no_next_level) begin
+                            // Computed unconditionally (harmless -- pure
+                            // combinational math local to this block) so
+                            // the LIMIT check below and the existing
+                            // per-level branch further down can both use
+                            // the same values without duplicating the
+                            // formula a third time.
+                            next_ti    = (walk_level_r == 2'd0) ? tib : tic;
+                            next_fb_lo = (walk_level_r == 2'd0) ? (fa_lo_r - {1'b0, tib})
+                                                                 : (fa_lo_r - {1'b0, tib} - {1'b0, tic});
+                            next_idx   = (walk_va_r >> next_fb_lo) &
+                                         ((32'h1 << {1'b0, next_ti}) - 32'h1);
+                            if (!no_next_level &&
+                                limit_violation(walk_word1_r[31], walk_word1_r[30:16], next_idx)) begin
+                                // open-items backlog Stage 12 (plan.md):
+                                // this long-format table descriptor's own
+                                // L/U+LIMIT bounds the NEXT level's index
+                                // (Figure 9-11). Deliberately NOT applied
+                                // in the no_next_level branch below --
+                                // that's the separate, still-deferred
+                                // genuine-indirect-descriptor case, not an
+                                // early-termination page's own LIMIT
+                                // (Figure 9-13's own "still used as a
+                                // check on the next index field" --
+                                // documented, not implemented this stage).
+                                fault_is_berr_r <= 1'b0;
+                                ms_state <= MS_FAULT;
+                            end else if (no_next_level) begin
                                 walk_pa_r  <= ({mmu_rdata[31:4], 4'h0} & page_mask) |
                                               (walk_va_r & ~page_mask);
                                 walk_ci_r  <= 1'b0;

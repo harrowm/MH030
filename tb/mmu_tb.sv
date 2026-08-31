@@ -38,7 +38,15 @@
 module mmu_tb;
     localparam logic [31:0] TC_MMU_ON = 32'h8C08_8000;
     // E=1, PS=12(4KB), IS=0, TIA=8, TIB=8, TIC=0
-    localparam logic [63:0] CRP_VAL   = 64'h0000_0000_0001_0000;
+    // open-items backlog Stage 12 (plan.md): upper word's own top 16 bits
+    // (L/U + LIMIT, Figure 9-9) were previously left at 0 -- L/U=0 (upper
+    // limit) + LIMIT=0 means "index must be <= 0," faulting on the very
+    // first real (nonzero) index, silently tolerated only because this
+    // project never checked it before. Set to L/U=0/LIMIT=$7FFF (the max
+    // permissive upper limit) to match what real 68030 firmware always
+    // sets when it doesn't want index limiting -- DT (bits[33:32]) and
+    // the table address (lower word) are unchanged.
+    localparam logic [63:0] CRP_VAL   = 64'h7FFF_0000_0001_0000;
     // crp_base = {crp[31:4],4'h0} = 0x10000
 
     localparam logic [31:0] VA_TEST    = 32'h1234_5678;
@@ -98,10 +106,15 @@ module mmu_tb;
     // longword sets DT=3 too, so level B is ALSO long-format, exercising
     // the full long-table -> long-page chain in one test.
     localparam logic [31:0] VA_LF      = 32'h7777_7777;
-    localparam logic [63:0] CRP_LONG   = 64'h0000_0003_0001_0000; // base=0x10000, DT=3(long)
+    // open-items backlog Stage 12 (plan.md): L/U=0/LIMIT=$7FFF (permissive
+    // upper limit), same reasoning as CRP_VAL above.
+    localparam logic [63:0] CRP_LONG   = 64'h7FFF_0003_0001_0000; // base=0x10000, DT=3(long)
     localparam logic [31:0] ADDR_A_LF   = 32'h0001_01DC; // crp_base + 0x77*4
     localparam logic [31:0] ADDR_A_LF_2 = ADDR_A_LF + 32'd4;
-    localparam logic [31:0] DESC_A_LF_1 = 32'h0000_0003; // 1st longword: DT=3 (level B is long)
+    // open-items backlog Stage 12 (plan.md): this is a long-format TABLE
+    // descriptor too (DT=3), so its own L/U+LIMIT bounds level B's index
+    // -- same permissive fix as CRP_LONG/CRP_VAL above.
+    localparam logic [31:0] DESC_A_LF_1 = 32'h7FFF_0003; // 1st longword: DT=3 (level B is long)
     localparam logic [31:0] DESC_A_LF_2 = 32'h0000_9000; // 2nd longword: next table base=0x9000
     localparam logic [31:0] ADDR_B_LF   = 32'h0000_91DC; // 0x9000 + 0x77*4
     localparam logic [31:0] ADDR_B_LF_2 = ADDR_B_LF + 32'd4;
@@ -115,7 +128,8 @@ module mmu_tb;
     // DISTINGUISHABLE page descriptor, so a wrong-root selection produces
     // an observably wrong PA rather than silently matching by coincidence.
     localparam logic [31:0] VA_SRP        = 32'h5050_5050;
-    localparam logic [63:0] SRP_VAL_TEST  = 64'h0000_0000_0002_0000; // base=0x20000
+    // open-items backlog Stage 12 (plan.md): permissive L/U+LIMIT, same as CRP_VAL above.
+    localparam logic [63:0] SRP_VAL_TEST  = 64'h7FFF_0000_0002_0000; // base=0x20000
     localparam logic [31:0] ADDR_A_SRP_CRP = 32'h0001_0140; // 0x10000 + 0x50*4
     localparam logic [31:0] ADDR_A_SRP_SRP = 32'h0002_0140; // 0x20000 + 0x50*4
     localparam logic [31:0] DESC_A_SRP_CRP = 32'hC000_0001; // page, frame=0xC0000000 ("CRP used")

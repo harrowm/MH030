@@ -1855,7 +1855,11 @@ module biu_tb;
             tt1_tb = 32'h0;
             // CRP lower 32-bit = {crp_base[31:4], DT=10} with crp_base=0x40
             // crp_base=0x40: {0x40>>4=4, 4-bit zone} → crp[31:4]=4 → crp=0x00000042
-            crp_tb = {32'h0, 32'h0000_0042};
+            // open-items backlog Stage 12 (plan.md): hi word's own L/U+LIMIT
+            // (Figure 9-9) was 0 (L/U=0,LIMIT=0 -- faults on any nonzero
+            // level-A index, which this test's own VA needs); permissive
+            // L/U=0/LIMIT=$7FFF instead, matching real 68030 firmware.
+            crp_tb = {32'h7FFF_0000, 32'h0000_0042};
 
             // VA = 0x0040_1000:
             //   TIA=10: VA[31:22] = 1 → root entry index 1
@@ -3414,7 +3418,9 @@ module biu_tb;
                 tc_tb  = 32'h8C0A_A000;
                 tt0_tb = 32'h0;
                 tt1_tb = 32'h0;
-                crp_tb = {32'h0, 32'h0000_0042};   // root table at 0x40
+                // open-items backlog Stage 12 (plan.md): permissive
+                // L/U=0/LIMIT=$7FFF hi word, same reasoning as P6-7 above.
+                crp_tb = {32'h7FFF_0000, 32'h0000_0042};   // root table at 0x40
 
                 // VA=0x0080_2000: VA[31:22]=2 -> root entry at 0x48 (mem[18])
                 u_mem.mem[18] = 32'h0000_0092;     // -> pointer table 0x90, DT=10

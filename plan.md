@@ -4248,3 +4248,102 @@ indirect descriptors) needs the user's own confirmation before
 starting; Stages 13-14 (BKPT live substitution, cpSAVE/cpRESTORE full
 protocol) are lower-value, stub-scope-matching items per the plan's
 own notes.
+
+## Phase 197 (open-items backlog Stage 12, sub-stages 12a+12b): S-bit + LIMIT enforcement
+
+User confirmed doing Stage 12 (all 3 sub-features, after a scoping
+question surfaced that the plan's own one-line description was really
+three separable features with different cost/risk: S-bit enforcement,
+table-index LIMIT enforcement, and genuine indirect descriptors).
+Investigated via a real, page-calibrated read of `docs/MC68030UM.pdf`
+Section 9 (Memory Management Unit) before writing any RTL -- located
+the TOC (PDF 7-13), calibrated the manual-page-to-PDF-page offset per
+section (each section restarts its own "N-1" numbering), then read
+9.5.1.1 (Descriptor Field Definitions), 9.5.1.2-9.5.1.12 (every
+descriptor format figure), 9.5.2 (General Table Search), 9.5.3.2
+(Indirection), and 9.7.2 (Translation Control Register).
+
+**Key finding that reshaped implementation scope**: SHORT-format
+descriptors (Figure 9-10, table; 9-12, page) carry NO L/U, LIMIT, or S
+fields at all -- confirmed directly from the figures, only U/WP/DT
+(table) or CI/M/U/WP/DT (page) exist there. These fields only exist in
+the ROOT POINTER (Figure 9-9, always the special 64-bit CRP/SRP
+format) and LONG-format descriptors (Figure 9-11 table, 9-13/9-14
+page). This means the whole feature is gated cleanly on `walk_long_r`
+(already an existing signal) for every non-root descriptor, with zero
+interaction needed for the short-format-only code paths this project
+has relied on since Phase 150 Stage 0.
+
+**S-bit** (9.5.1.1: "identifies a pointer table or a page as
+supervisor only... only programs operating at the supervisor privilege
+level are allowed to access"): confirmed bit position (9, within the
+low-16-bit STATUS half of a long descriptor's first longword) by cross-
+checking Figure 9-11 (table) against Figure 9-14 (page) -- both show
+"S" as the 7th box from the left in an identical 16-box row, i.e. bit
+9 of the STATUS field. Checked in `rtl/biu_mmu_if.sv`'s `MS_WALK_LONG2`
+state -- the ONE place both the table-descriptor and page-descriptor
+branches consume `walk_word1_r` (the long descriptor's first
+longword), so a single, uniform check (`walk_word1_r[9] &&
+!walk_fc_r[2]`, using this project's own FC[2]=supervisor-bit
+convention) covers every long-format table AND page descriptor at
+every level, faulting the same way an invalid descriptor does.
+
+**LIMIT** (9.5.1.1: L/U selects lower-vs-upper-bound semantics for the
+15-bit LIMIT field, checked against "the index value for the NEXT
+level of the tree"; 9.7.2: FCL=1 makes the root pointer's own LIMIT
+"ignored"): new `limit_violation(lu, limit, index)` function. Applied
+at two points: (1) the root pointer's own L/U+LIMIT (`active_root[63]`/
+`active_root[62:48]`, already conveniently in the exact bit positions
+Figure 9-9 shows since `active_root` is this project's own pre-existing
+64-bit CRP/SRP register) bounding the level-A index, gated `!fcl` --
+new `fcl=tc[29]` extraction, a best-inference bit position (adjacent to
+the already-proven `tc[30]=SRE`, some genuine ambiguity in the figure's
+own box-alignment, documented as such, low-impact regardless since this
+project never implements genuine FC-lookup indexing); (2) every long-
+format TABLE descriptor's own L/U+LIMIT (`walk_word1_r[31]`/
+`walk_word1_r[30:16]`) bounding the NEXT level's index, computed once
+(hoisted out of the existing `no_next_level` branch structure so both
+the new check and the pre-existing per-level dispatch logic share the
+same formula) and checked only in the "genuinely has a next level"
+case -- deliberately NOT applied in the `no_next_level` branch, which
+is the separate, still-deferred genuine-indirect-descriptor case (Figure
+9-13's own distinct "early termination page's own LIMIT still checks
+the next index field" refinement is also deliberately deferred, out of
+this sub-stage's scope, documented in-line).
+
+**Found and fixed a major, project-wide regression this same session
+caught via `make test`, not shipped silently**: enabling the root-level
+LIMIT check immediately broke almost every existing test that sets up
+CRP/SRP, across `tb/mmu_tb.sv`, `tb/mmu_xlate_tb.sv`, `tb/stall_fsm_tb.sv`,
+and `tb/biu_tb.sv` (`mmu_xlate` alone went from 32 passing checks to
+total failure, `stall_fsm` lost 3 BERR-mid-`<X>` tests to cascading
+corruption, `biu` lost the P6-7 walk test plus the unrelated-looking
+`ARB-1` arbitration test downstream of it). Root cause: every existing
+test's own CRP/SRP setup left the unused upper 16 bits (L/U+LIMIT) at
+0 -- architecturally, L/U=0 (upper limit) + LIMIT=0 genuinely means
+"only index 0 is permitted," which real 68030 firmware would have
+always avoided by explicitly setting a permissive LIMIT, but which this
+project's own test infrastructure had never needed to care about before
+this feature existed. Fixed by updating every CRP/SRP constant and
+descriptor literal this session's own tracing found (`CRP_VAL`/
+`CRP_LONG`/`SRP_VAL_TEST`/`DESC_A_LF_1` in `mmu_tb.sv`; `rom[0x3A00]`
+in `mmu_xlate_tb.sv`; `rom[0x2308]` in `stall_fsm_tb.sv`; `crp_tb` at
+both of its own two sites in `biu_tb.sv`) to L/U=0/LIMIT=$7FFF (the
+maximally permissive upper-limit setting, matching what real firmware
+always configures when it doesn't want index limiting) -- traced each
+site individually rather than blanket-patching, confirming via the
+short-vs-long-format distinction which literals genuinely needed the
+fix (short-format table/page descriptors, confirmed via their own DT
+encoding, correctly needed none).
+
+Results: `make test` 36/36 (clean after the CRP/SRP fixes), `cosim_grp`
+8/8, `cosim_memind` 13/13, full 124-suite Harte sweep (mandatory --
+`biu_mmu_if.sv` changed) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, zero
+regressions (expected: Harte never sets TC.E=1, so none of this new
+logic is ever exercised by the corpus -- `tb/mmu_tb.sv`/
+`tb/mmu_xlate_tb.sv` are the actual correctness gate here, both now
+green with the new checks genuinely exercised, not just tolerated).
+**Closes sub-stages 12a+12b.** Sub-stage 12c (genuine indirect
+descriptors) is next -- the largest, most novel piece, needing a new
+walker state.
