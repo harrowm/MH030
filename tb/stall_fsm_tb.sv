@@ -2175,6 +2175,51 @@ module stall_fsm_tb;
         rom[16'h2C5C/4] = {16'h3674, ADDX_L_A1_A0};
         rom[16'h2C60/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h2C64/4] = {16'd5504, NOP_OP};
+
+        // Open-items backlog Stage 5 (plan.md): INT-mid-PACK/INT-mid-
+        // BFINS's own rom[] content, plus the JMP redirect that reaches
+        // them (in the free gap right after T4d's own tail, before
+        // WS-CAS2's own fixed 0x2CC0 start), written here -- up front,
+        // before T4c/T4d's own check code runs and starts consuming real
+        // simulated time. A first attempt placed these writes in their
+        // own natural program-order position (right after WS-CAS's own
+        // block, in the T4d/WS-CAS2 gap) and found every check failed
+        // with zero bus activity ever observed -- traced to the exact
+        // same "ROM write issued after simulated time already passed
+        // that address" class Stage 3 already root-caused for the
+        // I-cache case, just via the IFU's own always-present linear
+        // readahead (not genuine caching, which isn't active yet at this
+        // point in the flow) racing ahead of a write positioned too late
+        // in SV program order.
+        // A few settle NOPs right at the JMP target, before any real
+        // (bus-touching) content -- avoids "interrupt arrives mid-JMP-
+        // redirect", a genuinely new scenario no other run_int_mid_test
+        // call site exercises (every other one is reached via plain
+        // fall-through, never a JMP). Found via direct trace: a first
+        // attempt with PACK's own real content starting immediately at
+        // the JMP target showed decode_pc/A0/A1/D1 all reading garbage
+        // (values from an entirely different, earlier test) after the
+        // interrupt round-tripped -- consistent with the NMI landing
+        // while the redirect itself was still in flight.
+        rom[16'h2EA0/4] = {NOP_OP, NOP_OP};
+        rom[16'h2EA4/4] = {NOP_OP, NOP_OP};
+        rom[16'h2EA8/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2EAC/4] = {16'h3084, MOVEA_L_IMM_A1};
+        rom[16'h2EB0/4] = {16'h0000, 16'h3094};
+        rom[16'h2EB4/4] = {PACK_A1_A0, 16'h0000};
+        rom[16'h2EB8/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2EBC/4] = {16'h0000, 16'd8005};
+        rom[16'h2EC0/4] = {NOP_OP, NOP_OP};
+        rom[16'h2EC4/4] = {NOP_OP, MOVEA_L_IMM_A0};
+        rom[16'h2EC8/4] = {16'h0000, 16'h30A0};
+        rom[16'h2ECC/4] = {BFINS_D1_A0, BFINS_EXT};
+        rom[16'h2ED0/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2ED4/4] = {16'h0000, 16'd8006};
+        rom[16'h2ED8/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h2EDC/4] = {16'h2CC0, NOP_OP};  // back to WS-CAS2's own start
+        rom[16'h2CAC/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h2CB0/4] = {16'h2EA0, NOP_OP};
+
         run_int_mid_test("INT-mid-ADDX", 32'h0000_2C50, 3, 5, 32'd5504, 32'h0000_008A);
 
         // -------------------------------------------------------------
@@ -2223,6 +2268,21 @@ module stall_fsm_tb;
         rom[16'h2CA0/4] = {16'h1925, 16'h0010};  // ext1 ; bd
         rom[16'h2CA4/4] = {TAS_A0, ADDI_L_D5};
         rom[16'h2CA8/4] = {16'h0000, 16'd4002};
+        // Open-items backlog Stage 5 (plan.md): redirect through the free
+        // gap before WS-CAS2's own fixed 0x2CC0 start (matching Stage 4's
+        // own "explicit JMP, isolated address" convention) to
+        // INT-mid-PACK/INT-mid-BFINS (own addresses, below WS-MOVEP/
+        // WS-CAS's own Stage-4 content), whose own tail JMPs back to
+        // 0x2CC0, preserving the original flow. (rom[] content for this
+        // JMP and for INT-mid-PACK/BFINS themselves is written up front,
+        // alongside INT-mid-ADDX's own setup -- see the comment there --
+        // not here: T4c/T4d's own check code between here and there
+        // advances real simulated time, and the IFU's own linear
+        // readahead reaches this address range well before a write
+        // positioned at this point in SV program order would land,
+        // hitting the identical class of race Stage 3 already root-
+        // caused for the I-cache case, just via the IFU's own
+        // always-present prefetch queue instead of genuine caching.)
         begin
             int c0, c1, t;
             // Unlike T4a (which ran directly after B-21 with nothing async
@@ -2278,6 +2338,37 @@ module stall_fsm_tb;
             check32("T4d: TAS set bit7 on A0's own byte (top byte 0x80, not stale 0x00)",
                     rom[16'h36A0/4], 32'h8011_2233);
         end
+
+        // INT-mid-PACK/INT-mid-BFINS: rom[] content for both, and the JMP
+        // redirect reaching them, is written up front alongside INT-mid-
+        // ADDX's own setup (see the comment there). The CALLS, though,
+        // must run HERE -- immediately after T4d's own check block, not
+        // after WS-CAS2/WS-Memind/WS-MOVEP/WS-CAS's own check blocks
+        // further below where they were originally placed (matching this
+        // file's own "next section in program-text order" convention).
+        // Root-caused via direct trace, not guessed at: this test's own
+        // real DUT execution (via the 0x2CAC JMP redirect) happens
+        // BEFORE WS-CAS2/WS-Memind/WS-MOVEP/WS-CAS in the actual
+        // execution sequence, but SV program order controls when
+        // run_int_mid_test's own decode_pc-based synchronization starts
+        // watching -- placed after those tests' own check blocks, the
+        // DUT had ALREADY passed this code (and moved on, deep into
+        // RAW-hazard-with-Ihit's own loop or beyond) by the time the SV
+        // task's own "reached own code" wait even began, so it resolved
+        // instantly (decode_pc already far past 0x2EA8) and the
+        // injection loop watched unrelated, much-later bus activity
+        // instead -- explaining the observed corruption (decode_pc/A0/
+        // A1/D1 reading garbage values from entirely different tests).
+        // SV program order must match real DUT execution order for this
+        // particular helper's own synchronization to work correctly.
+        // PACK's own real bus-cycle count is 2, not 3 like ADDX -- unlike
+        // ADDX's addition (needs both operands read before it can write
+        // the sum), PACK's own destination is a pure write (source word
+        // read from -(Ay), packed, written to -(Ax) with no dst-read
+        // needed first). Confirmed empirically (an initial guess of 3,
+        // matching ADDX's own shape, measured 2) before landing this.
+        run_int_mid_test("INT-mid-PACK", 32'h0000_2EA8, 2, 5, 32'd8005, 32'h0000_008A);
+        run_int_mid_test("INT-mid-BFINS", 32'h0000_2EC6, 2, 5, 32'd8006, 32'h0000_008A);
 
         // -------------------------------------------------------------
         // WS-CAS2: DSACK wait-states composing with CAS2's own bus beats

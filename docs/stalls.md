@@ -470,11 +470,12 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   MOVEP→CAS, memory-indirect-EA→TAS, Phases 107/126) out of the many possible
   combinations. Nothing suggests a further pairing would behave differently, but only
   these three have been checked.
-- **Interrupt-mid-FSM** (Category F) has 7 of ~19-23 possible FSM sources checked
-  individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX). Same reasoning as
-  above — the mechanism is decode-agnostic by construction, but only spot-checked, not
-  exhaustively swept the way Category I was. Remaining: MOVE16, ABCD/SBCD/PACK, BFINS,
-  CMP2/CHK2, MOVE mem-mem, RTR/RTE, PFLUSH/PTEST/PMOVE64.
+- **Interrupt-mid-FSM** (Category F) has 9 of ~19-23 possible FSM sources checked
+  individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS -- Phase 189's
+  own open-items backlog Stage 5 added the last two). Same reasoning as above — the
+  mechanism is decode-agnostic by construction, but only spot-checked, not exhaustively
+  swept the way Category I was. Remaining: MOVE16, ABCD/SBCD, CMP2/CHK2, MOVE mem-mem,
+  RTR/RTE, PFLUSH/PTEST/PMOVE64.
 - **DSACK wait-states-on-FSM-beats** (Category H) has 6 sources checked (TAS, MOVEM,
   CAS2, memory-indirect EA, MOVEP, single-address CAS -- Phase 188's own open-items
   backlog Stage 4 added the last two). Given Phase 125's own absorption-effect finding,

@@ -3689,3 +3689,73 @@ correctly wired up; `make test` 36/36, `cosim_grp` 8/8, `cosim_memind`
 empty). **Closes Stage 4.** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 10-stage backlog. Stage 5 (Interrupt-mid-FSM breadth) is next.
+
+## Phase 190 -- Open-items backlog Stage 5: Interrupt-mid-FSM breadth, PACK and BFINS -- plus a genuine, previously-unencountered testbench-methodology finding
+
+Extended `docs/stalls.md`'s own Category F (interrupt arrival mid-FSM,
+proving decode correctly defers dispatch until the interrupted
+instruction's own FSM genuinely completes) from 7 sources to 9, adding
+PACK -(Ay),-(Ax),#0 (the dual-address predecrement shape, explicitly
+flagged by `INT-mid-ADDX`'s own comment as "not yet exercised for
+interrupt-mid") and BFINS D1,(An){o:w} (memory bitfield insert, a
+genuinely different single-operand RMW FSM shape).
+
+**Hit a real, previously-unencountered class of testbench-methodology
+bug getting there** -- not an RTL bug, and not quite the same shape as
+Stage 3's "ROM write issued after simulated time already passed"
+class either, though related. First attempt placed the two new
+`run_int_mid_test(...)` CALLS (not just their own `rom[]` content)
+immediately after their own setup, in the same program-text position
+as the other `run_int_mid_test` call sites -- which, per this file's
+own convention, meant AFTER `WS-CAS2`/`WS-Memind`/`WS-MOVEP`/`WS-CAS`'s
+own check blocks (Stage 4's own new tests). But the new tests' own
+REAL DUT execution (reached via a JMP redirect from the gap after
+`T4d`) happens BEFORE those four tests in the actual execution
+sequence. `run_int_mid_test`'s own internal synchronization
+(`decode_pc>=code_start_addr`, then sample `data_ds_count` as `d0`
+before watching for the FSM's own first bus cycle) implicitly assumes
+SV program order matches real DUT execution order -- when it doesn't,
+the "reached own code" wait resolves instantly against a decode_pc
+that's already raced far past the target (the DUT having already
+executed that code long ago, while the SV testbench was still busy
+watching the four earlier tests), so `d0` samples arbitrary, much-
+later, unrelated bus activity instead. Confirmed via direct trace (a
+temporary `data_ds_count`-change monitor running from time 0, plus
+`ipl_n`/`exc_active`): by the time "reached own code" fired for
+`INT-mid-PACK`, `decode_pc` was already garbage
+(`0x4e734e71`/`0x4e714e71`) and `exc_active` was already 1 -- the
+interrupt had been injected against completely unrelated activity
+(traced to `WS-MOVEP`'s own tail), explaining the observed corruption
+(`A0`/`A1`/`D1` all reading stale values from entirely different
+tests). Two intermediate, ultimately-unnecessary fixes were tried and
+discarded along the way (settle-NOP padding after the JMP target,
+suspecting an "interrupt lands mid-JMP-redirect" race) before the real
+mechanism was found via this direct trace -- neither changed the
+symptom, which in hindsight correctly ruled out the "mid-redirect"
+theory before the real cause was found.
+
+**Fix**: relocate the two `run_int_mid_test(...)` CALLS (only -- their
+own `rom[]` content stays where Stage-3/4-style relocation already put
+it, up front alongside `INT-mid-ADDX`'s own setup) to execute
+immediately after `T4d`'s own check block, matching the real DUT
+execution order exactly. `rom[]` writes and task CALLS can have
+independently-correct positions for different reasons (writes need to
+land before real time passes that address at all; calls need to match
+real execution order for `run_int_mid_test`'s own synchronization) --
+this phase is the first to need both fixes at once, for two different
+reasons, on the same pair of tests.
+
+Also empirically corrected `INT-mid-PACK`'s own expected bus-cycle
+count from a first guess of 3 (matching `ADDX`'s own dual-read shape)
+to the measured, and on reflection architecturally correct, 2: unlike
+`ADDX`'s addition (needs both operands read before it can compute and
+write the sum), `PACK`'s own destination is a pure write (source word
+read from `-(Ay)`, packed, written to `-(Ax)` with no destination-read
+needed first).
+
+Results: both new tests pass cleanly, `make test` 36/36, `cosim_grp`
+8/8, `cosim_memind` 12/12 -- no Harte re-run needed (testbench-only,
+`git diff --stat rtl/` empty). **Closes Stage 5.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+9-stage backlog. Stage 6 (Back-to-back FSM composition breadth) is
+next.
