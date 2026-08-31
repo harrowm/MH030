@@ -3985,3 +3985,99 @@ FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
 bit-identical to baseline, zero regressions. **Closes Stage 8.** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 6-stage backlog. Stage 9 (CAS/CAS2 real bus-level lock) is next.
+
+## Phase 194 (open-items backlog Stage 9): CAS/CAS2 bus-level lock -- investigated, deferred
+
+**The plan's own stated premise was half-stale.** Grepped every
+`bus_lock` consumer before touching anything: `bus_lock`'s own assign
+in `biu_cycle_gen.sv` (`(state==ST_RMW_READ_S0)|...|is_rmw_write|
+is_cas2|is_burst`) has included `is_cas2` since the project's initial
+commit -- CAS2 was NEVER actually missing `bus_lock` coverage. Combined
+with Phase 213's own already-landed `cas2_as_hold` fix (AS held
+continuously across all 4 CAS2 sub-cycles, closing a real pin-
+continuity bug found while redesigning CAS2's timing), **CAS2 already
+has genuine bus-level lock in full** -- the stale `eu_seq.sv` comment
+this plan's own Stage 9 description was written from (Phase 158 Stage
+3 era: "CAS/CAS2 have no real bus-level lock at all today... bus_lock
+is declared but never driven") predates both facts and was simply
+never re-verified before being carried forward into this backlog.
+
+**Single-address CAS genuinely does lack it, confirmed real**: `mem_rmw`
+(the EU-side "hold bus for RMW" signal `biu_cycle_gen.sv` samples at
+dispatch to route a request through the locked `ST_RMW_READ_*`/
+`ST_RMW_WRITE_*` states instead of the ordinary unlocked read/write
+path) is asserted *only* for `ex_is_tas` -- confirmed via the single
+`assign mem_rmw = ...` site in the whole file. CAS's own two bus
+cycles (read, then a conditional write) dispatch through the ordinary
+`biu_cache_if.sv` path today, returning to `ST_IDLE` (and `bus_lock`
+low) between them -- genuinely not indivisible against DMA/another bus
+master, even though `mem_rmw_lookup` (Phase 158 Stage 3, a *separate*
+D-cache-force-miss-only signal, unrelated to bus arbitration) already
+correctly covers CAS's own read-portion cache behavior.
+
+**Read the real manual directly** (`docs/MC68030UM.pdf`, obtained a
+PDF-page-to-manual-page mapping first via the front-matter TOC rather
+than guessing) before designing anything: Section 3.5.1 "Using the CAS
+and CAS2 Instructions" (manual 3-25) states the instruction "uses an
+indivisible read-modify-write cycle; after CAS reads the memory
+location, no other instruction can change that location before CAS has
+written the new value" -- phrased as if the write always happens.
+Section 7.3.6's own per-state RMW-cycle description (manual 7-57/7-58,
+the synchronous variant; Phase 213 already cited the async 7.3.3
+sibling) never conditions the write portion (States 4-7) on anything
+-- no mention anywhere of skipping it on a failed compare. **This
+confirms real CAS silicon performs the write bus cycle
+unconditionally**, writing back either the new value (match) or the
+unchanged original value (mismatch, a no-op write) -- the same
+well-known pattern real CMPXCHG-style hardware uses for exactly this
+atomicity reason. This RTL's own `eu_seq.sv` CAS FSM currently skips
+the write bus cycle entirely on mismatch (`cas_write_r` only ever set
+`if (cas_z_r)`) -- a second, related but distinct correctness gap from
+the bus-lock question itself, now confirmed against the manual rather
+than assumed.
+
+**Attempted a design, found the real blocking complexity via close
+reading of the existing FSM (not by writing and testing code)**: TAS's
+own write-phase readiness (`tas_run_r`, with valid `eu_addr`/
+`eu_wdata`) becomes valid exactly 1 cycle after the read's own ack --
+the fixed timing `biu_cycle_gen.sv`'s own unconditional, internally-
+scheduled `ST_RMW_READ_S7 -> ST_RMW_WRITE_S0` transition ("no bus
+release!") is calibrated against. CAS's own FSM has a genuine
+*intermediate* register-only cycle (`cas_get_du_r`) between the read
+and any write, needed to fetch Du (the new value) via a register-file
+port swap. Traced exactly what's captured when: `cas_ea_r`/`cas_rdata_r`
+(the write ADDRESS, and the ORIGINAL value needed for a mismatch's own
+no-op write) are captured immediately at the read-ack cycle, with *zero*
+extra delay relative to TAS's own timing -- but `cas_du_val_r` (Du,
+needed only for the MATCH case's real new-value write) is only valid
+one cycle later, once `cas_get_du_r` completes. So a mismatch-case
+write could in principle dispatch on TAS's exact timing with no
+mechanism change at all, but the match case's write data is
+structurally one cycle later -- and `biu_cycle_gen.sv`'s own RMW-write
+dispatch has no "not ready yet, wait" mechanism, so a uniform reuse of
+the existing machinery would either present stale write data for the
+match case or need CAS's own register-port allocation restructured
+(reading Du simultaneously with the initial read dispatch, likely via
+the same `dyn_bit_get_Dn`-style deferred-register-swap trick already
+used elsewhere in this project for analogous 3-operand conflicts) --
+or `biu_cycle_gen.sv`'s own shared, Harte-proven-for-TAS RMW machinery
+would need a genuinely new variable-timing write-phase entry, carrying
+real regression risk to TAS's own 100% Harte pass rate.
+
+**Decision: investigated and characterized precisely, not implemented
+this session.** Both remaining pieces (bus-level lock for single CAS,
+and the always-write-on-mismatch bus behavior) are real, confirmed,
+and now grounded in the actual manual text rather than guessed at --
+but a correct, low-risk fix needs either a genuine register-port
+restructuring of CAS's own FSM or new tolerance in the shared RMW
+state machine every other locked instruction in the project already
+depends on, unlike TAS's own straightforward 1-line `mem_rmw` gate
+extension a naive reading of this plan's own Stage 9 description might
+have suggested. No RTL or testbench changed (`git diff --stat rtl/
+tb/` empty) -- this stage is documentation-only, matching the
+project's own established "confirmed real, but substantial --
+deferred to a dedicated future phase" precedent (Phase 158 Stage 8's
+own BERR-during-fill deferral is the closest prior example). **Closes
+Stage 9 as an investigation.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+5-stage backlog. Stage 10 (burst-cycle address freeze) is next.

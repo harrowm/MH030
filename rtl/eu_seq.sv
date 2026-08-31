@@ -193,11 +193,19 @@ module eu_seq (
     // signal, true for the entire read phase of TAS, CAS, or CAS2 (both
     // reads), consumed only by biu_cache_if.sv to force dhit=0 per manual
     // §6.1.2.2: "The read portion of a read-modify-write cycle is always
-    // forced to miss in the data cache." NOTE (found while implementing,
-    // documented, out of scope): CAS/CAS2 have no real bus-level lock at
-    // all today (bus_lock is declared but never driven anywhere; mem_rmw
-    // above only ever fires for TAS) — a separate, deeper gap from this
-    // stage's own cache-behavior scope, not fixed here.
+    // forced to miss in the data cache." NOTE, corrected by the open-
+    // items backlog Stage 9 investigation (plan.md): this comment used
+    // to claim "bus_lock is declared but never driven anywhere" — false;
+    // bus_lock's own assign in biu_cycle_gen.sv has included is_cas2
+    // since the initial commit, and Phase 213 gave CAS2 genuine AS
+    // continuity too (cas2_as_hold) — CAS2 already has full bus-level
+    // lock. Single-address CAS genuinely still lacks it (mem_rmw above
+    // is TAS-only) and also skips its own write bus cycle entirely on a
+    // failed compare, when real silicon performs it unconditionally
+    // (MC68030UM.pdf 3.5.1/7.3.6, confirmed directly) — both real,
+    // deferred gaps, with the exact blocking complexity (a register-port
+    // timing mismatch in CAS's own FSM vs. the shared RMW dispatch
+    // machinery) documented in plan.md §Phase 194 rather than guessed.
     output logic        mem_rmw_lookup,
 
     // ── FPU coprocessor interface (FC=111 CPU Space) ──────────────
