@@ -2216,9 +2216,34 @@ module stall_fsm_tb;
         rom[16'h2ED0/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h2ED4/4] = {16'h0000, 16'd8006};
         rom[16'h2ED8/4] = {JMP_ABS_L_OP, 16'h0000};
-        rom[16'h2EDC/4] = {16'h2CC0, NOP_OP};  // back to WS-CAS2's own start
+        rom[16'h2EDC/4] = {16'h2EE0, NOP_OP};  // on to T4e (see below), which itself continues to WS-CAS2
         rom[16'h2CAC/4] = {JMP_ABS_L_OP, 16'h0000};
         rom[16'h2CB0/4] = {16'h2EA0, NOP_OP};
+
+        // Open-items backlog Stage 6 (plan.md): T4e -- back-to-back FSM
+        // composition, pair #4 -- ADDX.L -(A1),-(A0) immediately followed
+        // by TAS (A0), no instruction between them. A genuinely new
+        // pairing shape (dual-address predecrement handing directly to a
+        // single-address RMW lock) with a real cross-boundary data-flow
+        // check: ADDX's own predecrement leaves A0 pointing at the exact
+        // byte it just wrote (the sum's own top byte, always 0x00 for
+        // this test's own small operands regardless of the incoming
+        // X-flag, same reasoning T4d's own TAS check already
+        // established), and TAS must read THAT value (not stale data)
+        // to correctly set bit7 -- 0x80, not a coincidental match.
+        // rom[] content written up front, same reasons as PACK/BFINS
+        // above; own fresh addresses (0x30BC/0x30CC), clear of every
+        // other predecrement target in this file.
+        rom[16'h30BC/4] = 32'h0000_0005;  // dst initial value ((A0)-4)
+        rom[16'h30CC/4] = 32'h0000_0003;  // src value ((A1)-4)
+        rom[16'h2EE0/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2EE4/4] = {16'h30C0, MOVEA_L_IMM_A1};
+        rom[16'h2EE8/4] = {16'h0000, 16'h30D0};
+        rom[16'h2EEC/4] = {ADDX_L_A1_A0, TAS_A0};
+        rom[16'h2EF0/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2EF4/4] = {16'h0000, 16'd8007};
+        rom[16'h2EF8/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h2EFC/4] = {16'h2CC0, NOP_OP};  // back to WS-CAS2's own start
 
         run_int_mid_test("INT-mid-ADDX", 32'h0000_2C50, 3, 5, 32'd5504, 32'h0000_008A);
 
@@ -2369,6 +2394,30 @@ module stall_fsm_tb;
         // matching ADDX's own shape, measured 2) before landing this.
         run_int_mid_test("INT-mid-PACK", 32'h0000_2EA8, 2, 5, 32'd8005, 32'h0000_008A);
         run_int_mid_test("INT-mid-BFINS", 32'h0000_2EC6, 2, 5, 32'd8006, 32'h0000_008A);
+
+        // T4e: check code positioned here (immediately after INT-mid-
+        // BFINS's own call), matching this test's own real DUT execution
+        // order exactly -- the same lesson Stage 5 already learned the
+        // hard way for INT-mid-PACK/BFINS themselves. rom[] content is
+        // above, alongside INT-mid-ADDX's own setup.
+        begin
+            int t, c0, c1;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_2EE0; t++)
+                @(posedge clk_4x);
+            check("T4e: reached own code", u_top.ifu_decode_pc >= 32'h0000_2EE0);
+            c0 = data_ds_count;
+            run_and_check("T4e: back-to-back ADDX->TAS dependent instr ran (D5=8007)", 5, 32'd8007, 4000);
+            c1 = data_ds_count;
+            check32("T4e: ADDX(3)+TAS(2)=5 data-space bus cycles", c1 - c0, 32'd5);
+            // Only the top byte is checked, not the full 32-bit sum: the
+            // incoming X-flag (whatever prior tests left it, same caveat
+            // INT-mid-ADDX's own comment already documents) can make the
+            // low byte 8 or 9, but 5+3+X always fits in the low byte
+            // regardless, so the top byte is 0x00 before TAS and must be
+            // 0x80 (bit7 set, not stale) after.
+            check8("T4e: TAS set bit7 on ADDX's own just-written byte (top byte 0x80, not stale 0x00)",
+                   rom[16'h30BC/4][31:24], 8'h80);
+        end
 
         // -------------------------------------------------------------
         // WS-CAS2: DSACK wait-states composing with CAS2's own bus beats

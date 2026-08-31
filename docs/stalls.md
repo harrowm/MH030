@@ -466,10 +466,10 @@ has both decode-holdoff and BERR-abort coverage, and the two mechanisms layered 
 (interrupt dispatch, DSACK wait states) are proven correct in principle across several
 FSM shapes each. What remains is purely *breadth*, not depth:
 
-- **Back-to-back FSM composition** (Category D→D handoff) has 3 pairs (TAS→MOVEM,
-  MOVEP→CAS, memory-indirect-EA→TAS, Phases 107/126) out of the many possible
-  combinations. Nothing suggests a further pairing would behave differently, but only
-  these three have been checked.
+- **Back-to-back FSM composition** (Category D→D handoff) has 4 pairs (TAS→MOVEM,
+  MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191) out of the many
+  possible combinations. Nothing suggests a further pairing would behave differently,
+  but only these four have been checked.
 - **Interrupt-mid-FSM** (Category F) has 9 of ~19-23 possible FSM sources checked
   individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS -- Phase 189's
   own open-items backlog Stage 5 added the last two). Same reasoning as above — the

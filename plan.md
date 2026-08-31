@@ -3759,3 +3759,52 @@ Results: both new tests pass cleanly, `make test` 36/36, `cosim_grp`
 `~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
 9-stage backlog. Stage 6 (Back-to-back FSM composition breadth) is
 next.
+
+## Phase 191 (open-items backlog Stage 6): Back-to-back FSM composition breadth
+
+Category D->D handoff (`docs/stalls.md`) had 3 of many possible pairs
+checked (TAS->MOVEM, MOVEP->CAS, memory-indirect-EA->TAS). Added a
+4th: `ADDX.L -(A1),-(A0)` immediately followed by `TAS (A0)` -- a new
+predecrement-memory-RMW-into-locked-RMW pairing, with a real cross-
+boundary data-flow check (not just "did it unstick", matching B-22's/
+T4c's/T4d's own established rigor): TAS must observe the exact byte
+ADDX itself just wrote, not a stale value.
+
+New `T4e` test in `tb/stall_fsm_tb.sv`, reached via redirecting
+`INT-mid-BFINS`'s own tail JMP (`0x2CC0` -> `0x2EE0`) and itself
+JMPing on to `WS-CAS2`'s own start (`0x2CC0`) once done, matching the
+file's own established isolated-address-plus-explicit-JMP convention.
+Applied Stage 5's own freshly-learned lesson *proactively* this time,
+rather than discovering it reactively: the check `begin...end` block
+was positioned immediately after `INT-mid-BFINS`'s own
+`run_int_mid_test(...)` call from the start (matching T4e's real DUT
+execution order, which runs before `WS-CAS2`/`WS-Memind`/`WS-MOVEP`/
+`WS-CAS`'s own checks), while `rom[]` content was written up front
+alongside `INT-mid-ADDX`'s own setup -- the same "writes need to land
+before real time passes that address; calls need to match real
+execution order" split Stage 5 established, applied correctly on the
+first attempt rather than needing a second pass.
+
+One check was deliberately written loosely rather than as an exact
+32-bit match: ADDX's own sum (`dst=5, src=3`, plus whatever the
+incoming X-flag happens to be -- unknown, left however prior tests in
+the file set it, the same documented caveat `INT-mid-ADDX`'s own
+comment already carries) can legitimately be either 8 or 9 in the low
+byte depending on X, but always fits within the low byte regardless --
+so the check verifies only the TOP byte (`0x00` before TAS, `0x80`
+after, bit 7 set) rather than asserting a specific low-byte sum that
+could spuriously fail on an unrelated X-flag difference. This avoided
+repeating Stage 5's own "guessed value turned out wrong" pattern (that
+time for `INT-mid-PACK`'s own bus-cycle count) via a different route --
+narrowing the assertion to what's actually architecturally guaranteed,
+rather than guessing a specific numeric outcome and correcting it after
+a failure.
+
+Results: `T4e` passed cleanly on the first real run, including the
+exact bus-cycle-count guess (`ADDX(3)+TAS(2)=5`, correct without
+correction this time -- unlike Stage 5's `PACK`). `make test` 36/36,
+`cosim_grp` 8/8, `cosim_memind` 12/12 -- no Harte re-run needed
+(testbench-only, `git diff --stat rtl/` empty). `docs/stalls.md`'s
+Category D tally updated to 4 pairs. **Closes Stage 6.** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+8-stage backlog. Stage 7 (MUL/DIV memory-EA form) is next.
