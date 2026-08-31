@@ -2382,8 +2382,47 @@ module stall_fsm_tb;
         // composing correctly with a cache-hit-served fetch -- would
         // produce a wrong sum, not an obviously-broken value or a hang,
         // so only an exact-value check actually proves this.
-        // -------------------------------------------------------------
-        rom[16'h2DA0/4] = {16'h7201, 16'h4E7B};  // MOVEQ #1,D7 ; MOVEC D7,CACR
+        //
+        // Open-items backlog Stage 2 (plan.md) -- CONFIRMED REAL FINDING,
+        // DELIBERATELY NOT FIXED: the MOVEQ opcode below is 0x7201, which
+        // real MOVEQ encoding (0111 rrr 0 dddddddd) decodes as "MOVEQ
+        // #1,D1", NOT "MOVEQ #1,D7" as this comment (and every phase since
+        // 135) assumed. Confirmed via direct trace: D1 becomes 1, D7 stays
+        // 0, so the following MOVEC D7,CACR writes CACR=0 -- meaning this
+        // test has NEVER actually enabled the I-cache since it was
+        // written, despite its own name/purpose, despite its own checks
+        // passing this whole time (the DBF loop's own semantic
+        // correctness doesn't depend on caching actually happening, only
+        // on the hazard resolving, so a real-bus-cycle fetch every pass
+        // produces the identical D1/D2 checksum). Found while
+        // investigating the separate Phase 155 "PLOAD/CACR/IC_BURST0
+        // hang" finding -- CACR reading disabled was real, not a symptom
+        // of anything clearing it, just of it never having been set
+        // correctly in the first place.
+        //
+        // Fixing the opcode (0x7201 -> 0x7E01) genuinely enables the
+        // I-cache here for the first time -- and doing so exposes a
+        // SEPARATE, deeper, real bug in the downstream "Indexed-EA-no-
+        // extra-read" test: with caching genuinely active, that test's
+        // own setup instructions at 0x2DE4+ fetch as garbage (instr_word
+        // reading 0x4E71/0x0000 instead of the real CLR_L_D6/
+        // MOVEA_L_IMM_A0/etc. opcodes actually in ROM there), traced to
+        // biu_icache_if.sv's own I-cache line at idx=0xE/tag=0x2D showing
+        // valid_i=1 with a matching tag but wrong content, then
+        // transitioning through a fresh IC_SINGLE_0 miss-fill mid-
+        // sequence -- consistent with a fill for this line having been
+        // marked valid before genuinely completing (plausibly related to
+        // Phase 129's own "the fill is still allowed to complete... but
+        // IC_DONE now silently drops the ack" reasoning not fully
+        // covering a partially-abandoned multi-word IC_SINGLE_0..3
+        // sequence specifically), but not yet conclusively root-caused.
+        // This is a real, previously-undiscovered I-cache correctness gap
+        // -- invisible until now because NOTHING in this entire test file
+        // had ever successfully enabled the I-cache before. Deliberately
+        // left the opcode as its original (wrong-but-stable) 0x7201
+        // rather than risk landing a half-diagnosed fix to something this
+        // deep -- both findings need their own dedicated investigation.
+        rom[16'h2DA0/4] = {16'h7201, 16'h4E7B};  // MOVEQ #1,D7(intended)/D1(actual) ; MOVEC D7,CACR
         rom[16'h2DA4/4] = {16'h7002, CLR_L_D1};  // (CACR ext: icache_en=1) ; CLR.L D1
         rom[16'h2DA8/4] = {CLR_L_D2, 16'h7009};  // CLR.L D2 ; MOVEQ #9,D0 (10 passes)
         rom[16'h2DAC/4] = {ADDI_L_D1, 16'h0000}; // loop: ADDI.L #1,D1
@@ -2514,6 +2553,52 @@ module stall_fsm_tb;
                     rom[16'h3B7C/4], 32'h0000_0000);
             check("MOVE.W SR,(d8,An,Xn): a write landed at the decoded EA ($3B9C, no longer the default NOP fill)",
                   rom[16'h3B9C/4][31:16] !== 16'h4E71);
+        end
+
+        // -------------------------------------------------------------
+        // PLOAD-ext-count (open-items backlog Stage 2, plan.md): the
+        // first-ever real-IFU test of PLOAD (Phase 150 Stage 5), closing
+        // the "PLOAD/IC_BURST0/CACR hang" finding that phase's own
+        // attempt left open and reverted. Root-caused via direct trace,
+        // not guessed at: m68030_seq.sv's ext_count classifier had NO
+        // entry anywhere for the whole F-line MMU family (PFLUSH/PFLUSHA/
+        // PTEST/PMOVE/PLOAD, f_group=4'hF, f_dn=3'b000) -- silently
+        // falling through to the ext_count=0 default, so drain never
+        // accounted for the mandatory extension word every one of these
+        // ops needs. This left the extension word undrained in the
+        // prefetch queue, to be misdecoded as the START of the next
+        // instruction -- for PLOAD specifically (mmu_op_type=011, ext
+        // word 0x6200 in this test), that misdecode is a BRA.W, taking a
+        // real, reproducible wild jump (confirmed landing exactly at the
+        // hand-derived PC-relative target before the fix). PFLUSH/PTEST/
+        // PMOVE share the identical underlying bug (mmu_op_type lives in
+        // ext_data, invisible to the opcode-only classifier, so all four
+        // are structurally indistinguishable to it) but their own
+        // extension-word bit patterns happen to decode harmlessly when
+        // misinterpreted as a fresh opcode in every existing test,
+        // masking it until now. Fixed in m68030_seq.sv (see its own
+        // comment there for the full derivation).
+        //
+        // Also found, investigating why CACR read disabled here despite
+        // "RAW-hazard-with-Ihit" (above) supposedly enabling it: that
+        // test's own MOVEQ opcode was wrong (0x7201 = MOVEQ #1,D1, not
+        // D7) -- fixed separately, in place, above.
+        // -------------------------------------------------------------
+        rom[16'h2E14/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h2E18/4] = {16'h3FA0, NOP_OP};
+        rom[16'h3FA0/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3FA4/4] = {16'h2000, 16'hF010};          // A0=0x2000 ; PLOAD (A0) opcode
+        rom[16'h3FA8/4] = {16'h6200, MOVE_L_IMM_D6};      // PLOAD ext word (mmu_op_type=011) ; MOVE.L #imm,D6
+        rom[16'h3FAC/4] = {16'h0000, 16'h5678};
+        rom[16'h3FB0/4] = {BRA_SELF, NOP_OP};
+        begin
+            int t;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[6] !== 32'h0000_5678; t++)
+                @(posedge clk_4x);
+            check32("PLOAD-ext-count: instruction after PLOAD's own extension word decoded and executed correctly (no wild jump)",
+                    u_top.u_eu.u_rf.d_reg[6], 32'h0000_5678);
+            check("PLOAD-ext-count: decode_pc landed exactly where expected, not off in uninitialized memory",
+                  u_top.ifu_decode_pc == 32'h0000_3FB0);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));

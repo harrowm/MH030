@@ -3463,3 +3463,105 @@ re-run needed (`git diff --stat rtl/` empty, testbench-only change).
 **Closes Stage 1.** See `~/.claude/plans/compressed-hopping-cocoa.md`
 for the remaining 12-stage backlog. Stage 2 (PLOAD/IC_BURST0/CACR
 hang investigation) is next.
+
+## Phase 187 -- Open-items backlog Stage 2: PLOAD/IC_BURST0/CACR hang root-caused and fixed (a real, previously-undiscovered RTL bug); a second real bug found and deliberately deferred
+
+Investigated the Phase 155 "PLOAD/IC_BURST0/CACR hang" finding (reverted
+at the time, undiagnosed). Reproduced cleanly: a real `PLOAD (A0)`
+instruction (`instr_word=0xF010`, `ext_data=0x6200`) placed at an
+isolated address and fetched through the real IFU, followed by a marker
+instruction, showed `decode_pc` wandering off to a wild, out-of-bounds
+address (`0x6BE6`) instead of completing -- not a hang in the classic
+"stuck forever" sense, a runaway misdecode.
+
+**Root cause, confirmed via direct trace, not guessed at**:
+`m68030_seq.sv`'s `ext_count` classifier -- the priority chain that
+tells the IFU how many extension words an instruction needs, so
+`drain` can correctly advance past all of them -- has **no entry
+anywhere** for the entire F-line MMU family (PFLUSH/PFLUSHA/PTEST/
+PMOVE/PLOAD, `f_group=4'hF`, `f_dn=3'b000`). It silently falls through
+to the `ext_count=0` default. Since `mmu_op_type` (which distinguishes
+these five op-shapes from each other) lives in `ext_data[15:13]` --
+invisible to this opcode-word-only classifier -- all five are
+structurally indistinguishable to it and should share one bucket, but
+none existed. With `ext_count=0`, `drain` only ever advances past the
+opcode word, leaving each op's own mandatory extension word sitting
+undrained in the prefetch queue to be misdecoded as the START of the
+next instruction. Confirmed exactly for PLOAD: its own extension word
+(`0x6200`) decodes as `BRA.W`, taking the FOLLOWING word as its own
+16-bit displacement -- computed the resulting jump target by hand
+(`PC_after_BRA + displacement = 0x3FAA + 0x2C3C = 0x6BE6`) and it
+matched the observed wild jump exactly.
+
+**Why PFLUSH/PTEST/PMOVE never caught this despite sharing the
+identical underlying bug** (confirmed by checking `eu_seq.sv`'s own
+gate: `else if (f_dn == 3'b000) begin ... dec_needs_ext=1'b1; case
+(mmu_op_type) ...` -- unconditional on `f_mode`/`f_reg`, so genuinely
+can't be told apart from PLOAD at the opcode-word level): the bug's
+own visible symptom is entirely data-dependent on what each op's own
+extension-word bit pattern happens to decode as when reinterpreted as
+a fresh opcode. PFLUSH's own `mmu_op_type=001` (giving a `0x2xxx`-
+shaped reinterpretation) and PTEST's `100` (`0x8xxx`-shaped) both
+happen to decode as harmless register-only ALU ops in `biu_tb.sv`'s
+and `stall_fsm_tb.sv`'s own existing B-19/20/21 tests -- masking the
+bug for as long as this project has had PFLUSH/PTEST/PMOVE coverage.
+PLOAD's own `011` value is the unlucky one that produces a genuinely
+catastrophic `BRA`-class misdecode.
+
+**Fixed in `rtl/m68030_seq.sv`**: added `else if ((f_group == 4'hf) &&
+(f_dn == 3'b000)) ext_count = 3'd1;` right before the final default,
+matching `eu_seq.sv`'s own unconditional-on-f_mode gate exactly.
+
+**Found a second real bug while investigating why `CACR` read
+"disabled" despite `RAW-hazard-with-Ihit`'s own MOVEC write** (the
+detail Phase 155 flagged but never explained): that test's own MOVEQ
+opcode, `0x7201`, decodes per the real MOVEQ format (`0111 rrr 0
+dddddddd`) as `MOVEQ #1,D1`, **not** `MOVEQ #1,D7` as its own comment
+(and every phase since 135) assumed -- confirmed via Python bit
+decode and via direct trace (D1 becomes 1, D7 stays 0). The subsequent
+`MOVEC D7,CACR` therefore always wrote `CACR=0`: **this test has never
+actually enabled the I-cache since it was written**, despite its own
+name, purpose, and passing checks the whole time (the DBF loop's own
+semantic correctness doesn't depend on caching actually happening,
+only on the hazard resolving, so a real-bus-cycle fetch every pass
+produces the identical checksum).
+
+**Fixing that opcode (0x7201 -> 0x7E01) exposed a THIRD, deeper, real
+bug** in the immediately-downstream `Indexed-EA-no-extra-read` test:
+with the I-cache now genuinely active for the first time, that test's
+own setup instructions fetched as garbage (`instr_word` reading
+`0x4E71`/`0x0000` instead of the real opcodes actually in ROM there).
+Traced to `biu_icache_if.sv`'s own cache line at idx=0xE/tag=0x2D
+showing `valid_i=1` with a correctly-matching tag but wrong content,
+transitioning mid-sequence into a fresh `IC_SINGLE_0` miss-fill --
+consistent with a line having been marked valid before a fill
+genuinely completed, plausibly related to (but not conclusively tied
+to) Phase 129's own "the fill is still allowed to complete... IC_DONE
+silently drops the ack" reasoning not fully covering a partially-
+abandoned multi-word `IC_SINGLE_0..3` sequence specifically. **Not
+root-caused to completion or fixed this stage** -- deliberately
+reverted the MOVEQ opcode fix back to its original (wrong-but-stable)
+`0x7201`, with a full derivation left in-line as a comment, rather
+than risk landing a half-diagnosed fix to something this deep on top
+of an already-substantial stage. This is a real, previously-
+undiscovered I-cache correctness gap, invisible until now because
+nothing in this entire test file had ever successfully enabled the
+I-cache before.
+
+**New permanent regression test**: `PLOAD-ext-count` in
+`tb/stall_fsm_tb.sv` -- the first-ever real-IFU test of PLOAD (closing
+Phase 150 Stage 5's own reverted attempt), verifying the instruction
+after PLOAD's own extension word decodes and executes correctly (no
+wild jump) and that `decode_pc` lands exactly where expected.
+
+Results: `make test` 36/36, `cosim_grp` 8/8, `cosim_memind` 12/12, full
+124-suite Harte sweep (mandatory -- `m68030_seq.sv` changed) -- PASS
+702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline. **Closes Stage 2** (the PLOAD hang, its
+original scope) with two additional real findings documented for
+future stages: the RAW-hazard-with-Ihit MOVEQ opcode bug, and the
+I-cache stale-fill bug it uncovers once fixed. See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the remaining
+11-stage backlog. Stage 3 (DSACK wait-states-on-FSM-beats breadth) is
+next -- though the newly-found I-cache issue may warrant its own
+dedicated stage first; flagging for the user's own prioritization call.

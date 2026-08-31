@@ -879,6 +879,37 @@ module m68030_seq (
                  // code for VBR relocation.
                  (instr_word == 16'h4E7A || instr_word == 16'h4E7B))
             ext_count = 3'd1;
+        // F-line MMU family (PFLUSH/PFLUSHA/PTEST/PMOVE/PLOAD), cpid=0
+        // (f_group=4'hF, f_dn=3'b000, matching eu_seq.sv's own
+        // "else if (f_dn == 3'b000) begin ... dec_needs_ext = 1'b1" gate
+        // exactly) -- previously had NO entry anywhere in this chain,
+        // silently falling through to the ext_count=0 default. mmu_op_type
+        // (which distinguishes PFLUSH/PMOVE/PLOAD/PTEST from each other)
+        // lives in ext_data[15:13], invisible to this opcode-only
+        // classifier, so all four share one bucket unconditionally on
+        // f_mode/f_reg -- matching eu_seq.sv's own dec_valid=1, which is
+        // likewise set regardless of f_mode there.
+        //
+        // Found via the open-items backlog Stage 2 investigation
+        // (plan.md): PFLUSH/PTEST/PMOVE's own existing test coverage
+        // (biu_tb.sv/stall_fsm_tb.sv B-19/20/21) never caught this gap
+        // because drain was silently short by exactly 1 word regardless,
+        // leaving each op's own extension word undrained in the prefetch
+        // queue to be misdecoded as the START of the next instruction --
+        // but whether that produces a visible failure is entirely
+        // data-dependent on what that extension word's own bit pattern
+        // happens to decode as when reinterpreted as a fresh opcode.
+        // PFLUSH's own ext word (mmu_op_type=001, giving a 0x2xxx-shaped
+        // reinterpretation) and PTEST's (100, 0x8xxx-shaped) both happen
+        // to decode as harmless register-only ALU ops in every existing
+        // test, masking the bug; PLOAD's own ext word (011, giving a
+        // 0x6xxx-shaped reinterpretation) decodes as BRA.W, taking a
+        // wild, uncontrolled jump using the FOLLOWING word as its own
+        // displacement -- reproduced directly (decode_pc landed exactly
+        // at the hand-derived target, PC_after_BRA + displacement) before
+        // this fix.
+        else if ((f_group == 4'hf) && (f_dn == 3'b000))
+            ext_count = 3'd1;
         else
             ext_count = 2'd0;
     end
