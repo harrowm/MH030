@@ -4589,3 +4589,103 @@ TIMEOUT 0, bit-identical to baseline, zero regressions. **Closes Stage
 13 of the open-items backlog.** Stage 14 (cpSAVE/cpRESTORE full
 transfer protocol) is next, per the user's explicit request to continue
 past Stage 12's own original stopping point.
+
+## Phase 200 (open-items backlog Stage 14 — cpSAVE/cpRESTORE full transfer protocol, closes the backlog)
+
+Extends the Phase 157 Stage 4 stub (one CIR read, then complete) into the
+real Section 10.2.3 format-word-driven multi-longword transfer protocol,
+for the `(An)` EA mode only -- every other EA mode (predecrement for
+cpSAVE, postincrement/displacement/indexed/absolute/PC-relative for
+either) deliberately keeps the original stub behavior, matching this
+project's own repeated "non-indexed EA first, everything else deferred"
+precedent. No real coprocessor, Harte vector, or Musashi reference exists
+for this instruction family (same caveat as the FPU stub itself, Phase
+55) -- correctness here is necessarily self-consistency against the
+manual's own protocol description (read directly from MC68030UM.pdf
+Section 10.2.3, PDF pages 407-416, calibrated via the front-matter TOC),
+not independently verified against any oracle.
+
+**Design**: `dec_src_reg={1,f_reg}`/`dec_reads_src=1` added to the
+decode block for `f_mode==3'b010`, reusing the standard An-in-rd_a EA
+template every other non-indexed instruction already uses -- `ex_ea`
+comes out correctly computed with zero new EA-computation code needed.
+`cpsr_real_r` (captured at dispatch from `f_mode`) gates the whole
+extended FSM; any other EA mode falls through to the untouched original
+stub path.
+
+**New FSM phases** (`rtl/eu_seq.sv`, extending the existing `cpsr_start_r`/
+`cpsr_run_r`/`cpsr_fmt_r`): `cpsr_mem_fmt_r` (cpSAVE: write `{format,
+length,reserved=0}` longword to EA; cpRESTORE: read it from EA first),
+`cpsr_cir_wr_r`/`cpsr_cir_echo_r` (cpRESTORE only: write the format word
+to the Restore CIR, then read it back to confirm -- manual's own M3/M4),
+`cpsr_abort_r` (write the `$0001` abort mask to the Control CIR on
+INVALID/reserved format or a length that isn't a multiple of 4, per
+10.2.3.2.3/10.5.1.5), `cpsr_xfer_cir_r`/`cpsr_xfer_mem_r` (the
+variable-length transfer loop, alternating Operand CIR ↔ memory --
+descending from EA+length for cpSAVE, ascending from EA+4 for
+cpRESTORE, matching Figure 10-14's own SAVE ORDER/RESTORE ORDER
+columns). Format-branch decisions are made live off `eu_coproc_rdata`/
+`mem_rdata` at the exact ack cycle (not the registered `cpsr_fmt_r`,
+which lags by one edge) -- avoids an unnecessary extra "wait one more
+cycle" state. NOT_READY is a genuine bounded retry (`cpsr_run_r` stays
+asserted, re-issuing the Save CIR read every cycle the response is
+NOT_READY) -- interrupt-servicing during the retry (a real but separate,
+optional efficiency the manual describes, not requires) is deliberately
+not implemented, matching the same kind of boundary Stage 13 drew around
+BKPT's own extension-word substitution.
+
+**New signal**: `cpsr_fmt_err_raw`/`cpsr_fmt_err_fired_r`/`cpsr_fmt_err_w`
+(a one-shot pulse, same shape as `chk_trap_raw`/`chk_trap_fired_r` --
+Phase 202), OR'd into `eu_fmt_err_req`'s own existing assign (previously
+RTE-only) -- architecturally the same vector-14 Format Error exception
+either source triggers, just a different trigger condition. Confirmed
+`rte_stall`'s own `!eu_fmt_err_req` exclusion is unaffected (already
+gated on `ex_is_rte`, structurally 0 during cpSAVE/cpRESTORE regardless).
+
+**Bus wiring**: `mem_req`/`mem_rw`/`mem_siz`/`mem_addr`/`mem_wdata`
+each gained a `cpsr_mem_fmt_r`/`cpsr_xfer_mem_r` arm (longword, direction
+from `cpsr_is_restore_r`); `eu_coproc_req`/`rw`/`wdata`/`addr` widened
+to cover all 4 new CIR-touching phases, with CIR select values taken
+directly from Figure 10-5's own byte-offset register map (Save=0x04,
+Restore=0x06, Control=0x02, Operand=0x10 -- the last a genuine 32-bit
+register per the figure, unlike the others' 16-bit-word-in-top-half
+convention already established by the Phase 157 Stage 4 stub).
+
+**Regression found and fixed**: `make test` immediately caught a hang in
+`eu_seq_tb` -- its own pre-existing decode/dispatch-only cpSAVE/cpRESTORE
+test used `(A0)` (mode=010), now the REAL protocol path; with
+`eu_coproc_rdata` left at its default X (the test's own documented
+"rdata/ack/berr left unconnected, only checks request/address
+correctness" scope), the live format-code branch resolved X-comparisons
+as false throughout and fell into `cpsr_abort_r`, which then hung
+forever waiting for a second ack the test never provided (only one
+`cp_ack_tb` pulse). Fixed by moving both tests' own EA field from `(An)`
+to `(An)+` (mode=011) -- a mode that still exercises the exact original
+stub path unchanged (no extension word needed, matching `(An)`), leaving
+the test's own stated scope intact.
+
+**New end-to-end test** (`tb/eu_seq_tb.sv`, extending its own
+`eu_coproc_*`/`mem_*` port connections -- both were entirely unconnected
+in this testbench before this stage): a full VALID-format, 2-longword
+(8-byte) transfer in both directions, driven via 4 new helper tasks
+(`wait_mem_req`/`wait_cp_req`/`pulse_mem_ack`/`pulse_cp_ack`) checking
+every `mem_*`/`eu_coproc_*` address, direction, and data value at each
+step -- not just "did it unstick." cpSAVE: Save CIR read (VALID/len=8)
+-> format-word write at EA -> 2× (Operand CIR read -> descending memory
+write, EA+8 then EA+4). cpRESTORE: format-word read from EA (VALID/
+len=8) -> Restore CIR write+echo -> 2× (ascending memory read, EA+4
+then EA+8 -> Operand CIR write). All 28 new checks passed on the first
+real attempt, confirming the whole mechanism end-to-end. EMPTY and
+INVALID/format-error are implemented per the manual's own protocol but
+not independently exercised by a dedicated check this phase --
+documented, not silently skipped.
+
+Results: `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind`
+13/13, full 124-suite Harte sweep (mandatory -- `eu_seq.sv` changed,
+including the shared `eu_fmt_err_req`/`ex_will_except` exception-dispatch
+path) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline, zero regressions (Harte has
+zero coverage of cpSAVE/cpRESTORE, a 68020+-only coprocessor-interface
+feature). **Closes Stage 14, and with it, the entire 14-stage open-items
+backlog plan (Phases 186-200 / Stages 1-14).** See
+`~/.claude/plans/compressed-hopping-cocoa.md` for the original plan.

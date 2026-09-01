@@ -6028,11 +6028,20 @@ module eu_seq (
                     end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b100) begin
                         // cpSAVE: cpid=1, TYPE=100 (manual Figure 10-15). Privileged.
                         // EA field is bits[5:0] (f_mode/f_reg, same positions as any
-                        // ordinary EA). Stub scope (Phase 157 Stage 4): issues one
-                        // CIR read to the Save CIR; does not implement the real
-                        // format-word-driven multi-longword transfer protocol --
-                        // same "one CPI cycle, full protocol later" scope as the
-                        // existing FPU stub (Phase 55).
+                        // ordinary EA). Open-items backlog Stage 14 (plan.md): the
+                        // real format-word-driven multi-longword transfer protocol
+                        // (Section 10.2.3) is now implemented for the (An) EA mode
+                        // only (f_mode==010) -- reusing the standard An-in-rd_a EA
+                        // template (An -> rd_a, ex_ea = rd_a_data unchanged, same as
+                        // TST/NEG's own non-indexed block) so ex_ea is already
+                        // correctly computed by the time the cpsr_* FSM needs it.
+                        // Every OTHER EA mode (predecrement, displacement, indexed,
+                        // absolute) keeps the original Phase 157 Stage 4 stub scope
+                        // (one CIR read, no real memory access) -- deliberately not
+                        // extended, matching this project's own established
+                        // "non-indexed EA first, everything else deferred" precedent
+                        // (see the eu_seq.sv cpsr_* FSM comment for the full scope
+                        // boundary).
                         if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
@@ -6042,10 +6051,15 @@ module eu_seq (
                             dec_unit      = UNIT_NONE;
                             dec_needs_ext = (f_mode == 3'b101 || f_mode == 3'b110 ||
                                              f_mode == 3'b111);
+                            if (f_mode == 3'b010) begin  // (An)
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                            end
                         end
                     end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b101) begin
                         // cpRESTORE: cpid=1, TYPE=101 (manual Figure 10-17). Same
-                        // privilege check and stub scope as cpSAVE above.
+                        // privilege check and (An)-only real-protocol scope as
+                        // cpSAVE above.
                         if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
@@ -6055,6 +6069,10 @@ module eu_seq (
                             dec_unit         = UNIT_NONE;
                             dec_needs_ext    = (f_mode == 3'b101 || f_mode == 3'b110 ||
                                                 f_mode == 3'b111);
+                            if (f_mode == 3'b010) begin  // (An)
+                                dec_src_reg   = {1'b1, f_reg};
+                                dec_reads_src = 1'b1;
+                            end
                         end
                     end else if (f_dn == 3'b001) begin
                         // FPU coprocessor: cpid=1, any ppp or EA mode 4-7.
@@ -6724,9 +6742,48 @@ module eu_seq (
 
     // cpSAVE/cpRESTORE dispatch FSM (Phase 157 Stage 4) — declared early for ex_mem_stall
     logic        cpsr_start_r;     // one-cycle setup after instr_ack
-    logic        cpsr_run_r;       // eu_coproc_req active, waiting for ack (shared w/ FPU)
+    logic        cpsr_run_r;       // eu_coproc_req active, waiting for ack (shared w/ FPU) --
+                                    // cpSAVE only: reading the Save CIR, retrying in place
+                                    // while the returned format is NOT_READY. cpRESTORE's
+                                    // own first real step is cpsr_mem_fmt_r (its own format
+                                    // word comes from MEMORY first, not a CIR read).
     logic        cpsr_is_restore_r; // 0=cpSAVE (Save CIR), 1=cpRESTORE (Restore CIR)
-    logic [15:0] cpsr_fmt_r;       // captured format word (not acted upon -- stub scope)
+    logic [15:0] cpsr_fmt_r;       // captured format word (format code in [15:8], length in [7:0])
+    // open-items backlog Stage 14 (plan.md): real format-word-driven transfer
+    // protocol (Section 10.2.3), (An) EA mode only -- see the decode block's
+    // own comment (dec_is_cpsave/dec_is_cprestore) for the scope boundary.
+    // cpsr_real_r gates the whole extended FSM below; every other EA mode
+    // keeps falling through to the original Phase 157 Stage 4 stub (one CIR
+    // read, then complete) via the unchanged cpsr_run_r->done path.
+    logic        cpsr_real_r;       // captured (f_mode==3'b010) at dispatch
+    logic        cpsr_mem_fmt_r;    // cpSAVE: write format longword to EA;
+                                     // cpRESTORE: read format longword from EA
+    logic        cpsr_cir_wr_r;     // cpRESTORE only: write format word to Restore CIR
+    logic        cpsr_cir_echo_r;   // cpRESTORE only: re-read Restore CIR (echo/confirm)
+    logic        cpsr_abort_r;      // write $0001 abort mask to Control CIR, then format error
+    logic        cpsr_xfer_cir_r;   // transfer loop: Operand CIR access (rd for save, wr for restore)
+    logic        cpsr_xfer_mem_r;   // transfer loop: memory access (wr for save, rd for restore)
+    logic [7:0]  cpsr_len_r;        // byte length from format word (multiple of 4)
+    logic [7:0]  cpsr_xfer_cnt_r;   // bytes transferred so far in the loop
+    logic [31:0] cpsr_xfer_addr_r;  // current transfer address (descending for save,
+                                     // ascending for restore)
+    logic [31:0] cpsr_xfer_val_r;   // value in flight between CIR and memory
+    // one-shot format-error trigger (same shape as chk_trap_raw/chk_trap_fired_r,
+    // Phase 202 -- prevents ex_will_except's own OR-list from re-firing every
+    // tick cpsr_abort_r's own multi-cycle CIR write is in flight). cpsr_abort_r
+    // and eu_coproc_ack (the only two inputs cpsr_fmt_err_raw's own assign
+    // needs, written further down near the main FSM) are both already
+    // early-available (a plain logic reg and a port respectively), so unlike
+    // chk_trap_raw this signal never actually needs the split -- declared
+    // here anyway, mirroring the established convention for consistency.
+    logic        cpsr_fmt_err_raw, cpsr_fmt_err_fired_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                cpsr_fmt_err_fired_r <= 1'b0;
+        else if (!ex_valid)        cpsr_fmt_err_fired_r <= 1'b0;
+        else if (cpsr_fmt_err_raw) cpsr_fmt_err_fired_r <= 1'b1;
+    end
+    // Gated one-shot pulse, mirroring chk_trap's own shape exactly.
+    wire cpsr_fmt_err_w = cpsr_fmt_err_raw && !cpsr_fmt_err_fired_r;
 
     // MMU instruction FSM state — declared early for ex_mem_stall
     logic        pflush_start_r, pflush_req_r;
@@ -6930,6 +6987,8 @@ module eu_seq (
                            !bkpt_wait_replacement_r && !bkpt_subst_active_r &&
                            !ex_redirect_pending) ||
                           cpsr_start_r || cpsr_run_r ||
+                          cpsr_mem_fmt_r || cpsr_cir_wr_r || cpsr_cir_echo_r ||
+                          cpsr_abort_r || cpsr_xfer_cir_r || cpsr_xfer_mem_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
@@ -8847,13 +8906,50 @@ module eu_seq (
     end
 
     // -----------------------------------------------------------------------
-    // cpSAVE/cpRESTORE dispatch FSM (Phase 157 Stage 4)
+    // cpSAVE/cpRESTORE dispatch FSM (Phase 157 Stage 4 stub; real protocol
+    // added open-items backlog Stage 14, plan.md).
     // Shares eu_coproc_req/ack/berr with the FPU FSM above -- at most one
     // EU-issued CPU-space cycle is ever in flight, since only one instruction
-    // occupies EX at a time. Issues one CIR read (Save CIR=0x04, Restore
-    // CIR=0x06 per Figure 10-5) and completes -- does not implement the real
-    // format-word-driven multi-longword transfer protocol (same stub scope
-    // as the FPU FSM's own "one CPI cycle" comment above).
+    // occupies EX at a time.
+    //
+    // For any EA mode OTHER than (An) (cpsr_real_r==0, captured at dispatch
+    // from f_mode -- see the decode block's own comment), this is exactly
+    // the original Phase 157 Stage 4 stub: one CIR read, then complete.
+    //
+    // For (An) mode, the real Section 10.2.3 protocol:
+    //   cpSAVE:    cpsr_run_r (read Save CIR, retries in place on NOT_READY)
+    //           -> cpsr_mem_fmt_r (write {format,length,0} longword to EA)
+    //           -> [VALID only] transfer loop, descending from EA+length
+    //   cpRESTORE: cpsr_mem_fmt_r (read format longword FROM memory at EA)
+    //           -> cpsr_cir_wr_r (write format word to Restore CIR)
+    //           -> cpsr_cir_echo_r (read Restore CIR back -- confirms format)
+    //           -> [VALID only] transfer loop, ascending from EA+4
+    //   Either: INVALID/reserved format code, or a VALID format whose length
+    //           isn't a multiple of 4, routes to cpsr_abort_r (writes $0001
+    //           to the Control CIR per 10.2.3.2.3/10.5.1.5) then the
+    //           already-existing vector-14 Format Error dispatch
+    //           (cpsr_fmt_err_w, folded into eu_fmt_err_req's own assign).
+    //
+    // Format-branch decisions are made LIVE off eu_coproc_rdata/mem_rdata at
+    // the exact ack cycle (not the registered cpsr_fmt_r, which lags by one
+    // edge) -- avoids an unnecessary extra "wait one more cycle before it's
+    // safe to branch" state, the same lesson BKPT's own bkpt_wait_replacement_r
+    // exists to bridge for a genuinely different reason (Stage 13) doesn't
+    // apply here, since nothing downstream needs the REGISTERED cpsr_fmt_r
+    // to be valid on this exact same edge.
+    //
+    // Deliberately out of scope, matching this project's own repeated
+    // "non-indexed EA first, everything else deferred" precedent: every EA
+    // mode besides (An) -- predecrement (cpSAVE), postincrement/displacement/
+    // indexed/absolute/PC-relative (either) -- and interrupt servicing during
+    // a NOT_READY retry (the retry loop itself is implemented; only the
+    // "service pending interrupts between polls" optimization the manual
+    // separately describes is skipped, matching real 68030 architecture,
+    // which permits but does not require it). No real coprocessor, Harte
+    // vector, or Musashi reference exists for this instruction family (same
+    // caveat as the FPU stub itself, Phase 55) -- correctness here is
+    // necessarily self-consistency against the manual's own protocol
+    // description, not independently verified against any oracle.
     // -----------------------------------------------------------------------
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -8861,23 +8957,163 @@ module eu_seq (
             cpsr_run_r        <= 1'b0;
             cpsr_is_restore_r <= 1'b0;
             cpsr_fmt_r        <= 16'h0;
+            cpsr_real_r       <= 1'b0;
+            cpsr_mem_fmt_r    <= 1'b0;
+            cpsr_cir_wr_r     <= 1'b0;
+            cpsr_cir_echo_r   <= 1'b0;
+            cpsr_abort_r      <= 1'b0;
+            cpsr_xfer_cir_r   <= 1'b0;
+            cpsr_xfer_mem_r   <= 1'b0;
+            cpsr_len_r        <= 8'h0;
+            cpsr_xfer_cnt_r   <= 8'h0;
+            cpsr_xfer_addr_r  <= 32'h0;
+            cpsr_xfer_val_r   <= 32'h0;
         end else begin
-            if (!cpsr_start_r && !cpsr_run_r && instr_ack &&
-                (dec_is_cpsave || dec_is_cprestore)) begin
+            if (!cpsr_start_r && !cpsr_run_r && !cpsr_mem_fmt_r && !cpsr_cir_wr_r &&
+                !cpsr_cir_echo_r && !cpsr_abort_r && !cpsr_xfer_cir_r && !cpsr_xfer_mem_r &&
+                instr_ack && (dec_is_cpsave || dec_is_cprestore)) begin
                 cpsr_start_r      <= 1'b1;
                 cpsr_is_restore_r <= dec_is_cprestore;
+                cpsr_real_r       <= (f_mode == 3'b010);
             end else if (cpsr_start_r) begin
                 cpsr_start_r <= 1'b0;
-                cpsr_run_r   <= 1'b1;
+                if (cpsr_is_restore_r && (f_mode == 3'b010)) begin
+                    // cpRESTORE, (An): first step is a real memory read of the
+                    // format word, not a CIR access.
+                    cpsr_mem_fmt_r <= 1'b1;
+                end else begin
+                    // cpSAVE (any mode, since it always starts with the Save
+                    // CIR read regardless), or a stub-scope (non-(An)) cpRESTORE.
+                    cpsr_run_r <= 1'b1;
+                end
             end else if (cpsr_run_r && eu_coproc_ack) begin
-                cpsr_run_r <= 1'b0;
-                // Format word, not acted upon -- stub scope (see header comment).
                 cpsr_fmt_r <= eu_coproc_rdata[31:16];
+                if (!cpsr_real_r) begin
+                    // Stub scope: capture and complete, exactly as before.
+                    cpsr_run_r <= 1'b0;
+                end else if (eu_coproc_rdata[31:24] == 8'h01) begin
+                    // NOT_READY -- stay in cpsr_run_r, re-issues next cycle.
+                end else if (eu_coproc_rdata[31:24] == 8'h00 ||
+                             (eu_coproc_rdata[31:24] >= 8'h10 &&
+                              eu_coproc_rdata[17:16] == 2'b00)) begin
+                    // EMPTY, or VALID with a genuine multiple-of-4 length.
+                    cpsr_run_r     <= 1'b0;
+                    cpsr_mem_fmt_r <= 1'b1;
+                end else begin
+                    // INVALID/reserved ($02-$0F), or VALID with a bad length.
+                    cpsr_run_r   <= 1'b0;
+                    cpsr_abort_r <= 1'b1;
+                end
             end else if (cpsr_run_r && eu_coproc_berr) begin
                 cpsr_run_r <= 1'b0;
+            end else if (cpsr_mem_fmt_r && mem_ack) begin
+                if (!cpsr_is_restore_r) begin
+                    // cpSAVE: just wrote the format longword to EA.
+                    cpsr_mem_fmt_r <= 1'b0;
+                    // By construction, cpsr_fmt_r here is guaranteed EMPTY
+                    // (0x00) or VALID-with-good-length (>=0x10, already
+                    // multiple-of-4-checked) -- anything else was already
+                    // routed to cpsr_abort_r back in the cpsr_run_r branch.
+                    // Re-checking >=0x10 explicitly (rather than relying
+                    // implicitly on "not EMPTY") for defensive clarity.
+                    if (cpsr_fmt_r[15:8] >= 8'h10 && cpsr_fmt_r[7:0] != 8'h00) begin
+                        // VALID with a nonzero length -- start the transfer
+                        // loop, descending from EA+length.
+                        cpsr_len_r       <= cpsr_fmt_r[7:0];
+                        cpsr_xfer_cnt_r  <= 8'h0;
+                        cpsr_xfer_addr_r <= ex_ea + {24'h0, cpsr_fmt_r[7:0]};
+                        cpsr_xfer_cir_r  <= 1'b1;
+                    end
+                    // else: EMPTY (or VALID-with-zero-length, an edge case the
+                    // manual doesn't explicitly address) -- done, nothing more.
+                end else begin
+                    // cpRESTORE: just read the format longword FROM memory.
+                    // Retains the length field from THIS read (per 10.2.3.4.2:
+                    // "the main processor retains a copy of the length field"),
+                    // used later even though the echo re-read (below) may
+                    // return a different format code.
+                    cpsr_fmt_r     <= mem_rdata[31:16];
+                    cpsr_len_r     <= mem_rdata[23:16];
+                    cpsr_mem_fmt_r <= 1'b0;
+                    cpsr_cir_wr_r  <= 1'b1;
+                end
+            end else if (cpsr_cir_wr_r && eu_coproc_ack) begin
+                // cpRESTORE: format word landed in the Restore CIR -- read it
+                // back to confirm (manual M4).
+                cpsr_cir_wr_r   <= 1'b0;
+                cpsr_cir_echo_r <= 1'b1;
+            end else if (cpsr_cir_wr_r && eu_coproc_berr) begin
+                cpsr_cir_wr_r <= 1'b0;
+            end else if (cpsr_cir_echo_r && eu_coproc_ack) begin
+                cpsr_cir_echo_r <= 1'b0;
+                if (eu_coproc_rdata[31:24] == 8'h00) begin
+                    // EMPTY -- done.
+                end else if (eu_coproc_rdata[31:24] >= 8'h10 && cpsr_len_r != 8'h0 &&
+                             cpsr_len_r[1:0] == 2'b00) begin
+                    // VALID, using the length retained from the original
+                    // memory read -- start the transfer loop, ascending
+                    // from EA+4.
+                    cpsr_xfer_cnt_r  <= 8'h0;
+                    cpsr_xfer_addr_r <= ex_ea + 32'd4;
+                    cpsr_xfer_mem_r  <= 1'b1;
+                end else begin
+                    // INVALID/reserved, or a bad (non-multiple-of-4 or zero)
+                    // retained length.
+                    cpsr_abort_r <= 1'b1;
+                end
+            end else if (cpsr_cir_echo_r && eu_coproc_berr) begin
+                cpsr_cir_echo_r <= 1'b0;
+            end else if (cpsr_abort_r && (eu_coproc_ack || eu_coproc_berr)) begin
+                // Abort-mask write to the Control CIR completed (or itself
+                // faulted -- either way, give up cleanly). The format-error
+                // exception itself fires via cpsr_fmt_err_w (a combinational
+                // one-shot keyed off this exact ack), not from this register.
+                cpsr_abort_r <= 1'b0;
+            end else if (cpsr_xfer_cir_r && eu_coproc_ack) begin
+                if (!cpsr_is_restore_r) begin
+                    // cpSAVE: just read one longword from the Operand CIR --
+                    // write it to memory next.
+                    cpsr_xfer_val_r <= eu_coproc_rdata;
+                    cpsr_xfer_cir_r <= 1'b0;
+                    cpsr_xfer_mem_r <= 1'b1;
+                end else begin
+                    // cpRESTORE: just wrote one longword to the Operand CIR --
+                    // this completes one loop iteration.
+                    cpsr_xfer_cir_r <= 1'b0;
+                    if ((cpsr_xfer_cnt_r + 8'd4) < cpsr_len_r) begin
+                        cpsr_xfer_cnt_r  <= cpsr_xfer_cnt_r + 8'd4;
+                        cpsr_xfer_addr_r <= cpsr_xfer_addr_r + 32'd4;
+                        cpsr_xfer_mem_r  <= 1'b1;
+                    end
+                    // else: this was the last longword -- done.
+                end
+            end else if (cpsr_xfer_cir_r && eu_coproc_berr) begin
+                cpsr_xfer_cir_r <= 1'b0;
+            end else if (cpsr_xfer_mem_r && mem_ack) begin
+                if (!cpsr_is_restore_r) begin
+                    // cpSAVE: just wrote one longword to memory -- this
+                    // completes one loop iteration.
+                    cpsr_xfer_mem_r <= 1'b0;
+                    if ((cpsr_xfer_cnt_r + 8'd4) < cpsr_len_r) begin
+                        cpsr_xfer_cnt_r  <= cpsr_xfer_cnt_r + 8'd4;
+                        cpsr_xfer_addr_r <= cpsr_xfer_addr_r - 32'd4;
+                        cpsr_xfer_cir_r  <= 1'b1;
+                    end
+                    // else: this was the last longword -- done.
+                end else begin
+                    // cpRESTORE: just read one longword from memory -- write
+                    // it to the Operand CIR next.
+                    cpsr_xfer_val_r <= mem_rdata;
+                    cpsr_xfer_mem_r <= 1'b0;
+                    cpsr_xfer_cir_r <= 1'b1;
+                end
             end
         end
     end
+
+    // cpsr_fmt_err_raw's own assign -- see its declaration (near the other
+    // cpsr_* registers) for why this needs no Icarus forward-reference split.
+    assign cpsr_fmt_err_raw = cpsr_abort_r && (eu_coproc_ack || eu_coproc_berr);
 
     // -----------------------------------------------------------------------
     // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3; live
@@ -10358,8 +10594,14 @@ module eu_seq (
             default: return 8'd0;
         endcase
     endfunction
-    assign eu_fmt_err_req = ex_valid && ex_is_rte && !rte_phase_r && mem_ack &&
-                            !rte_fmt_valid(mem_rdata[31:28]);
+    // Open-items backlog Stage 14 (plan.md): cpsr_fmt_err_w widens this same
+    // vector-14 dispatch to also cover cpSAVE/cpRESTORE's own invalid coprocessor
+    // state-frame format word (Section 10.5.1.5) -- architecturally the same
+    // Format Error exception RTE's own bad stack-frame format triggers, just a
+    // different trigger source.
+    assign eu_fmt_err_req = (ex_valid && ex_is_rte && !rte_phase_r && mem_ack &&
+                             !rte_fmt_valid(mem_rdata[31:28])) ||
+                            cpsr_fmt_err_w;
 
     // STOP — SR write fires first cycle STOP is in EX (before stop_r is set)
     assign stop_sr_wr_en = ex_valid && ex_is_stop && !stop_r;
@@ -10390,6 +10632,7 @@ module eu_seq (
                        addx_mem_run_r || bf_mem_run_r || pack_mem_run_r || pmove64_run_r ||
                        cas_write_r || bcds_run_r ||
                        cas2_rd2_r || cas2_wr1_r || cas2_wr2_r ||
+                       cpsr_mem_fmt_r || cpsr_xfer_mem_r ||
                        (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
     assign mem_rw    = movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
@@ -10409,6 +10652,9 @@ module eu_seq (
                      : cas2_rd2_r     ? 1'b1        // CAS2 second read
                      : cas2_wr1_r     ? 1'b0        // CAS2 write Du1→M[Rn1]
                      : cas2_wr2_r     ? 1'b0        // CAS2 write Du2→M[Rn2]
+                     // cpSAVE writes (format word / transfer loop -> memory);
+                     // cpRESTORE reads (memory -> format word / transfer loop).
+                     : (cpsr_mem_fmt_r || cpsr_xfer_mem_r) ? cpsr_is_restore_r
                      : ex_is_mem_rd;
     assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
@@ -10425,6 +10671,7 @@ module eu_seq (
                        cas_write_r    ? cas_siz_r :
                        bcds_run_r     ? 2'b01 :
                        (cas2_rd2_r || cas2_wr1_r || cas2_wr2_r) ? cas2_siz_r :
+                       (cpsr_mem_fmt_r || cpsr_xfer_mem_r) ? 2'b00 :  // always longword
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
                        (ex_is_rte && !rte_phase_r) ? 2'b00 :  // longword: reads {format_word,SR} together
                        (ex_mem_rd_siz != 2'b00)    ? ex_mem_rd_siz :
@@ -10450,6 +10697,8 @@ module eu_seq (
                        cas2_rd2_r     ? rd_a_data :       // Rn2 from rd_a override
                        cas2_wr1_r     ? cas2_ea1_r :      // write Du1→M[Rn1]
                        cas2_wr2_r     ? cas2_ea2_r :      // write Du2→M[Rn2]
+                       cpsr_mem_fmt_r ? ex_ea :           // format word always at EA itself
+                       cpsr_xfer_mem_r ? cpsr_xfer_addr_r :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
                        (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :
                        (ex_is_cmpm && cmpm_phase_r)          ? cmpm_ax_addr_r : ex_ea;
@@ -10460,6 +10709,13 @@ module eu_seq (
     assign mem_wdata = cas2_wr1_r               ? cas2_du1_val_r
                      : cas2_wr2_r              ? cas2_du2_val_r
                      : cas_write_r             ? cas_du_val_r
+                     // cpSAVE only (mem_rw=0 -- cpRESTORE's own cpsr_mem_fmt_r/
+                     // cpsr_xfer_mem_r phases are reads, this value is unused
+                     // then): format+length word in the upper half, reserved
+                     // lower half per Figure 10-14; the just-read Operand CIR
+                     // value for the transfer loop.
+                     : cpsr_mem_fmt_r          ? {cpsr_fmt_r, 16'h0}
+                     : cpsr_xfer_mem_r         ? cpsr_xfer_val_r
                      : (bcds_run_r && bcds_phase_r == 2'd2) ? {bcd_result, 24'h0}
                      : mem_rmw_run_r            ? mem_rmw_wdata_r
                      : move_mm_run_r            ? eu_lane(move_mm_data_r, move_mm_siz_r)
@@ -10503,7 +10759,9 @@ module eu_seq (
     // -----------------------------------------------------------------------
     // FPU coprocessor / cpSAVE / cpRESTORE bus interface outputs
     // eu_coproc_req asserted while fpu_run_r (CPI read, cpid=1 register 0)
-    // or cpsr_run_r (Phase 157 Stage 4: cpSAVE/cpRESTORE, one CIR read) --
+    // or any of the cpsr_* CIR-touching phases (Phase 157 Stage 4's own
+    // Save/Restore CIR read, plus Stage 14's own Restore-CIR-write/echo,
+    // Control-CIR abort-mask write, and Operand-CIR transfer-loop access) --
     // mutually exclusive, only one instruction occupies EX at a time.
     // FPU address: A[31:20]=0, A[19:16]=0010, A[15:13]=ppp, A[12:11]=01
     // (cpid=1), A[10:0]=0. NOTE (found while implementing Stage 4, out of
@@ -10514,13 +10772,32 @@ module eu_seq (
     // coprocessor, so it's flagged, not touched, matching this rollout's
     // own "found but out of scope" convention. cpSAVE/cpRESTORE below use
     // the real Figure 10-3 layout directly, since this is fresh code.
+    // CIR select values (byte offset per Figure 10-5): Save=0x04,
+    // Restore=0x06, Control=0x02, Operand=0x10.
     // -----------------------------------------------------------------------
-    assign eu_coproc_req   = fpu_run_r || cpsr_run_r;
-    assign eu_coproc_rw    = 1'b1;
+    assign eu_coproc_req   = fpu_run_r || cpsr_run_r || cpsr_cir_wr_r ||
+                             cpsr_cir_echo_r || cpsr_abort_r || cpsr_xfer_cir_r;
+    // Reads by default (Save/Restore CIR read, Restore-CIR echo read, and
+    // the save-direction Operand CIR read) -- explicit writes for
+    // cpsr_cir_wr_r (format word -> Restore CIR), cpsr_abort_r (abort mask
+    // -> Control CIR), and the restore-direction Operand CIR write.
+    assign eu_coproc_rw    = cpsr_cir_wr_r ? 1'b0
+                            : cpsr_abort_r ? 1'b0
+                            : (cpsr_xfer_cir_r && cpsr_is_restore_r) ? 1'b0
+                            : 1'b1;
     assign eu_coproc_fc    = 3'b111;        // CPU Space
     assign eu_coproc_siz   = 2'b00;         // longword
-    assign eu_coproc_wdata = 32'h0;
-    assign eu_coproc_addr  = cpsr_run_r
+    assign eu_coproc_wdata = cpsr_cir_wr_r  ? {cpsr_fmt_r, 16'h0}
+                            : cpsr_abort_r  ? {16'h0001, 16'h0}
+                            : cpsr_xfer_cir_r ? cpsr_xfer_val_r
+                            : 32'h0;
+    assign eu_coproc_addr  = (cpsr_cir_wr_r || cpsr_cir_echo_r)
+        ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h06}                   // Restore CIR
+        : cpsr_abort_r
+        ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h02}                   // Control CIR
+        : cpsr_xfer_cir_r
+        ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h10}                   // Operand CIR
+        : cpsr_run_r
         ? {12'h000, 4'b0010, 3'b001, 8'h00, cpsr_is_restore_r ? 5'h06 : 5'h04}
         : {12'h000, 4'b0010, fpu_prim_r, 2'b01, 11'h000};
 

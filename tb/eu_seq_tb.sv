@@ -70,10 +70,27 @@ module eu_seq_tb;
 
     // Coprocessor CPU Space wires (Phase 157 Stage 4: cpSAVE/cpRESTORE
     // decode/dispatch observability -- rdata/ack/berr left unconnected,
-    // this test only checks request/address correctness, not completion).
+    // the ORIGINAL decode/dispatch-only test only checks request/address
+    // correctness, not completion).
     logic        cp_req_tb;
     logic [31:0] cp_addr_tb;
     logic        cp_ack_tb = 1'b0;
+    // open-items backlog Stage 14 (plan.md): the rest of the coprocessor
+    // bus interface, plus the ordinary memory port, needed for the new
+    // real-(An)-protocol end-to-end tests further down (both were entirely
+    // unconnected before this stage -- eu_seq's own ports default to
+    // floating/undriven when omitted from an explicit port-list
+    // instantiation like this one).
+    logic        cp_rw_tb;
+    logic [31:0] cp_wdata_tb;
+    logic [31:0] cp_rdata_tb = 32'h0;
+    logic        cp_berr_tb  = 1'b0;
+    logic        mem_req_tb;
+    logic        mem_rw_tb;
+    logic [31:0] mem_addr_tb;
+    logic [31:0] mem_wdata_tb;
+    logic [31:0] mem_rdata_tb = 32'h0;
+    logic        mem_ack_tb   = 1'b0;
 
     // BCD ↔ seq wires
     logic [7:0]  bcd_src, bcd_dst, bcd_result;
@@ -165,11 +182,24 @@ module eu_seq_tb;
         .int_pending    (1'b0),
         .eu_int_ready   (),
         .exc_active     (1'b0),
+        .mem_req        (mem_req_tb),
+        .mem_rw         (mem_rw_tb),
+        .mem_siz        (),
+        .mem_fc         (),
+        .mem_addr       (mem_addr_tb),
+        .mem_wdata      (mem_wdata_tb),
+        .mem_rdata      (mem_rdata_tb),
+        .mem_ack        (mem_ack_tb),
         .mem_berr       (1'b0),
         .eu_coproc_req  (cp_req_tb),
+        .eu_coproc_rw   (cp_rw_tb),
+        .eu_coproc_siz  (),
+        .eu_coproc_fc   (),
         .eu_coproc_addr (cp_addr_tb),
+        .eu_coproc_wdata(cp_wdata_tb),
+        .eu_coproc_rdata(cp_rdata_tb),
         .eu_coproc_ack  (cp_ack_tb),
-        .eu_coproc_berr (1'b0)
+        .eu_coproc_berr (cp_berr_tb)
     );
 
     eu_regfile u_rf (
@@ -383,6 +413,39 @@ module eu_seq_tb;
     localparam MULS_W_D1_D0 = 16'hC1C1;
     localparam DIVU_W_D1_D0 = 16'h80C1;
     localparam DIVS_W_D1_D0 = 16'h81C1;
+
+    // -----------------------------------------------------------------------
+    // open-items backlog Stage 14 (plan.md): helper tasks driving/checking
+    // the real cpSAVE/cpRESTORE (An)-mode protocol's own multi-step mem_*/
+    // eu_coproc_* bus interaction. wait_* tasks poll the DUT's own request
+    // line with a generous (200-cycle) safety-cutoff budget, matching this
+    // project's own established "safety margin, not exact count" testbench
+    // convention; pulse_* tasks provide a single-cycle ack, mirroring the
+    // existing cp_ack_tb usage pattern already in this file.
+    // -----------------------------------------------------------------------
+    task automatic wait_mem_req();
+        int t;
+        for (t = 0; t < 200 && !mem_req_tb; t++) @(posedge clk_4x);
+    endtask
+
+    task automatic wait_cp_req();
+        int t;
+        for (t = 0; t < 200 && !cp_req_tb; t++) @(posedge clk_4x);
+    endtask
+
+    task automatic pulse_mem_ack(input logic [31:0] rdata_val);
+        mem_rdata_tb = rdata_val;
+        mem_ack_tb   = 1'b1;
+        @(posedge clk_4x); #1;
+        mem_ack_tb   = 1'b0;
+    endtask
+
+    task automatic pulse_cp_ack(input logic [31:0] rdata_val);
+        cp_rdata_tb = rdata_val;
+        cp_ack_tb   = 1'b1;
+        @(posedge clk_4x); #1;
+        cp_ack_tb   = 1'b0;
+    endtask
 
     // -----------------------------------------------------------------------
     // Main test
@@ -771,6 +834,18 @@ module eu_seq_tb;
         // Checks request/address correctness only (eu_coproc_ack/berr left
         // unconnected -- the completion path is already proven generically
         // by the shared FPU-stub bus mechanism at the BIU level).
+        //
+        // open-items backlog Stage 14 (plan.md): EA mode deliberately
+        // changed from (An) (mode=010) to (An)+ (mode=011) -- (An) is now
+        // the REAL Section 10.2.3 protocol (a full format-word-driven
+        // multi-phase transfer, needing a properly-shaped synthetic
+        // response this simple decode/dispatch-only test was never meant
+        // to provide), while every OTHER EA mode -- including (An)+, which
+        // this test doesn't rely on for anything beyond "some non-(An)
+        // mode" -- still gets the original one-CIR-read-then-complete stub
+        // this test's own single cp_ack_tb pulse was designed for. The
+        // real (An)-mode protocol has its own dedicated test elsewhere
+        // (tb/biu_tb.sv).
         // ================================================================
         $display("--- cpSAVE / cpRESTORE decode + dispatch ---");
         begin
@@ -780,10 +855,10 @@ module eu_seq_tb;
             while (seq_busy) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
 
-            // cpSAVE (A0): F-line, CpID=1, TYPE=100, EA=(An) mode=010,reg=000
-            // -> 0xF310. Address = {12'h0,4'b0010,CpID=001,8'h0,SaveCIR=5'h04}
-            //   = 0x00022004.
-            instr_word  = 16'hF310;
+            // cpSAVE (A0)+: F-line, CpID=1, TYPE=100, EA=(An)+ mode=011,reg=000
+            // -> 0xF318. Address = {12'h0,4'b0010,CpID=001,8'h0,SaveCIR=5'h04}
+            //   = 0x00022004 (independent of EA mode).
+            instr_word  = 16'hF318;
             instr_valid = 1'b1;
             ext_valid   = 1'b0;
             @(posedge clk_4x); #1;
@@ -797,6 +872,9 @@ module eu_seq_tb;
             check32("cpSAVE: address = Save CIR", cp_addr_tb, 32'h0002_2004);
             check("cpSAVE: cpsr_is_restore_r=0", u_seq.cpsr_is_restore_r === 1'b0);
             // Ack it so cpsr_run_r clears cleanly before the next test.
+            // rdata left at X on purpose (stub scope, non-(An) EA) -- the
+            // FSM captures cpsr_fmt_r and completes unconditionally without
+            // ever branching on it, same as before this stage.
             cp_ack_tb = 1'b1;
             @(posedge clk_4x); #1;
             cp_ack_tb = 1'b0;
@@ -809,9 +887,14 @@ module eu_seq_tb;
             while (seq_busy) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
 
-            // cpRESTORE (A0): TYPE=101 -> 0xF350. Address = Restore CIR
-            // (5'h06) = 0x00022006.
-            instr_word  = 16'hF350;
+            // cpRESTORE (A0)+: TYPE=101, EA=(An)+ mode=011,reg=000 -> 0xF358.
+            // Address = Restore CIR (5'h06) = 0x00022006. Same (An)+
+            // deliberate-EA-mode reasoning as the cpSAVE test above -- (An)
+            // is now the real protocol (starts with a MEMORY read of the
+            // format word, never touching eu_coproc_req at all until later
+            // phases), so this decode/dispatch-only test would never see
+            // cp_req_tb assert at all if left at (An).
+            instr_word  = 16'hF358;
             instr_valid = 1'b1;
             ext_valid   = 1'b0;
             @(posedge clk_4x); #1;
@@ -828,6 +911,127 @@ module eu_seq_tb;
             @(posedge clk_4x); #1;
             cp_ack_tb = 1'b0;
             repeat(4) @(posedge clk_4x);
+        end
+
+        // ================================================================
+        // cpSAVE / cpRESTORE REAL (An)-mode protocol (open-items backlog
+        // Stage 14, plan.md) -- the actual mechanism, exercised end-to-end
+        // for the first time (the decode/dispatch-only tests above were
+        // deliberately moved off (An) to avoid this exact path). Drives a
+        // full VALID-format, 2-longword transfer in both directions,
+        // checking every mem_*/eu_coproc_* address, direction, and data
+        // value at each step -- not just "did it unstick". EMPTY and
+        // INVALID/format-error are implemented per the manual's own
+        // protocol (see eu_seq.sv's own cpsr_* FSM header comment) but not
+        // independently exercised by a dedicated check here -- documented,
+        // not silently skipped.
+        // ================================================================
+        $display("--- cpSAVE / cpRESTORE real (An)-mode protocol ---");
+        begin
+            // cpSAVE (A0), A0=0x1000. Save CIR returns VALID/len=8 -- a
+            // 2-longword (8-byte) transfer, descending from EA+8.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_1000;
+
+            instr_word  = 16'hF310;  // cpSAVE (A0), mode=010,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_cp_req();
+            check("cpSAVE-real: Save CIR read", cp_req_tb && cp_rw_tb);
+            check32("cpSAVE-real: Save CIR address", cp_addr_tb, 32'h0002_2004);
+            pulse_cp_ack(32'h1008_0000);  // format=$10 (VALID), length=8
+
+            wait_mem_req();
+            check("cpSAVE-real: format-word write is a write", mem_req_tb && !mem_rw_tb);
+            check32("cpSAVE-real: format word written at EA", mem_addr_tb, 32'h0000_1000);
+            check32("cpSAVE-real: format-word value ({fmt,len},reserved=0)",
+                    mem_wdata_tb, 32'h1008_0000);
+            pulse_mem_ack(32'h0);
+
+            wait_cp_req();
+            check("cpSAVE-real: Operand CIR read #1", cp_req_tb && cp_rw_tb);
+            check32("cpSAVE-real: Operand CIR address", cp_addr_tb, 32'h0002_2010);
+            pulse_cp_ack(32'hAAAA_5555);
+
+            wait_mem_req();
+            check("cpSAVE-real: transfer write #1 is a write", mem_req_tb && !mem_rw_tb);
+            check32("cpSAVE-real: transfer write #1 address (EA+len, descending)",
+                    mem_addr_tb, 32'h0000_1008);
+            check32("cpSAVE-real: transfer write #1 value", mem_wdata_tb, 32'hAAAA_5555);
+            pulse_mem_ack(32'h0);
+
+            wait_cp_req();
+            check("cpSAVE-real: Operand CIR read #2", cp_req_tb && cp_rw_tb);
+            pulse_cp_ack(32'hBBBB_6666);
+
+            wait_mem_req();
+            check32("cpSAVE-real: transfer write #2 address (EA+len-4)",
+                    mem_addr_tb, 32'h0000_1004);
+            check32("cpSAVE-real: transfer write #2 value", mem_wdata_tb, 32'hBBBB_6666);
+            pulse_mem_ack(32'h0);
+
+            repeat(4) @(posedge clk_4x);
+            check("cpSAVE-real: FSM returned to idle (no further requests)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
+        end
+
+        begin
+            // cpRESTORE (A0), A0=0x1100. Memory holds VALID/len=8 at EA;
+            // transfer is ascending from EA+4.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_1100;
+
+            instr_word  = 16'hF350;  // cpRESTORE (A0), mode=010,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_mem_req();
+            check("cpRESTORE-real: format-word read is a read", mem_req_tb && mem_rw_tb);
+            check32("cpRESTORE-real: format word read from EA", mem_addr_tb, 32'h0000_1100);
+            pulse_mem_ack(32'h1008_0000);  // format=$10 (VALID), length=8
+
+            wait_cp_req();
+            check("cpRESTORE-real: Restore CIR write is a write", cp_req_tb && !cp_rw_tb);
+            check32("cpRESTORE-real: Restore CIR address", cp_addr_tb, 32'h0002_2006);
+            check32("cpRESTORE-real: Restore CIR write value", cp_wdata_tb, 32'h1008_0000);
+            pulse_cp_ack(32'h0);
+
+            wait_cp_req();
+            check("cpRESTORE-real: Restore CIR echo read", cp_req_tb && cp_rw_tb);
+            check32("cpRESTORE-real: Restore CIR address (echo)", cp_addr_tb, 32'h0002_2006);
+            pulse_cp_ack(32'h1008_0000);  // echo back the same VALID/len=8
+
+            wait_mem_req();
+            check("cpRESTORE-real: transfer read #1 is a read", mem_req_tb && mem_rw_tb);
+            check32("cpRESTORE-real: transfer read #1 address (EA+4, ascending)",
+                    mem_addr_tb, 32'h0000_1104);
+            pulse_mem_ack(32'hCCCC_7777);
+
+            wait_cp_req();
+            check("cpRESTORE-real: Operand CIR write #1 is a write", cp_req_tb && !cp_rw_tb);
+            check32("cpRESTORE-real: Operand CIR address", cp_addr_tb, 32'h0002_2010);
+            check32("cpRESTORE-real: Operand CIR write #1 value", cp_wdata_tb, 32'hCCCC_7777);
+            pulse_cp_ack(32'h0);
+
+            wait_mem_req();
+            check32("cpRESTORE-real: transfer read #2 address (EA+8)",
+                    mem_addr_tb, 32'h0000_1108);
+            pulse_mem_ack(32'hDDDD_8888);
+
+            wait_cp_req();
+            check32("cpRESTORE-real: Operand CIR write #2 value", cp_wdata_tb, 32'hDDDD_8888);
+            pulse_cp_ack(32'h0);
+
+            repeat(4) @(posedge clk_4x);
+            check("cpRESTORE-real: FSM returned to idle (no further requests)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
         end
 
         // ================================================================
