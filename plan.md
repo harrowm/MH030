@@ -5246,3 +5246,47 @@ no Harte re-run needed. **Closes Stage 3 as a confirmed-but-deferred
 investigation**, matching this plan's own explicit allowance for that
 outcome. See `~/.claude/plans/elegant-gliding-fog.md` for the full 12-stage
 plan. Stage 4 (CAS write-on-mismatch semantics) is next.
+
+## Phase 212 (deferred-items closure plan, Stage 4): CAS write-on-mismatch semantics -- Phase 223's own earlier finding was wrong, current RTL already correct
+
+Re-verified the specific claim this stage was scoped around -- "real CAS
+silicon issues the write bus cycle unconditionally, writing back the
+unchanged value on mismatch" (Phase 223's own citation of MC68030UM.pdf
+Section 3.5.1/7.3.6) -- by reading the primary source directly, rather than
+trusting the earlier citation, before touching any RTL. Section 7.3.3
+(Asynchronous Read-Modify-Write Cycle, the section that actually applies --
+this RTL's own bus protocol is asynchronous/DSACK-based, not the synchronous/
+STERM-based 7.3.6) opens with a completely unambiguous sentence, directly
+above its own RMW flowchart:
+
+  "Depending on the compare results of the CAS and CAS2 instructions, the
+  write cycle(s) may not occur."
+
+This is the OPPOSITE of Phase 223's own conclusion. Section 3.5.1's own
+worked example ("the write portion of the cycle copies the new count in
+SYS-CNTR into D0") turns out to be describing the STANDARD, universally-known
+CAS semantic -- Dc gets loaded with the current memory value on a mismatch --
+in casual software-level prose, not a literal bus-cycle-level claim; the
+7.3.3 statement is the authoritative, bus-accurate one for this project's own
+pin-level-cycle-accuracy goal.
+
+**Confirmed this project's own current RTL already matches the manual
+exactly, and already has passing test coverage proving it**: `tb/atomic_tb.sv`'s
+own pre-existing CAS-02 test (`chk("CAS-02:mem_unchanged", ram[...],
+32'h1111_2222)`) has verified memory stays unchanged on a CAS mismatch this
+entire project's history, and the file's own header comment already
+correctly documents "mismatch -> load M into Dc" with no write. **Zero RTL
+change, zero test change** -- this stage closes as a pure documentation
+correction of a stale, incorrect earlier finding, caught by re-verifying the
+primary source before implementing a "fix" that would have introduced a real
+regression (writing memory when real silicon explicitly does not).
+
+`make test` 36/36 (unchanged, sanity re-confirmed). **Closes Stage 4.**
+Stage 5 (CAS genuine bus-level lock) remains independently valid and
+unaffected by this correction -- that gap (single-address CAS dispatching
+its read and write as two ordinary unlocked bus cycles instead of one
+genuinely locked RMW sequence) is a completely separate finding from Phase
+223's own same investigation, confirmed real via direct code reading, not
+the write-on-mismatch question this stage addressed. See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 12-stage plan. Stage 5
+is next.
