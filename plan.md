@@ -5045,3 +5045,52 @@ practical ceiling** -- same disposition Stage 4 already gave Category F, just fo
 serious PTEST-specific reason this time. See `~/.claude/plans/elegant-gliding-fog.md` for
 the full 8-stage plan. Stage 8 (3 new back-to-back FSM pairs: CAS2->MOVE16, BFINS->CAS2,
 RTE->TAS) is next -- the last stage in this plan.
+
+## Phase 208 (pipeline-stall breadth extension plan, Stage 8): T4f/T4g/T4h -- closes the 8-stage plan in full
+
+New `T4f`/`T4g`/`T4h` in `tb/stall_fsm_tb.sv`, the 3 back-to-back FSM composition pairs
+called for by the plan's own final stage: CAS2->MOVE16 (first pairing combining two
+different multi-beat burst-adjacent mechanisms back to back), BFINS->CAS2 (first pairing
+where the producer's own FSM shape -- a same-address memory RMW -- differs structurally
+from every earlier producer), and RTE->TAS (first pairing where the producer is a
+control-transfer/stack-restore FSM rather than a data-processing FSM). Each has a real
+cross-boundary data-flow check, not just "did it unstick": T4f pre-loads memory to match
+CAS2's own Dc1/Dc2 exactly and checks MOVE16's own destination reads CAS2's own freshly-
+written value, not a stale pre-load; T4g pre-loads memory with one deliberately-wrong
+byte so BFINS's own write is what makes CAS2's subsequent compare succeed, and checks the
+post-CAS2 memory value; T4h hand-builds a format-$0 RTE frame whose restored PC points
+directly at TAS with no instruction between them, and checks TAS's own target byte
+transitions from 0 to 0x80 (bit7 set), proving it genuinely executed right where RTE's
+redirect landed. New `MOVE_L_IMM_D3`/`MOVE_L_IMM_D4` localparams (`0x263C`/`0x283C`),
+derived from the same formula already proven by the existing D1/D2/D6/D7 constants
+(`0x203C | (n<<9)`), needed to load CAS2's own Dc2/Du2 registers compactly.
+
+**Found and fixed a real bug via `make test`, the same class this project has hit
+repeatedly**: a first attempt placed T4f/T4g/T4h's own check blocks immediately after
+WS-MOVE16's own check block in SV program-text order -- but WS-PMOVE64's own check block
+sits between there and where T4f/g/h's own rom[] code actually runs on real hardware,
+meaning the real DUT executes WS-PMOVE64 BEFORE T4f/g/h despite T4f/g/h's own checks
+being placed earlier in program text. WS-PMOVE64-1/2 both timed out as a direct
+consequence: by the time WS-PMOVE64's own (correctly-positioned-later-in-text, but
+now-executing-later-in-time) check finally started polling for D5=9202, T4f/g/h had
+already overwritten D5 with their own markers (7100/7101/7102) and moved on. Fixed by
+relocating T4f/g/h's own check blocks to run after WS-PMOVE64's, matching this file's own
+established "SV program order must match real DUT execution order" lesson (T4c/T4e,
+INT-mid-PACK/BFINS) -- rom[] content itself was already correctly staged up front,
+unaffected by the fix. T4f's own bus-cycle-count guess (12: CAS2's match-path 4 +
+MOVE16's own established 8) also happened to measure as exactly 12 once the ordering bug
+was fixed (the earlier, corrupted-ordering run had shown a spurious 16, an artifact of
+the same corruption, not a genuine miscount).
+
+Results: `tb/stall_fsm_tb.sv` 0 failures (9 new checks), `make test` 36/36.
+Testbench-only (no RTL touched, confirmed via `git diff --stat rtl/`) -- no Harte re-run
+needed. `docs/stalls.md` updated: back-to-back FSM composition 4->7 pairs (2 locations).
+**This closes the pipeline-stall breadth extension plan (elegant-gliding-fog.md, Phases
+201-208, Stages 1-8) in full.** Category F (interrupt-mid-FSM) closed at 18 sources (its
+practical ceiling), Category H (DSACK wait-states-on-FSM-beats) closed at 14 sources
+(also its practical ceiling, with a genuine, deferred translation-fault finding for
+PTEST -- see Phase 207), and back-to-back FSM composition now has 7 pairs, each with a
+real cross-boundary data-flow check. No known correctness gap remains in
+`docs/stalls.md`; what remains everywhere is purely breadth, matching this plan's own
+starting premise. See `plan.md`'s own Phase 201-207 entries for the full stage-by-stage
+history.

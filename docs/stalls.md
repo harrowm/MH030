@@ -478,7 +478,7 @@ Harte sweep) — see `docs/cache.md`.
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
 | J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
 | K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
-| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 4 pairs (Phases 107/126/191): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, each a genuinely different FSM-shape handoff, no instruction between them |
+| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 7 pairs (Phases 107/126/191, elegant-gliding-fog.md Stage 8): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, CAS2→MOVE16, BFINS→CAS2, RTE→TAS, each a genuinely different FSM-shape handoff, no instruction between them; each with a real cross-boundary data-flow check (not just "did it unstick") |
 
 Run everything with `make test` (35/35, includes all of the above except Categories J/K,
 which are verified via the Harte sweep instead — see those categories' own entries). See
@@ -514,10 +514,16 @@ has both decode-holdoff and BERR-abort coverage, and the two mechanisms layered 
 (interrupt dispatch, DSACK wait states) are proven correct in principle across several
 FSM shapes each. What remains is purely *breadth*, not depth:
 
-- **Back-to-back FSM composition** (Category D→D handoff) has 4 pairs (TAS→MOVEM,
-  MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191) out of the many
-  possible combinations. Nothing suggests a further pairing would behave differently,
-  but only these four have been checked.
+- **Back-to-back FSM composition** (Category D→D handoff) has 7 pairs (TAS→MOVEM,
+  MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191, plus CAS2→MOVE16,
+  BFINS→CAS2, and RTE→TAS, added by the pipeline-stall breadth extension plan's own
+  Stage 8, elegant-gliding-fog.md -- the first pairing combining two multi-beat
+  burst-adjacent mechanisms, the first where the producer's own FSM shape differs
+  structurally from every earlier producer, and the first where the producer is a
+  control-transfer/stack-restore FSM rather than a data-processing one, respectively)
+  out of the many possible combinations. Nothing suggests a further pairing would behave
+  differently, but only these seven have been checked. **This closes the pipeline-stall
+  breadth extension plan (elegant-gliding-fog.md) in full** -- all 8 stages done.
 - **Interrupt-mid-FSM** (Category F) has 18 of ~19-23 possible FSM sources checked
   individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS -- Phase 189's
   own open-items backlog Stage 5 added the last two -- plus MOVE16/ABCD/SBCD/CMP2/CHK2/

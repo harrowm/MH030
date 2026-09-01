@@ -196,6 +196,8 @@ module stall_fsm_tb;
     localparam MOVE_L_IMM_D7   = 16'h2E3C;  // MOVE.L #imm,D7
     localparam MOVE_L_IMM_D1   = 16'h223C;  // MOVE.L #imm,D1
     localparam MOVE_L_IMM_D2   = 16'h243C;  // MOVE.L #imm,D2
+    localparam MOVE_L_IMM_D3   = 16'h263C;  // MOVE.L #imm,D3 (same formula as D1/D2/D6/D7 above)
+    localparam MOVE_L_IMM_D4   = 16'h283C;  // MOVE.L #imm,D4
     localparam CLR_L_IDX_A0    = 16'h42B0;  // CLR.L (d8,A0,D1.L)
     localparam MOVE_SR_IDX_A1  = 16'h40F1;  // MOVE.W SR,(d8,A1,D2.L)
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
@@ -3288,9 +3290,90 @@ module stall_fsm_tb;
         rom[16'h3E50/4] = {PMOVE_CRP_EXT, CLR_L_D5};
         rom[16'h3E54/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h3E58/4] = {16'd9203, NOP_OP};
-        // Temporary park -- Stage 8 will redirect this on to its own new
-        // tests instead of parking permanently here.
-        rom[16'h3E5C/4] = {BRA_SELF, NOP_OP};
+        // Stage 8 (elegant-gliding-fog.md, the last stage of this plan):
+        // 3 new back-to-back FSM composition pairs. Reached via an explicit
+        // JMP to a fresh region (0x3D28-0x3DB7, confirmed clear via the
+        // same collision-checking script used throughout this plan), since
+        // fall-through here would walk into WS-PTEST's own reverted
+        // scratch space. Data buffers live separately at 0x3920-0x3984
+        // (within the Memind pointer-chain's own free gap, 0x3914-0x3AFF,
+        // confirmed clear of that family's own dynamic 0x3900/0x3910/
+        // 0x3B00/0x3B44-0x3B9C targets), keeping the code region itself
+        // small and free of data-vs-code overlap risk.
+        rom[16'h3E5C/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h3E60/4] = {16'h3D28, NOP_OP};
+
+        // Pair #1 (T4f): CAS2 -> MOVE16, a genuine match (not WS-CAS2's
+        // own deliberate-mismatch shortcut) so CAS2 really writes, then
+        // MOVE16 immediately reads that fresh write as its own 16-byte
+        // burst source. D1/D3 (Dc1/Dc2) pre-loaded to match memory at
+        // A0/A1 exactly; D2/D4 (Du1/Du2) are the values CAS2 writes on
+        // match. A1 is deliberately reused as MOVE16's own destination
+        // (legal -- CAS2 never modifies address registers), the same
+        // "adjacent register reuse" cross-check shape T4c/T4d already
+        // established.
+        rom[16'h3920/4] = 32'h0000_1234;  // A0 pre-load, matches D1 (Dc1)
+        rom[16'h3940/4] = 32'h0000_9ABC;  // A1 pre-load, matches D3 (Dc2)
+        rom[16'h3D28/4] = {MOVE_L_IMM_D1, 16'h0000};
+        rom[16'h3D2C/4] = {16'h1234, MOVE_L_IMM_D2};
+        rom[16'h3D30/4] = {16'h0000, 16'h5678};
+        rom[16'h3D34/4] = {MOVE_L_IMM_D3, 16'h0000};
+        rom[16'h3D38/4] = {16'h9ABC, MOVE_L_IMM_D4};
+        rom[16'h3D3C/4] = {16'h0000, 16'hDEF0};
+        rom[16'h3D40/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3D44/4] = {16'h3920, MOVEA_L_IMM_A1};
+        rom[16'h3D48/4] = {16'h0000, 16'h3940};
+        rom[16'h3D4C/4] = {CAS2_L, CAS2_EXT1};
+        rom[16'h3D50/4] = {CAS2_EXT2, MOVE16_A0P_A1P};
+        rom[16'h3D54/4] = {MOVE16_EXT, CLR_L_D5};
+        rom[16'h3D58/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3D5C/4] = {16'd7100, NOP_OP};
+
+        // Pair #2 (T4g): BFINS -> CAS2, a genuine match too. D1=0x12121212
+        // (also BFINS's own field-insert source register); memory at A0
+        // pre-loaded to 0x12FF1212 (byte 1 deliberately wrong) so BFINS's
+        // own write (inserting D1's own low byte into offset:8 width:8) is
+        // what makes memory equal D1 exactly -- CAS2's own subsequent
+        // compare succeeding is therefore genuine proof BFINS's write
+        // landed, not a coincidence of a stale pre-load already matching.
+        rom[16'h3950/4] = 32'h12FF_1212;  // A0 pre-load, byte1 wrong until BFINS fixes it
+        rom[16'h3960/4] = 32'h3333_3333;  // A1 pre-load, matches D3 (Dc2)
+        rom[16'h3D60/4] = {MOVE_L_IMM_D1, 16'h1212};
+        rom[16'h3D64/4] = {16'h1212, MOVE_L_IMM_D2};
+        rom[16'h3D68/4] = {16'hCAFE, 16'hBABE};
+        rom[16'h3D6C/4] = {MOVE_L_IMM_D3, 16'h3333};
+        rom[16'h3D70/4] = {16'h3333, MOVE_L_IMM_D4};
+        rom[16'h3D74/4] = {16'hF00D, 16'hF00D};
+        rom[16'h3D78/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3D7C/4] = {16'h3950, MOVEA_L_IMM_A1};
+        rom[16'h3D80/4] = {16'h0000, 16'h3960};
+        rom[16'h3D84/4] = {BFINS_D1_A0, BFINS_EXT};
+        rom[16'h3D88/4] = {CAS2_L, CAS2_EXT1};
+        rom[16'h3D8C/4] = {CAS2_EXT2, CLR_L_D5};
+        rom[16'h3D90/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3D94/4] = {16'd7101, NOP_OP};
+
+        // Pair #3 (T4h): RTE -> TAS, the first pairing where the producer
+        // is a control-transfer/stack-restore FSM rather than a
+        // data-processing FSM. RTE's own restored PC points directly at
+        // TAS (A0), with no instruction between them -- TAS's own target
+        // byte is pre-loaded to 0 so a post-TAS 0x80 (bit7 set) is
+        // unambiguous proof TAS genuinely executed right where RTE's
+        // redirect landed, matching INT-mid-RTR/RTE's own established
+        // frame layout (format-$0, SR restored with S=1).
+        rom[16'h3970/4] = {16'h0000, 16'h2000};  // fmt/vec=0, SR=0x2000 (S=1)
+        rom[16'h3974/4] = 32'h0000_3DA8;         // PC -> TAS, right after the redirect
+        rom[16'h3980/4] = 32'h0011_2233;         // TAS target; top byte 0 -> TAS sets bit7 -> 0x80
+        rom[16'h3D98/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3D9C/4] = {16'h3980, MOVEA_L_IMM_A7};
+        rom[16'h3DA0/4] = {16'h0000, 16'h3970};
+        rom[16'h3DA4/4] = {RTE_OP, NOP_OP};
+        rom[16'h3DA8/4] = {TAS_A0, CLR_L_D5};
+        rom[16'h3DAC/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3DB0/4] = {16'd7102, NOP_OP};
+        // Permanent park -- Stage 8 is the last stage of this plan, no
+        // further redirect needed.
+        rom[16'h3DB4/4] = {BRA_SELF, NOP_OP};
 
         rom[16'h3EA0/4] = 32'h1111_2222;
         rom[16'h3EA4/4] = 32'h3333_4444;
@@ -3476,6 +3559,66 @@ module stall_fsm_tb;
             wait_states = 0;
             check("WS-PMOVE64: wait states measurably lengthen PMOVE64's own load bus cycles too",
                   elapsedX > elapsed0);
+        end
+
+        // T4f: back-to-back FSM composition, pair #4 -- CAS2 -> MOVE16.
+        // First pairing combining two different multi-beat burst-adjacent
+        // mechanisms back to back. Check code positioned HERE (immediately
+        // after WS-PMOVE64's own check block), matching this test's own
+        // real DUT execution order -- rom[] writes for T4f/T4g/T4h are
+        // staged earlier (right after WS-PMOVE64's own rom[] setup, before
+        // its own test block consumes real simulated time), the same
+        // "SV program order must match real DUT execution order" lesson
+        // this file has learned repeatedly (T4c/T4e, INT-mid-PACK/BFINS) --
+        // a first attempt placed this whole block right after WS-MOVE16's
+        // own check instead, which put it BEFORE WS-PMOVE64's own check in
+        // program order despite WS-PMOVE64 executing on real hardware
+        // first; caught immediately via WS-PMOVE64-1/2 both timing out
+        // (their own D5 marker had already been overwritten by T4f/g/h's
+        // own markers by the time WS-PMOVE64's delayed check started
+        // polling for it).
+        begin
+            int c0, c1, t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3D28; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4f: back-to-back CAS2->MOVE16 dependent instr ran (D5=7100)", 5, 32'd7100, 4000);
+            c1 = data_ds_count;
+            check32("T4f: CAS2(4)+MOVE16(8)=12 data-space bus cycles", c1 - c0, 32'd12);
+            check32("T4f: MOVE16 read fresh CAS2-written data, not a stale pre-load",
+                    rom[16'h3940/4], 32'h0000_5678);
+        end
+
+        // T4g: back-to-back FSM composition, pair #5 -- BFINS -> CAS2.
+        // First pairing where the producer's own FSM shape (a same-address
+        // memory RMW) differs structurally from every existing producer.
+        begin
+            int c0, c1, t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3D60; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4g: back-to-back BFINS->CAS2 dependent instr ran (D5=7101)", 5, 32'd7101, 4000);
+            c1 = data_ds_count;
+            check32("T4g: BFINS(2)+CAS2(4)=6 data-space bus cycles", c1 - c0, 32'd6);
+            check32("T4g: CAS2 matched based on BFINS's own fresh write, not a stale pre-load",
+                    rom[16'h3950/4], 32'hCAFE_BABE);
+        end
+
+        // T4h: back-to-back FSM composition, pair #6 -- RTE -> TAS. First
+        // pairing where the producer is a control-transfer/stack-restore
+        // FSM rather than a data-processing FSM; exercises the redirect-
+        // then-immediate-FSM-dispatch boundary Category E and Category D
+        // would otherwise never combine.
+        begin
+            int c0, c1, t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3D98; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4h: back-to-back RTE->TAS dependent instr ran (D5=7102)", 5, 32'd7102, 4000);
+            c1 = data_ds_count;
+            check32("T4h: RTE(2)+TAS(2)=4 data-space bus cycles", c1 - c0, 32'd4);
+            check8("T4h: TAS set bit7 on RTE's own restored-PC target byte (0x80, not stale 0x00)",
+                   rom[16'h3980/4][31:24], 8'h80);
         end
 
         // WS-PTEST: checked directly, not assumed excludable -- and this
