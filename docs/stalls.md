@@ -281,8 +281,28 @@ transparent under the "any VA" TT0 window -- a genuinely new combination (I-cach
 miss-fill + a fresh TC.E re-enable + a cache-line-crossing fetch, immediately following a
 real PTEST/ATC-install) nothing in this project's history had exercised together before.
 Confirmed real, not guessed at, but substantially deeper than this breadth-extension
-stage's own scope -- deferred to a dedicated future phase (same disposition as the
-BERR-during-fill investigation, Phase 158 Stage 8), not chased to resolution here.
+stage's own scope -- deferred to a dedicated future phase at the time (same disposition,
+at the time, as the BERR-during-fill investigation, Phase 158 Stage 8 -- that one has
+since been partially fixed too, see `docs/cache.md`).
+
+**Follow-up (deferred-items closure plan Stage 10, Phase 218/plan.md)**: investigated
+directly with a clean, isolated reproduction in `tb/mmu_xlate_tb.sv` rather than working
+inside this file's own long, collision-prone execution history. Two hypotheses derived
+directly from the wording above -- PTEST's own opcode+ext straddling a cache-line
+boundary itself, and (the more literal reading) the *following* `ADDI.L`'s own
+immediate-operand span straddling the next boundary instead -- both survived cleanly in
+isolation, no hang either time. Since both directly-derived alignment hypotheses failed
+in a clean environment, the most likely explanation is that the original hang depends on
+state specific to *this file's* own long execution history preceding `WS-PTEST` -- most
+plausibly a stale I-cache line from one of its own many earlier I-cache tests already
+resident at the same index, needing a genuine eviction the clean reproduction can't
+exercise. Matches this project's own "confirmed real, not reproduced under controlled
+conditions" precedent (closest prior example: the Phase 137 `JMP (An)`-after-exception-
+dispatch investigation) -- the isolated reproduction is kept as new permanent regression
+coverage (`tb/mmu_xlate_tb.sv`'s own Phase 6), but `WS-PTEST`/`INT-mid-PTEST` remain
+absent from *this* file specifically. Still not chased to full resolution -- a genuine
+`stall_fsm_tb.sv`-specific reproduction, if one is ever wanted, would need to be built
+inside this file's own execution history rather than isolated.
 
 **Head-start variant of the absorption effect (Stage 6)**: for BFINS/CMP2/MOVE-mem-mem,
 `wait_states=10` didn't just get absorbed with zero visible effect — it produced a

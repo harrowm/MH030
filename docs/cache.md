@@ -217,11 +217,104 @@ prior phases to expose timing windows that had always existed. Documented in
 SR-write collision); the third was the D-cache byte-lane/alignment trio described
 above (per-word valid bits, `merge_wr()`, `d_size_ok`).
 
+## Later additions: the 8-stage cache-correctness plan (Phase 158, `plan.md` §Phase 158
+## Stages 1-8) — not yet folded into the sections above
+
+Everything above this point in the document was written covering Phases 127-137 and
+never revised afterward. A separate, later 8-stage plan (Phase 158, closed in full)
+found and fixed 6 real, previously-undiscovered gaps against a direct re-read of
+MC68030UM.pdf Section 6 — summarized here rather than woven into the (now slightly
+outdated) narrative above, to avoid rewriting sections that are otherwise still
+accurate:
+
+1. **CACR bit-position fix** (Stage 1): every D-cache CACR bit in `biu_cache_if.sv` was
+   wrong (`ED` read from the `FD`/freeze bit's own position, `CD`/`CED` read from the
+   wrong positions too) — software setting `ED` the textbook-correct way got a D-cache
+   that silently never activated. The I-cache's own bits were already correct. Fixed;
+   `tb/cache_tb.sv`'s own D-cache tests (self-consistently validating the same wrong
+   bits) needed matching literal updates.
+2. **Function-code bits added to both cache tags** (Stage 2) — neither tag included FC
+   before this, so a supervisor and user access to the same logical address could alias
+   onto the same line. Also found, documented, **not** fixed: ordinary instruction
+   fetches hardcode FC=110 (supervisor) regardless of the real S-bit, limiting the new
+   I-cache tag bit's practical effect until that's fixed too (**this was later fixed
+   separately** — see "instruction-fetch FC hardcoding" below).
+3. **RMW read forced-miss** (Stage 3) — the manual requires a locked RMW's own read
+   phase to always miss the D-cache lookup (still populating the cache afterward);
+   this RTL had no such gate.
+4. **IBE/WA/DBE** (Stage 4, three sub-stages) — I-cache burst-enable gating was
+   previously backwards (a comment claiming IBE only selected the pin protocol,
+   contradicting the manual's "must not assert CBREQ# when burst filling is not
+   enabled"); write-allocate (`WA`, CACR bit 13) was a pure no-op; and — **the item
+   most relevant to the stale claim this section replaces** — **D-cache burst-mode
+   fill (DBE, CACR bit 12) was added from scratch** (Stage 4c): a burst-capable
+   read-miss, with `DBE` set and the D-cache enabled, now fills and validates the
+   *entire* line via a genuine `CBREQ#`/`CBACK#` handshake (`dc_burst_req`/
+   `CI_D_BURST0`/`CI_D_FILL_1B..3B` in `biu_cache_if.sv`), mirroring the I-cache's own
+   mechanism (Phase 136) exactly. **The "D-cache burst is intentionally unimplemented"
+   claim that used to be the first bullet in this section was true when originally
+   written (Phases 127-137) and is no longer true — DBE-gated D-cache burst fill has
+   existed since Phase 158 Stage 4c.**
+5. **Freeze (FD/FI)** (Stage 5) — a miss under `FD`/`FI` no longer replaces the indexed
+   entry; a D-cache write-*hit* under `FD` still correctly updates (the manual's own
+   explicit exception).
+6. **CACR self-clearing-bit readback masking** (Stage 6) — `MOVEC CACR,Dn` no longer
+   echoes back the momentary `1` software last wrote into `CD`/`CED`/`CI`/`CEI` (always
+   reads 0 per the manual), plus reserved bits masked to 0.
+7. **CIIN/CIOUT pins** (Stage 7) — neither pin existed anywhere in the RTL before this
+   stage; both added (`ciin_n` async input, `ciout_n` computed output on the D-cache
+   side). Largest blast radius of any stage in this plan (touches every testbench that
+   instantiates `m68030_top` directly) — verified inert wherever left tied off, since no
+   dedicated CIIN-asserted test exists yet.
+8. **BERR-during-fill entry-invalidation investigation** (Stage 8) — confirmed real via
+   direct tracing (every beat's own BERR unconditionally faults the whole fill,
+   regardless of which beat failed, diverging from the manual's "only the actually-
+   requested word's own beat should fault") but not fixed in Phase 158 itself — the fix
+   needed a genuine per-beat discrimination mechanism the burst controller didn't yet
+   expose. **Partially fixed later**: `deferred-items closure plan Stage 9` (`plan.md`
+   §Phase 217) added `burst_beat_at_berr` to `biu_burst_ctrl.sv` and used it in both
+   cache-if modules to resolve the "beat is *after* the requested word" sub-case
+   cleanly (the requested word's data was already captured in an earlier successful
+   beat — no fault needed, mark only the words that genuinely arrived valid). The harder
+   "beat is *at or before* the requested word" sub-case still needs a genuine retry
+   mechanism and remains open — see the next section.
+
+Every stage passed the full mandatory gate (`make test`/`cosim_grp`/`cosim_memind`/full
+124-suite Harte sweep, bit-identical to baseline at every RTL-touching stage — Harte
+never sets `TC.E=1` or enables either cache, so none of this plan's own work was ever
+exercised by the Harte corpus itself; `tb/cache_tb.sv`/`tb/biu_tb.sv` are the real gates
+throughout).
+
+**Instruction-fetch FC hardcoding** (flagged as an open blocker by Stage 2 above): fixed
+separately by the open-items backlog's own Stage 8 (`plan.md` §Phase 193) — real S-bit
+now threads through `biu_cycle_gen.sv`'s instruction-fetch dispatch, `m68030_biu.sv`'s
+`biu_icache_if` instantiation, and the icache-burst-fallback FC mux (three previously-
+hardcoded sites, not just one). Confirmed functionally inert for the entire Harte corpus
+(Harte never sets `TC.E=1` or enables the I-cache), as predicted before implementing it.
+
 ## What's left, if anything
 
-- The D-cache's own burst behavior is intentionally unimplemented — real 68030
-  hardware's D-cache fill is architecturally single-longword, not burst, so there's
-  nothing to add here.
+- **BERR-during-fill, the harder sub-case** (Stage 8 above): a beat failing *at or
+  before* the actually-requested word still unconditionally faults the whole fill —
+  real hardware would, in principle, need a genuine retry there. Confirmed real,
+  deliberately not attempted — this sits directly on top of the extensively-hardened
+  BERR-abort machinery from Phases 108-114, and this project has consistently avoided
+  touching that machinery without overwhelming justification.
+- A related possible improvement, never pursued: **genuine per-beat CIIN checking
+  during a burst** — this RTL currently checks CIIN once, for the whole line, at final
+  burst completion (Stage 7 above), not per-beat as the manual's own text describes;
+  would need reworking the beat-tracking mechanism itself.
+- **`mmu_ci`** (used for `ciout_n`'s own computation, Stage 7) is fed from the
+  EXT/PTEST port, not the real, live, per-access MMU translation CI result — flagged
+  since the Phase 150-era MMU work as "threaded through but not yet acted on"; wiring
+  it into real cache-inhibit behavior is a separate, deeper MMU-integration item.
+- A full MOVES-based D-cache FC-aliasing test was attempted once (predating Phase 158)
+  and caused an unexplained timing sensitivity elsewhere in `tb/cache_tb.sv` when
+  inserted mid-sequence — **root-caused and closed** by the open-items backlog's own
+  Stage 1 (`plan.md` §Phase 215): a plain ROM-address-space collision between that
+  test's own flowing accumulator and a fixed exception-handler block placed earlier in
+  the file, not a simulation-timing race. A real FC-aliasing test now exists at an
+  isolated address (D-13).
 - Two dead-code items are documented above (the unused EU-side I-cache array in
   `biu_cache_if.sv`, gated by a permanently-0 `eu_is_icache`) rather than removed —
   harmless, and removing them is a cleanup task independent of cache *correctness*,
@@ -230,4 +323,9 @@ above (per-word valid bits, `merge_wr()`, `d_size_ok`).
   closed in Phase 137 (see D-6 above) — not an open item, listed here only so a
   future reader doesn't go looking for it as unresolved.
 
-No known correctness gap remains in either cache.
+`tb/cache_tb.sv`'s own check count has grown considerably past the "46 checks total
+(Phase 137)" figure quoted in the table above, via Phase 158's own 8 stages and the
+open-items backlog's own Stage 1 — no single up-to-date count is maintained here; run
+`make test` for the current pass/fail state of the `cache` suite. **No known
+correctness gap remains in either cache except the one item above** (BERR-during-fill's
+harder sub-case), which is confirmed real but deliberately deferred, not overlooked.
