@@ -5376,3 +5376,98 @@ Phase 236's WS-PTEST deferral) -- re-documented here rather than forced.
 already names the two approaches and their trade-off; nothing further to
 add to the plan file itself. Stage 6 (cpSAVE/cpRESTORE
 predecrement/postincrement EA) is next.
+
+## Phase 214 (deferred-items closure plan, Stage 6): cpSAVE/cpRESTORE predecrement/postincrement EA
+
+Extended Phase 229's real format-word-driven transfer protocol (previously
+`(An)` only) to each instruction's own one remaining architecturally-valid
+EA mode. **Corrected the plan's own "predecrement and postincrement (both)"
+framing before implementing anything** -- read MC68030UM.pdf Sections
+10.2.3.3.1 and 10.2.3.4.1 directly: cpSAVE's own text is unambiguous ("the
+control alterable and predecrement addressing modes are valid... other
+addressing modes cause the MC68030 to initiate F-line emulator exception
+processing"), meaning `(An)+` is genuinely architecturally **invalid** for
+cpSAVE, not just deferred; cpRESTORE's own text is the mirror image ("all
+memory addressing modes except the predecrement addressing mode are
+valid"), meaning `-(An)` is genuinely invalid there. The correct, narrower
+scope: cpSAVE gets `-(An)`, cpRESTORE gets `(An)+` -- each instruction's
+own single remaining valid mode, not "both get both."
+
+**EA/register-update model**: since neither manual section describes the
+predecrement/postincrement step as scaling with the variable transfer
+length, and the protocol's own M3 step ("evaluate EA and store format
+word") happens before the length is even known, the auto-adjust step is a
+fixed 4 bytes (the format word's own size) -- identical to any other
+longword predecrement/postincrement instruction, reusing the existing
+`setup_mem_incdec(2'b00,...)` template unmodified; the transfer loop's own
+already-correct address math (`EA+length`, descending/ascending) needed no
+change at all once fed the right starting EA.
+
+Decode (`rtl/eu_seq.sv`): widened cpSAVE's own `if (f_mode==3'b010)` to
+`(f_mode==3'b010 || f_mode==3'b100)` and cpRESTORE's to
+`(f_mode==3'b010 || f_mode==3'b011)`, each now calling
+`setup_mem_incdec(2'b00, dec_an_upd_en, dec_an_upd_reg, dec_an_delta,
+dec_ea_offset)`; widened `cpsr_real_r`'s own capture condition to match.
+
+**Found and fixed two real, previously-latent RTL bugs while building the
+new test coverage** -- both invisible until this stage since nothing had
+ever exercised cpSAVE/cpRESTORE with `dec_an_upd_en=1` before:
+
+1. **An never actually committed.** `dec_an_upd_en`/`ex_an_upd_en` were
+   correctly computed, but cpSAVE/cpRESTORE's own multi-cycle FSM holds
+   `ex_mem_stall` (and therefore blocks the generic WB `an_upd` path)
+   continuously for its entire duration -- exactly the same situation TAS's
+   own RMW forms already solve via a dedicated `mem_rmw_an_wr_en` firing
+   directly off the write-phase ack, bypassing WB entirely. cpSAVE/
+   cpRESTORE had no equivalent. Added `cpsr_an_wr_en = cpsr_start_r &&
+   ex_an_upd_en` (fires once, at the one-cycle `cpsr_start_r` setup phase,
+   mirroring `mem_rmw_an_wr_en`'s own formula `rd_a_data + ex_an_delta`),
+   wired into the `an_wr_en`/`an_wr_sel`/`an_wr_data` priority mux; added a
+   new `ex_is_cpsr` EX-latch flag (mirrors `ex_is_mem_rmw` exactly) so
+   `wb_an_upd_en`'s own generic path is explicitly excluded, guaranteeing
+   no double-apply regardless of any single-cycle timing subtlety.
+
+2. **A second-order bug the first fix's own test then exposed**: `ex_ea` is
+   NOT a frozen snapshot in this codebase -- it's recomputed live every
+   cycle from `rd_a_data` (An's own current register value), unlike TAS's
+   dedicated address registers. Once (1)'s fix committed An's new value as
+   early as `cpsr_start_r`, every LATER use of `ex_ea` (the format-word bus
+   address during `cpsr_mem_fmt_r`, and `cpsr_xfer_addr_r`'s own
+   computation) silently went stale, reading the ALREADY-updated An instead
+   of the original. Added `cpsr_ea_r`, captured once at the same
+   `cpsr_start_r` transition `cpsr_an_wr_en` itself fires on (guaranteed
+   pre-update, since the actual register write lands on the following
+   edge) -- replaced all 3 downstream `ex_ea` uses with `cpsr_ea_r`.
+   **Found a third bug fixing the second**: cpRESTORE's own dispatch-branch
+   condition selecting "go straight to a real memory read" vs. "fall
+   through to the CIR-read stub path" only ever checked `f_mode==3'b010`,
+   never widened for the new `f_mode==3'b011` case -- silently routing
+   `(An)+` cpRESTORE into the wrong branch. Fixed by switching the
+   condition to `cpsr_real_r` (already correctly captures the exact set of
+   real-protocol-eligible modes one branch up).
+
+Updated `tb/eu_seq_tb.sv`'s pre-existing cpRESTORE decode/dispatch stub
+test (previously deliberately using `(An)+` to exercise the stub path,
+per Phase 229's own note) to use `-(An)` instead, the new genuinely-invalid
+mode for cpRESTORE (cpSAVE's own sibling test already correctly used
+`(An)+`, still invalid, unchanged). New "cpSAVE -(An) / cpRESTORE (An)+
+real protocol" test block: full VALID/len=8 2-longword transfers in both
+directions, checking every bus address AND the final committed An value
+(not just "did it unstick") -- **also found, while building the new
+`eu_regfile u_rf(...)` connections these tests needed to even observe An's
+own commit, that `an_wr_en`/`an_wr_sel`/`an_wr_data` had never been wired
+between `u_seq` and `u_rf` in this file at all** (both omitted from the
+explicit named-port instantiation lists on both sides) -- the same class of
+gap Phase 98 already found and fixed once for the sibling
+`tb/eu_regfile_tb.sv`, just never previously noticed here since no earlier
+test in this file had ever checked a `-(An)`/`(An)+` instruction's own
+committed register value. Fixed by adding the 3 missing testbench-level
+wires and connecting them at both instantiation sites.
+
+Results: `tb/eu_seq_tb.sv` 0 failures (11 new checks), `make test` 36/36,
+`make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep
+(mandatory -- `eu_seq.sv` changed substantially) -- PASS 702142, FAIL 2
+(same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to
+baseline, zero regressions. **Closes Stage 6.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the remaining 6-stage
+backlog. Stage 7 (cpSAVE/cpRESTORE EMPTY/INVALID test coverage) is next.

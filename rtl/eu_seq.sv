@@ -6030,18 +6030,29 @@ module eu_seq (
                         // EA field is bits[5:0] (f_mode/f_reg, same positions as any
                         // ordinary EA). Open-items backlog Stage 14 (plan.md): the
                         // real format-word-driven multi-longword transfer protocol
-                        // (Section 10.2.3) is now implemented for the (An) EA mode
-                        // only (f_mode==010) -- reusing the standard An-in-rd_a EA
-                        // template (An -> rd_a, ex_ea = rd_a_data unchanged, same as
-                        // TST/NEG's own non-indexed block) so ex_ea is already
-                        // correctly computed by the time the cpsr_* FSM needs it.
-                        // Every OTHER EA mode (predecrement, displacement, indexed,
-                        // absolute) keeps the original Phase 157 Stage 4 stub scope
-                        // (one CIR read, no real memory access) -- deliberately not
-                        // extended, matching this project's own established
-                        // "non-indexed EA first, everything else deferred" precedent
-                        // (see the eu_seq.sv cpsr_* FSM comment for the full scope
-                        // boundary).
+                        // (Section 10.2.3) was first implemented for (An) only
+                        // (f_mode==010); deferred-items closure plan Stage 6
+                        // (plan.md) extends it to -(An) (f_mode==100) -- the ONLY
+                        // other valid cpSAVE addressing mode. Confirmed directly
+                        // against MC68030UM.pdf Section 10.2.3.3.1: "The control
+                        // alterable and predecrement addressing modes are valid
+                        // for the cpSAVE instruction" -- (An)+ is genuinely
+                        // architecturally INVALID for cpSAVE (not just deferred),
+                        // so it correctly stays on the original one-CIR-read stub
+                        // below, same as every other EA mode. Both (An)-in-rd_a
+                        // and -(An)'s own decrement reuse the standard
+                        // setup_mem_incdec(2'b00,...) template unmodified: the
+                        // manual's own protocol (Figure 10-16, M3) evaluates the
+                        // EA and stores the FORMAT WORD there BEFORE the variable
+                        // transfer length is even known, so the auto-decrement
+                        // step is a fixed 4 bytes (the format word's own size),
+                        // identical to any other longword predecrement -- the
+                        // cpsr_* FSM's own transfer-loop math (ex_ea + length,
+                        // descending) is completely unaffected either way.
+                        // Displacement/indexed/absolute/PC-relative stay stubbed,
+                        // documented explicitly as still out of scope (same
+                        // boundary the FPU coprocessor stub has carried since
+                        // Phase 55).
                         if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
@@ -6051,15 +6062,27 @@ module eu_seq (
                             dec_unit      = UNIT_NONE;
                             dec_needs_ext = (f_mode == 3'b101 || f_mode == 3'b110 ||
                                              f_mode == 3'b111);
-                            if (f_mode == 3'b010) begin  // (An)
+                            if (f_mode == 3'b010 || f_mode == 3'b100) begin  // (An), -(An)
                                 dec_src_reg   = {1'b1, f_reg};
                                 dec_reads_src = 1'b1;
+                                setup_mem_incdec(2'b00, dec_an_upd_en, dec_an_upd_reg,
+                                                  dec_an_delta, dec_ea_offset);
                             end
                         end
                     end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b101) begin
                         // cpRESTORE: cpid=1, TYPE=101 (manual Figure 10-17). Same
-                        // privilege check and (An)-only real-protocol scope as
-                        // cpSAVE above.
+                        // privilege check as cpSAVE above; deferred-items closure
+                        // plan Stage 6 extends the real protocol to (An)+
+                        // (f_mode==011) -- confirmed against Section 10.2.3.4.1:
+                        // "All memory addressing modes except the predecrement
+                        // addressing mode are valid" for cpRESTORE, the exact
+                        // mirror image of cpSAVE's own restriction -- -(An) is
+                        // genuinely INVALID for cpRESTORE (not just deferred) and
+                        // correctly stays on the stub below. Same fixed-4-byte
+                        // setup_mem_incdec template as cpSAVE (the format word is
+                        // read from the EA first, THEN An postincrements by its
+                        // own fixed size, before the variable-length transfer
+                        // loop -- which is unaffected -- even begins).
                         if (!sr_live[13]) begin
                             dec_valid   = 1'b1;
                             dec_is_priv = 1'b1;
@@ -6069,9 +6092,11 @@ module eu_seq (
                             dec_unit         = UNIT_NONE;
                             dec_needs_ext    = (f_mode == 3'b101 || f_mode == 3'b110 ||
                                                 f_mode == 3'b111);
-                            if (f_mode == 3'b010) begin  // (An)
+                            if (f_mode == 3'b010 || f_mode == 3'b011) begin  // (An), (An)+
                                 dec_src_reg   = {1'b1, f_reg};
                                 dec_reads_src = 1'b1;
+                                setup_mem_incdec(2'b00, dec_an_upd_en, dec_an_upd_reg,
+                                                  dec_an_delta, dec_ea_offset);
                             end
                         end
                     end else if (f_dn == 3'b001) begin
@@ -6306,6 +6331,10 @@ module eu_seq (
     logic        ex_moves_load;    // 1=load (SFC), 0=store (DFC)
     // TAS
     logic        ex_is_tas;        // TAS in EX stage
+    // cpSAVE/cpRESTORE (deferred-items closure plan Stage 6, plan.md): gates
+    // WB's own generic an_upd path off, mirroring ex_is_mem_rmw's own
+    // existing "handled by a dedicated wr_en instead" exclusion below.
+    logic        ex_is_cpsr;       // cpSAVE or cpRESTORE in EX stage
     // CHK, CMP2/CHK2
     logic        ex_is_chk;        // CHK in EX stage
     logic        ex_chk_word;      // 1=CHK.W, 0=CHK.L
@@ -6550,6 +6579,18 @@ module eu_seq (
     logic        mem_rmw_read_ack;   // combinatorial: read phase just acked
     logic        mem_rmw_sr_wr_en;   // combinatorial: fire CCR on write ack
     logic        mem_rmw_an_wr_en;   // combinatorial: fire An update on write ack
+    logic        cpsr_an_wr_en;      // cpSAVE -(An)/cpRESTORE (An)+ (Stage 6):
+                                      // fire An's own fixed 4-byte auto-adjust
+                                      // once, at cpsr_start_r (mirrors real
+                                      // silicon's own EA-evaluation micro-step,
+                                      // which happens before the transfer even
+                                      // begins -- ex_an_upd_en/ex_an_delta are
+                                      // already valid+stable by then and stay
+                                      // so for the whole multi-cycle FSM, so
+                                      // firing here vs. later makes no value
+                                      // difference, just needs to fire exactly
+                                      // once since ex_mem_stall blocks the
+                                      // generic WB an_upd path throughout).
     logic        mem_rmw_ccr_en_r;   // registered: this RMW op updates CCR
     // Read ack: all referenced signals declared before this block.
     assign mem_rmw_read_ack = ex_valid && ex_is_mem_rmw && ex_is_mem_rd && mem_ack
@@ -6750,12 +6791,16 @@ module eu_seq (
     logic        cpsr_is_restore_r; // 0=cpSAVE (Save CIR), 1=cpRESTORE (Restore CIR)
     logic [15:0] cpsr_fmt_r;       // captured format word (format code in [15:8], length in [7:0])
     // open-items backlog Stage 14 (plan.md): real format-word-driven transfer
-    // protocol (Section 10.2.3), (An) EA mode only -- see the decode block's
-    // own comment (dec_is_cpsave/dec_is_cprestore) for the scope boundary.
+    // protocol (Section 10.2.3); deferred-items closure plan Stage 6
+    // (plan.md) widened this from (An)-only to also cover each instruction's
+    // own one remaining architecturally-valid mode (-(An) for cpSAVE,
+    // (An)+ for cpRESTORE) -- see the decode block's own comment
+    // (dec_is_cpsave/dec_is_cprestore) for the full scope boundary.
     // cpsr_real_r gates the whole extended FSM below; every other EA mode
     // keeps falling through to the original Phase 157 Stage 4 stub (one CIR
     // read, then complete) via the unchanged cpsr_run_r->done path.
-    logic        cpsr_real_r;       // captured (f_mode==3'b010) at dispatch
+    logic        cpsr_real_r;       // captured at dispatch: (An) always, plus
+                                     // -(An) for cpSAVE / (An)+ for cpRESTORE
     logic        cpsr_mem_fmt_r;    // cpSAVE: write format longword to EA;
                                      // cpRESTORE: read format longword from EA
     logic        cpsr_cir_wr_r;     // cpRESTORE only: write format word to Restore CIR
@@ -6768,6 +6813,20 @@ module eu_seq (
     logic [31:0] cpsr_xfer_addr_r;  // current transfer address (descending for save,
                                      // ascending for restore)
     logic [31:0] cpsr_xfer_val_r;   // value in flight between CIR and memory
+    // Deferred-items closure plan Stage 6 (plan.md): ex_ea is NOT a frozen
+    // snapshot -- it's recomputed live every cycle from rd_a_data (An's own
+    // CURRENT register value), unlike e.g. mem_rmw's own tas_addr-style
+    // registers. cpsr_an_wr_en (below) commits -(An)/(An)+'s own register
+    // update as early as cpsr_start_r, well before ex_ea's own last real
+    // use (the format-word bus access, and cpsr_xfer_addr_r's own
+    // computation) -- so ex_ea itself would silently go stale (reflecting
+    // the ALREADY-updated An) by the time those later phases read it.
+    // cpsr_ea_r captures the correct, pre-update ex_ea once, at the same
+    // cpsr_start_r transition the register commit itself fires on (see
+    // cpsr_an_wr_en's own comment) -- every later cpsr_* use of the
+    // instruction's own effective address reads this instead of ex_ea
+    // directly.
+    logic [31:0] cpsr_ea_r;
     // one-shot format-error trigger (same shape as chk_trap_raw/chk_trap_fired_r,
     // Phase 202 -- prevents ex_will_except's own OR-list from re-firing every
     // tick cpsr_abort_r's own multi-cycle CIR write is in flight). cpsr_abort_r
@@ -7917,6 +7976,7 @@ module eu_seq (
             ex_movem_postinc  <= 1'b0;
             ex_movem_long     <= 1'b0;
             ex_is_tas         <= 1'b0;
+            ex_is_cpsr        <= 1'b0;
             ex_is_chk         <= 1'b0;
             ex_chk_word       <= 1'b0;
             ex_is_cmp2chk2    <= 1'b0;
@@ -8039,6 +8099,7 @@ module eu_seq (
             ex_movem_postinc  <= 1'b0;
             ex_movem_long     <= 1'b0;
             ex_is_tas         <= 1'b0;
+            ex_is_cpsr        <= 1'b0;
             ex_is_chk         <= 1'b0;
             ex_chk_word       <= 1'b0;
             ex_is_cmp2chk2    <= 1'b0;
@@ -8192,6 +8253,7 @@ module eu_seq (
             ex_is_moves       <= dec_is_moves;
             ex_moves_load     <= dec_moves_load;
             ex_is_tas         <= dec_is_tas;
+            ex_is_cpsr        <= dec_is_cpsave || dec_is_cprestore;
             ex_is_chk         <= dec_is_chk;
             ex_chk_word       <= dec_chk_word;
             ex_is_cmp2chk2    <= dec_is_cmp2chk2;
@@ -8274,6 +8336,7 @@ module eu_seq (
     end
     // ex_an_upd_en declared above inside the EX latch always_ff block:
     assign mem_rmw_an_wr_en = mem_rmw_run_r && mem_ack && ex_valid && ex_an_upd_en;
+    assign cpsr_an_wr_en    = cpsr_start_r && ex_an_upd_en;
 
     // Scc to memory is UNIT_MOVE and does NOT affect CCR.
     // All other memory RMW ops (ALU/SHF/BIT) do affect CCR.
@@ -8968,18 +9031,27 @@ module eu_seq (
             cpsr_xfer_cnt_r   <= 8'h0;
             cpsr_xfer_addr_r  <= 32'h0;
             cpsr_xfer_val_r   <= 32'h0;
+            cpsr_ea_r         <= 32'h0;
         end else begin
             if (!cpsr_start_r && !cpsr_run_r && !cpsr_mem_fmt_r && !cpsr_cir_wr_r &&
                 !cpsr_cir_echo_r && !cpsr_abort_r && !cpsr_xfer_cir_r && !cpsr_xfer_mem_r &&
                 instr_ack && (dec_is_cpsave || dec_is_cprestore)) begin
                 cpsr_start_r      <= 1'b1;
                 cpsr_is_restore_r <= dec_is_cprestore;
-                cpsr_real_r       <= (f_mode == 3'b010);
+                cpsr_real_r       <= (f_mode == 3'b010) ||
+                                      (dec_is_cpsave    && f_mode == 3'b100) ||  // -(An)
+                                      (dec_is_cprestore && f_mode == 3'b011);    // (An)+
             end else if (cpsr_start_r) begin
                 cpsr_start_r <= 1'b0;
-                if (cpsr_is_restore_r && (f_mode == 3'b010)) begin
-                    // cpRESTORE, (An): first step is a real memory read of the
-                    // format word, not a CIR access.
+                cpsr_ea_r    <= ex_ea;  // capture before cpsr_an_wr_en's own
+                                         // register commit can make ex_ea stale
+                if (cpsr_is_restore_r && cpsr_real_r) begin
+                    // cpRESTORE, real-protocol EA (Stage 6: (An) or (An)+):
+                    // first step is a real memory read of the format word,
+                    // not a CIR access. Was f_mode==3'b010 only -- widened
+                    // to cpsr_real_r (already correctly gates exactly the
+                    // set of real-protocol modes, captured the same cycle
+                    // one branch up) once (An)+ became real too.
                     cpsr_mem_fmt_r <= 1'b1;
                 end else begin
                     // cpSAVE (any mode, since it always starts with the Save
@@ -9021,7 +9093,7 @@ module eu_seq (
                         // loop, descending from EA+length.
                         cpsr_len_r       <= cpsr_fmt_r[7:0];
                         cpsr_xfer_cnt_r  <= 8'h0;
-                        cpsr_xfer_addr_r <= ex_ea + {24'h0, cpsr_fmt_r[7:0]};
+                        cpsr_xfer_addr_r <= cpsr_ea_r + {24'h0, cpsr_fmt_r[7:0]};
                         cpsr_xfer_cir_r  <= 1'b1;
                     end
                     // else: EMPTY (or VALID-with-zero-length, an edge case the
@@ -9054,7 +9126,7 @@ module eu_seq (
                     // memory read -- start the transfer loop, ascending
                     // from EA+4.
                     cpsr_xfer_cnt_r  <= 8'h0;
-                    cpsr_xfer_addr_r <= ex_ea + 32'd4;
+                    cpsr_xfer_addr_r <= cpsr_ea_r + 32'd4;
                     cpsr_xfer_mem_r  <= 1'b1;
                 end else begin
                     // INVALID/reserved, or a bad (non-multiple-of-4 or zero)
@@ -10224,7 +10296,10 @@ module eu_seq (
                               :                         ex_result;
             wb_ccr           <= {ex_x, ex_n, ex_z, ex_v, ex_c};
             // RMW ops: mem_rmw_an_wr_en handles An update at write ack; WB must not double-apply
-            wb_an_upd_en     <= ex_an_upd_en && !ex_is_mem_rmw;
+            // cpSAVE/cpRESTORE (Stage 6, plan.md): handled by cpsr_an_wr_en
+            // instead, same "dedicated wr_en, WB must not double-apply"
+            // shape as ex_is_mem_rmw immediately above.
+            wb_an_upd_en     <= ex_an_upd_en && !ex_is_mem_rmw && !ex_is_cpsr;
             wb_an_upd_reg    <= ex_an_upd_reg;
             wb_an_upd_new    <= ex_an_new;
             wb_is_mem_rd     <= ex_is_mem_rd;
@@ -10349,7 +10424,7 @@ module eu_seq (
                        pack_ay_wr_en || pack_ax_wr_en ||
                        cmpm_ay_wr_en || cmpm_ax_wr_en ||
                        bcds_ay_wr_en || bcds_ax_wr_en ||
-                       mem_rmw_an_wr_en || move_mm_dst_an_wr_en ||
+                       mem_rmw_an_wr_en || move_mm_dst_an_wr_en || cpsr_an_wr_en ||
                        (wb_valid && wb_an_upd_en);
     // an_wr_sel and an_wr_data share the same 15-arm priority — kept together
     // in one always_comb so they can never get out of sync.
@@ -10371,6 +10446,7 @@ module eu_seq (
         else if (bcds_ax_wr_en)        begin an_wr_sel = bcds_ax_reg_r;        an_wr_data = bcds_ax_addr_r;                              end
         else if (mem_rmw_an_wr_en)     begin an_wr_sel = ex_an_upd_reg;        an_wr_data = rd_a_data + ex_an_delta;                     end
         else if (move_mm_dst_an_wr_en) begin an_wr_sel = move_mm_dst_an_reg_r; an_wr_data = move_mm_dst_an_new_r;                        end
+        else if (cpsr_an_wr_en)        begin an_wr_sel = ex_an_upd_reg;        an_wr_data = rd_a_data + ex_an_delta;                     end
     end
 
     // -----------------------------------------------------------------------
@@ -10697,7 +10773,7 @@ module eu_seq (
                        cas2_rd2_r     ? rd_a_data :       // Rn2 from rd_a override
                        cas2_wr1_r     ? cas2_ea1_r :      // write Du1→M[Rn1]
                        cas2_wr2_r     ? cas2_ea2_r :      // write Du2→M[Rn2]
-                       cpsr_mem_fmt_r ? ex_ea :           // format word always at EA itself
+                       cpsr_mem_fmt_r ? cpsr_ea_r :           // format word always at EA itself
                        cpsr_xfer_mem_r ? cpsr_xfer_addr_r :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
                        (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :

@@ -41,6 +41,16 @@ module eu_seq_tb;
     logic [3:0]  wr_sel;
     logic [1:0]  wr_siz;
     logic [31:0] wr_data;
+    // Deferred-items closure plan Stage 6 (plan.md): these 3 real
+    // eu_seq<->eu_regfile ports were never connected in this file (the
+    // eu_regfile u_rf(...) instantiation below omitted them entirely,
+    // leaving u_rf's own an_wr_en/an_wr_sel/an_wr_data inputs floating) --
+    // same class of gap Phase 98 already found/fixed once for the sibling
+    // tb/eu_regfile_tb.sv, just never noticed here since no earlier test in
+    // this file checked a -(An)/(An)+ instruction's own committed An value.
+    logic        an_wr_en;
+    logic [2:0]  an_wr_sel;
+    logic [31:0] an_wr_data;
     logic        sr_wr_en;
     logic [15:0] sr_wr_data;
     logic        sr_ccr_only;
@@ -126,6 +136,9 @@ module eu_seq_tb;
         .wr_sel         (wr_sel),
         .wr_siz         (wr_siz),
         .wr_data        (wr_data),
+        .an_wr_en       (an_wr_en),
+        .an_wr_sel      (an_wr_sel),
+        .an_wr_data     (an_wr_data),
         .sr_wr_en       (sr_wr_en),
         .sr_wr_data     (sr_wr_data),
         .sr_ccr_only    (sr_ccr_only),
@@ -218,6 +231,9 @@ module eu_seq_tb;
         .wr_sel     (wr_sel),
         .wr_siz     (wr_siz),
         .wr_data    (wr_data),
+        .an_wr_en   (an_wr_en),
+        .an_wr_sel  (an_wr_sel),
+        .an_wr_data (an_wr_data),
         .pc_wr_en   (1'b0),
         .pc_wr_data (32'h0),
         .pc_out     (),
@@ -887,14 +903,18 @@ module eu_seq_tb;
             while (seq_busy) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
 
-            // cpRESTORE (A0)+: TYPE=101, EA=(An)+ mode=011,reg=000 -> 0xF358.
-            // Address = Restore CIR (5'h06) = 0x00022006. Same (An)+
-            // deliberate-EA-mode reasoning as the cpSAVE test above -- (An)
-            // is now the real protocol (starts with a MEMORY read of the
-            // format word, never touching eu_coproc_req at all until later
-            // phases), so this decode/dispatch-only test would never see
-            // cp_req_tb assert at all if left at (An).
-            instr_word  = 16'hF358;
+            // cpRESTORE -(A0): TYPE=101, EA=-(An) mode=100,reg=000 -> 0xF360.
+            // Address = Restore CIR (5'h06) = 0x00022006. Deferred-items
+            // closure plan Stage 6 (plan.md) made cpRESTORE's own (An)+
+            // form real (it's the one architecturally-valid EA beyond
+            // (An), confirmed against MC68030UM.pdf 10.2.3.4.1 -- "all
+            // modes except predecrement" -- so (An)+ can no longer be used
+            // here to exercise the stub path; -(An) is the mirror-image
+            // genuinely-INVALID mode for cpRESTORE and stays stubbed,
+            // same deliberate-EA-mode reasoning as the cpSAVE test above
+            // (a real-protocol EA starts with a MEMORY read of the format
+            // word, never touching eu_coproc_req at all until later).
+            instr_word  = 16'hF360;
             instr_valid = 1'b1;
             ext_valid   = 1'b0;
             @(posedge clk_4x); #1;
@@ -1032,6 +1052,112 @@ module eu_seq_tb;
             repeat(4) @(posedge clk_4x);
             check("cpRESTORE-real: FSM returned to idle (no further requests)",
                   !mem_req_tb && !cp_req_tb && !seq_busy);
+        end
+
+        // ================================================================
+        // cpSAVE -(An) / cpRESTORE (An)+ REAL protocol (deferred-items
+        // closure plan Stage 6, plan.md) -- the one remaining
+        // architecturally-valid EA mode for each instruction (confirmed
+        // against MC68030UM.pdf 10.2.3.3.1/10.2.3.4.1, see the decode
+        // block's own comment). Both reuse the same fixed 4-byte
+        // setup_mem_incdec(2'b00,...) step as any other longword
+        // predecrement/postincrement instruction -- the manual's own
+        // protocol evaluates the EA and stores/reads the FORMAT WORD
+        // there before the variable transfer length is even known, so
+        // An only ever moves by the format word's own fixed size, not
+        // the total (variable) frame length. Checks the EA used for the
+        // format-word access AND An's own final committed value, not
+        // just that the transfer completes.
+        // ================================================================
+        $display("--- cpSAVE -(An) / cpRESTORE (An)+ real protocol ---");
+        begin
+            // cpSAVE -(A0), A0=0x2000 -> EA=0x1FFC (predecrement by 4).
+            // Same VALID/len=8 2-longword transfer shape as the (An) test.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_2000;
+
+            instr_word  = 16'hF320;  // cpSAVE -(A0), mode=100,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_cp_req();
+            check("cpSAVE-predec: Save CIR read", cp_req_tb && cp_rw_tb);
+            pulse_cp_ack(32'h1008_0000);  // format=$10 (VALID), length=8
+
+            wait_mem_req();
+            check("cpSAVE-predec: format word written at EA=An-4",
+                  mem_addr_tb === 32'h0000_1FFC);
+            pulse_mem_ack(32'h0);
+
+            wait_cp_req();
+            pulse_cp_ack(32'hAAAA_5555);
+
+            wait_mem_req();
+            check("cpSAVE-predec: transfer write #1 address (EA+len)",
+                  mem_addr_tb === 32'h0000_2004);
+            pulse_mem_ack(32'h0);
+
+            wait_cp_req();
+            pulse_cp_ack(32'hBBBB_6666);
+
+            wait_mem_req();
+            check("cpSAVE-predec: transfer write #2 address (EA+len-4)",
+                  mem_addr_tb === 32'h0000_2000);
+            pulse_mem_ack(32'h0);
+
+            repeat(4) @(posedge clk_4x);
+            check("cpSAVE-predec: FSM returned to idle (no further requests)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
+            check32("cpSAVE-predec: A0 committed to An-4", u_rf.a_reg[0], 32'h0000_1FFC);
+        end
+
+        begin
+            // cpRESTORE (A0)+, A0=0x3000 -> EA=0x3000 (used as-is), then
+            // postincrements to 0x3004. Same VALID/len=8 shape.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_3000;
+
+            instr_word  = 16'hF358;  // cpRESTORE (A0)+, mode=011,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_mem_req();
+            check("cpRESTORE-postinc: format word read from EA=An",
+                  mem_req_tb && mem_rw_tb && mem_addr_tb === 32'h0000_3000);
+            pulse_mem_ack(32'h1008_0000);  // format=$10 (VALID), length=8
+
+            wait_cp_req();
+            pulse_cp_ack(32'h0);  // Restore CIR write ack
+
+            wait_cp_req();
+            pulse_cp_ack(32'h1008_0000);  // echo
+
+            wait_mem_req();
+            check("cpRESTORE-postinc: transfer read #1 address (EA+4)",
+                  mem_addr_tb === 32'h0000_3004);
+            pulse_mem_ack(32'hCCCC_7777);
+
+            wait_cp_req();
+            pulse_cp_ack(32'h0);
+
+            wait_mem_req();
+            check("cpRESTORE-postinc: transfer read #2 address (EA+8)",
+                  mem_addr_tb === 32'h0000_3008);
+            pulse_mem_ack(32'hDDDD_8888);
+
+            wait_cp_req();
+            pulse_cp_ack(32'h0);
+
+            repeat(4) @(posedge clk_4x);
+            check("cpRESTORE-postinc: FSM returned to idle (no further requests)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
+            check32("cpRESTORE-postinc: A0 committed to An+4", u_rf.a_reg[0], 32'h0000_3004);
         end
 
         // ================================================================
