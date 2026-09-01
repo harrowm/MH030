@@ -232,6 +232,13 @@ module stall_fsm_tb;
     localparam ADDX_L_A1_A0   = 16'hD189;
     // ABCD -(A1),-(A0): group=1100, Ax=A0, ss=00(fixed), Ay=A1.
     localparam ABCD_A1_A0     = 16'hC109;
+    // SBCD -(A1),-(A0): identical layout to ABCD, group=1000 instead of
+    // 1100 (open-items backlog breadth plan, Stage 1). Cross-checked
+    // against tb/eu_seq_tb.sv's own proven "SBCD D2,D3" = 16'h8702
+    // (register form: bit3=Rm=0) -- the memory/predecrement form only
+    // flips Rm (bit3) to 1, same relationship ABCD_A1_A0 already has to
+    // ABCD's own register-direct form.
+    localparam SBCD_A1_A0     = 16'h8109;
     // PACK -(A1),-(A0),#0: group=1000, Ax=A0, ss=01(PACK), Ay=A1; #adj ext=0.
     localparam PACK_A1_A0     = 16'h8149;
     // BFINS D1,(A0){8:8}: group 1110, f_dn=111(bitfield marker+BFINS op),
@@ -2733,7 +2740,13 @@ module stall_fsm_tb;
         rom[16'h3FC0/4] = {BKPT_3, CLR_L_D5};
         rom[16'h3FC4/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h3FC8/4] = {16'd1234, NOP_OP};
-        rom[16'h3FCC/4] = {BRA_SELF, NOP_OP};
+        // Pipeline-stall breadth extension plan (elegant-gliding-fog.md):
+        // redirect on to Stage 1's own new tests instead of parking
+        // permanently here -- same "explicit JMP, isolated address"
+        // convention this file has used throughout (Stage 4/5/6 of the
+        // closed open-items backlog, etc).
+        rom[16'h3FCC/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h3FD0/4] = {16'h2604, NOP_OP};
 
         begin
             int t;
@@ -2920,6 +2933,64 @@ module stall_fsm_tb;
             check32("BKPT-live-substitution: the replacement opcode (MOVEQ #42,D0) genuinely executed",
                     u_top.u_eu.u_rf.d_reg[0], 32'd42);
         end
+
+        // ===================================================================
+        // Pipeline-stall breadth extension plan (elegant-gliding-fog.md),
+        // Stage 1: INT-mid-MOVE16/ABCD/SBCD -- 3 more sources for Category F
+        // (interrupt-mid-FSM), reusing B-8's MOVE16 encoding and B-10's
+        // ABCD/-(Ay),-(Ax) shape (SBCD is the identical layout, group 1000
+        // instead of 1100). Reached via the JMP redirect at the tail of the
+        // BKPT-live-substitution test above. No explicit BCD operand data is
+        // set for ABCD/SBCD (default-filled memory is fine, same convention
+        // B-10/B-11 already use) -- this stage is checking decode-holdoff/
+        // interrupt-recognition timing, not BCD arithmetic correctness
+        // (already 100% Harte-proven).
+        // ===================================================================
+
+        // INT-mid-MOVE16: interrupt arrival mid-MOVE16 (16-byte SIZ=11
+        // burst block move -- a genuinely different FSM beat shape from
+        // every other INT-mid-* source so far).
+        rom[16'h2604/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2608/4] = {16'h2630, MOVEA_L_IMM_A1};
+        rom[16'h260C/4] = {16'h0000, 16'h2650};
+        rom[16'h2610/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
+        rom[16'h2614/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2618/4] = {16'h0000, 16'd9001};
+        rom[16'h2630/4] = 32'h1111_2222;
+        rom[16'h2634/4] = 32'h3333_4444;
+        rom[16'h2638/4] = 32'h5555_6666;
+        rom[16'h263C/4] = 32'h7777_8888;
+        // MOVE16's own real bus-cycle count (data_ds_count delta) isn't
+        // yet established anywhere else in this file -- measured
+        // empirically the first time this ran (per this file's own
+        // established "verify, don't guess" discipline, e.g. PACK's own
+        // 2-vs-3 correction in the open-items backlog Stage 5).
+        run_int_mid_test("INT-mid-MOVE16", 32'h0000_2604, 8, 5, 32'd9001, 32'h0000_008A);
+        check32("INT-mid-MOVE16: beat0 copied despite the interrupt", rom[16'h2650/4], 32'h1111_2222);
+        check32("INT-mid-MOVE16: beat3 copied despite the interrupt", rom[16'h265C/4], 32'h7777_8888);
+
+        // INT-mid-ABCD: interrupt arrival mid-ABCD -(A1),-(A0) (the
+        // predecrement-memory shape shared with ADDX/SBCD/PACK's own
+        // mem_abort handling, not yet exercised for interrupt-mid).
+        rom[16'h26C4/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h26C8/4] = {16'h0000, 16'h26F1};
+        rom[16'h26CC/4] = {MOVEA_L_IMM_A1, 16'h0000};
+        rom[16'h26D0/4] = {16'h26F5, ABCD_A1_A0};
+        rom[16'h26D4/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h26D8/4] = {16'd9002, NOP_OP};
+        run_int_mid_test("INT-mid-ABCD", 32'h0000_26C4, 3, 5, 32'd9002, 32'h0000_008A);
+
+        // INT-mid-SBCD: same shape, opposite BCD direction.
+        rom[16'h2784/4] = {CLR_L_D5, MOVEA_L_IMM_A0};
+        rom[16'h2788/4] = {16'h0000, 16'h27B1};
+        rom[16'h278C/4] = {MOVEA_L_IMM_A1, 16'h0000};
+        rom[16'h2790/4] = {16'h27B5, SBCD_A1_A0};
+        rom[16'h2794/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2798/4] = {16'd9003, NOP_OP};
+        // Temporary park -- Stage 2 will redirect this on to its own new
+        // tests instead of parking permanently here.
+        rom[16'h279C/4] = {BRA_SELF, NOP_OP};
+        run_int_mid_test("INT-mid-SBCD", 32'h0000_2784, 3, 5, 32'd9003, 32'h0000_008A);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

@@ -4689,3 +4689,57 @@ zero coverage of cpSAVE/cpRESTORE, a 68020+-only coprocessor-interface
 feature). **Closes Stage 14, and with it, the entire 14-stage open-items
 backlog plan (Phases 186-200 / Stages 1-14).** See
 `~/.claude/plans/compressed-hopping-cocoa.md` for the original plan.
+
+## Phase 201 (pipeline-stall breadth extension plan, Stage 1): INT-mid-MOVE16/ABCD/SBCD
+
+First stage of a new, user-approved 8-stage plan (`~/.claude/plans/elegant-gliding-fog.md`)
+extending Category F (interrupt-mid-FSM), Category H (DSACK wait-states-on-FSM-beats),
+and back-to-back FSM composition breadth per `docs/stalls.md`'s own "What's left, if
+anything" section -- the only genuinely open item left in the project after the
+open-items backlog (Phases 186-200) and MMU-hardening plan closed. All three mechanisms
+are already proven correct in principle; this plan is regression-proofing breadth, not
+new feature work.
+
+This stage: `INT-mid-MOVE16` (reuses B-8's MOVE16 encoding -- a genuinely new burst FSM
+beat shape for Category F), `INT-mid-ABCD`/`INT-mid-SBCD` (reuse B-10's ABCD
+predecrement-memory shape; SBCD needed a new opcode constant, `SBCD_A1_A0 = 16'h8109`,
+derived by cross-checking against `tb/eu_seq_tb.sv`'s own proven register-form "SBCD
+D2,D3 = 16'h8702" and confirming the memory/predecrement form only flips bit3 (Rm),
+the identical relationship `ABCD_A1_A0` already has to ABCD's own register-direct
+form). No explicit BCD operand data needed for ABCD/SBCD (default-filled memory is
+fine, matching B-10/B-11's own established convention -- this stage tests
+decode-holdoff/interrupt-recognition timing, not BCD arithmetic, already 100%
+Harte-proven).
+
+Address planning done via a small scratch Python script scanning every existing
+`rom[16'hXXXX/4]` write in `tb/stall_fsm_tb.sv` to find genuinely free memory regions
+before placing anything -- confirmed the file's used-address footprint is sparse (506
+words used out of 4096), not tightly packed as the tail's own proximity to the 16KB
+bound might suggest; picked the largest free gap (0x2604-0x28FC, 764 bytes) for this
+stage's own 3 tests. Reached via a JMP redirect replacing the previous permanent
+`BRA_SELF` park at the tail of the BKPT-live-substitution test (0x3FCC) -- the file's
+own established "explicit JMP, isolated address" convention throughout Stages 4-6 of
+the closed open-items backlog. A new temporary `BRA_SELF` park sits at the end of this
+stage's own content (0x279C), to be replaced by Stage 2's own redirect.
+
+MOVE16's own expected interrupt-recognition bus-cycle count (`data_ds_count` delta) was
+not established anywhere else in the file -- rather than guess and risk a wrong
+assertion, implemented with a reasoned first estimate (8: a 4-beat burst read + 4-beat
+burst write, each beat producing its own DS-falling-edge event) and confirmed
+empirically on the first real run rather than assumed, per this file's own "verify,
+don't guess" discipline (e.g. PACK's own 2-vs-3 correction, open-items backlog Stage
+5). ABCD/SBCD's own count (3, the same read-src/read-dst/write-dst shape ADDX already
+established) was also confirmed correct on the first run. All 3 new tests passed with
+zero corrections needed. Added 2 bonus data-correctness checks for MOVE16 (beat0/beat3
+copied despite the interrupt), matching this project's own preference for checking real
+data flow, not just "did it unstick."
+
+Results: `tb/stall_fsm_tb.sv` 0 failures, `make test` 36/36. Testbench-only change (no
+RTL files touched, confirmed via `git diff --stat rtl/`) -- no Harte re-run needed per
+the plan's own gate. `docs/stalls.md` updated: Category F 9->12 sources (also corrected
+2 other stale tallies found while editing -- Category H's own summary-table row still
+said "4 sources" despite Phase 188 already having brought it to 6, and the back-to-back
+summary-table row still said "3 pairs" despite Phase 191 already having brought it to
+4; both fixed alongside this stage's own real addition). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. Stage 2
+(INT-mid-CMP2/CHK2) is next.

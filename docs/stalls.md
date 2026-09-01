@@ -192,16 +192,17 @@ and `plan.md §Phase 105` for the original discovery.
 `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` sequence in `m68030_exc.sv`, clearing naturally once
 the IFU flush on `pc_wr_en` changes `dec_valid` out from under it.
 
-**Coverage depth**: fixed and tested against 7 FSM sources so far — CAS2 (Phase 105,
-the original discovery), MOVEM and genuine memory-indirect EA (Phase 125), and TAS,
-MOVEP, single CAS, and ADDX predecrement (Phase 126), via the shared `run_int_mid_test`
-task, chosen to span the RMW-lock, byte-interleaved, and dual-address-predecrement FSM
-shapes. The mechanism is decode-content-agnostic (it gates purely on
+**Coverage depth**: fixed and tested against 12 FSM sources so far — CAS2 (Phase 105,
+the original discovery), MOVEM and genuine memory-indirect EA (Phase 125), TAS, MOVEP,
+single CAS, and ADDX predecrement (Phase 126), PACK and BFINS (open-items backlog Stage
+5, Phase 189), and MOVE16, ABCD, and SBCD (pipeline-stall breadth extension plan,
+elegant-gliding-fog.md Stage 1), via the shared `run_int_mid_test` task, chosen to span
+the RMW-lock, byte-interleaved, dual-address-predecrement, and burst FSM shapes. The
+mechanism is decode-content-agnostic (it gates purely on
 `int_pending`/`dec_valid`/`stall_base`, none of which vary by which FSM is running), so
-there's no structural reason to expect a per-source bug, but the remaining ~12-16
-`ex_mem_stall` sources (MOVE16, ABCD/SBCD/PACK, BFINS, CMP2/CHK2, MOVE mem-mem, RTR/RTE,
-PFLUSH/PTEST/PMOVE64) haven't been individually spot-checked the way BERR-abort
-(Category I) was.
+there's no structural reason to expect a per-source bug, but the remaining ~10
+`ex_mem_stall` sources (CMP2/CHK2, MOVE mem-mem, RTR/RTE, PFLUSH/PTEST/PMOVE64) haven't
+been individually spot-checked the way BERR-abort (Category I) was.
 
 ## Category G — bus arbitration contention
 
@@ -424,13 +425,13 @@ Harte sweep) — see `docs/cache.md`.
 | C. Missing ext word | *(folded into A's harness where reachable; see file header for scope note)* | |
 | D. Multi-cycle FSM | `tb/stall_fsm_tb.sv` | All 23 of ~23 sources (closed Phase 124), decode-holdoff + a real dependent instruction after; exact bus-cycle counts for TAS/MOVEM/CMPM/CAS2/MOVEP/ADDX.L/memory-indirect EA; the memory-indirect EA check (B-22) also verifies the loaded register's actual value, not just "did it unstick" |
 | E. Control-transfer | `tb/stall_hazard_tb.sv` | BRA/JMP(register-indirect+abs)/DBF-taken/JSR+RTS round trip through real memory |
-| F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 7 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX, Phases 105/125/126); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
+| F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 12 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS/MOVE16/ABCD/SBCD, Phases 105/125/126/189, elegant-gliding-fog.md Stage 1); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
 | G. Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU 3-way priority; IFU starvation+recovery under a real multi-beat burst; DMA held off by `bus_lock` |
-| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 4 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA at wait_states=10, Phases 125/126; see Category H's own absorption-effect note for why the values differ) |
+| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 6 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS at wait_states=10, Phases 125/126/188; see Category H's own absorption-effect note for why the values differ) |
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
 | J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
 | K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
-| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 3 pairs (Phases 107/126): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, each a genuinely different FSM-shape handoff, no instruction between them |
+| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 4 pairs (Phases 107/126/191): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, each a genuinely different FSM-shape handoff, no instruction between them |
 
 Run everything with `make test` (35/35, includes all of the above except Categories J/K,
 which are verified via the Harte sweep instead — see those categories' own entries). See
@@ -470,12 +471,13 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191) out of the many
   possible combinations. Nothing suggests a further pairing would behave differently,
   but only these four have been checked.
-- **Interrupt-mid-FSM** (Category F) has 9 of ~19-23 possible FSM sources checked
+- **Interrupt-mid-FSM** (Category F) has 12 of ~19-23 possible FSM sources checked
   individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS -- Phase 189's
-  own open-items backlog Stage 5 added the last two). Same reasoning as above — the
-  mechanism is decode-agnostic by construction, but only spot-checked, not exhaustively
-  swept the way Category I was. Remaining: MOVE16, ABCD/SBCD, CMP2/CHK2, MOVE mem-mem,
-  RTR/RTE, PFLUSH/PTEST/PMOVE64.
+  own open-items backlog Stage 5 added the last two -- plus MOVE16/ABCD/SBCD, added by the
+  pipeline-stall breadth extension plan's own Stage 1, elegant-gliding-fog.md). Same
+  reasoning as above — the mechanism is decode-agnostic by construction, but only
+  spot-checked, not exhaustively swept the way Category I was. Remaining: CMP2/CHK2,
+  MOVE mem-mem, RTR/RTE, PFLUSH/PTEST/PMOVE64.
 - **DSACK wait-states-on-FSM-beats** (Category H) has 6 sources checked (TAS, MOVEM,
   CAS2, memory-indirect EA, MOVEP, single-address CAS -- Phase 188's own open-items
   backlog Stage 4 added the last two). Given Phase 125's own absorption-effect finding,
