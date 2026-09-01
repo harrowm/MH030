@@ -172,6 +172,34 @@ module mmu_tb;
     localparam logic [31:0] DESC_IND_L_TGT_2 = 32'h8100_0000; // 2nd longword: page addr
     localparam logic [31:0] PA_IND_L         = 32'h8100_0456;
 
+    // Deferred-items closure plan Stage 2 (plan.md): long-format EARLY
+    // TERMINATION page descriptor LIMIT (MC68030UM Figure 9-13, 9.5.1.6).
+    // Reuses TC_MMU_ON's own TIA=8/TIB=8/TIC=0 config (level A's own fa_lo
+    // is 24), but level A's descriptor here is a genuine PAGE (DT=1)
+    // instead of a table -- since TIB!=0 (a level-B table WAS configured),
+    // finding a page here is early termination, so this descriptor's own
+    // L/U+LIMIT (same bit30:16/bit31 position as an ordinary long-format
+    // table descriptor, Figure 9-11) bounds the "next_idx" field (VA's own
+    // bits[23:16], the same bits that would have indexed level B) rather
+    // than the descriptor being unconditionally valid. LIMIT=0x10 (L/U=0,
+    // upper-limit direction): 21a's own next_idx=0x05 is within bounds
+    // (0x05 <= 0x10, no fault); 21b's own next_idx=0x50 exceeds it (fault).
+    // Fresh base (0x60000) to avoid any collision with the file's own
+    // existing tests.
+    localparam logic [63:0] CRP_ET_LIMIT = 64'h7FFF_0003_0006_0000; // base=0x60000,DT=3(long)
+    localparam logic [31:0] VA_ET_OK     = 32'h2005_0678; // idxA=0x20,next_idx=0x05,off=0x678
+    localparam logic [31:0] ADDR_A_ET_OK   = 32'h0006_0080; // 0x60000 + 0x20*4
+    localparam logic [31:0] ADDR_A_ET_OK_2 = ADDR_A_ET_OK + 32'd4;
+    localparam logic [31:0] DESC_A_ET_OK_1 = 32'h0010_0001; // L/U=0,LIMIT=0x10,DT=01(page)
+    localparam logic [31:0] DESC_A_ET_OK_2 = 32'hAAAA_0000; // page address
+    localparam logic [31:0] PA_ET_OK       = 32'hAAAA_0678;
+
+    localparam logic [31:0] VA_ET_FAULT     = 32'h2150_09AB; // idxA=0x21,next_idx=0x50,off=0x9AB
+    localparam logic [31:0] ADDR_A_ET_FAULT   = 32'h0006_0084; // 0x60000 + 0x21*4
+    localparam logic [31:0] ADDR_A_ET_FAULT_2 = ADDR_A_ET_FAULT + 32'd4;
+    localparam logic [31:0] DESC_A_ET_FAULT_1 = 32'h0010_0001; // same L/U+LIMIT
+    localparam logic [31:0] DESC_A_ET_FAULT_2 = 32'hBBBB_0000; // page address (never reached)
+
     // -----------------------------------------------------------------------
     // Clock + reset
     // -----------------------------------------------------------------------
@@ -377,6 +405,10 @@ module mmu_tb;
             ADDR_A_IND_L_2:   stub_rdata = DESC_A_IND_L_2;
             ADDR_IND_L_TGT:   stub_rdata = DESC_IND_L_TGT_1;
             ADDR_IND_L_TGT_2: stub_rdata = DESC_IND_L_TGT_2;
+            ADDR_A_ET_OK:      stub_rdata = DESC_A_ET_OK_1;
+            ADDR_A_ET_OK_2:    stub_rdata = DESC_A_ET_OK_2;
+            ADDR_A_ET_FAULT:   stub_rdata = DESC_A_ET_FAULT_1;
+            ADDR_A_ET_FAULT_2: stub_rdata = DESC_A_ET_FAULT_2;
             default: stub_rdata = 32'h0;    // invalid DT=00 → fault
         endcase
     end
@@ -957,6 +989,29 @@ module mmu_tb;
             check32("MMU-20b: PA via long indirect descriptor", pa, PA_IND_L);
             check32("MMU-20b: exactly 4 walk bus cycles (2 for level-A + 2 for indirect target)",
                     cnt_after - cnt_before, 32'd4);
+        end
+
+        // ----------------------------------------------------------------
+        // MMU-21 (deferred-items closure plan, Stage 2): long-format
+        // early-termination page descriptor LIMIT (Figure 9-13, 9.5.1.6).
+        // Reuses TC_MMU_ON explicitly (TIB=8, a level B IS configured) --
+        // MMU-20's own tc=TC_INDIRECT (TIB=0) is still live otherwise.
+        // ----------------------------------------------------------------
+        $display("--- MMU-21: long-format early-termination page LIMIT ---");
+        begin
+            logic [31:0] pa; logic fault, ci;
+            tc  = TC_MMU_ON;
+
+            // MMU-21a: next_idx=0x05, within LIMIT=0x10 -- must succeed.
+            crp = CRP_ET_LIMIT;
+            translate(VA_ET_OK, 3'b001, 1'b1, pa, fault, ci);
+            check  ("MMU-21a: no fault (next_idx within LIMIT)", !fault);
+            check32("MMU-21a: PA from early-termination page", pa, PA_ET_OK);
+
+            // MMU-21b: next_idx=0x50, exceeds LIMIT=0x10 -- must fault.
+            crp = CRP_ET_LIMIT;
+            translate(VA_ET_FAULT, 3'b001, 1'b1, pa, fault, ci);
+            check("MMU-21b: LIMIT violation faults (next_idx exceeds LIMIT)", fault);
         end
 
         $display("=== %0d failure(s) ===", fail_count);

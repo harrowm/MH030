@@ -5125,3 +5125,62 @@ a single stage (genuine memory-indirect EA extended beyond `MOVE <ea>,dst`,
 and MOVEM's own genuine memory-indirect) — flagged for a dedicated future plan
 if pursued. See the plan file for the full stage list and rationale. Stage 2
 (MMU LIMIT residuals) is next.
+
+## Phase 210 (deferred-items closure plan, Stage 2): MMU LIMIT residuals -- long-format early-termination page descriptor
+
+Investigated Phase 226's own two flagged minor gaps by re-reading MC68030UM.pdf
+Section 9.5.1.6 and Figure 9-13 directly (via `pdftoppm` + visual read, not
+the OCR'd text extraction, which mangled the figure's own bit-position
+numbering beyond parsing). Found one real, previously-undocumented-in-detail
+gap, confirmed fixable with reasonable confidence, and closed it; the second
+originally-flagged item ("no LIMIT refinement for early-termination pages")
+turned out to BE the fix, not a separate item -- Phase 226's own comment had
+already correctly cited Figure 9-13's own text ("still used as a check on the
+next index field") as the concrete next step, this stage just implemented it.
+
+**Root cause / fix**: `biu_mmu_if.sv`'s `MS_WALK_LONG2` state only ever
+checked `limit_violation()` in its table-descriptor branch (bounding the NEXT
+level's index) -- never in its page-descriptor branch. Per Figure 9-13, a
+long-format page found BEFORE the deepest configured tree level (a genuine
+"early termination" descriptor) carries its own L/U+LIMIT field at the SAME
+bit position as an ordinary long-format table descriptor (bit31=L/U,
+bits[30:16]=LIMIT, confirmed via direct visual comparison against Figure
+9-11), bounding how many consecutive pages this ONE descriptor validly
+covers -- via the same "next_idx" field (the index that would have been used
+for the next level) already computed for the table-descriptor case. A page
+found AT the deepest configured level (Figure 9-14, including every page
+reached via a genuine indirect-descriptor dereference, Phase 227) has no
+LIMIT field at all in that position (UNUSED) and must never be checked.
+
+Hoisted the existing `no_next_level`/`next_idx` computation to the top of
+`MS_WALK_LONG2`'s `mmu_ack_rise` handling (previously local to the
+table-descriptor branch only) so both branches share one formula, then added
+the identical `limit_violation()` gate to the page-descriptor branch, keyed
+on `!no_next_level` (early termination) exactly like the pre-existing
+table-descriptor check. **Verified the indirect-dereference case is correctly
+excluded without any new state**: traced through `MS_WALK_A/B/C`'s own three
+indirect-descriptor trigger conditions (`tib==0`/`tic==0`/level-C's own
+default) and confirmed an indirect descriptor can only ever be *created*
+exactly when `no_next_level` was already true at that same level -- since
+`walk_level_r`/`tib`/`tic` are unchanged when `MS_WALK_INDIRECT` re-enters
+`MS_WALK_LONG2` for a long-format indirect target, re-evaluating
+`no_next_level` there always correctly yields true again, skipping the check
+-- no new register needed, despite an initial concern that one might be.
+
+New MMU-21 in `tb/mmu_tb.sv` (reusing TC_MMU_ON's own TIA=8/TIB=8/TIC=0
+config, a fresh CRP base to avoid collision): MMU-21a (next_idx within
+LIMIT=0x10, must succeed, checks the exact resulting PA) and MMU-21b
+(next_idx exceeds LIMIT, must fault) -- both passed on the first real
+attempt. One SV brace-nesting mistake caught immediately by `iverilog`
+during the hoist (the new wrapper `begin`/`end` needed one more closing
+`end` than the first attempt had) -- fixed via direct begin/end depth
+counting before recompiling, not by trial and error.
+
+Results: `tb/mmu_tb.sv` 0 failures (26->29 checks), `make test` 36/36,
+`make cosim_grp` 8/8, `make cosim_memind` 12/12, full 124-suite Harte sweep
+(mandatory -- `biu_mmu_if.sv` changed) -- PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline
+(expected: Harte never sets TC.E=1, so this gate gets its own real-world
+verification entirely from MMU-21 itself). **Closes Stage 2.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 12-stage plan. Stage 3
+(instruction-fetch BERR pending-until-use investigation) is next.

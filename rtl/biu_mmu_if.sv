@@ -776,7 +776,63 @@ module biu_mmu_if (
                         if (walk_word1_r[9] && !walk_fc_r[2]) begin
                             fault_is_berr_r <= 1'b0;  // purely logical fault
                             ms_state <= MS_FAULT;
-                        end else if (walk_long_is_page_r) begin
+                        end else begin
+                        // Deferred-items closure plan Stage 2 (plan.md):
+                        // no_next_level/next_idx hoisted here, above the
+                        // walk_long_is_page_r branch, so BOTH the
+                        // early-termination-page LIMIT check below AND the
+                        // table-descriptor LIMIT check further down share
+                        // one formula. Safe to reuse unchanged for a page
+                        // reached via MS_WALK_INDIRECT's own re-entry into
+                        // this state too (walk_level_r/tib/tic are carried
+                        // over unmodified from the original discovery): an
+                        // indirect descriptor can only ever be created
+                        // when no_next_level was ALREADY true at that same
+                        // level (MS_WALK_A/B/C's own tib==0/tic==0/level-C
+                        // triggers, confirmed by direct inspection), so
+                        // re-evaluating it here for an indirect-dereferenced
+                        // page always correctly yields no_next_level=1
+                        // again, skipping the LIMIT check -- exactly right,
+                        // since an indirect target is a plain leaf per
+                        // 9.5.3.2 (Figure 9-14 layout), never an early-
+                        // termination descriptor (Figure 9-13).
+                        logic no_next_level;
+                        logic [4:0]  next_fb_lo;
+                        logic [3:0]  next_ti;
+                        logic [31:0] next_idx;
+                        case (walk_level_r)
+                            2'd0:    no_next_level = (tib == 4'h0);
+                            2'd1:    no_next_level = (tic == 4'h0);
+                            default: no_next_level = 1'b1; // level C: no level D modeled
+                        endcase
+                        next_ti    = (walk_level_r == 2'd0) ? tib : tic;
+                        next_fb_lo = (walk_level_r == 2'd0) ? (fa_lo_r - {1'b0, tib})
+                                                             : (fa_lo_r - {1'b0, tib} - {1'b0, tic});
+                        next_idx   = (walk_va_r >> next_fb_lo) &
+                                     ((32'h1 << {1'b0, next_ti}) - 32'h1);
+                        if (walk_long_is_page_r) begin
+                            // Deferred-items closure plan Stage 2: a page
+                            // found BEFORE the deepest configured level
+                            // (no_next_level==0) is a genuine long-format
+                            // EARLY TERMINATION page descriptor (Figure
+                            // 9-13, MC68030UM 9.5.1.6) -- it carries its
+                            // own L/U+LIMIT at the SAME bit position as an
+                            // ordinary long-format table descriptor
+                            // (confirmed by direct visual read of Figure
+                            // 9-13: bit31=L/U, bits[30:16]=LIMIT, same as
+                            // Figure 9-11), bounding how many consecutive
+                            // pages this one descriptor covers. A page
+                            // found AT the deepest configured level
+                            // (no_next_level==1, including every indirect-
+                            // dereferenced page) is the ordinary Figure
+                            // 9-14 layout, which has no LIMIT field at all
+                            // in that position (UNUSED) -- must not be
+                            // checked there.
+                            if (!no_next_level &&
+                                limit_violation(walk_word1_r[31], walk_word1_r[30:16], next_idx)) begin
+                                fault_is_berr_r <= 1'b0;
+                                ms_state <= MS_FAULT;
+                            end else begin
                             walk_pa_r  <= (mmu_rdata & page_mask) |
                                           (walk_va_r & ~page_mask);
                             walk_ci_r  <= walk_word1_r[6];
@@ -794,6 +850,7 @@ module biu_mmu_if (
                                 walk_m_r <= walk_word1_r[4];
                                 ms_state <= MS_WALK_DONE;
                             end
+                            end
                         end else begin
                             // Table descriptor -- continue to the next
                             // level, or (no next level configured) a
@@ -801,39 +858,12 @@ module biu_mmu_if (
                             // (open-items backlog Stage 12c, plan.md --
                             // closes the gap this comment used to
                             // document as out of scope).
-                            logic no_next_level;
-                            logic [4:0]  next_fb_lo;
-                            logic [3:0]  next_ti;
-                            logic [31:0] next_idx;
-                            case (walk_level_r)
-                                2'd0:    no_next_level = (tib == 4'h0);
-                                2'd1:    no_next_level = (tic == 4'h0);
-                                default: no_next_level = 1'b1; // level C: no level D modeled
-                            endcase
-                            // Computed unconditionally (harmless -- pure
-                            // combinational math local to this block) so
-                            // the LIMIT check below and the existing
-                            // per-level branch further down can both use
-                            // the same values without duplicating the
-                            // formula a third time.
-                            next_ti    = (walk_level_r == 2'd0) ? tib : tic;
-                            next_fb_lo = (walk_level_r == 2'd0) ? (fa_lo_r - {1'b0, tib})
-                                                                 : (fa_lo_r - {1'b0, tib} - {1'b0, tic});
-                            next_idx   = (walk_va_r >> next_fb_lo) &
-                                         ((32'h1 << {1'b0, next_ti}) - 32'h1);
                             if (!no_next_level &&
                                 limit_violation(walk_word1_r[31], walk_word1_r[30:16], next_idx)) begin
                                 // open-items backlog Stage 12 (plan.md):
                                 // this long-format table descriptor's own
                                 // L/U+LIMIT bounds the NEXT level's index
-                                // (Figure 9-11). Deliberately NOT applied
-                                // in the no_next_level branch below --
-                                // that's the separate, still-deferred
-                                // genuine-indirect-descriptor case, not an
-                                // early-termination page's own LIMIT
-                                // (Figure 9-13's own "still used as a
-                                // check on the next index field" --
-                                // documented, not implemented this stage).
+                                // (Figure 9-11).
                                 fault_is_berr_r <= 1'b0;
                                 ms_state <= MS_FAULT;
                             end else if (no_next_level) begin
@@ -874,6 +904,7 @@ module biu_mmu_if (
                                     ms_state <= MS_WALK_C;
                                 end
                             end
+                        end
                         end
                     end
                 end
