@@ -259,8 +259,12 @@ showed a clearly measurable delta on the first attempt (no repeat of the absorpt
 surprise) — but this was *verified*, not assumed, per the guidance above; a future
 source could still land back in the absorbed regime.
 
-**Coverage depth**: 4 FSM sources — TAS (`wait_states=3`), MOVEM, CAS2, and genuine
-memory-indirect EA (all three added `wait_states=10`, Phases 125-126).
+**Coverage depth**: 9 FSM sources — TAS (`wait_states=3`), MOVEM, CAS2, genuine
+memory-indirect EA (Phases 125-126), MOVEP, single-address CAS (Phase 188), and ADDX,
+ABCD, and PACK predecrement (pipeline-stall breadth extension plan, elegant-gliding-fog.md
+Stage 5 -- all three added `wait_states=10`, verified against the absorption-effect
+guidance above: each showed a clearly measurable delta on the first attempt, no
+absorption surprise this time).
 
 ## Category I — bus error abort (`mem_abort`)
 
@@ -435,7 +439,7 @@ Harte sweep) — see `docs/cache.md`.
 | E. Control-transfer | `tb/stall_hazard_tb.sv` | BRA/JMP(register-indirect+abs)/DBF-taken/JSR+RTS round trip through real memory |
 | F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 18 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS/MOVE16/ABCD/SBCD/CMP2/CHK2/MOVEmm/RTR/RTE/PMOVE64, Phases 105/125/126/189, elegant-gliding-fog.md Stages 1-4 -- practical ceiling for this mechanism; PFLUSH/PTEST confirmed permanently untestable this way, no FC=101 bus activity to anchor an injection on); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
 | G. Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU 3-way priority; IFU starvation+recovery under a real multi-beat burst; DMA held off by `bus_lock` |
-| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 6 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS at wait_states=10, Phases 125/126/188; see Category H's own absorption-effect note for why the values differ) |
+| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 9 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS/ADDX/ABCD/PACK at wait_states=10, Phases 125/126/188, elegant-gliding-fog.md Stage 5; see Category H's own absorption-effect note for why the values differ) |
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
 | J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
 | K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
@@ -490,13 +494,16 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   (`run_int_mid_test` keys on FC=101 bus activity; neither instruction produces any
   under this file's own transparent-TT0 MMU setup) -- a real, documented limitation of
   the injection technique itself, not a gap in FSM coverage.
-- **DSACK wait-states-on-FSM-beats** (Category H) has 6 sources checked (TAS, MOVEM,
+- **DSACK wait-states-on-FSM-beats** (Category H) has 9 sources checked (TAS, MOVEM,
   CAS2, memory-indirect EA, MOVEP, single-address CAS -- Phase 188's own open-items
-  backlog Stage 4 added the last two). Given Phase 125's own absorption-effect finding,
-  a new source needs its own wait-state-value sanity check (don't assume `wait_states=3`
-  or `=10` transfers automatically) rather than a purely mechanical extension -- Stage 4's
-  own two additions both showed a clearly visible delta at `wait_states=10` on the first
-  try (MOVEP 167->255 ticks, CAS 137->209), but that was verified, not assumed.
+  backlog Stage 4 added the last two -- plus ADDX, ABCD, and PACK predecrement, added by
+  the pipeline-stall breadth extension plan's own Stage 5, elegant-gliding-fog.md).
+  Given Phase 125's own absorption-effect finding, a new source needs its own
+  wait-state-value sanity check (don't assume `wait_states=3` or `=10` transfers
+  automatically) rather than a purely mechanical extension -- Stage 5's own three
+  additions all showed a clearly visible delta at `wait_states=10` on the first try
+  (ADDX 227->255, ABCD 113->255, PACK 99->233 ticks), but that was verified, not
+  assumed. Remaining: MOVE16, PTEST, PMOVE64.
 
 None of these block using the CPU today; they're the natural next increment if more
 confidence is wanted in the generic mechanisms specifically.

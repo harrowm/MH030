@@ -3137,10 +3137,59 @@ module stall_fsm_tb;
         rom[16'h296C/4] = {16'h29B0, PMOVE_A0_OP};
         rom[16'h2970/4] = {PMOVE_CRP_EXT, CLR_L_D5};
         rom[16'h2974/4] = {ADDI_L_D5, 16'h0000};
-        rom[16'h2978/4] = {16'd9010, NOP_OP};
-        // Temporary park -- Stage 5 will redirect this on to its own new
+        rom[16'h2978/4] = {16'd9010, JMP_ABS_L_OP};
+        rom[16'h297C/4] = {16'h0000, 16'h3308};
+
+        // Stage 5 (elegant-gliding-fog.md): WS-ADDX/WS-ABCD/WS-PACK --
+        // DSACK wait-states composing with 3 more FSM beats, all sharing
+        // the same predecrement-memory (-(Ay),-(Ax)) shape B-9/B-10/B-11
+        // already established. No explicit BCD/ADDX operand data needed
+        // (default-filled memory is fine, matching B-9/10/11's own
+        // convention -- this is checking wait-state timing composition,
+        // not arithmetic correctness, already 100% Harte-proven). Reached
+        // via JMP from PMOVE64's own tail (a large NOP desert separates
+        // them, so an explicit JMP avoids wasting simulated time walking
+        // through it). rom[] content written up front, before
+        // run_int_mid_test's own earlier calls, per Stage 3's own lesson.
+        rom[16'h3308/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h330C/4] = {16'h3400, MOVEA_L_IMM_A1};
+        rom[16'h3310/4] = {16'h0000, 16'h3410};
+        rom[16'h3314/4] = {ADDX_L_A1_A0, CLR_L_D5};
+        rom[16'h3318/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h331C/4] = {16'd9100, NOP_OP};
+        rom[16'h3320/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3324/4] = {16'h3420, MOVEA_L_IMM_A1};
+        rom[16'h3328/4] = {16'h0000, 16'h3430};
+        rom[16'h332C/4] = {ADDX_L_A1_A0, CLR_L_D5};
+        rom[16'h3330/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3334/4] = {16'd9101, NOP_OP};
+        rom[16'h3338/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h333C/4] = {16'h3440, MOVEA_L_IMM_A1};
+        rom[16'h3340/4] = {16'h0000, 16'h3450};
+        rom[16'h3344/4] = {ABCD_A1_A0, CLR_L_D5};
+        rom[16'h3348/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h334C/4] = {16'd9102, NOP_OP};
+        rom[16'h3350/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3354/4] = {16'h3460, MOVEA_L_IMM_A1};
+        rom[16'h3358/4] = {16'h0000, 16'h3470};
+        rom[16'h335C/4] = {ABCD_A1_A0, CLR_L_D5};
+        rom[16'h3360/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3364/4] = {16'd9103, NOP_OP};
+        rom[16'h3368/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h336C/4] = {16'h3480, MOVEA_L_IMM_A1};
+        rom[16'h3370/4] = {16'h0000, 16'h3490};
+        rom[16'h3374/4] = {PACK_A1_A0, 16'h0000};
+        rom[16'h3378/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h337C/4] = {16'h0000, 16'd9104};
+        rom[16'h3380/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3384/4] = {16'h34A0, MOVEA_L_IMM_A1};
+        rom[16'h3388/4] = {16'h0000, 16'h34B0};
+        rom[16'h338C/4] = {PACK_A1_A0, 16'h0000};
+        rom[16'h3390/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h3394/4] = {16'h0000, 16'd9105};
+        // Temporary park -- Stage 6 will redirect this on to its own new
         // tests instead of parking permanently here.
-        rom[16'h297C/4] = {BRA_SELF, NOP_OP};
+        rom[16'h3398/4] = {BRA_SELF, NOP_OP};
 
         run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
 
@@ -3162,6 +3211,57 @@ module stall_fsm_tb;
         // other checks (exception correctly recognized only after the FSM
         // is done, dependent marker reached, ISR ran and RTE'd back).
         run_int_mid_test("INT-mid-PMOVE64", 32'h0000_2968, 1, 5, 32'd9010, 32'h0000_008A);
+
+        // WS-ADDX: DSACK wait-states composing with ADDX's own 3-phase
+        // predecrement (read Ay, read Ax, write Ax) FSM beat shape.
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3308; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-ADDX-1: wait_states=0, D5=9100", 5, 32'd9100, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3320; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-ADDX-2: wait_states=10, D5=9101", 5, 32'd9101, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-ADDX: wait states measurably lengthen ADDX's own predecrement bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-ABCD: same predecrement shape, opposite BCD direction.
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3338; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-ABCD-1: wait_states=0, D5=9102", 5, 32'd9102, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3350; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-ABCD-2: wait_states=10, D5=9103", 5, 32'd9103, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-ABCD: wait states measurably lengthen ABCD's own predecrement bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-PACK: same predecrement shape, source-read+write only (no
+        // destination read needed -- PACK's own destination is a pure
+        // write, per INT-mid-PACK's own established 2-bus-cycle finding).
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3368; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-PACK-1: wait_states=0, D5=9104", 5, 32'd9104, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3380; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-PACK-2: wait_states=10, D5=9105", 5, 32'd9105, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-PACK: wait states measurably lengthen PACK's own predecrement bus cycles too",
+                  elapsedX > elapsed0);
+        end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

@@ -4901,3 +4901,39 @@ mechanism's own practical ceiling (3 locations). See
 Category F breadth work for this plan** (the 3-item "Remaining" list from docs/stalls.md
 is now fully resolved: 1 added, 2 confirmed out of mechanism scope). Stage 5
 (`WS-ADDX`/`WS-ABCD`/`WS-PACK`, DSACK wait-states-on-FSM-beats) is next.
+
+## Phase 205 (pipeline-stall breadth extension plan, Stage 5): WS-ADDX/WS-ABCD/WS-PACK
+
+Fifth stage of `~/.claude/plans/elegant-gliding-fog.md`. `WS-ADDX`/`WS-ABCD`/`WS-PACK`
+-- 3 more Category H (DSACK wait-states-on-FSM-beats) sources (6→9), reusing
+`ADDX_L_A1_A0`/`ABCD_A1_A0`/`PACK_A1_A0`'s own already-proven predecrement encodings
+(B-9/B-10/B-11), each swept at `wait_states=0` then `wait_states=10` following the
+established `WS-*` two-instance pattern. No explicit BCD/ADDX operand data needed
+(default-filled memory is fine, matching B-9/10/11's own convention -- this checks
+wait-state timing composition, not arithmetic correctness, already 100% Harte-proven).
+
+Applied Stage 3's own hard-won lesson from the start this time: all of Stage 5's own
+`rom[]` content (6 instances × 24 bytes = 144 bytes, in a fresh, collision-checked
+region at 0x3308) is written up front, before `run_int_mid_test("INT-mid-CHK2", ...)`
+is called, not interleaved with the calls that consume real simulated time. Reached via
+an explicit JMP from PMOVE64's own tail (a large NOP desert separates the two regions,
+so a JMP avoids wasting simulated time walking through it, rather than a correctness
+requirement this time). Combined with per-Stage 5's own careful, up-front
+collision-checking (both the static `rom[]`-literal scan and a manual cross-check
+against known dynamic write targets like MOVEP's own destinations), this stage worked
+correctly on the very first attempt -- no investigation needed, a sharp contrast to
+Stage 3.
+
+Per Phase 125's own absorption-effect finding (a small number of injected wait states
+can be fully absorbed by an instruction's own baseline per-beat latency with zero
+visible effect), each of the three new sources' own `wait_states=10` choice was
+verified to produce a clearly visible elapsed-tick delta, not assumed: ADDX 227->255,
+ABCD 113->255, PACK 99->233 ticks -- no repeat of the absorption surprise.
+
+Results: `tb/stall_fsm_tb.sv` 0 failures (9 new checks), `make test` 36/36.
+Testbench-only (no RTL touched, confirmed via `git diff --stat rtl/`) -- no Harte
+re-run needed. `docs/stalls.md` updated: Category H 6→9 sources (3 locations; also
+fixed one other stale count found along the way -- Category H's own "Coverage depth"
+paragraph still said "4 FSM sources" despite Phase 188 already having brought it to 6,
+never updated at the time). See `~/.claude/plans/elegant-gliding-fog.md` for the full
+8-stage plan. Stage 6 (`WS-BFINS`/`WS-CMP2`/`WS-MOVEmm`) is next.
