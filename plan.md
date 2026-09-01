@@ -5290,3 +5290,89 @@ genuinely locked RMW sequence) is a completely separate finding from Phase
 the write-on-mismatch question this stage addressed. See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 12-stage plan. Stage 5
 is next.
+
+## Phase 213 (deferred-items closure plan, Stage 5): CAS genuine bus-level lock -- attempted, real regression found, reverted, deferred
+
+Attempted approach (a) from the plan: route CAS's read through `mem_rmw`
+(the same signal that puts TAS's read through `biu_cycle_gen.sv`'s
+locked `ST_RMW_READ_*`/`ST_RMW_WRITE_*` states), collapsing CAS's own
+read-to-write handoff to TAS's exact 1-cycle shape by reading Du via the
+`rd_c` port (Phase 148-149's 3rd register-file port) instead of the old
+`cas_get_du_r` deferred `rd_b` swap. Compiled clean, but `make test`
+regressed hard: `BERR-mid-CAS` failed ("a real Bus Error exception was
+taken"), cascading into ~10 downstream `stall_fsm_tb.sv` failures and a
+hard timeout.
+
+Root-caused via direct hierarchical `$display` tracing (temporary,
+removed before reverting): `biu_cycle_gen.sv`'s
+`ST_RMW_READ_S7: state_nxt = ST_RMW_WRITE_S0; // no bus release!`
+transition is **unconditional** -- once `mem_rmw` dispatches a read
+through the locked-RMW path, the BIU proceeds into a real write bus
+cycle regardless of whether `eu_seq.sv` is ready to drive one. TAS's own
+FSM is built for exactly this (it always writes). The attempted CAS FSM,
+after collapsing to TAS's shape, only set `cas_write_r<=1` `if (ex_z)`
+(match) -- on a mismatch, `cas_active_r` dropped straight to 0 and
+`cas_write_r` never engaged, leaving nobody driving the write phase
+`biu_cycle_gen` was going to run anyway. Confirmed at the signal level: a
+CAS mismatch's own read completed normally (`mem_ack=1`, not
+`mem_berr`), `biu_cycle_gen` advanced straight into `ST_RMW_WRITE_S0..S6`
+regardless, a BERR injected mid-write pulsed `cg_eu_berr_raw` correctly
+at the BIU layer -- but with `mem_req`/`cas_write_r`/`cas_active_r` all
+still 0 in `eu_seq.sv` throughout that phantom write, nothing in EX ever
+observed `mem_berr`, so `mem_abort` never fired and the exception
+dispatch machinery from Phases 108-114 never engaged. The apparent fix
+(make `cas_write_r` unconditional, always writing back the read value on
+mismatch) would have "worked" mechanically but is a real regression:
+Phase 212 (Stage 4) already read MC68030UM.pdf Section 7.3.3 directly and
+confirmed the *opposite* -- "depending on the compare results... the
+write cycle(s) may not occur" is genuine, correct 68030 behavior, already
+matched by this RTL's pre-Stage-5 CAS FSM and already proven by
+`tb/atomic_tb.sv`'s own pre-existing CAS-02 (`mem_unchanged` on
+mismatch) test. Approach (a) is therefore architecturally incompatible
+with CAS's own real semantics: `biu_cycle_gen`'s hardwired,
+always-writes RMW schedule has no way to represent "the write cycle may
+not occur."
+
+**Reverted `rtl/eu_seq.sv` to the Stage 4 commit (`git checkout --`)** --
+confirmed byte-identical (`git diff --stat` empty) and `make test` 36/36
+at the unchanged Stage 4 baseline. No RTL diff exists, so the full
+mandatory gate doesn't apply; the stale Harte sweep launched against the
+broken intermediate code was allowed to finish in the background and its
+result discarded (moot once the code was reverted).
+
+**The correct shape is approach (b)**, already named in the plan: keep
+CAS's read and write as two *ordinary* dispatches through
+`biu_cache_if.sv` (as today), but extend `cas2_as_hold`'s own
+"hold AS while a locked continuation is coming" pattern across them --
+holding AS between the read and write bus cycles only when a write is
+actually going to follow (i.e. genuinely conditional, unlike CAS2's own
+always-4-cycles sequence or TAS's own always-writes shape). This is
+qualitatively harder than CAS2's version: CAS2 is a fully self-contained,
+dedicated `ST_CAS2_*` state sequence in `biu_cycle_gen.sv` with its own
+private AS-hold wire computed from its own state-transition table; CAS's
+read and write instead go through the *shared*, ordinary
+`ST_READ_*`/`ST_WRITE_*` path used by literally every other instruction
+in the chip, so a genuine AS-hold here needs a new signal threaded from
+`eu_seq.sv` (present combinationally at the exact moment the read's own
+negate-phase would otherwise fire -- the compare result, and therefore
+the write-or-not decision, isn't known until the read's own data
+arrives) all the way to `biu_cycle_gen.sv`'s shared per-state AS pin
+logic. Getting this wrong risks corrupting the negate timing for every
+ordinary read in the project, not just CAS's own -- a substantially
+larger blast radius than CAS2's dedicated states ever carried.
+
+**Decision: deferred, not implemented this session.** A first,
+plausible-seeming implementation attempt already produced a subtle,
+hard-to-diagnose hang needing extensive hierarchical tracing to fully
+understand and correctly attribute -- exactly the kind of risk the
+plan's own Stage 5 write-up flagged in advance ("real regression risk to
+TAS since they may share dispatch logic"). Rather than push a second,
+still-unproven design (this time threading a new signal into the shared
+ordinary-cycle pin logic) through under continued pressure, this matches
+the project's own established precedent for a confirmed-real,
+substantial finding (Phase 158 Stage 8's BERR-during-fill deferral;
+Phase 236's WS-PTEST deferral) -- re-documented here rather than forced.
+`~/.claude/plans/elegant-gliding-fog.md`'s own Stage 5 description
+already names the two approaches and their trade-off; nothing further to
+add to the plan file itself. Stage 6 (cpSAVE/cpRESTORE
+predecrement/postincrement EA) is next.
