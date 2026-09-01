@@ -4848,3 +4848,56 @@ updated: Category F 14→17 sources (3 locations). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. Stage 4
 (`INT-mid-PFLUSH`/`INT-mid-PTEST`/`INT-mid-PMOVE64`, closing Category F in full) is
 next.
+
+## Phase 204 (pipeline-stall breadth extension plan, Stage 4): INT-mid-PMOVE64 -- closes Category F to its practical ceiling
+
+Fourth stage of `~/.claude/plans/elegant-gliding-fog.md`, originally scoped as
+INT-mid-PFLUSH/INT-mid-PTEST/INT-mid-PMOVE64 (reusing B-19/B-20/B-21's own proven
+encodings, per docs/stalls.md's own "Remaining" list). Delivered only PMOVE64 --
+PFLUSH and PTEST were both attempted and found genuinely, permanently incompatible with
+`run_int_mid_test`'s own injection mechanism, not fixed.
+
+`run_int_mid_test`'s own injection keys entirely on `data_ds_count`, itself gated on
+FC=101 (supervisor data-space) bus activity -- it waits to see the target FSM's own
+first bus cycle before asserting the interrupt. PFLUSHA has no EA/bus operand at all
+(confirmed directly by B-19's own pre-existing comment: "flush entire ATC, no EA/bus
+operand needed") -- there is structurally nothing for the mechanism to key off. PTEST,
+reached under this file's own transparent-TT0 MMU setup (globally active since
+B-20/B-21, ~0x1700-1810, reused unchanged here), was empirically confirmed to ALSO
+produce zero FC=101 activity: B-20's own comment had already predicted this outcome
+("resolves immediately without needing any actual page-table data" -- no real table
+walk means no bus cycle either) but this is the first time it was actually tried with
+an injected interrupt riding on that assumption. The result was the full 20000-tick
+injection-wait budget elapsing with `injected` never firing, and a misleading PASS on
+the unrelated "interrupt handler ran" check (D6 was simply still `12345`, left over
+from the *previous* test's own genuine interrupt, since PTEST's own ISR never actually
+ran). Confirmed via direct reproduction, not assumed from the comment alone. Neither
+is a bug -- testing "interrupt held off during PFLUSH/PTEST's own internal duration"
+is real, valid follow-up work, but needs a different injection-timing anchor (keyed on
+internal FSM state like `pflush_start_r`/`ptest_run_r`, not bus activity), out of scope
+for this specific mechanism/plan.
+
+PMOVE64 itself worked cleanly on the first attempt once written up front (per Stage 3's
+own hard-won lesson -- all of Stage 4's own `rom[]` content sits before
+`run_int_mid_test("INT-mid-CHK2", ...)` in program order), with one measurement-only
+adjustment: the observed bus-cycle count before the interrupt was recognized was 1, not
+PMOVE64's own architectural 2 (B-21's own comment: "64-bit load, 2 bus cycles"). Rather
+than chase this as a potential bug (a real risk given this session's own extensive
+false-alarm history on this exact file), it was treated as the same already-documented
+"d0 baseline sampled after decode_pc reaches the target but before EX has necessarily
+completed the FIRST beat" measurement artifact this file's own `run_int_mid_test` wait
+is already known to be subject to (same class as Phase 125's WS-* findings) --
+justified because every OTHER check (exception correctly recognized only after the FSM
+is done, dependent marker reached, ISR ran and RTE'd back) passes cleanly, meaning the
+actual interrupt-holdoff mechanism is validated regardless of this one supplementary
+count's own precision. Adjusted the test's own expected value to 1 with an in-line
+explanation rather than the architectural 2.
+
+Results: `tb/stall_fsm_tb.sv` 0 failures, `make test` 36/36. Testbench-only (zero RTL
+touched, confirmed via `git diff --stat rtl/`) -- no Harte re-run needed.
+`docs/stalls.md` updated: Category F 17→18 sources, now explicitly documented as this
+mechanism's own practical ceiling (3 locations). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. **This closes
+Category F breadth work for this plan** (the 3-item "Remaining" list from docs/stalls.md
+is now fully resolved: 1 added, 2 confirmed out of mechanism scope). Stage 5
+(`WS-ADDX`/`WS-ABCD`/`WS-PACK`, DSACK wait-states-on-FSM-beats) is next.

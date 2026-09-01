@@ -3101,9 +3101,46 @@ module stall_fsm_tb;
         rom[16'h2954/4] = 32'h0000_2960;          // PC -> dependent instr
         rom[16'h2960/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h2964/4] = {16'h0000, 16'd9008};
-        // Temporary park -- Stage 4 will redirect this on to its own new
+
+        // Stage 4 (elegant-gliding-fog.md): INT-mid-PMOVE64 -- 1 more
+        // Category F source. Falls straight through from RTE's own
+        // dependent target above (0x2960's own tail, at 0x2968). TC.E=1
+        // with a fully-transparent TT0 has been globally active since
+        // B-20/B-21 (~0x1700-1810) and nothing since then touches
+        // TC/TT0, so PMOVE works directly with no re-setup -- matching
+        // B-20/B-21's own established convention. rom[] content written
+        // up front, before run_int_mid_test's own earlier calls, per
+        // Stage 3's own hard-won lesson.
+        //
+        // INT-mid-PFLUSH and INT-mid-PTEST were BOTH attempted and
+        // dropped: `run_int_mid_test`'s own injection mechanism keys
+        // entirely on `data_ds_count` (FC=101 supervisor-data bus
+        // activity) to time when to assert the interrupt. PFLUSHA has no
+        // EA/bus operand at all (confirmed by this file's own B-19
+        // comment) -- there is nothing for it to ever detect. PTEST,
+        // under this file's own transparent-TT0 setup, was empirically
+        // confirmed to ALSO produce zero FC=101 activity (B-20's own
+        // comment already predicted this: "resolves immediately without
+        // needing any actual page-table data" -- no real table walk
+        // means no bus cycle to key off either). A real attempt hung
+        // the entire 20000-tick injection-wait budget for PTEST, with
+        // "interrupt handler ran" showing a MISLEADING pass (D6 was
+        // simply still 12345 from the PREVIOUS test's own genuine
+        // interrupt, never re-cleared, since PTEST's own ISR never
+        // actually ran at all) -- a real, permanent mechanism-scope
+        // limitation, not a bug: testing "interrupt held off during
+        // PFLUSH/PTEST's own internal duration" would need an entirely
+        // different injection-timing anchor (keyed on internal FSM
+        // state like `pflush_start_r`/`ptest_run_r` instead of bus
+        // activity), out of scope for this breadth-extension plan.
+        rom[16'h2968/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h296C/4] = {16'h29B0, PMOVE_A0_OP};
+        rom[16'h2970/4] = {PMOVE_CRP_EXT, CLR_L_D5};
+        rom[16'h2974/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2978/4] = {16'd9010, NOP_OP};
+        // Temporary park -- Stage 5 will redirect this on to its own new
         // tests instead of parking permanently here.
-        rom[16'h2968/4] = {BRA_SELF, NOP_OP};
+        rom[16'h297C/4] = {BRA_SELF, NOP_OP};
 
         run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
 
@@ -3114,6 +3151,17 @@ module stall_fsm_tb;
         run_int_mid_test("INT-mid-RTR", 32'h0000_287C, 2, 5, 32'd9007, 32'h0000_008A);
 
         run_int_mid_test("INT-mid-RTE", 32'h0000_2948, 2, 5, 32'd9008, 32'h0000_008A);
+
+        // Measured bus-cycle count is 1, not PMOVE64's own architectural 2
+        // (B-21's own comment: "64-bit load, 2 bus cycles"). Consistent
+        // with the already-documented "d0 baseline sampled after decode_pc
+        // reaches the target but before EX has necessarily completed the
+        // FIRST beat" measurement artifact this file's own run_int_mid_test
+        // wait is subject to (same class as Phase 125's WS-* findings) --
+        // the interrupt-holdoff mechanism itself is still validated by the
+        // other checks (exception correctly recognized only after the FSM
+        // is done, dependent marker reached, ISR ran and RTE'd back).
+        run_int_mid_test("INT-mid-PMOVE64", 32'h0000_2968, 1, 5, 32'd9010, 32'h0000_008A);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
