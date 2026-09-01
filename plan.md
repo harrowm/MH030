@@ -4937,3 +4937,60 @@ fixed one other stale count found along the way -- Category H's own "Coverage de
 paragraph still said "4 FSM sources" despite Phase 188 already having brought it to 6,
 never updated at the time). See `~/.claude/plans/elegant-gliding-fog.md` for the full
 8-stage plan. Stage 6 (`WS-BFINS`/`WS-CMP2`/`WS-MOVEmm`) is next.
+
+## Phase 206 (pipeline-stall breadth extension plan, Stage 6): WS-BFINS/WS-CMP2/WS-MOVEmm
+
+New `WS-BFINS`/`WS-CMP2`/`WS-MOVEmm` in `tb/stall_fsm_tb.sv`, reusing B-12/B-13/B-14's
+own already-proven encodings, same `WS-*` two-instance pattern as every prior source in
+Category H.
+
+**Real bug #1, found before any test ran**: relocating the new code away from a real
+collision with WS-ADDX/ABCD/PACK's own predecrement data region (0x3400-0x34C0, a
+genuine dynamic-write collision the static `rom[]`-literal scanner can't catch, matching
+the class already documented in `feedback_rom_write_ordering.md`) needed an explicit JMP
+from WS-PACK-2's own tail. That JMP's own 32-bit absolute-address operand was encoded
+wrong: `rom[16'h339C/4] = {16'h0000, 16'h34C0}` put the low address word at the WRONG
+offset (0x339E instead of 0x339C, immediately after the hi word at 0x339A) — a different,
+more precise instance of the exact off-by-one-word mistake Stage 2 already hit once for
+a different JMP. Confirmed via direct `pc_wr_data_common`/`ex_abs_ea_val` tracing: the
+redirect fired with `abs_val=00000000` — not X, not garbage, a clean *zero*, immediately
+pointing at a wrong-slot low-word extraction rather than a genuine RTL race (this
+project's own established JMP_ABS_L_OP convention, re-derived directly from the
+already-working CHK2-skip JMP at 0x2810-0x2816: opcode's own low half, hi word
+immediately after, lo word immediately after that — packed `{hi,lo}` into ONE slot only
+when the opcode itself occupies the low half of the PRECEDING slot; here the opcode
+occupied the LOW half of its OWN slot, so hi/lo needed two separate one-word-each
+placements, not one combined `{hi,lo}` slot). Fixed: `rom[16'h339C/4] = {16'h34C0,
+NOP_OP}` (lo word in the low half of its own slot, filler after).
+
+**Real bug #2 (a measurement-technique finding, not RTL)**: with the JMP fixed, all 9
+new checks initially passed on VALUE but the 3 "wait states measurably lengthen" `check()`
+calls failed outright — `wait_states=10` produced a *reversed* comparison (BFINS-2
+measured 146 ticks vs BFINS-1's 208, MOVEmm nearly identical 146 vs 150). Direct
+decode_pc/D5 tracing (temporary `$display`s bracketing each gate loop's own entry/exit)
+found the mechanism: BFINS-1's own long RMW stall gives the IFU's linear readahead
+enough real time to fetch all the way past BFINS-2's own setup opcode while decode is
+blocked on EX — confirmed directly, the second gate loop (`decode_pc < 0x34D4`)
+consistently exits after **zero** iterations, meaning BFINS-2's own measurement window
+opens with a head start large enough to swallow `wait_states=10`'s own ~20-tick effect
+(across BFINS's 2 bus cycles) outright rather than merely absorbing it invisibly (Phase
+125's milder documented effect). Confirmed the underlying RTL mechanism itself is
+correct throughout — the same trace showed BFINS-2's own read-to-ack latency was
+genuinely longer under wait_states=10 (~210ns vs BFINS-1's ~120ns), just starting from
+a smaller remaining-work baseline than BFINS-1's own measurement window happened to
+capture. Resolved by tuning the magnitude, same technique as Phase 125's own resolution
+for WS-MOVEM (swept 20, settled on 10) — swept `wait_states=60` for all three sources,
+confirmed a clear, unambiguous margin (BFINS 208->458, CMP2 96->451, MOVEmm 150->458),
+applied permanently with the reasoning documented in each test's own header comment.
+
+Results: `tb/stall_fsm_tb.sv` 0 failures (9 new checks), `make test` 36/36.
+Testbench-only (no RTL touched, confirmed via `git diff --stat rtl/`) -- no Harte
+re-run needed. `docs/stalls.md` updated: Category H 9->12 sources (3 locations), plus a
+new "head-start variant of the absorption effect" note documenting the reversal finding
+for future WS-* additions. See `~/.claude/plans/elegant-gliding-fog.md` for the full
+8-stage plan. Stage 7 (`WS-MOVE16`/`WS-PTEST`/`WS-PMOVE64`, closing Category H) is next
+-- given Stage 4's finding that PTEST produces no FC=101 bus activity under this file's
+own transparent-TT0 MMU setup (making it incompatible with `run_int_mid_test`), Stage 7
+will need to check directly whether the same limitation applies to a wait-state
+composition test (which doesn't strictly need FC=101 timing, just *some* bus activity
+to stretch) before assuming PTEST can be included.

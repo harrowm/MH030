@@ -3187,9 +3187,61 @@ module stall_fsm_tb;
         rom[16'h338C/4] = {PACK_A1_A0, 16'h0000};
         rom[16'h3390/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h3394/4] = {16'h0000, 16'd9105};
-        // Temporary park -- Stage 6 will redirect this on to its own new
+
+        // Stage 6 (elegant-gliding-fog.md): WS-BFINS/WS-CMP2/WS-MOVEmm --
+        // DSACK wait-states composing with 3 more FSM beats, reusing
+        // B-12/B-13/B-14's own already-proven encodings. No explicit
+        // bitfield/bound/mem-mem data needed anywhere (default-filled
+        // memory is fine -- this checks wait-state timing composition,
+        // not data correctness, already separately proven in Stage 3 for
+        // MOVEmm and 100% Harte-proven for BFINS/CMP2's own arithmetic).
+        // Reached via an explicit JMP from WS-PACK-2's own tail (0x3398)
+        // -- NOT plain fall-through -- because 0x3400-0x34C0 is WS-ADDX/
+        // WS-ABCD/WS-PACK's own predecrement DATA region: those
+        // instructions genuinely WRITE a real computed result byte back
+        // there at runtime (not merely reading default-fill), so it can
+        // no longer be trusted to decode safely as NOP filler the way an
+        // untouched region can (the exact "data sitting in the linear
+        // fall-through path" class this project has hit before). rom[]
+        // content written up front, before run_int_mid_test's own
+        // earlier calls.
+        rom[16'h3398/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h339C/4] = {16'h34C0, NOP_OP};
+        rom[16'h34C0/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h34C4/4] = {16'h3580, BFINS_D1_A0};
+        rom[16'h34C8/4] = {BFINS_EXT, CLR_L_D5};
+        rom[16'h34CC/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h34D0/4] = {16'd9110, NOP_OP};
+        rom[16'h34D4/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h34D8/4] = {16'h3590, BFINS_D1_A0};
+        rom[16'h34DC/4] = {BFINS_EXT, CLR_L_D5};
+        rom[16'h34E0/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h34E4/4] = {16'd9111, NOP_OP};
+        rom[16'h34E8/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h34EC/4] = {16'h35A0, CMP2_L_A0_D1};
+        rom[16'h34F0/4] = {CMP2_EXT, CLR_L_D5};
+        rom[16'h34F4/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h34F8/4] = {16'd9112, NOP_OP};
+        rom[16'h34FC/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3500/4] = {16'h35B0, CMP2_L_A0_D1};
+        rom[16'h3504/4] = {CMP2_EXT, CLR_L_D5};
+        rom[16'h3508/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h350C/4] = {16'd9113, NOP_OP};
+        rom[16'h3510/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3514/4] = {16'h35C0, MOVEA_L_IMM_A1};
+        rom[16'h3518/4] = {16'h0000, 16'h35D0};
+        rom[16'h351C/4] = {MOVE_L_A0_A1, CLR_L_D5};
+        rom[16'h3520/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3524/4] = {16'd9114, NOP_OP};
+        rom[16'h3528/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h352C/4] = {16'h35E0, MOVEA_L_IMM_A1};
+        rom[16'h3530/4] = {16'h0000, 16'h35F0};
+        rom[16'h3534/4] = {MOVE_L_A0_A1, CLR_L_D5};
+        rom[16'h3538/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h353C/4] = {16'd9115, NOP_OP};
+        // Temporary park -- Stage 7 will redirect this on to its own new
         // tests instead of parking permanently here.
-        rom[16'h3398/4] = {BRA_SELF, NOP_OP};
+        rom[16'h3540/4] = {BRA_SELF, NOP_OP};
 
         run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
 
@@ -3260,6 +3312,73 @@ module stall_fsm_tb;
             run_and_check_timed("WS-PACK-2: wait_states=10, D5=9105", 5, 32'd9105, 4000, elapsedX);
             wait_states = 0;
             check("WS-PACK: wait states measurably lengthen PACK's own predecrement bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-BFINS: DSACK wait-states composing with memory bit-field
+        // insert's own single-address RMW beat shape. Uses wait_states=60,
+        // not the usual 10 -- BFINS-1's own long RMW stall gives the IFU's
+        // readahead enough real time to have ALREADY fetched BFINS-2's own
+        // setup opcode by the moment BFINS-1's D5 check resolves (confirmed
+        // via direct trace: the second decode_pc gate loop consistently
+        // exits after 0 iterations), so BFINS-2's own measurement window
+        // starts with a head start large enough that wait_states=10 (~20
+        // extra ticks across BFINS's 2 bus cycles) reversed the comparison
+        // outright (measured 146 < 208) instead of just being absorbed
+        // (Phase 125's milder finding). wait_states=60 overwhelms that head
+        // start with a clear, unambiguous margin (measured 458 vs 208) --
+        // same tuning technique Phase 125 already used for WS-MOVEM (swept
+        // 20, settled on 10), just needing a larger value for this shape.
+        // Same head-start reasoning applies to WS-CMP2/WS-MOVEmm below.
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_34C0; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-BFINS-1: wait_states=0, D5=9110", 5, 32'd9110, 4000, elapsed0);
+            wait_states = 60;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_34D4; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-BFINS-2: wait_states=60, D5=9111", 5, 32'd9111, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-BFINS: wait states measurably lengthen BFINS's own RMW bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-CMP2: DSACK wait-states composing with CMP2's own 2-read
+        // bounds-check beat shape. wait_states=60 for the same head-start
+        // reason as WS-BFINS above (measured 96 -> 451, unambiguous).
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_34E8; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-CMP2-1: wait_states=0, D5=9112", 5, 32'd9112, 4000, elapsed0);
+            wait_states = 60;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_34FC; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-CMP2-2: wait_states=60, D5=9113", 5, 32'd9113, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-CMP2: wait states measurably lengthen CMP2's own bounds-check bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-MOVEmm: DSACK wait-states composing with MOVE mem-mem's own
+        // read-then-write beat shape. wait_states=60 for the same
+        // head-start reason as WS-BFINS above (measured 150 -> 458,
+        // unambiguous).
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3510; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVEmm-1: wait_states=0, D5=9114", 5, 32'd9114, 4000, elapsed0);
+            wait_states = 60;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3528; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVEmm-2: wait_states=60, D5=9115", 5, 32'd9115, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-MOVEmm: wait states measurably lengthen MOVE mem-mem's own bus cycles too",
                   elapsedX > elapsed0);
         end
 
