@@ -78,6 +78,11 @@ module biu_cache_if (
     input  logic [31:0]  dc_burst_rdata2,
     input  logic [31:0]  dc_burst_rdata3,
     input  logic [1:0]   dc_burst_beat,   // beat reached when dc_burst_ack fires (3=full, 0=degraded)
+    // Deferred-items closure plan Stage 9 (plan.md): the beat that was in
+    // flight when dc_burst_berr fired -- see biu_burst_ctrl.sv's own
+    // burst_beat_at_berr port comment. Only meaningful the same cycle
+    // dc_burst_berr pulses.
+    input  logic [1:0]   dc_burst_beat_at_berr,
     input  logic         dc_burst_ack,
     input  logic         dc_burst_berr,
 
@@ -705,9 +710,55 @@ module biu_cache_if (
                             // dc_burst_req_r stays asserted for the next request.
                         end
                     end else if (dc_burst_berr) begin
-                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
-                        state          <= CI_BERR;
-                        dc_burst_req_r <= 1'b0;
+                        // Deferred-items closure plan Stage 9 (plan.md):
+                        // per MC68030UM.pdf p.6-19, a BERR on a beat AFTER
+                        // the CPU's own actually-requested word (woff_r)
+                        // does not fault at all -- the microsequencer
+                        // "has not yet requested" that later data. This
+                        // RTL previously faulted unconditionally on any
+                        // beat's own BERR. dc_burst_beat_at_berr tells us
+                        // which beat was in flight; if the requested word's
+                        // own beat already completed strictly before it
+                        // (woff_r < dc_burst_beat_at_berr), that word's own
+                        // data is already live on dc_burst_rdataN (a pure
+                        // combinational passthrough of biu_burst_ctrl.sv's
+                        // own internal capture array, not something that
+                        // needs the final combined ack to become visible)
+                        // -- complete successfully with it. Only the words
+                        // that actually arrived (0..dc_burst_beat_at_berr-1)
+                        // get marked valid; the failed beat and anything
+                        // after it stay invalid, so a later real access to
+                        // THOSE words still takes its own genuine fault --
+                        // correctly, since they were never actually
+                        // fetched. The harder "beat is at or before the
+                        // requested word" case (woff_r >=
+                        // dc_burst_beat_at_berr) still needs a genuine
+                        // retry mechanism this RTL doesn't have -- stays
+                        // unconditionally faulting, deliberately out of
+                        // scope for this stage.
+                        if (woff_r < dc_burst_beat_at_berr) begin
+                            case (woff_r)
+                                2'd0: fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                                2'd1: fill_rdata_r <= extract_rd(dc_burst_rdata1, siz_r, addr_r[1:0]);
+                                2'd2: fill_rdata_r <= extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
+                                default: fill_rdata_r <= extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
+                                // woff_r==2'd3 (the default arm) is
+                                // structurally unreachable here (nothing
+                                // can be strictly "before" beat 3), kept
+                                // only for case exhaustiveness.
+                            endcase
+                            if (!ciin) begin
+                                tag_d[idx_r] <= vtag_r;
+                                for (m = 0; m < 4; m++)
+                                    valid_d[idx_r][m] <= (m < dc_burst_beat_at_berr);
+                            end
+                            state          <= CI_IDLE;
+                            dc_burst_req_r <= 1'b0;
+                        end else begin
+                            xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
+                            state          <= CI_BERR;
+                            dc_burst_req_r <= 1'b0;
+                        end
                     end
                 end
 
@@ -1006,6 +1057,22 @@ module biu_cache_if (
                         2'd1: eu_rdata = extract_rd(dc_burst_rdata1, siz_r, addr_r[1:0]);
                         2'd2: eu_rdata = extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
                         2'd3: eu_rdata = extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
+                    endcase
+                // Deferred-items closure plan Stage 9 (plan.md): the
+                // "BERR after the requested word's own beat" success path
+                // -- same combinational-fast-path shape as the ack arm
+                // above (mirrors the always_ff block's own identical
+                // condition), needed since that block's own registered
+                // transition to CI_IDLE doesn't by itself produce eu_ack.
+                end else if (dc_burst_berr && (woff_r < dc_burst_beat_at_berr)) begin
+                    eu_ack = 1'b1;
+                    case (woff_r)
+                        2'd0: eu_rdata = extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        2'd1: eu_rdata = extract_rd(dc_burst_rdata1, siz_r, addr_r[1:0]);
+                        2'd2: eu_rdata = extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
+                        default: eu_rdata = extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
+                        // woff_r==2'd3 structurally unreachable here, same
+                        // reasoning as the always_ff block's own case.
                     endcase
                 end
             end

@@ -115,6 +115,19 @@ module biu_tb;
     logic        use_cache       = 1'b0;
     logic [31:0] cache_eu_rdata;
     logic        cache_eu_ack, cache_eu_berr;
+    // Deferred-items closure plan Stage 9 (plan.md): genuine testbench-
+    // driven D-cache burst response signals (were tied to dead constants
+    // before this stage -- see u_cache's own instantiation below) --
+    // gives a dedicated test full, deterministic control over exactly
+    // which beat succeeds vs. faults, with zero S-state burst-timing
+    // navigation needed (biu_cache_if.sv's own CI_D_BURST0 dispatch only
+    // needs eu_req+CACR to be genuine; dc_burst_req itself can stay
+    // unconnected, same as before).
+    logic [31:0] dc_burst_rdata0_tb = 32'h0, dc_burst_rdata1_tb = 32'h0;
+    logic [31:0] dc_burst_rdata2_tb = 32'h0, dc_burst_rdata3_tb = 32'h0;
+    logic [1:0]  dc_burst_beat_tb = 2'b00;
+    logic [1:0]  dc_burst_beat_at_berr_tb = 2'b00;
+    logic        dc_burst_ack_tb = 1'b0, dc_burst_berr_tb = 1'b0;
     // cache_if → sizing_fsm wires
     logic [31:0] ca_sf_addr;
     logic [2:0]  ca_sf_fc;
@@ -599,20 +612,26 @@ module biu_tb;
         // convention every other unused input port above already uses.
         .ciin        (1'b0),
         .ciout       (),
-        // Phase 158 Stage 4c: new D-cache burst-linefill port. This
-        // testbench never sets DBE (CACR bit 12), so CI_D_BURST0 is never
-        // reached -- tied off the same way the pre-existing MMU xl_*
-        // ports above are for tests that don't exercise them.
+        // Phase 158 Stage 4c: new D-cache burst-linefill port. Every
+        // pre-existing test in this file leaves DBE (CACR bit 12) unset,
+        // so CI_D_BURST0 is never reached by them -- deferred-items
+        // closure plan Stage 9 (plan.md) converted the response signals
+        // from dead constants to genuine testbench regs (default 0,
+        // matching the old tie-off exactly) so a dedicated new test can
+        // drive them directly; dc_burst_req/addr/fc stay unconnected
+        // (outputs, safe to leave floating for observation via hierarchy
+        // if ever needed).
         .dc_burst_req    (),
         .dc_burst_addr   (),
         .dc_burst_fc     (),
-        .dc_burst_rdata0 (32'h0),
-        .dc_burst_rdata1 (32'h0),
-        .dc_burst_rdata2 (32'h0),
-        .dc_burst_rdata3 (32'h0),
-        .dc_burst_beat   (2'b00),
-        .dc_burst_ack    (1'b0),
-        .dc_burst_berr   (1'b0),
+        .dc_burst_rdata0 (dc_burst_rdata0_tb),
+        .dc_burst_rdata1 (dc_burst_rdata1_tb),
+        .dc_burst_rdata2 (dc_burst_rdata2_tb),
+        .dc_burst_rdata3 (dc_burst_rdata3_tb),
+        .dc_burst_beat   (dc_burst_beat_tb),
+        .dc_burst_beat_at_berr (dc_burst_beat_at_berr_tb),
+        .dc_burst_ack    (dc_burst_ack_tb),
+        .dc_burst_berr   (dc_burst_berr_tb),
         .sf_addr     (ca_sf_addr),
         .sf_fc       (ca_sf_fc),
         .sf_rw       (ca_sf_rw),
@@ -1970,6 +1989,98 @@ module biu_tb;
             while (!bus_idle) @(posedge clk_4x);
             check("berr asserted", saw_berr2);
             repeat(8) @(posedge clk_4x);
+        end
+
+        // ===================================================================
+        // D-cache burst-fill: BERR on a beat AFTER the requested word
+        // (deferred-items closure plan Stage 9, plan.md).
+        //
+        // Real hardware (MC68030UM.pdf p.6-19): a BERR on a burst beat
+        // AFTER the CPU's own actually-requested word does not fault at
+        // all -- the microsequencer "has not yet requested" that later
+        // data. This RTL previously faulted unconditionally on ANY beat's
+        // own BERR during CI_D_BURST0. Drives biu_cache_if.sv's own
+        // dc_burst_* response port directly (converted from dead tie-off
+        // constants to genuine testbench regs this stage) for full,
+        // deterministic control over exactly which beat "arrives" vs.
+        // "fails" -- no S-state burst-timing navigation needed, since
+        // CI_D_BURST0's own dispatch is a fast combinational transition
+        // off eu_req+CACR alone (confirmed by direct signal tracing while
+        // building this test) and its own beat-level protocol lives
+        // entirely on this port, decoupled from biu_cycle_gen/
+        // biu_burst_ctrl's own S-state machinery.
+        //
+        // Requests a longword read at a fresh, aligned address (woff=0),
+        // then injects dc_burst_berr with dc_burst_beat_at_berr=2 (as if
+        // beat 2 failed) while dc_burst_rdata0 already holds the value
+        // beat 0 "would have" delivered -- exactly what real
+        // biu_burst_ctrl.sv's own combinational dc_burst_rdataN
+        // passthrough looks like mid-burst. Must complete SUCCESSFULLY
+        // with that value, not fault; only words 0-1 (the beats that
+        // genuinely "arrived" before the fault) get marked valid.
+        // ===================================================================
+        begin
+            int t;
+            logic saw_ack9, saw_berr9;
+            $display("--- D-cache burst: BERR after requested word (Stage 9) ---");
+            use_cache   = 1'b1;
+            cacr_tb     = 32'h0000_1100;  // DBE=1 | dcache_en=1
+            dc_burst_rdata0_tb = 32'hDEAD_BEEF;  // what beat 0 "arrived" with
+            eu_is_icache_tb = 1'b0;               // D-cache
+            eu_addr_tb  = 32'h0000_3F00;           // fresh, aligned, woff=0
+            eu_rw_tb    = 1'b1;                    // read
+            eu_siz_tb   = 2'b00;                    // longword
+            eu_req_tb   = 1'b1;
+
+            // Dispatch is a fast combinational transition -- a short,
+            // bounded poll is enough, not a fixed guess.
+            for (t = 0; t < 20 && u_cache.state !== u_cache.CI_D_BURST0; t++)
+                @(posedge clk_4x);
+            check("Stage9-Dburst: reached CI_D_BURST0", u_cache.state === u_cache.CI_D_BURST0);
+            check("Stage9-Dburst: requested word is woff=0", u_cache.woff_r === 2'd0);
+            // Settle margin: the wait_cp_req()/pulse_cp_ack() same-edge
+            // race already root-caused and fixed in Stage 7 (plan.md)
+            // applies here too -- @(posedge clk_4x)'s own resumption can
+            // land in the same simulated instant the RTL's always_ff
+            // block evaluates that identical edge; an immediately-
+            // following blocking assignment can then be seen by THAT
+            // same edge instead of a genuinely later one (confirmed via
+            // direct u_cache.state change-tracing while building this
+            // test: the injection was being consumed one edge early).
+            // A single #1 here restores the same settled offset Stage 7
+            // needed, before touching dc_burst_beat_at_berr_tb/
+            // dc_burst_berr_tb below.
+            #1;
+            dc_burst_beat_at_berr_tb = 2'd2;   // as if beat 2 failed
+            dc_burst_berr_tb         = 1'b1;
+            // eu_ack/eu_rdata are the CI_D_BURST0 output block's own pure
+            // combinational "fast path" (bus-pipelining-overlap plan,
+            // Track D) -- valid the instant dc_burst_berr+state==
+            // CI_D_BURST0 are both true, no clock edge needed (and, in
+            // fact, WRONG to wait for one: state itself transitions away
+            // from CI_D_BURST0 on the very same edge, via the always_ff
+            // block's own registered side of this same fix). Sample
+            // combinationally, right after the assignment settles.
+            #1;
+            saw_ack9  = cache_eu_ack;
+            saw_berr9 = cache_eu_berr;
+            check("Stage9-Dburst: completed successfully (eu_ack), not faulted", saw_ack9 && !saw_berr9);
+            check32("Stage9-Dburst: returned beat 0's own already-arrived value",
+                    cache_eu_rdata, 32'hDEAD_BEEF);
+            @(posedge clk_4x); #1;
+            dc_burst_berr_tb = 1'b0;
+
+            check("Stage9-Dburst: word 0 (arrived before the fault) marked valid",
+                  u_cache.valid_d[u_cache.idx_r][0] === 1'b1);
+            check("Stage9-Dburst: word 2 (the failed beat) NOT marked valid",
+                  u_cache.valid_d[u_cache.idx_r][2] === 1'b0);
+            check("Stage9-Dburst: word 3 (after the failed beat) NOT marked valid",
+                  u_cache.valid_d[u_cache.idx_r][3] === 1'b0);
+
+            eu_req_tb = 1'b0;
+            cacr_tb   = 32'h0;
+            use_cache = 1'b0;
+            repeat(4) @(posedge clk_4x);
         end
 
         // ===================================================================

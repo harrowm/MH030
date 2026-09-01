@@ -43,6 +43,15 @@ module biu_burst_ctrl (
 
     // Burst state exported to cycle_gen for address mux and state transitions
     output logic [1:0]  burst_beat,      // current beat (0-3)
+    // Deferred-items closure plan Stage 9 (plan.md): the beat that was in
+    // flight (its own S7, the same cycle burst_beat_r's PRE-NBA value is
+    // read for the ack/berr decision below) at the moment eu_burst_berr
+    // fires -- registered on the identical edge/condition as eu_burst_berr
+    // itself, guaranteeing same-cycle consistency for any consumer of both.
+    // Only meaningful for burst READS (only reads feed a cache); write
+    // bursts (MOVE16) never populate this, since nothing downstream needs
+    // per-beat BERR discrimination for a write.
+    output logic [1:0]  burst_beat_at_berr,
     output logic [31:0] burst_addr,      // current beat's bus address
     output logic [2:0]  burst_fc,        // function code for this burst
     output logic        cback_ok,        // CBACK# was asserted during beat-0 sampling
@@ -203,18 +212,22 @@ module biu_burst_ctrl (
     // bus cycle from the perspective of the 25 MHz external bus).
     logic eu_burst_ack_r, eu_burst_berr_r;
     logic eu_m16_ack_r,   eu_m16_berr_r;
+    logic [1:0] burst_beat_at_berr_r;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             eu_burst_ack_r  <= 1'b0; eu_burst_berr_r <= 1'b0;
             eu_m16_ack_r    <= 1'b0; eu_m16_berr_r   <= 1'b0;
+            burst_beat_at_berr_r <= 2'd0;
         end else begin
             eu_burst_ack_r  <= 1'b0; eu_burst_berr_r <= 1'b0;
             eu_m16_ack_r    <= 1'b0; eu_m16_berr_r   <= 1'b0;
             if (state_adv && at_burst_s7) begin
                 if (is_burst_read) begin
-                    if (berr_abort_r)
-                        eu_burst_berr_r <= 1'b1;
+                    if (berr_abort_r) begin
+                        eu_burst_berr_r       <= 1'b1;
+                        burst_beat_at_berr_r  <= burst_beat_r;
+                    end
                     else if (burst_beat_r == 2'd3 || !cback_ok_r)
                         eu_burst_ack_r  <= 1'b1;
                 end else if (is_burst_write) begin
@@ -229,6 +242,7 @@ module biu_burst_ctrl (
 
     assign eu_burst_ack  = eu_burst_ack_r;
     assign eu_burst_berr = eu_burst_berr_r;
+    assign burst_beat_at_berr = burst_beat_at_berr_r;
     assign eu_m16_ack    = eu_m16_ack_r;
     assign eu_m16_berr   = eu_m16_berr_r;
 

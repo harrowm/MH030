@@ -83,6 +83,11 @@ module biu_icache_if (
     input  logic [31:0]  ic_burst_rdata2,
     input  logic [31:0]  ic_burst_rdata3,
     input  logic [1:0]   ic_burst_beat,   // beat reached when ic_burst_ack fires (3=full, 0=degraded)
+    // Deferred-items closure plan Stage 9 (plan.md): the beat that was in
+    // flight when ic_burst_berr fired -- see biu_burst_ctrl.sv's own
+    // burst_beat_at_berr port comment. Only meaningful the same cycle
+    // ic_burst_berr pulses.
+    input  logic [1:0]   ic_burst_beat_at_berr,
     input  logic         ic_burst_ack,
     input  logic         ic_burst_berr,
 
@@ -401,10 +406,34 @@ module biu_icache_if (
                             // ic_burst_req_r stays asserted for the next request.
                         end
                     end else if (ic_burst_berr) begin
-                        berr_r         <= 1'b1;
-                        xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
-                        state          <= IC_DONE;
-                        ic_burst_req_r <= 1'b0;
+                        // Deferred-items closure plan Stage 9 (plan.md):
+                        // same "BERR after the requested word's own beat
+                        // does not fault" reasoning as biu_cache_if.sv's
+                        // own identical fix -- see that module's own
+                        // comment for the full derivation. Here, unlike
+                        // the D-cache, valid_i is per-LINE not per-word,
+                        // so this sub-case deliberately does NOT mark the
+                        // line valid (only part of it genuinely arrived) --
+                        // it just completes THIS fetch successfully with
+                        // the correct data; the line itself stays a real
+                        // miss for any later access, safe and conservative.
+                        if (woff_r < ic_burst_beat_at_berr) begin
+                            case (woff_r)
+                                2'd0: fill_rdata_r <= ic_burst_rdata0;
+                                2'd1: fill_rdata_r <= ic_burst_rdata1;
+                                2'd2: fill_rdata_r <= ic_burst_rdata2;
+                                default: fill_rdata_r <= ic_burst_rdata3;
+                                // woff_r==2'd3 structurally unreachable,
+                                // same reasoning as biu_cache_if.sv's own.
+                            endcase
+                            state          <= IC_DONE;
+                            ic_burst_req_r <= 1'b0;
+                        end else begin
+                            berr_r         <= 1'b1;
+                            xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
+                            state          <= IC_DONE;
+                            ic_burst_req_r <= 1'b0;
+                        end
                     end
                 end
 

@@ -355,6 +355,10 @@ module m68030_biu #(
     // cg_eu_burst_beat also needs early declaration -- both u_cache (below)
     // and u_icache (later) reference it in their own port connections.
     logic [1:0]  cg_eu_burst_beat;
+    // Deferred-items closure plan Stage 9 (plan.md): same shared-wire
+    // reasoning as cg_eu_burst_beat above -- only one burst requester is
+    // ever in flight, so a single wire fans out to both cache consumers.
+    logic [1:0]  cg_eu_burst_beat_at_berr;
     // Sizing FSM → cycle_gen EU port (also drives arbiter eu_req)
     logic sf_cyc_req;
     logic [31:0] sf_cyc_addr, sf_cyc_wdata;
@@ -718,6 +722,7 @@ module m68030_biu #(
         .dc_burst_rdata2(eu_burst_rdata2),
         .dc_burst_rdata3(eu_burst_rdata3),
         .dc_burst_beat  (cg_eu_burst_beat),
+        .dc_burst_beat_at_berr (cg_eu_burst_beat_at_berr),
         .dc_burst_ack   (eu_burst_ack),
         .dc_burst_berr  (eu_burst_berr),
         .cacr        (cacr),
@@ -839,6 +844,7 @@ module m68030_biu #(
         .ic_burst_rdata2(eu_burst_rdata2),
         .ic_burst_rdata3(eu_burst_rdata3),
         .ic_burst_beat  (cg_eu_burst_beat),
+        .ic_burst_beat_at_berr (cg_eu_burst_beat_at_berr),
         .ic_burst_ack   (eu_burst_ack),
         .ic_burst_berr  (eu_burst_berr),
         .tc             (tc),
@@ -1046,6 +1052,7 @@ module m68030_biu #(
         .eu_burst_ack    (eu_burst_ack),
         .eu_burst_berr   (eu_burst_berr),
         .eu_burst_beat   (cg_eu_burst_beat),
+        .eu_burst_beat_at_berr (cg_eu_burst_beat_at_berr),
         // MOVE16 burst write
         .eu_m16_req      (eu_m16_req),
         .eu_m16_addr     (eu_m16_addr),

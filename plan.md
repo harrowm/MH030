@@ -5587,3 +5587,110 @@ Stage 8.** See `~/.claude/plans/elegant-gliding-fog.md` for the
 remaining 4-stage backlog. Stage 9 (BERR-during-fill per-beat
 discrimination) is next -- the most architecturally delicate remaining
 stage.
+
+## Phase 217 (deferred-items closure plan, Stage 9): BERR-during-fill per-beat discrimination
+
+The most architecturally sensitive item on this list -- real hardware only
+faults the beat matching the CPU's own actually-requested word during a
+multi-beat cache-line burst fill (MC68030UM.pdf p.6-19: a BERR on a beat
+AFTER the requested one "does not fault at all... the microsequencer has
+not yet requested" that later data). This RTL previously faulted
+unconditionally on ANY beat's own BERR during a burst linefill, for both
+caches. Phase 158 Stage 8/11 already scoped the concrete next step
+(`burst_beat_at_berr`) but deferred implementation.
+
+**Plumbing**: added a new `burst_beat_at_berr` output to
+`biu_burst_ctrl.sv` -- a registered snapshot of `burst_beat_r` (its own
+PRE-NBA value, the same register the pre-existing `eu_burst_ack_r`/
+`eu_burst_berr_r` pulse-generation logic already reads), captured on the
+identical edge/condition as `eu_burst_berr_r` itself (only for burst
+READS, since only reads feed a cache -- MOVE16 writes never populate
+this). Threaded the SAME shared-wire pattern `eu_burst_beat`/
+`cg_eu_burst_beat` already uses (one wire, `biu_burst_ctrl`→
+`biu_cycle_gen`'s own new `eu_burst_beat_at_berr` output→`m68030_biu.sv`'s
+shared `cg_eu_burst_beat_at_berr`→fanned out to BOTH `biu_cache_if.sv`'s
+`dc_burst_beat_at_berr` and `biu_icache_if.sv`'s `ic_burst_beat_at_berr`,
+since only one burst requester is ever in flight).
+
+**D-cache fix** (`biu_cache_if.sv`, `CI_D_BURST0`'s own `dc_burst_berr`
+branch): if `woff_r < dc_burst_beat_at_berr` (the requested word's own
+beat genuinely completed strictly before the failing one), the requested
+word's data is ALREADY live on the matching `dc_burst_rdataN` wire --
+confirmed by reading `biu_burst_ctrl.sv` closely: `dc_burst_rdata0..3`
+are pure combinational passthroughs of its own internal capture array,
+populated progressively as each beat's data arrives via `at_burst_data`,
+independent of whether the burst as a whole ever reaches its final ack.
+Extract `fill_rdata_r` from the correct wire, mark ONLY the words that
+genuinely arrived (`0..dc_burst_beat_at_berr-1`) valid via the existing
+per-word `valid_d[idx][m]` array (Phase 133's own mechanism), complete to
+`CI_IDLE` -- the failed beat and anything after it stay invalid, so a
+later real access to THOSE words still takes its own genuine fault,
+correctly, since they were never actually fetched. Otherwise (`woff_r >=
+dc_burst_beat_at_berr`), unconditionally faults exactly as before -- the
+harder "beat is at or before the requested word" case needs a genuine
+retry mechanism this RTL doesn't have, deliberately out of scope for this
+stage, matching the plan's own explicit boundary. The output block's own
+`CI_D_BURST0` combinational "fast path" (bus-pipelining-overlap plan,
+Track D) needed a matching new `else if` arm firing `eu_ack`/`eu_rdata`
+for this same condition, mirroring the pre-existing success-ack arm's
+identical shape.
+
+**I-cache fix** (`biu_icache_if.sv`, `IC_BURST0`'s own `ic_burst_berr`
+branch): same discrimination, but simpler -- `IC_DONE`'s own output block
+already purely discriminates on `berr_r` alone (no separate fast-path
+mux needed), so the fix is entirely within the always_ff: extract
+`fill_rdata_r` from the matching `ic_burst_rdataN` wire and transition to
+`IC_DONE` WITHOUT setting `berr_r` (success) when `woff_r <
+ic_burst_beat_at_berr`. Since `valid_i` here is per-LINE, not per-word
+(unlike the D-cache), this sub-case deliberately does NOT mark the line
+valid -- only part of it genuinely arrived -- it just completes THIS
+fetch successfully with the correct data; the line itself stays a real
+miss for any later access, a safe and conservative simplification
+(documented, not a silent gap).
+
+**Verification**: no existing test exercises this new sub-case (every
+prior BERR-mid-fill test in the whole project injects the fault on the
+FIRST beat, the unchanged "before/at woff_r" case) -- `make test` 36/36
+clean on the first attempt confirms zero regression, not that the fix
+was exercised. Built a dedicated new test in `tb/biu_tb.sv`: converted
+`u_cache`'s own `dc_burst_rdata0..3`/`dc_burst_beat`/`dc_burst_ack`/
+`dc_burst_berr` ports from dead tie-off constants (this testbench never
+previously set DBE, so `CI_D_BURST0` was never reached) to genuine
+testbench-driven regs (default 0, matching the old tie-off exactly) --
+gives full, deterministic, S-state-timing-free control over exactly
+which beat succeeds vs. fails, since `CI_D_BURST0`'s own dispatch is a
+fast combinational transition off `eu_req`+CACR alone, decoupled from
+`biu_cycle_gen`/`biu_burst_ctrl`'s own S-state machinery entirely.
+Requests a longword read at a fresh aligned address (woff=0), injects
+`dc_burst_berr` with `dc_burst_beat_at_berr=2` (as if beat 2 failed)
+while `dc_burst_rdata0` already holds the value beat 0 "arrived" with.
+**Root-caused and fixed the identical same-edge testbench race already
+found in Stage 7**: `@(posedge clk_4x)`'s own resumption can land in the
+same simulated instant the RTL's `always_ff` block evaluates that
+identical edge, so an immediately-following blocking assignment can be
+seen by THAT same edge instead of a genuinely later one -- confirmed via
+direct `u_cache.state` change-tracing (varying the preceding poll-loop's
+iteration count and observing the spurious transition always landing
+exactly at the loop's own final edge, regardless of count, proving it
+was a same-edge artifact rather than a fixed RTL timing quantity).
+Fixed with a single `#1` settle before touching `dc_burst_beat_at_berr`/
+`dc_burst_berr`, the same pattern Stage 7 established. Also found the
+combinational "fast path" outputs (`eu_ack`/`eu_rdata`) are only valid
+for as long as `dc_burst_berr` itself stays asserted -- sample them
+BEFORE clearing it, not after (an earlier attempt polled afterward and
+read stale/default values).
+
+All 7 new checks pass: reached `CI_D_BURST0`, requested word is woff=0,
+completed successfully (not faulted), returned the correct value
+(0xDEADBEEF), and the exact valid-bit granularity (word 0 valid, words
+2/3 not). Results: `tb/biu_tb.sv` 0 failures, `make test` 36/36, `make
+cosim_grp` 8/8, `make cosim_memind` 13/13 (unchanged), full 124-suite
+Harte sweep (mandatory -- sits directly on top of the Phase 108-114
+BERR-abort machinery) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, zero
+regressions (Harte never enables burst mode at all, so this is purely a
+regression gate for the shared cache/BERR machinery, not a direct test
+of the new code -- `tb/biu_tb.sv`'s own new test is what actually proves
+correctness). **Closes Stage 9.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the remaining 3-stage
+backlog. Stage 10 (PTEST translation-fault hang investigation) is next.

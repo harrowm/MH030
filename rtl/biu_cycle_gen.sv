@@ -155,6 +155,7 @@ module biu_cycle_gen #(
     // Phase 127's cache plan Step 8 needed a consumer -- biu_icache_if.sv --
     // able to tell a full burst from a degraded one.
     output logic [1:0]  eu_burst_beat,
+    output logic [1:0]  eu_burst_beat_at_berr,
 
     // MOVE16 burst write (4×LW, AS held)
     input  logic        eu_m16_req,
@@ -650,6 +651,9 @@ module biu_cycle_gen #(
 
     // biu_burst_ctrl output wires
     logic [1:0]  bc_burst_beat;
+    // Deferred-items closure plan Stage 9 (plan.md): see biu_burst_ctrl.sv's
+    // own burst_beat_at_berr port comment.
+    logic [1:0]  bc_burst_beat_at_berr;
     logic [31:0] bc_burst_addr;
     logic [2:0]  bc_burst_fc;
     logic        bc_cback_ok;
@@ -684,6 +688,7 @@ module biu_cycle_gen #(
         .eu_m16_wdata2   (eu_m16_wdata2),
         .eu_m16_wdata3   (eu_m16_wdata3),
         .burst_beat      (bc_burst_beat),
+        .burst_beat_at_berr (bc_burst_beat_at_berr),
         .burst_addr      (bc_burst_addr),
         .burst_fc        (bc_burst_fc),
         .cback_ok        (bc_cback_ok),
@@ -1414,6 +1419,7 @@ module biu_cycle_gen #(
         eu_burst_rdata2 = bc_burst_rdata2; eu_burst_rdata3 = bc_burst_rdata3;
         eu_burst_ack = bc_eu_burst_ack; eu_burst_berr = bc_eu_burst_berr;
         eu_burst_beat = bc_burst_beat;
+        eu_burst_beat_at_berr = bc_burst_beat_at_berr;
         eu_m16_ack   = bc_eu_m16_ack;   eu_m16_berr   = bc_eu_m16_berr;
         eu_addr_err  = 1'b0; ifu_addr_err = 1'b0;
 
