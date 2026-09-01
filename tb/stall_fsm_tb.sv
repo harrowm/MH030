@@ -3239,9 +3239,71 @@ module stall_fsm_tb;
         rom[16'h3534/4] = {MOVE_L_A0_A1, CLR_L_D5};
         rom[16'h3538/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h353C/4] = {16'd9115, NOP_OP};
-        // Temporary park -- Stage 7 will redirect this on to its own new
+
+        // Stage 7 (elegant-gliding-fog.md): WS-MOVE16/WS-PMOVE64 -- the
+        // last 2 sources closing Category H's own DSACK wait-states-on-
+        // FSM-beats breadth (WS-PTEST is checked separately below, not
+        // assumed testable -- Stage 4 already found PTEST produces zero
+        // FC=101 bus activity under this file's own transparent-TT0 MMU
+        // setup, so the same absence of a real bus cycle may mean there's
+        // nothing for wait_states to stretch either; verified, not
+        // inferred, before deciding whether to include it). Reached via an
+        // explicit JMP (0x3544-0x39FF hosts the Memind pointer-chain tests'
+        // own dynamic read/write targets -- 0x3900/0x3910/0x3B00/0x3B44-
+        // 0x3B9C -- unsafe for fall-through even though the static rom[]
+        // scanner doesn't flag them as literal collisions) to a genuinely
+        // clear region confirmed via the same collision-checking script
+        // this project's own memory (feedback_rom_write_ordering.md)
+        // documents using. rom[] content written up front, before
+        // run_int_mid_test("INT-mid-CHK2", ...) is called, matching every
+        // stage since Stage 3's own lesson.
+        rom[16'h3540/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h3544/4] = {16'h3E04, NOP_OP};
+
+        // WS-MOVE16-1 (wait_states=0): source at 0x3EA0, dest at 0x3EC0
+        // (default-fill, MOVE16's own write is what populates it).
+        rom[16'h3E04/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3E08/4] = {16'h3EA0, MOVEA_L_IMM_A1};
+        rom[16'h3E0C/4] = {16'h0000, 16'h3EC0};
+        rom[16'h3E10/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
+        rom[16'h3E14/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h3E18/4] = {16'h0000, 16'd9200};
+        // WS-MOVE16-2 (wait_states=10): source at 0x3EE0, dest at 0x3F00.
+        rom[16'h3E1C/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3E20/4] = {16'h3EE0, MOVEA_L_IMM_A1};
+        rom[16'h3E24/4] = {16'h0000, 16'h3F00};
+        rom[16'h3E28/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
+        rom[16'h3E2C/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h3E30/4] = {16'h0000, 16'd9201};
+        // WS-PMOVE64-1 (wait_states=0): CRP source at 0x3F20 (dummy,
+        // all-zero -- timing test only, this CRP is never actually walked).
+        rom[16'h3E34/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3E38/4] = {16'h3F20, PMOVE_A0_OP};
+        rom[16'h3E3C/4] = {PMOVE_CRP_EXT, CLR_L_D5};
+        rom[16'h3E40/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3E44/4] = {16'd9202, NOP_OP};
+        // WS-PMOVE64-2 (wait_states=10): CRP source at 0x3F30.
+        rom[16'h3E48/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3E4C/4] = {16'h3F30, PMOVE_A0_OP};
+        rom[16'h3E50/4] = {PMOVE_CRP_EXT, CLR_L_D5};
+        rom[16'h3E54/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3E58/4] = {16'd9203, NOP_OP};
+        // Temporary park -- Stage 8 will redirect this on to its own new
         // tests instead of parking permanently here.
-        rom[16'h3540/4] = {BRA_SELF, NOP_OP};
+        rom[16'h3E5C/4] = {BRA_SELF, NOP_OP};
+
+        rom[16'h3EA0/4] = 32'h1111_2222;
+        rom[16'h3EA4/4] = 32'h3333_4444;
+        rom[16'h3EA8/4] = 32'h5555_6666;
+        rom[16'h3EAC/4] = 32'h7777_8888;
+        rom[16'h3EE0/4] = 32'hAAAA_BBBB;
+        rom[16'h3EE4/4] = 32'hCCCC_DDDD;
+        rom[16'h3EE8/4] = 32'hEEEE_FFFF;
+        rom[16'h3EEC/4] = 32'h1234_5678;
+        rom[16'h3F20/4] = 32'h0000_0000;
+        rom[16'h3F24/4] = 32'h0000_0000;
+        rom[16'h3F30/4] = 32'h0000_0000;
+        rom[16'h3F34/4] = 32'h0000_0000;
 
         run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
 
@@ -3381,6 +3443,74 @@ module stall_fsm_tb;
             check("WS-MOVEmm: wait states measurably lengthen MOVE mem-mem's own bus cycles too",
                   elapsedX > elapsed0);
         end
+
+        // WS-MOVE16: DSACK wait-states composing with MOVE16's own 16-byte
+        // SIZ=11 burst block-move beat shape.
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3E04; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVE16-1: wait_states=0, D5=9200", 5, 32'd9200, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3E1C; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-MOVE16-2: wait_states=10, D5=9201", 5, 32'd9201, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-MOVE16: wait states measurably lengthen MOVE16's own burst bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-PMOVE64: DSACK wait-states composing with PMOVE (A0),CRP's own
+        // 64-bit (2-longword) load beat shape.
+        begin
+            int elapsed0, elapsedX, t;
+            wait_states = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3E34; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-PMOVE64-1: wait_states=0, D5=9202", 5, 32'd9202, 4000, elapsed0);
+            wait_states = 10;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3E48; t++)
+                @(posedge clk_4x);
+            run_and_check_timed("WS-PMOVE64-2: wait_states=10, D5=9203", 5, 32'd9203, 4000, elapsedX);
+            wait_states = 0;
+            check("WS-PMOVE64: wait states measurably lengthen PMOVE64's own load bus cycles too",
+                  elapsedX > elapsed0);
+        end
+
+        // WS-PTEST: checked directly, not assumed excludable -- and this
+        // check is why it's NOT in Category H's final source count.
+        // Stage 4 (elegant-gliding-fog.md) predicted PTEST would be a
+        // clean, zero-delta non-source under this file's own transparent-
+        // TT0 MMU setup (a pure internal ATC-array hit, no real table
+        // walk, so nothing for wait_states to stretch). The real result
+        // was a genuine, deeper problem, not the predicted mild one: a
+        // first attempt re-establishing the transparent TT0/TC.E=1 state
+        // (needed since several later tests in this file disable TC again
+        // for their own real-table-walk work, so B-20/B-21's own setup is
+        // NOT still live by this point) then had PTEST's own dependent
+        // ADDI hang outright (FAIL, elapsed=4000/timeout). Direct signal
+        // tracing (temporary `$display`s on ifu_bus_err/eu_berr/exc_active/
+        // need_ext, removed before finalizing) found `exc_active` gets
+        // stuck at 1 indefinitely with `ifu_bus_err` also stuck at 1 and
+        // `eu_berr` pulsing repeatedly -- a genuine, sustained instruction-
+        // fetch translation fault (not resolved by the exception dispatch
+        // it triggers), specifically on ADDI's own immediate-operand fetch
+        // crossing from PTEST's own 16-byte cache line into the next one,
+        // despite that next line's own address still being well within the
+        // "transparent for any VA" TT0 window. This is a real, previously
+        // undiscovered combination (I-cache miss-fill + a fresh TC.E
+        // re-enable + a cache-line-crossing fetch, immediately following a
+        // genuine PTEST/ATC-install) that nothing in this project's own
+        // 206-phase history has exercised together before -- confirmed,
+        // not guessed at, but substantially deeper than this breadth-
+        // extension stage's own scope; matches this project's established
+        // "confirmed real, but substantial -- deferred to a dedicated
+        // future phase" precedent (e.g. the BERR-during-fill investigation,
+        // Phase 158 Stage 8) rather than a rushed fix. PTEST is therefore
+        // excluded from Category H's own final source count, same
+        // disposition as Stage 4 already gave it for Category F, just for
+        // a more serious reason than originally predicted.
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

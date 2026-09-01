@@ -4994,3 +4994,54 @@ own transparent-TT0 MMU setup (making it incompatible with `run_int_mid_test`), 
 will need to check directly whether the same limitation applies to a wait-state
 composition test (which doesn't strictly need FC=101 timing, just *some* bus activity
 to stretch) before assuming PTEST can be included.
+
+## Phase 207 (pipeline-stall breadth extension plan, Stage 7): WS-MOVE16/WS-PMOVE64 -- closes Category H's own practical ceiling
+
+New `WS-MOVE16`/`WS-PMOVE64` in `tb/stall_fsm_tb.sv`, reusing B-8's MOVE16 encoding and
+B-21's PMOVE-CRP-load encoding, same `WS-*` two-instance pattern as every prior Category
+H source. Both passed cleanly on the first attempt at `wait_states=10` -- no reversal or
+absorption surprise this time (MOVE16 245->362 ticks, PMOVE64 96->143 ticks). Reached via
+a JMP from WS-MOVEmm's own tail, avoiding the memory-indirect-EA test family's own
+dynamic pointer-chain targets (0x3900/0x3910/0x3B00/0x3B44-0x3B9C) -- a genuine class of
+collision the project's own static `rom[]`-literal collision-checker can't see (per
+`feedback_rom_write_ordering.md`), confirmed via manual inspection of those tests' own
+`MOVEA`-loaded addresses before picking a destination, not just the checker's own output.
+
+**WS-PTEST was attempted third, per the plan's own "check directly rather than assume"
+instruction, and found substantially worse than predicted.** Stage 4's own Category F
+finding (PTEST produces zero FC=101 bus activity under this file's transparent-TT0 setup)
+predicted a clean zero-delta non-source here too, since there'd be nothing for
+`wait_states` to stretch. First attempt reused that same TT0 setup, assumed still live --
+wrong: several later tests in the file (the memory-indirect EA and MMU-hardening test
+regions) explicitly disable TC again for their own real-table-walk work, so B-20/B-21's
+own transparent TC.E=1 state is long gone by Stage 7. Re-establishing it explicitly
+(reusing the same 0x3800/0x3804 TC/TT0 data B-20/B-21 themselves wrote, still present in
+memory) then produced an outright hang (`FAIL`, `elapsed=4000`/timeout), not the
+predicted zero-delta pass. Direct signal tracing (temporary `$display`s bracketing
+decode_pc/stall/`ex_exc_dispatch_hazard`/`exc_active`/`ifu_bus_err`/`eu_berr`, removed
+before finalizing) found the real mechanism: a genuine, sustained instruction-fetch
+translation fault -- `ifu_bus_err` and `exc_active` both stuck at 1 for 2000+ ticks,
+`eu_berr` pulsing repeatedly without ever resolving -- on a fetch that crosses from
+PTEST's own 16-byte I-cache line into the next one (needed to fetch ADDI's own immediate
+operand), despite that next line's own address being well within the "transparent for
+any VA" TT0 window that had already worked correctly for the first several instructions
+in the sequence. This is a genuinely new combination this project's own 206-phase history
+had never exercised together before: an I-cache miss-fill, immediately following a fresh
+TC.E re-enable, immediately following a real PTEST/ATC-install, crossing a cache-line
+boundary. Confirmed real via direct tracing, not guessed at -- but substantially deeper
+and riskier to chase than this breadth-extension stage's own scope, matching this
+project's established "confirmed real, but substantial -- deferred to a dedicated future
+phase" precedent (closest prior example: the BERR-during-fill investigation, Phase 158
+Stage 8) rather than a rushed fix under time pressure. Reverted WS-PTEST's own `rom[]`
+content and test block entirely, documenting the finding in-line at the point it would
+have been added, rather than silently dropping it.
+
+Results: `tb/stall_fsm_tb.sv` 0 failures (6 new checks -- WS-MOVE16/WS-PMOVE64 only),
+`make test` 36/36. Testbench-only (no RTL touched, confirmed via `git diff --stat rtl/`)
+-- no Harte re-run needed. `docs/stalls.md` updated: Category H 12->14 sources (3
+locations), plus a new "PTEST remains excluded, for a deeper reason than predicted" note
+documenting Stage 7's own finding precisely. **This closes Category H to its own
+practical ceiling** -- same disposition Stage 4 already gave Category F, just for a more
+serious PTEST-specific reason this time. See `~/.claude/plans/elegant-gliding-fog.md` for
+the full 8-stage plan. Stage 8 (3 new back-to-back FSM pairs: CAS2->MOVE16, BFINS->CAS2,
+RTE->TAS) is next -- the last stage in this plan.
