@@ -141,7 +141,10 @@ module stall_hazard_tb;
         .fc_out       (),
         .bus_err      (),
         .bus_err_addr (),
-        .addr_err     ()
+        .addr_err     (),
+        // open-items backlog Stage 13 (plan.md): not exercised here.
+        .bkpt_subst_active (1'b0),
+        .bkpt_subst_word   (16'h0)
     );
 
     m68030_seq u_seq2 (

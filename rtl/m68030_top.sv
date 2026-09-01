@@ -135,6 +135,9 @@ module m68030_top #(
     logic [31:0] eu_bkpt_rdata;
     logic        eu_bkpt_ack, eu_bkpt_berr;
     logic        eu_bkpt_illegal_req_w;
+    // open-items backlog Stage 13 (plan.md): live opcode substitution.
+    logic        eu_bkpt_subst_active_w;
+    logic [15:0] eu_bkpt_subst_word_w;
     logic [31:0] eu_mo_rdata0, eu_mo_rdata1;
     logic [31:0] eu_mo_rdata2, eu_mo_rdata3;
     logic        eu_mo_ack, eu_mo_berr;
@@ -392,7 +395,10 @@ module m68030_top #(
         .fc_out       (ifu_fc_out),
         .bus_err      (ifu_bus_err),
         .bus_err_addr (ifu_bus_err_addr),
-        .addr_err     (ifu_addr_err_int)
+        .addr_err     (ifu_addr_err_int),
+        // open-items backlog Stage 13 (plan.md): live opcode substitution.
+        .bkpt_subst_active (eu_bkpt_subst_active_w),
+        .bkpt_subst_word   (eu_bkpt_subst_word_w)
     );
 
     // ───────────────────────────────────────────────────────────────────────
@@ -474,6 +480,8 @@ module m68030_top #(
         .eu_bkpt_ack         (eu_bkpt_ack),
         .eu_bkpt_berr        (eu_bkpt_berr),
         .eu_bkpt_illegal_req (eu_bkpt_illegal_req_w),
+        .eu_bkpt_subst_active (eu_bkpt_subst_active_w),
+        .eu_bkpt_subst_word   (eu_bkpt_subst_word_w),
         // MMU instruction interface
         .eu_pflush_req   (eu_pflush_req_w),
         .eu_pflush_all   (eu_pflush_all_w),

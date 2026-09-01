@@ -113,6 +113,9 @@ module m68030_eu (
     input  logic        eu_bkpt_ack,
     input  logic        eu_bkpt_berr,
     output logic        eu_bkpt_illegal_req,
+    // open-items backlog Stage 13 (plan.md): live opcode substitution.
+    output logic        eu_bkpt_subst_active,
+    output logic [15:0] eu_bkpt_subst_word,
 
     // ── MMU instruction interface ──────────────────────────────
     output logic        eu_pflush_req,
@@ -366,6 +369,8 @@ module m68030_eu (
         .eu_bkpt_ack         (eu_bkpt_ack),
         .eu_bkpt_berr        (eu_bkpt_berr),
         .eu_bkpt_illegal_req (eu_bkpt_illegal_req),
+        .eu_bkpt_subst_active (eu_bkpt_subst_active),
+        .eu_bkpt_subst_word   (eu_bkpt_subst_word),
         // MMU instruction interface
         .eu_pflush_req   (eu_pflush_req),
         .eu_pflush_all   (eu_pflush_all),

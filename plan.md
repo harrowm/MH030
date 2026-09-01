@@ -4443,3 +4443,149 @@ indirect descriptors). See `~/.claude/plans/compressed-hopping-cocoa.md`
 for the remaining 2 stages (13-14, BKPT live opcode substitution and
 cpSAVE/cpRESTORE full transfer protocol, both lower-value stub-scope
 items per the plan's own notes).
+
+## Phase 199 (open-items backlog Stage 13 — BKPT live opcode substitution)
+
+Closes the gap Phase 157 Stage 3 deliberately left open: BKPT's own
+DSACK'd bus response already correctly captured the replacement opcode
+word, but never spliced it back into the pipeline for genuine re-decode
+-- PC simply advanced past BKPT normally. This phase makes that
+substitution real.
+
+**Design** (confirmed via direct trace before writing any RTL): BKPT is
+architecturally exactly 1 word with no extension words of its own, so
+the replacement opcode's own extension words (if any) are simply
+whatever real memory already holds right after BKPT's own opcode word
+-- meaning live substitution can be implemented as a pure `instr_word`
+override mux at the IFU's own output, with zero changes needed to
+`ext_count`/drain (both are already computed fresh from whatever value
+`instr_word` presents).
+
+**RTL**: `rtl/eu_seq.sv` gained `bkpt_wait_replacement_r`/
+`bkpt_subst_active_r` (bridging the 1-cycle gap between
+`bkpt_replacement_r`'s own registered write and it being safely
+readable, then holding the substituted opcode active for exactly one
+decode cycle) and two new output ports, `eu_bkpt_subst_active`/
+`eu_bkpt_subst_word`, threaded through `m68030_eu.sv` -> `m68030_top.sv`
+-> a new `bkpt_subst_active`/`bkpt_subst_word` input pair on
+`m68030_ifu.sv`, which mux `instr_word = bkpt_subst_active ?
+bkpt_subst_word : q[0]`. Three testbenches instantiating `m68030_ifu`
+directly (`tb/ifu_tb.sv`, `tb/pipeline_tb.sv`, `tb/stall_hazard_tb.sv`)
+needed the two new inputs tied off; the 18 files instantiating
+`m68030_eu`/`eu_seq` directly needed no changes at all, since the two
+new ports there are outputs (Icarus allows leaving those unconnected).
+
+**Bug 1 (found via direct trace, fixed)**: BKPT's own *initial* decode
+fired a real `instr_ack` immediately -- `bkpt_start_r`/`bkpt_run_r`
+only get set the *next* edge, so nothing stalled the very first cycle
+-- letting the IFU drain past BKPT's own slot in `q[]` before the
+substitution FSM's own bus cycle had even started. By the time
+`bkpt_subst_active_r` finally activated, `q[0]` already held the REAL
+next instruction's own opcode, so the substitution mux correctly
+overrode `instr_word` for one cycle (the replacement executed
+correctly) but the subsequent drain then silently consumed the real
+next instruction's own opcode word as if it belonged to the
+substituted decode, skipping it entirely. Fixed by adding a new
+`ex_mem_stall` term (`dec_valid && dec_is_bkpt && !bkpt_start_r &&
+!bkpt_run_r && !bkpt_wait_replacement_r && !bkpt_subst_active_r`)
+stalling the SAME cycle a raw BKPT opcode is first decoded, and
+switching the FSM's own dispatch trigger from `instr_ack` (which can
+never fire for a raw, stalled BKPT opcode, since the new stall term
+itself suppresses it -- a self-referential design) to the unstalled
+`dec_valid` directly.
+
+**Bug 2 (found via the full Harte sweep, the harder of the two)**:
+after Bug 1's fix, the full 124-suite sweep showed a real, reproducible
+regression -- `PASS 702140 FAIL 4 SKIP 281221 TIMEOUT 2` (JSR and RTS
+each gaining exactly 1 new TIMEOUT). Reproduced in isolation (both
+Icarus-batch and Verilator-batch, ruling out a backend-specific issue;
+`run_harte.py`'s own true single-process model passed the identical
+test cleanly, initially pointing at "batch mode's own deliberate
+no-memory-clear-between-tests design" as the culprit). Direct
+instrumentation of the failing `JSR (A0)` test (temporary `$display`s
+on the BKPT FSM's own state transitions, later on
+`ex_valid`/`ex_is_jsr`/`mem_ack`/`ex_redirect_pending`, all removed
+before finalizing) found the real mechanism was narrower and more
+interesting than stale batch memory: `gen_harte_hex.py` (unchanged,
+pre-existing behavior) deliberately patches the WORD IMMEDIATELY AFTER
+a control-transfer instruction's own opcode with whatever the
+reference 68000's own real prefetch queue held at that moment (Harte's
+own `initial.prefetch` field) -- a genuine, always-present, real part
+of this exact test vector (present in single-process mode too, not
+batch-mode garbage) -- and for this specific test, that word happened
+to be `0x484e`, itself a real BKPT-pattern match. Real 68000/68030
+silicon's own IFU genuinely does prefetch that word regardless of
+whether the control transfer will redirect away from it; every OTHER
+instruction type is naturally immune to ever *committing* to it,
+because their own dispatch trigger requires `instr_ack`, which
+requires `!stall`, so they never commit until stall_base clears --
+BKPT's own new early trigger (added for Bug 1, reacting to `dec_valid`
+alone, specifically because `instr_ack` can never fire for a raw BKPT)
+is the first mechanism in this project ever exposed to this "stale,
+about-to-be-flushed fall-through slot" race.
+
+First fix attempt added `ex_redirect_pending` (an EX-stage "is
+JSR/BSR/RTS/RTR/RTE still waiting on its own mem_ack" guard, excluding
+BKPT's early trigger while true) -- still hung. Direct trace showed
+why: it fired with `ex_valid=1 ex_is_jsr=1 mem_ack=1` all simultaneously
+-- i.e. on the EXACT cycle JSR's own push finally acks and its redirect
+fires, which the first attempt's `!mem_ack`-style exclusion specifically
+treated as "no longer pending." But `m68030_ifu.sv`'s own `q_cnt<=0`
+flush (triggered by `pc_wr_en`, itself driven combinationally from the
+SAME redirect this cycle) only takes effect on the FOLLOWING clock
+edge -- so on the redirect-firing cycle itself, decode is STILL looking
+at the stale, pre-flush `q[0]`, racing with JSR's own completion.
+Fixed by widening `ex_redirect_pending` to `branch_taken ||
+(ex_valid && (ex_is_jsr || ex_is_bsr || ex_is_rts || ex_is_rtr ||
+ex_is_rte))` -- `branch_taken` (a module port, so no forward-reference
+concern, and already covers every redirect-capable instruction
+including Bcc/JMP/DBcc which resolve in a single cycle with no
+"pending" window of their own) catches the exact redirect-firing cycle
+for all of them; the `ex_valid && ex_is_X` term catches the earlier,
+multi-cycle "still waiting for mem_ack" window specific to
+JSR/BSR/RTS/RTR/RTE. Both terms clear on the exact same clock edge
+`m68030_ifu.sv`'s own `q_cnt<=0` takes effect (ex_valid/ex_is_X latch
+from dec_valid, which by then already reflects the flushed queue), so
+there's no residual gap. Hit the project's own well-documented Icarus
+forward-reference-in-a-continuous-assign issue twice while implementing
+this (a `wire =` inline declaration doesn't bind when referenced by an
+earlier continuous assign, even though `always_ff` procedural code
+tolerates it) -- fixed by splitting `ex_redirect_pending` into an early
+plain-`logic` declaration (right after `rtr_stall`/`rte_stall`'s own
+declaration, well before `ex_mem_stall`'s own assign) with its actual
+`assign` computed from only early-available signals (`ex_valid`,
+`ex_is_X`, `mem_ack`, `rtr_phase_r`, `rte_phase_r` -- deliberately NOT
+the `ex_*_taken` wires, themselves late-assigned continuous assigns
+that would have reintroduced the identical issue).
+
+Re-verified the isolated JSR window (tests 7460-7479) after the fix:
+the spurious `bkpt_dispatch` trace line is gone entirely for test 7479,
+which now reports `OK` with the correct final PC (matching A0's own
+value, the genuine JSR target) instead of chasing garbage decoded from
+the stale fall-through word. `JSR.json.gz` and `RTS.json.gz` each
+independently re-verified at 100% (3738/3738, 4008/4008) under the
+Icarus batch backend before running the full sweep.
+
+**New test coverage** (`tb/stall_fsm_tb.sv`, full-chip `m68030_top`,
+the first-ever end-to-end test of BKPT's DSACK'd outcome actually being
+spliced into the pipeline and executed): `BKPT #3` (its own fixed
+CPU-space address `rom[0xC]` patched up front to hold `MOVEQ
+#42,D0`) immediately followed by `CLR.L D5` / `ADDI.L #1234,D5` --
+proving both that the substituted opcode genuinely executed (D0=42)
+and that the REAL next instruction in memory right after BKPT's own
+single opcode word ran normally afterward, unaffected (D5=1234), using
+a register the substitution itself never touches. Redirected
+`PLOAD-ext-count`'s own former permanent self-park into a JMP reaching
+this new test; relaxed its own `decode_pc`-exact-match check into a
+range (it used to rely on that address being a permanent dead-end,
+which is no longer true).
+
+Results: `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind`
+13/13, full 124-suite Harte sweep (mandatory -- `eu_seq.sv` changed,
+and this specifically touches the shared `branch_taken`/redirect
+machinery every control-transfer instruction in the corpus depends on)
+-- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0, bit-identical to baseline, zero regressions. **Closes Stage
+13 of the open-items backlog.** Stage 14 (cpSAVE/cpRESTORE full
+transfer protocol) is next, per the user's explicit request to continue
+past Stage 12's own original stopping point.

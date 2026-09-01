@@ -200,6 +200,9 @@ module stall_fsm_tb;
     localparam MOVE_SR_IDX_A1  = 16'h40F1;  // MOVE.W SR,(d8,A1,D2.L)
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
+    // open-items backlog Stage 13 (plan.md): BKPT live opcode substitution.
+    localparam BKPT_3         = 16'h484B;  // BKPT #3 (breakpoint number in bits[2:0])
+    localparam MOVEQ_D0_42    = 16'h702A;  // MOVEQ #42,D0 (the replacement opcode)
     // CAS.L Dc,Du,(A0): opcode 0000_111_0_11_010_000 (f_dn=111=long,
     // f_mode=010=(An)) per eu_seq.sv's dec_is_cas block. Ext word:
     // [8:6]=Dc(compared, ->D1=001), [2:0]=Du(written on match, ->D2=010).
@@ -1457,6 +1460,14 @@ module stall_fsm_tb;
             // ready to watch (see claim_park()'s own header comment for
             // why that direction of control matters) — fixes that cleanly.
             rom[16'h0008/4] = 32'h0000_0090;
+            // open-items backlog Stage 13 (plan.md): BKPT #3's own fixed
+            // CPU-space address is bkpt_num*4 = 0xC (eu_bkpt_addr =
+            // {27'h0,bkpt_num_r,2'b00}) -- written up front here,
+            // alongside the other fixed-address content, well before the
+            // real BKPT-substitution test itself runs (see near the end
+            // of this file). Only the HIGH word is ever read
+            // (eu_bkpt_siz=word, top-justified); the low word is unused.
+            rom[16'h000C/4] = {MOVEQ_D0_42, NOP_OP};
             rom[16'h0090/4] = {CLR_L_D5, ADDI_L_D5};
             rom[16'h0094/4] = {16'h0000, 16'd999};
             rom[16'h0098/4] = {JMP_ABS_L_OP, PARK_ADDR[31:16]};
@@ -2707,7 +2718,22 @@ module stall_fsm_tb;
         rom[16'h3FA4/4] = {16'h2000, 16'hF010};          // A0=0x2000 ; PLOAD (A0) opcode
         rom[16'h3FA8/4] = {16'h6200, MOVE_L_IMM_D6};      // PLOAD ext word (mmu_op_type=011) ; MOVE.L #imm,D6
         rom[16'h3FAC/4] = {16'h0000, 16'h5678};
-        rom[16'h3FB0/4] = {BRA_SELF, NOP_OP};
+        // open-items backlog Stage 13 (plan.md): redirect on to the BKPT
+        // live-substitution test instead of parking permanently here.
+        rom[16'h3FB0/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h3FB4/4] = {16'h3FC0, NOP_OP};
+
+        // BKPT #3 substitutes to MOVEQ #42,D0 (rom[0xC], written up
+        // front above); the word right after BKPT's own opcode (0x3FC2)
+        // is the REAL next instruction in the stream, unaffected by the
+        // substitution -- CLR.L D5 + ADDI.L #1234,D5 proves execution
+        // continued normally afterward, using a DIFFERENT register (D5)
+        // than the substituted instruction's own target (D0) so both
+        // effects are independently checkable.
+        rom[16'h3FC0/4] = {BKPT_3, CLR_L_D5};
+        rom[16'h3FC4/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3FC8/4] = {16'd1234, NOP_OP};
+        rom[16'h3FCC/4] = {BRA_SELF, NOP_OP};
 
         begin
             int t;
@@ -2856,8 +2882,43 @@ module stall_fsm_tb;
                 @(posedge clk_4x);
             check32("PLOAD-ext-count: instruction after PLOAD's own extension word decoded and executed correctly (no wild jump)",
                     u_top.u_eu.u_rf.d_reg[6], 32'h0000_5678);
-            check("PLOAD-ext-count: decode_pc landed exactly where expected, not off in uninitialized memory",
-                  u_top.ifu_decode_pc == 32'h0000_3FB0);
+            // open-items backlog Stage 13 (plan.md): 0x3FB0 used to be a
+            // permanent self-park (BRA_SELF), so decode_pc reading exactly
+            // that address was a robust check regardless of exactly when
+            // it was sampled. It's now a real JMP on to the BKPT
+            // substitution test below, so decode_pc can legitimately have
+            // already moved past it by the time this is checked -- relaxed
+            // to a range covering everywhere that redirect can reach,
+            // while still catching the original bug's own real wild-jump
+            // target (0x6BE6, nowhere near this range).
+            check("PLOAD-ext-count: decode_pc landed somewhere sensible, not off in uninitialized memory",
+                  u_top.ifu_decode_pc >= 32'h0000_3FB0 && u_top.ifu_decode_pc <= 32'h0000_3FD0);
+        end
+
+        // -------------------------------------------------------------
+        // BKPT-live-substitution (open-items backlog Stage 13, plan.md):
+        // the first-ever end-to-end test of BKPT's own DSACK'd outcome
+        // actually being spliced into the pipeline and executed, closing
+        // the scope boundary Phase 157 Stage 3 originally documented
+        // ("captures the replacement opcode word correctly but does not
+        // attempt live re-decode/substitution"). BKPT #3 (rom[0x3FC0])
+        // reads its own fixed CPU-space address (rom[0xC], set up front
+        // near the top of this file) and substitutes to MOVEQ #42,D0 --
+        // D0 proves the substitution's own value landed; D5 (set by
+        // CLR.L D5 / ADDI.L #1234,D5, the REAL next instruction in
+        // memory right after BKPT's own single opcode word, entirely
+        // unaffected by the substitution) proves execution continued
+        // normally afterward, using a register the substituted
+        // instruction itself never touches.
+        // -------------------------------------------------------------
+        begin
+            int t;
+            for (t = 0; t < 20000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd1234; t++)
+                @(posedge clk_4x);
+            check32("BKPT-live-substitution: real next instruction after BKPT's own opcode word ran (D5=1234)",
+                    u_top.u_eu.u_rf.d_reg[5], 32'd1234);
+            check32("BKPT-live-substitution: the replacement opcode (MOVEQ #42,D0) genuinely executed",
+                    u_top.u_eu.u_rf.d_reg[0], 32'd42);
         end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));

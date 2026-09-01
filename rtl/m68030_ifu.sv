@@ -81,7 +81,18 @@ module m68030_ifu (
     // Fault outputs
     output logic        bus_err,
     output logic [31:0] bus_err_addr,
-    output logic        addr_err      // decode_pc[0]: odd address error
+    output logic        addr_err,     // decode_pc[0]: odd address error
+
+    // open-items backlog Stage 13 (plan.md): live BKPT opcode
+    // substitution. When active, instr_word presents bkpt_subst_word
+    // instead of q[0] for exactly one decode cycle -- the underlying
+    // q[] array and drain/ext_count mechanism are entirely untouched,
+    // since BKPT is always exactly 1 word with no extension words of
+    // its own; the substituted instruction's own extension words (if
+    // any) are simply whatever q[1]/q[2]/... already hold, unaffected
+    // by this mux.
+    input  logic         bkpt_subst_active,
+    input  logic [15:0]  bkpt_subst_word
 );
 
     // -----------------------------------------------------------------------
@@ -102,7 +113,8 @@ module m68030_ifu (
     // -----------------------------------------------------------------------
     // Combinational outputs
     // -----------------------------------------------------------------------
-    assign instr_word   = q[0];
+    // open-items backlog Stage 13 (plan.md): live BKPT opcode substitution.
+    assign instr_word   = bkpt_subst_active ? bkpt_subst_word : q[0];
     assign ext_data     = {q[1], q[2]};
     assign q3_word      = q[3];
     assign ext34_data   = {q[3], q[4]};

@@ -230,6 +230,10 @@ module eu_seq (
     input  logic        eu_bkpt_ack,
     input  logic        eu_bkpt_berr,
     output logic        eu_bkpt_illegal_req,  // one-cycle pulse: BERR'd BKPT -> illegal instr
+    // open-items backlog Stage 13 (plan.md): live opcode substitution --
+    // threaded all the way up to m68030_ifu.sv's own instr_word mux.
+    output logic        eu_bkpt_subst_active,
+    output logic [15:0] eu_bkpt_subst_word,
 
     // ── Address register update port (for (An)+ and -(An)) ──────────────────
     output logic        an_wr_en,
@@ -6709,6 +6713,14 @@ module eu_seq (
     logic        bkpt_run_r;       // eu_bkpt_req active, waiting for ack/berr
     logic [2:0]  bkpt_num_r;       // captured breakpoint number (f_reg)
     logic [15:0] bkpt_replacement_r; // captured replacement opcode word (DSACK'd outcome)
+    // open-items backlog Stage 13 (plan.md): live opcode substitution.
+    // bkpt_wait_replacement_r bridges the 1-cycle gap between
+    // bkpt_replacement_r's own registered write (the same edge
+    // bkpt_run_r clears) and it actually being readable; bkpt_subst_active_r
+    // is then 1 for exactly the one decode cycle the IFU should present
+    // bkpt_replacement_r instead of its own q[0] as instr_word.
+    logic        bkpt_wait_replacement_r;
+    logic        bkpt_subst_active_r;
 
     // cpSAVE/cpRESTORE dispatch FSM (Phase 157 Stage 4) — declared early for ex_mem_stall
     logic        cpsr_start_r;     // one-cycle setup after instr_ack
@@ -6808,6 +6820,57 @@ module eu_seq (
     // exc_active, not just mem_berr).
     assign rtr_stall    = ex_is_rtr && !(mem_berr || exc_active) && !(rtr_phase_r && mem_ack);
     assign rte_stall    = ex_is_rte && !(mem_berr || exc_active) && !(rte_phase_r && mem_ack) && !eu_fmt_err_req;
+
+    // open-items backlog Stage 13 (plan.md), Bug 2 fix: JSR/BSR/RTS/RTR/RTE
+    // all occupy EX for one or more cycles WAITING on their own push/pop
+    // mem_ack before the redirect/flush actually lands. During that
+    // window, decode has *already* moved on (dec_valid/instr_word reflect
+    // q[0] combinationally, independent of whether the older EX-stage
+    // instruction has committed) -- so decode can be looking at the
+    // STALE, pre-redirect "fall-through" instruction slot, which is about
+    // to be discarded once the pending redirect resolves. Every OTHER
+    // instruction type is naturally immune to this (their own dispatch
+    // trigger requires instr_ack, which requires !stall, so they never
+    // commit until AFTER stall_base clears). BKPT's own early trigger
+    // (see the ex_mem_stall term below) is the first mechanism in this
+    // project to react to dec_valid alone, specifically because instr_ack
+    // can never fire for a raw BKPT opcode -- which also makes it the
+    // first mechanism exposed to this stale-slot race. Confirmed via
+    // direct trace (Bug 2 investigation): a genuine JSR (A0) Harte test
+    // hung because BKPT's own early trigger fired on the fall-through
+    // word immediately after JSR's own opcode (a word gen_harte_hex.py
+    // deliberately patches into memory to match the reference CPU's own
+    // real prefetch-queue content for that test -- not stale batch-mode
+    // memory carryover; this can happen in ANY run, single-process or
+    // batched, whenever the IFU's own linear readahead reaches it before
+    // an older control-transfer's own redirect lands).
+    //
+    // First attempt excluded only "still waiting for mem_ack" (via an
+    // explicit !mem_ack-style check per instruction) and left the exact
+    // ack/redirect cycle itself unguarded -- still hung, because
+    // m68030_ifu.sv's own q_cnt<=0 flush (on pc_wr_en, itself driven
+    // combinationally from branch_taken/ex_jsr_taken etc. this same
+    // cycle) only takes effect on the FOLLOWING clock edge: on the exact
+    // cycle mem_ack arrives and the redirect fires, decode is STILL
+    // looking at the old, pre-flush q[0] one more time. Confirmed via
+    // trace: the hang reproduced with ex_valid=1/ex_is_jsr=1/mem_ack=1
+    // (JSR's OWN redirect firing) on the exact same cycle BKPT's early
+    // trigger fired too.
+    //
+    // Fixed via branch_taken (a port, so no forward-reference concern --
+    // covers Bcc/JMP/DBcc, all of which resolve unconditionally the same
+    // cycle they'd otherwise race this exact way, as well as the redirect
+    // cycle itself for JSR/BSR/RTS/RTR/RTE) OR'd with a plain "one of
+    // JSR/BSR/RTS/RTR/RTE is anywhere in EX" check (covers their own
+    // multi-cycle wait BEFORE mem_ack arrives, in addition to the
+    // redirect cycle branch_taken already covers). Both terms clear on
+    // the exact same clock edge m68030_ifu.sv's own q_cnt<=0 takes
+    // effect (ex_valid/ex_is_X latch from dec_valid, which by then
+    // already reflects the flushed/empty queue), so there's no residual
+    // gap between "guard lifts" and "IFU catches up".
+    logic ex_redirect_pending;
+    assign ex_redirect_pending = branch_taken ||
+        (ex_valid && (ex_is_jsr || ex_is_bsr || ex_is_rts || ex_is_rtr || ex_is_rte));
     // cmpm_stall declared above (near CMPM state registers)
     // tas_read_ack: hold pipeline stall on the cycle the TAS read ack fires (before
     // tas_run_r becomes 1) so EX doesn't release prematurely. Gated by !tas_after_write_r
@@ -6840,7 +6903,32 @@ module eu_seq (
                           movep_start_r || movep_pre_r || movep_run_r ||
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
-                          bkpt_start_r || bkpt_run_r ||
+                          bkpt_start_r || bkpt_run_r || bkpt_wait_replacement_r ||
+                          // open-items backlog Stage 13 (plan.md): a raw,
+                          // just-recognized BKPT opcode must stall the
+                          // SAME cycle it's first decoded -- otherwise
+                          // instr_ack fires immediately (bkpt_start_r
+                          // isn't set until the NEXT edge), letting the
+                          // IFU drain past BKPT's own slot before the
+                          // substitution FSM even starts, corrupting the
+                          // instruction stream once the real replacement
+                          // finally arrives (confirmed via direct trace,
+                          // not guessed at -- decode_pc had already
+                          // advanced past BKPT's own address while
+                          // bkpt_run_r was still 1).
+                          //
+                          // Bug 2 fix (see ex_redirect_pending's own
+                          // declaration/comment near ex_jsr_taken etc.):
+                          // also require !ex_redirect_pending -- while an
+                          // older JSR/BSR/RTS/RTR/RTE is still waiting on
+                          // its own mem_ack, the "current" decode slot can
+                          // be a stale fall-through word about to be
+                          // flushed by that instruction's own pending
+                          // redirect; don't let a spurious BKPT-shaped
+                          // match on that stale word stall/dispatch here.
+                          (dec_valid && dec_is_bkpt && !bkpt_start_r && !bkpt_run_r &&
+                           !bkpt_wait_replacement_r && !bkpt_subst_active_r &&
+                           !ex_redirect_pending) ||
                           cpsr_start_r || cpsr_run_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
                           pflush_start_r || pflush_req_r ||
@@ -7546,6 +7634,9 @@ module eu_seq (
     // breakpoint-acknowledge cycle takes an illegal instruction exception.
     wire bkpt_trap_w = bkpt_run_r && eu_bkpt_berr;
     assign eu_bkpt_illegal_req = bkpt_trap_w;
+    // open-items backlog Stage 13 (plan.md): live opcode substitution.
+    assign eu_bkpt_subst_active = bkpt_subst_active_r;
+    assign eu_bkpt_subst_word   = bkpt_replacement_r;
 
     logic ex_will_except;
     assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
@@ -8789,41 +8880,73 @@ module eu_seq (
     end
 
     // -----------------------------------------------------------------------
-    // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3)
+    // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3; live
+    // substitution added open-items backlog Stage 13, plan.md)
     // On instr_ack of a BKPT instruction, issue one CPU-space read via
     // eu_bkpt_req -- address per manual Figure 7-42 (type field 0, breakpoint
     // number on A[4:2]). Two outcomes (Section 7.4.2):
-    //   DSACK'd/STERM'd: data word is a replacement opcode, captured here.
-    //   Real live re-decode/substitution of that word into the pipeline is
-    //   NOT implemented -- instr_word is a plain combinational alias of the
-    //   IFU's own prefetch-queue head (m68030_ifu.sv) with no override mux
-    //   anywhere, and correctly interacting with the IFU's own ext_count/
-    //   drain logic for whatever the replacement opcode turns out to need
-    //   is a substantial separate undertaking (confirmed via direct
-    //   investigation before implementing this stage). This mirrors the
-    //   FPU coprocessor stub's own scope boundary (Phase 55: "issues one
-    //   CPI CPU Space bus cycle; full protocol in later phases") --
-    //   bkpt_replacement_r proves the bus protocol/data-lane extraction are
-    //   correct; PC simply advances past BKPT normally, same as any other
-    //   1-word instruction.
+    //   DSACK'd/STERM'd: data word is a replacement opcode, captured into
+    //   bkpt_replacement_r, then genuinely spliced into the pipeline in
+    //   place of BKPT (bkpt_wait_replacement_r/bkpt_subst_active_r below,
+    //   feeding m68030_ifu.sv's own new instr_word override mux) -- BKPT
+    //   is always exactly 1 word with no extension words of its own, so
+    //   the replacement's own extension words (if any) are simply
+    //   whatever real memory already holds right after the BKPT opcode --
+    //   exactly what a real fetched instruction's own extension words
+    //   would be too, needing no special IFU drain handling beyond the
+    //   ordinary ext_count computed fresh from the substituted instr_word.
+    //   Real memory is never modified -- this is a pure pipeline-internal
+    //   substitution, matching the manual's own "spliced... in place of
+    //   BKPT" wording exactly.
     //   BERR'd: illegal instruction exception (bkpt_trap_w above).
     // -----------------------------------------------------------------------
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            bkpt_start_r       <= 1'b0;
-            bkpt_run_r         <= 1'b0;
-            bkpt_num_r         <= 3'h0;
-            bkpt_replacement_r <= 16'h0;
+            bkpt_start_r             <= 1'b0;
+            bkpt_run_r               <= 1'b0;
+            bkpt_num_r               <= 3'h0;
+            bkpt_replacement_r       <= 16'h0;
+            bkpt_wait_replacement_r  <= 1'b0;
+            bkpt_subst_active_r      <= 1'b0;
         end else begin
-            if (!bkpt_start_r && !bkpt_run_r && instr_ack && dec_is_bkpt) begin
+            // open-items backlog Stage 13 (plan.md): the dispatch trigger
+            // is dec_valid (decode currently sees a valid BKPT opcode),
+            // NOT instr_ack -- with live substitution, instr_ack for a
+            // raw, unresolved BKPT opcode must never fire at all (see the
+            // new bkpt_raw_stall term folded into ex_mem_stall below,
+            // which is exactly what keeps instr_ack low here), so a
+            // trigger keyed on instr_ack would never fire, deadlocking
+            // the whole mechanism. dec_valid alone is enough: decode
+            // genuinely IS looking at a real BKPT opcode this cycle,
+            // stall or not.
+            //
+            // Bug 2 fix: also require !ex_redirect_pending, matching the
+            // identical guard added to the ex_mem_stall term above -- see
+            // ex_redirect_pending's own declaration/comment for the full
+            // derivation (a stale fall-through decode slot, about to be
+            // flushed by an older JSR/BSR/RTS/RTR/RTE's own pending
+            // redirect, must never be trusted as a real BKPT dispatch).
+            if (!bkpt_start_r && !bkpt_run_r && !bkpt_wait_replacement_r &&
+                !bkpt_subst_active_r && dec_valid && dec_is_bkpt &&
+                !ex_redirect_pending) begin
                 bkpt_start_r <= 1'b1;
                 bkpt_num_r   <= f_reg;   // breakpoint number, opcode bits [2:0]
             end else if (bkpt_start_r) begin
                 bkpt_start_r <= 1'b0;
                 bkpt_run_r   <= 1'b1;
             end else if (bkpt_run_r && eu_bkpt_ack) begin
-                bkpt_run_r         <= 1'b0;
-                bkpt_replacement_r <= eu_bkpt_rdata[31:16]; // word-aligned read: word lands top-justified
+                bkpt_run_r              <= 1'b0;
+                bkpt_replacement_r      <= eu_bkpt_rdata[31:16]; // word-aligned read: word lands top-justified
+                bkpt_wait_replacement_r <= 1'b1;
+            end else if (bkpt_wait_replacement_r) begin
+                // bkpt_replacement_r is valid as of THIS cycle (registered
+                // the same edge bkpt_run_r cleared) -- now safe to present.
+                bkpt_wait_replacement_r <= 1'b0;
+                bkpt_subst_active_r     <= 1'b1;
+            end else if (bkpt_subst_active_r && instr_ack) begin
+                // The substituted decode was accepted -- revert instr_word
+                // to the IFU's own q[0] for the instruction after it.
+                bkpt_subst_active_r <= 1'b0;
             end else if (bkpt_run_r && eu_bkpt_berr) begin
                 bkpt_run_r <= 1'b0;
             end
