@@ -5471,3 +5471,70 @@ Results: `tb/eu_seq_tb.sv` 0 failures (11 new checks), `make test` 36/36,
 baseline, zero regressions. **Closes Stage 6.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the remaining 6-stage
 backlog. Stage 7 (cpSAVE/cpRESTORE EMPTY/INVALID test coverage) is next.
+
+## Phase 215 (deferred-items closure plan, Stage 7): cpSAVE/cpRESTORE EMPTY/INVALID test coverage
+
+Added dedicated coverage for the EMPTY and INVALID/format-error paths of
+the real cpSAVE/cpRESTORE protocol (built by Phase 229, previously only
+exercised via VALID/good-length format words). All four against the
+already-fully-real `(An)` EA mode: cpSAVE-empty (Save CIR returns
+format=$00, format word still written to EA, no transfer loop follows),
+cpSAVE-invalid (Save CIR returns format=$05, a reserved code -- must
+never touch EA at all, instead write the $0001 abort mask to the Control
+CIR and fire the format-error exception), cpRESTORE-empty (memory holds
+format=$00, round-trips through the Restore CIR echo, no transfer loop),
+cpRESTORE-invalid (memory holds format=$10/length=$03 -- a VALID code
+with a non-multiple-of-4 length, gated on the length *retained from the
+original memory read* per 10.2.3.4.2's own wording, not the echo's own
+value -- must abort the same way).
+
+New `fmt_err_seen` sticky monitor (`always @(posedge clk_4x) if
+(u_seq.eu_fmt_err_req) fmt_err_seen<=1;`) since `eu_fmt_err_req` is a
+1-cycle combinational pulse exactly on the abort-mask write's own ack,
+too precise a window for a plain `check()` after `pulse_cp_ack()`
+returns.
+
+**Root-caused and fixed a real testbench-only race, not an RTL bug** --
+confirmed via extensive direct signal tracing (temporary, all removed
+before finalizing) that `cpsr_abort_r` correctly asserts on the exact
+ack that carries the INVALID format code (matching the RTL's own
+already-correct decision logic exactly), but then spuriously *cleared
+itself* again one clock edge later, before the test could ever observe
+it. Root cause: `wait_cp_req()`'s own internal poll loop, whenever it
+genuinely has to wait (the common case, not the "already true" fast
+path), always returns *exactly on* a raw `posedge clk_4x` -- never
+settled `#1` past it, unlike this file's own dispatch convention
+elsewhere (`@(posedge clk_4x); #1;`). Calling `pulse_cp_ack()`
+immediately afterward (zero simulated delay) sets `cp_ack_tb=1` within
+that *same* simulated instant -- and the DUT's own `always_ff`, also
+triggered by that identical edge, ends up observing the ack on *that*
+edge rather than the intended "next" one (confirmed via Icarus's own
+event-scheduling order for this file). `pulse_cp_ack()`'s own internal
+`@(posedge clk_4x)` -- which thinks it's waiting for "the next edge
+after the ack was set" -- therefore actually catches one edge *later*
+than the DUT's own genuine consumption, holding `cp_ack_tb=1` for a full
+extra clock period the DUT never needed. Harmless for a single isolated
+ack (just one wasted idle cycle) or for chains with a genuine `mem_req`
+step in between (which naturally reintroduces the missing `#1` offset,
+matching every OTHER multi-step CIR transaction already in this file) --
+but the abort path chains two `cp_req`-only transactions directly with
+nothing in between, so the stale-held ack lands exactly on the very edge
+`cpsr_abort_r && eu_coproc_ack`'s own clearing condition checks,
+spuriously undoing the abort assertion one cycle after it fires. Two
+earlier fix attempts (a bare settle `@(posedge clk_4x);` inserted
+*after* `pulse_cp_ack()` returns) didn't work because the damage happens
+*inside* `pulse_cp_ack()`'s own body, before it ever returns control --
+too late for any fix placed after the call. The real, minimal fix: a
+single `#1;` inserted immediately *before* the first `pulse_cp_ack()`
+call in the chain, restoring the same settled offset every other
+transaction already has by construction -- zero change to the shared
+`wait_cp_req()`/`pulse_cp_ack()` tasks themselves.
+
+Results: `tb/eu_seq_tb.sv` 0 failures (11 new checks: cpSAVE-empty x4,
+cpSAVE-invalid x5, cpRESTORE-empty x4, cpRESTORE-invalid x6 -- one check
+count discrepancy from the plan's own estimate is just because several
+of these blocks ended up with more granular checks than originally
+sketched), `make test` 36/36. Testbench-only -- `git diff --stat rtl/`
+empty, no Harte re-run needed. **Closes Stage 7.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the remaining 5-stage
+backlog. Stage 8 (MOVE mem-to-mem plain-src (d16,An) long-bd) is next.

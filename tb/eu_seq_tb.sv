@@ -319,6 +319,15 @@ module eu_seq_tb;
     // -----------------------------------------------------------------------
     int fail_count = 0;
 
+    // Sticky monitor for cpSAVE/cpRESTORE's own format-error request
+    // (deferred-items closure plan Stage 7, plan.md): eu_fmt_err_req is a
+    // 1-cycle combinational pulse exactly on the abort-mask write's own
+    // ack, too precise a window to reliably sample with a plain check()
+    // after pulse_cp_ack() returns -- clear fmt_err_seen right before
+    // triggering an abort sequence, check it afterward.
+    logic fmt_err_seen = 1'b0;
+    always @(posedge clk_4x) if (u_seq.eu_fmt_err_req) fmt_err_seen <= 1'b1;
+
     task check(input string name, input logic cond);
         if (cond) $display("PASS  %s", name);
         else begin $display("FAIL  %s", name); fail_count++; end
@@ -1158,6 +1167,171 @@ module eu_seq_tb;
             check("cpRESTORE-postinc: FSM returned to idle (no further requests)",
                   !mem_req_tb && !cp_req_tb && !seq_busy);
             check32("cpRESTORE-postinc: A0 committed to An+4", u_rf.a_reg[0], 32'h0000_3004);
+        end
+
+        // ================================================================
+        // cpSAVE / cpRESTORE EMPTY and INVALID/format-error paths
+        // (deferred-items closure plan Stage 7, plan.md). Both were
+        // implemented by Phase 229 (open-items backlog Stage 14) but never
+        // independently exercised -- every prior test used a VALID,
+        // good-length format word. All four use the already-fully-real
+        // (An) EA mode.
+        // ================================================================
+        $display("--- cpSAVE / cpRESTORE EMPTY / INVALID paths ---");
+        begin
+            // cpSAVE (A0), A0=0x1200. Save CIR returns EMPTY (format=$00):
+            // format word still gets written to EA, but no transfer loop.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_1200;
+
+            instr_word  = 16'hF310;  // cpSAVE (A0), mode=010,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_cp_req();
+            check("cpSAVE-empty: Save CIR read", cp_req_tb && cp_rw_tb);
+            pulse_cp_ack(32'h0000_0000);  // format=$00 (EMPTY)
+
+            wait_mem_req();
+            check("cpSAVE-empty: format word written at EA", mem_addr_tb === 32'h0000_1200);
+            check32("cpSAVE-empty: format-word value (EMPTY)", mem_wdata_tb, 32'h0000_0000);
+            pulse_mem_ack(32'h0);
+
+            repeat(8) @(posedge clk_4x);
+            check("cpSAVE-empty: FSM idle, no transfer loop (EMPTY)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
+        end
+
+        begin
+            // cpSAVE (A0), A0=0x1300. Save CIR returns INVALID (format=$05,
+            // a reserved code) -- must NOT write anything to EA at all, and
+            // must instead write the $0001 abort mask to the Control CIR,
+            // then fire the format-error exception (vector 14).
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_1300;
+
+            instr_word  = 16'hF310;  // cpSAVE (A0), mode=010,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_cp_req();
+            check("cpSAVE-invalid: Save CIR read", cp_req_tb && cp_rw_tb);
+            // wait_cp_req()'s own internal loop, when it genuinely waits
+            // (the common case), always returns exactly ON a raw posedge
+            // (never settled #1 past it, unlike this file's own dispatch
+            // convention elsewhere). Calling pulse_cp_ack() with zero delay
+            // right here sets cp_ack_tb=1 within that SAME simulated
+            // instant, which the DUT's own always_ff (triggered by that
+            // identical edge) can also observe on THIS edge rather than
+            // the next one -- root-caused via direct tracing: cpsr_abort_r
+            // asserts one edge earlier than pulse_cp_ack's own internal
+            // @(posedge) expects, so its ack ends up held for one full
+            // extra clock period, still asserted on the very next edge --
+            // exactly when cpsr_abort_r && eu_coproc_ack's own clear
+            // condition then spuriously fires, undoing the abort before
+            // this test can ever observe it. Every OTHER multi-step
+            // transaction in this file has a genuine mem_req step between
+            // consecutive cp_req accesses, which naturally reintroduces
+            // the missing #1 offset and avoids this; the abort path chains
+            // two cp_req accesses directly with nothing in between. A
+            // single #1 here restores that same offset without touching
+            // the shared wait_cp_req()/pulse_cp_ack() tasks.
+            #1;
+            pulse_cp_ack(32'h0500_0000);  // format=$05 (INVALID/reserved)
+
+            wait_cp_req();
+            check("cpSAVE-invalid: Control CIR abort write (not a memory access)",
+                  cp_req_tb && !cp_rw_tb && !mem_req_tb);
+            check32("cpSAVE-invalid: Control CIR address", cp_addr_tb, 32'h0002_2002);
+            check32("cpSAVE-invalid: abort mask value", cp_wdata_tb, 32'h0001_0000);
+            fmt_err_seen = 1'b0;
+            pulse_cp_ack(32'h0);
+            check("cpSAVE-invalid: format-error request fired on the abort ack", fmt_err_seen);
+
+            repeat(2) @(posedge clk_4x);
+            check("cpSAVE-invalid: FSM idle, never touched memory (INVALID)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
+        end
+
+        begin
+            // cpRESTORE (A0), A0=0x1400. Memory holds format=$00 (EMPTY) at
+            // EA -- reads it, round-trips through the Restore CIR echo, then
+            // completes with no transfer loop.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_1400;
+
+            instr_word  = 16'hF350;  // cpRESTORE (A0), mode=010,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_mem_req();
+            check("cpRESTORE-empty: format word read from EA", mem_req_tb && mem_rw_tb &&
+                  mem_addr_tb === 32'h0000_1400);
+            pulse_mem_ack(32'h0000_0000);  // format=$00 (EMPTY)
+
+            wait_cp_req();
+            check("cpRESTORE-empty: Restore CIR write", cp_req_tb && !cp_rw_tb);
+            pulse_cp_ack(32'h0);
+
+            wait_cp_req();
+            check("cpRESTORE-empty: Restore CIR echo read", cp_req_tb && cp_rw_tb);
+            pulse_cp_ack(32'h0000_0000);  // echo back EMPTY
+
+            repeat(8) @(posedge clk_4x);
+            check("cpRESTORE-empty: FSM idle, no transfer loop (EMPTY)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
+        end
+
+        begin
+            // cpRESTORE (A0), A0=0x1500. Memory holds format=$10 (VALID)
+            // but length=$03 (not a multiple of 4) -- the length retained
+            // from the ORIGINAL memory read (not the echo) must gate the
+            // INVALID/abort path, per 10.2.3.4.2's own "the main processor
+            // retains a copy of the length field" wording.
+            while (seq_busy) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            u_rf.a_reg[0] = 32'h0000_1500;
+
+            instr_word  = 16'hF350;  // cpRESTORE (A0), mode=010,reg=000
+            instr_valid = 1'b1;
+            ext_valid   = 1'b0;
+            @(posedge clk_4x); #1;
+            instr_valid = 1'b0;
+
+            wait_mem_req();
+            check("cpRESTORE-invalid: format word read from EA",
+                  mem_req_tb && mem_rw_tb && mem_addr_tb === 32'h0000_1500);
+            pulse_mem_ack(32'h1003_0000);  // format=$10 (VALID), length=$03 (bad)
+
+            wait_cp_req();
+            check("cpRESTORE-invalid: Restore CIR write", cp_req_tb && !cp_rw_tb);
+            pulse_cp_ack(32'h0);
+
+            wait_cp_req();
+            check("cpRESTORE-invalid: Restore CIR echo read", cp_req_tb && cp_rw_tb);
+            pulse_cp_ack(32'h1003_0000);  // echo back the same VALID-but-bad-length
+
+            wait_cp_req();
+            check("cpRESTORE-invalid: Control CIR abort write (bad retained length)",
+                  cp_req_tb && !cp_rw_tb && !mem_req_tb);
+            check32("cpRESTORE-invalid: Control CIR address", cp_addr_tb, 32'h0002_2002);
+            check32("cpRESTORE-invalid: abort mask value", cp_wdata_tb, 32'h0001_0000);
+            fmt_err_seen = 1'b0;
+            pulse_cp_ack(32'h0);
+            check("cpRESTORE-invalid: format-error request fired on the abort ack", fmt_err_seen);
+
+            repeat(2) @(posedge clk_4x);
+            check("cpRESTORE-invalid: FSM idle, no transfer loop (INVALID)",
+                  !mem_req_tb && !cp_req_tb && !seq_busy);
         end
 
         // ================================================================
