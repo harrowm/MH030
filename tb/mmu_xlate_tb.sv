@@ -185,6 +185,7 @@ module mmu_xlate_tb;
     localparam PTEST_A0_OP    = 16'hF010;  // deferred-items closure plan Stage 10 (plan.md)
     localparam PTEST_EXT      = 16'h8000;  // op_type=100(PTEST) -- same values as stall_fsm_tb.sv's own B-20
     localparam NOP_OP         = 16'h4E71;
+    localparam MOVE_W_IMM_SR  = 16'h46FC;  // deferred-items closure plan Stage 11 (plan.md)
     localparam RTE_OP         = 16'h4E73;
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
@@ -471,7 +472,74 @@ module mmu_xlate_tb;
         rom[16'h0724/4] = {16'h5000, PTEST_A0_OP};        // A0 = VA 0x20005000 ; PTEST opcode @0x0726
         rom[16'h0728/4] = {PTEST_EXT, CLR_L_D5};          // PTEST ext @0x0728 ; CLR.L D5 @0x072A (still line 0x0720-0x072F)
         rom[16'h072C/4] = {ADDI_L_D5, 16'h0000};          // ADDI opcode @0x072C (offset 12) -- own imm crosses into 0x0730
-        rom[16'h0730/4] = {16'd999, BRA_SELF};            // marker D5=999 (PTEST + crossing ADDI fetch survived)
+        rom[16'h0730/4] = {16'd999, JMP_ABS_L_OP};        // marker D5=999 (PTEST + crossing ADDI fetch survived)
+        rom[16'h0734/4] = {16'h0000, 16'h0800};           // JMP 0x00000800 (Stage 11 investigation)
+
+        // -------------------------------------------------------------
+        // Phase 7 (deferred-items closure plan Stage 11, plan.md):
+        // eu_trace_req mid-FSM/dispatch hazard. No dedicated trace-mode
+        // (SR.T) test exists anywhere in this project outside the Harte
+        // corpus itself. eu_trace_req is deliberately excluded from
+        // eu_seq.sv's own ex_exc_dispatch_hazard aggregation (Phase 134),
+        // reasoned to be "genuinely post-instruction-retirement by
+        // design" and therefore a different hazard shape than the
+        // interrupt/internal-exception dispatch race Phase 108/134
+        // already fixed -- never independently confirmed.
+        //
+        // Direct signal reading (rtl/m68030_exc.sv): exc_active =
+        // (state_r != EXC_IDLE), and EXC_IDLE's own transition to
+        // EXC_PUSH happens on trace_req's own first-true edge -- meaning
+        // exc_active only becomes true the CYCLE AFTER eu_trace_req first
+        // fires, the identical one-cycle gap shape Phase 108/151 already
+        // found and fixed for other exception sources. Whether this is a
+        // genuine, exploitable hazard depends on whether a new
+        // instruction can actually dispatch into EX during that one
+        // cycle -- tested directly here with a non-idempotent marker
+        // (ADDI.L #1,D6, mirroring Phase 108's own technique): sets
+        // SR.T1=1, then a traced CLR.L D5, immediately followed
+        // (already decoded, ready to dispatch) by the marker. If the
+        // hazard is real, D6 may show 2 (executed once prematurely
+        // mid-dispatch, once more after RTE); if not, exactly 1.
+        //
+        // RESULT (confirmed via a temporary hierarchical trace, since
+        // removed): the dispatch race IS real -- instr_ack does fire for
+        // the next instruction on the exact cycle eu_trace_req asserts,
+        // one cycle before exc_active catches up, identical in shape to
+        // every other exception source's own recognition gap. But it
+        // never corrupts anything: eu_seq.sv's EX latch has a *pre-
+        // existing, exception-source-agnostic* "stall -> insert bubble"
+        // branch (`else if (stall) ex_valid<=1'b0`, unrelated to
+        // exceptions -- it exists purely so a decode-side stall doesn't
+        // leak garbage into EX) that fires the very next cycle once
+        // `stall`/`ex_exc_dispatch_hazard`'s own `exc_active` term goes
+        // high, squashing the raced-in instruction's ex_valid to 0 before
+        // `wb_valid<=ex_valid` can ever latch it into WB. So the fix
+        // Phase 108 needed for interrupts (a bespoke int_ready/int_defer
+        // gate) was never actually about closing the 1-cycle recognition
+        // window itself -- that window is structural, exists for every
+        // exception source, and can't be closed without exc_active
+        // becoming combinational. What Phase 108 fixed was that, before
+        // it, NOTHING included int_pending in `stall` at all, so a raced-
+        // in instruction ran completely unguarded to full WB commit. Once
+        // exc_active is in `stall` (true for interrupts since Phase 108,
+        // and true for trace/internal exceptions from the start), the
+        // pre-existing bubble-insert logic protects every exception
+        // source uniformly -- eu_trace_req needs no bespoke term in
+        // ex_exc_dispatch_hazard, and doesn't have a "different hazard
+        // shape" from the others; it's the same shape, already covered.
+        // -------------------------------------------------------------
+        rom[16'h0800/4] = {MOVE_W_IMM_SR, 16'hA700};      // SR = S=1,IPL=7,T1=1
+        rom[16'h0804/4] = {CLR_L_D6, CLR_L_D5};           // D6=0 (marker) ; D5=0 (the TRACED instruction)
+        rom[16'h0808/4] = {ADDI_L_D6, 16'h0000};          // ADDI.L #1,D6 -- non-idempotent marker
+        rom[16'h080C/4] = {16'h0001, BRA_SELF};
+
+        // Vector 9 (Trace) handler: deliberately does nothing but RTE --
+        // SR.T1 stays set on return, so BRA_SELF's own later retirement
+        // also re-traces (an endless, harmless trace/RTE loop back into
+        // the self-branch -- D6 is never touched again either way, so a
+        // bounded wait then a direct D6 check is sufficient regardless).
+        rom[16'h0024/4] = 32'h0000_0820;                  // vector 9 -> 0x0820
+        rom[16'h0820/4] = {RTE_OP, NOP_OP};
 
         saw_walk_read_addr       = 1'b0;
         saw_translated_data_read = 1'b0;
@@ -671,6 +739,29 @@ module mmu_xlate_tb;
                     u_top.eu_berr, u_top.u_eu.u_rf.d_reg[5]);
             end
             check("Phase 6: ADDI's own immediate-operand fetch straddling the line right after PTEST survives (D5=999)", saw_d5_999);
+        end
+
+        // -------------------------------------------------------------
+        // Phase 7 (deferred-items closure plan Stage 11, plan.md):
+        // eu_trace_req mid-FSM dispatch-race check.
+        // -------------------------------------------------------------
+        begin
+            int t;
+            logic saw_d6_1;
+            saw_d6_1 = 1'b0;
+            for (t = 0; t < 5000; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_eu.u_rf.d_reg[6] === 32'd1) begin saw_d6_1 = 1'b1; break; end
+            end
+            check("Phase 7: ADDI's own marker was seen at exactly D6=1 (no premature dispatch)", saw_d6_1);
+            // A settle window past that first sighting: if the hazard is
+            // real, D6 should climb to 2 (a second, illegitimate ADDI
+            // commit) shortly after -- if not, it must stay pinned at 1
+            // forever (ADDI never executes again; only its own single,
+            // correct retirement should ever touch D6).
+            repeat(2000) @(posedge clk_4x);
+            check32("Phase 7: D6 stayed pinned at exactly 1 -- no double-commit from a mid-dispatch race",
+                    u_top.u_eu.u_rf.d_reg[6], 32'd1);
         end
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);

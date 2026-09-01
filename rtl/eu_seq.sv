@@ -7745,10 +7745,20 @@ module eu_seq (
     // identical unprotected shape, so this aggregates all of them rather
     // than special-casing priv alone. Excluded: eu_reset_req (RESET
     // pulses RSTOUT directly, no exc_active-mediated frame dispatch to
-    // race against) and eu_trace_req (already separately gated on
-    // !ex_mem_stall and, being genuinely post-instruction-retirement by
-    // design, is a different hazard shape not reproduced here -- left for
-    // a dedicated follow-up rather than bundled in speculatively).
+    // race against) and eu_trace_req -- investigated directly (deferred-
+    // items closure plan Stage 11, plan.md; see tb/mmu_xlate_tb.sv's own
+    // "Phase 7" test) via a hierarchical trace: the same 1-cycle dispatch
+    // race Phase 108 fixed for interrupts DOES occur here too (instr_ack
+    // fires for the next instruction the exact cycle eu_trace_req
+    // asserts, one cycle before exc_active catches up) -- but it never
+    // corrupts anything, because exc_active is already in `stall` below,
+    // and the very next cycle's pre-existing, exception-agnostic
+    // "stall -> insert bubble" EX-latch branch (else if (stall)
+    // ex_valid<=1'b0, several hundred lines below) squashes the raced-in
+    // instruction before wb_valid<=ex_valid can ever commit it. No
+    // bespoke term needed -- eu_trace_req doesn't have a different hazard
+    // shape from priv/trap/illegal/etc.; it's the identical shape,
+    // already covered by exc_active alone.
     // BKPT's BERR outcome (Phase 157 Stage 3) is decided later than decode
     // time -- only once eu_bkpt_berr arrives, mid-FSM -- same shape as
     // chk_trap/div_trap immediately below, not the plain ex_is_illegal

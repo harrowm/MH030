@@ -5765,3 +5765,80 @@ Testbench-only -- `git diff --stat rtl/` empty, no Harte re-run needed.
 the plan's own explicit allowance for this outcome). See
 `~/.claude/plans/elegant-gliding-fog.md` for the remaining 2-stage backlog.
 Stage 11 (`eu_trace_req` mid-FSM hazard) is next.
+
+## Phase 219 (deferred-items closure plan, Stage 11): eu_trace_req mid-FSM/dispatch hazard -- investigated, confirmed race exists but is already structurally safe
+
+Stage 11 asked whether Phase 134's own excluded `eu_trace_req` term in
+`ex_exc_dispatch_hazard` ("genuinely post-instruction-retirement by design...
+a different hazard shape... left for a dedicated follow-up") was actually
+safe. No dedicated trace-mode (`SR.T1`) test existed anywhere in this project
+outside the Harte corpus itself before this stage (confirmed via grep).
+
+**Test built**: a new "Phase 7" block in `tb/mmu_xlate_tb.sv` (chosen over
+`tb/stall_fsm_tb.sv` for its own much simpler, collision-free structure --
+this file's own Phase 1-6 blocks already establish the exact
+JMP-redirect-between-phases convention needed). `MOVE.W #0xA700,SR` (sets
+T1=1) -> `CLR.L D6` (marker pre-clear) -> `CLR.L D5` (the traced instruction)
+-> `ADDI.L #1,D6` (a non-idempotent marker, mirroring Phase 108's own
+technique exactly) -> `BRA_SELF` (park). Vector 9 (Trace) handler is a bare
+`RTE`. If the hazard is real, D6 would show 2 (the marker committing once
+prematurely mid-dispatch, once more after RTE); if not, exactly 1.
+
+**Result: both checks passed cleanly** (D6 pinned at exactly 1, no
+double-commit) -- but rather than accept a bare negative result the way
+Phase 137's "JMP (An) after exception dispatch" investigation did, added a
+temporary hierarchical trace (`u_top.u_eu.eu_trace_req`/`u_top.u_exc.exc_active`/
+`u_top.u_eu.u_seq.{dec_valid,ex_valid,stall}`/`u_top.u_eu.instr_ack`, since
+removed) to understand *why*, not just confirm *that*. The trace showed
+something more interesting than a simple non-collision: **the dispatch race
+genuinely does occur** --
+
+```
+t=44895 trace_req=1 exc_active=0 dec_valid=1 instr_ack=1 ex_valid=1 stall=0 decode_pc=00000806
+t=44905 trace_req=1 exc_active=1 dec_valid=0 instr_ack=0 ex_valid=1 stall=1 decode_pc=00000808
+t=44915 trace_req=0 exc_active=1 dec_valid=0 instr_ack=0 ex_valid=0 stall=1 decode_pc=00000808
+```
+
+At t=44895, `eu_trace_req=1` (CLR.L D6 retiring) but `exc_active=0` still (the
+same one-cycle recognition gap Phase 108/151 already found for every other
+exception source) -- and `instr_ack=1` fires that exact cycle, meaning
+CLR.L D5 genuinely dispatches into EX (`ex_valid<=dec_valid`, the ordinary
+non-stalled path at line 8188) during the window. One cycle later,
+`exc_active=1` catches up and `stall` (via `ex_exc_dispatch_hazard`'s own
+already-present `exc_active` term) goes high -- and `eu_seq.sv`'s EX latch has
+a **pre-existing, completely exception-agnostic** "stall -> insert bubble"
+branch (`else if (stall) ex_valid<=1'b0`, line ~8066-8068 -- present since
+long before this session, for the mundane, unrelated reason of "decode is
+blocked this cycle, don't let garbage flow into EX") that fires immediately
+and squashes the raced-in CLR.L D5's own `ex_valid` to 0 -- visibly, by
+t=44915 -- **before** `wb_valid<=ex_valid` (line 10283, itself gated on `!ex_mem_stall
+&& !ex_internal_stall && !ex_berr_abort_wb`, all false for a plain register-direct
+CLR) could ever latch it into WB.
+
+**This reframes Phase 108's own original fix, not just this one exclusion.**
+The 1-cycle recognition window (dispatch racing in before `exc_active` visibly
+catches up) is structural -- it exists for *every* exception source, `eu_trace_req`
+included, and can't be closed without making `exc_active` itself combinational.
+What Phase 108 actually fixed for interrupts wasn't that window; it was that,
+*before* the fix, nothing included `int_pending` in `stall` at all, so a
+raced-in instruction ran completely unguarded all the way to a real WB commit.
+Once `exc_active` is present in `stall` -- true for interrupts since Phase 108,
+and true for internal exceptions/`eu_trace_req` from the start, since
+`ex_exc_dispatch_hazard` already included `exc_active` unconditionally -- the
+pre-existing, always-present bubble-insert logic protects every exception
+source uniformly, one cycle later, regardless of which `_req` signal raised
+it. `eu_trace_req` was never structurally different from `priv`/`trap`/
+`illegal`/etc.; it was already covered, just never verified.
+
+**Fixed**: updated the stale comment in `rtl/eu_seq.sv` (the `eu_trace_req`
+exclusion note) and the matching passage in `docs/stalls.md` to record the
+verified mechanism instead of the old "different hazard shape... left for a
+follow-up" framing. No RTL logic changed -- comment-only in `eu_seq.sv`, plus
+the new permanent `tb/mmu_xlate_tb.sv` "Phase 7" test as regression coverage
+(the temporary trace instrumentation was fully removed before finalizing).
+
+Results: `make test` 36/36 (including the new `mmu_xlate` Phase 7 checks),
+`make cosim_grp` 8/8. Testbench/comment-only -- `git diff --stat rtl/` shows
+only the comment hunk, no Harte re-run needed. **Closes Stage 11.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the one remaining stage.
+Stage 12 (Burst-mode timing residual) is next -- the last stage in this plan.

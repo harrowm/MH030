@@ -417,8 +417,18 @@ case only needs a single-cycle pulse to see the request, so nothing is lost by l
 advance immediately afterward; what matters is that `exc_active` itself, folded into the
 same OR term, keeps blocking new dispatch for the rest of the window regardless of what
 EX holds. Excludes `eu_reset_req` (RESET pulses RSTOUT directly, no frame dispatch to
-race) and `eu_trace_req` (a genuinely different, post-retirement hazard shape, not
-reproduced here — left as its own follow-up).
+race) and `eu_trace_req` — investigated directly (deferred-items closure plan Stage 11,
+`plan.md`; `tb/mmu_xlate_tb.sv`'s own "Phase 7" test) via a hierarchical trace: the same
+1-cycle dispatch race described above genuinely does occur for `eu_trace_req` too
+(`instr_ack` fires for the next instruction the exact cycle `eu_trace_req` asserts, one
+cycle before `exc_active` catches up) — but it never corrupts anything, because
+`exc_active` is already in `stall` regardless of which `_req` source raised it, and the
+very next cycle's pre-existing, exception-agnostic "stall → insert bubble" EX-latch
+branch (`else if (stall) ex_valid<=1'b0`, unrelated to exceptions — it exists purely so a
+decode-side stall doesn't leak garbage into EX) squashes the raced-in instruction before
+`wb_valid<=ex_valid` can ever commit it. No bespoke term needed: `eu_trace_req` isn't a
+different hazard shape from `priv`/`trap`/`illegal`/etc., it's the identical shape,
+already covered by `exc_active` alone.
 
 **Duration**: held for the entire `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` window, same shape as
 Category F's `int_defer`.
