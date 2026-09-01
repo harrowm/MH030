@@ -3056,10 +3056,64 @@ module stall_fsm_tb;
         rom[16'h2858/4] = {CMP2_L_A0_D1, CHK2_EXT};
         rom[16'h285C/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h2860/4] = {16'h0000, 16'd9005};
-        // Temporary park -- Stage 3 will redirect this on to its own new
+        // No JMP -- falls straight through into INT-mid-MOVEmm's own code.
+        // MOVEmm's own rom[] content (below) is written HERE, up front,
+        // BEFORE run_int_mid_test("INT-mid-CHK2"...) is called -- not
+        // after it. This is the exact "ROM write issued after simulated
+        // time already passed that address" class this project has hit
+        // repeatedly (Phase 131 I-4/I-5, Phase 126 T4c/T4d): a first
+        // attempt placed these writes AFTER the CHK2 call returned, and
+        // traced decode reading pure default-fill NOPs (0x4E71) all the
+        // way from 0x2864 to 0x286E instead of the real MOVEA.L
+        // instructions -- the IFU's own speculative readahead had already
+        // raced past 0x2864 while CHK2's own (real-time-consuming)
+        // run_int_mid_test call was still executing, well before this
+        // SV code got around to writing the real bytes there.
+        rom[16'h2864/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2868/4] = {16'h3104, MOVEA_L_IMM_A1};
+        rom[16'h286C/4] = {16'h0000, 16'h3110};
+        rom[16'h2870/4] = {MOVE_L_A0_A1, CLR_L_D5};
+        rom[16'h2874/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2878/4] = {16'd9006, NOP_OP};
+        rom[16'h3104/4] = 32'hDEAD_C0DE;
+
+        // INT-mid-RTR: interrupt arrival mid-RTR (2-phase stack read: CCR
+        // word, then PC longword -- the first control-transfer/stack-
+        // restore FSM shape exercised by this mechanism). Falls straight
+        // through from MOVEmm's own tail above -- no JMP needed (RTR is
+        // itself a control-transfer instruction). Frame at 0x2932
+        // (CCR)/0x2934 (PC), same even-SP-but-4-aligned-PC trick B-15
+        // already established.
+        rom[16'h287C/4] = {MOVEA_L_IMM_A7, 16'h0000};
+        rom[16'h2880/4] = {16'h2932, RTR_OP};
+        rom[16'h2930/4] = {16'h0000, 16'h0000};   // CCR=0 at 0x2932
+        rom[16'h2934/4] = 32'h0000_2940;          // PC -> dependent instr
+        rom[16'h2940/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2944/4] = {16'h0000, 16'd9007};
+
+        // INT-mid-RTE: interrupt arrival mid-RTE (format-$0 frame). SR
+        // restored with S=1 so supervisor mode continues unaffected.
+        // Reached via plain fall-through from RTR's own dependent target
+        // above (0x2940's own tail, at 0x2948).
+        rom[16'h2948/4] = {MOVEA_L_IMM_A7, 16'h0000};
+        rom[16'h294C/4] = {16'h2950, RTE_OP};
+        rom[16'h2950/4] = {16'h0000, 16'h2000};   // fmt/vec=0, SR=0x2000 (S=1)
+        rom[16'h2954/4] = 32'h0000_2960;          // PC -> dependent instr
+        rom[16'h2960/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2964/4] = {16'h0000, 16'd9008};
+        // Temporary park -- Stage 4 will redirect this on to its own new
         // tests instead of parking permanently here.
-        rom[16'h2864/4] = {BRA_SELF, NOP_OP};
+        rom[16'h2968/4] = {BRA_SELF, NOP_OP};
+
         run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
+
+        run_int_mid_test("INT-mid-MOVEmm", 32'h0000_2864, 2, 5, 32'd9006, 32'h0000_008A);
+        check32("INT-mid-MOVEmm: source copied to destination despite the interrupt",
+                rom[16'h3110/4], 32'hDEAD_C0DE);
+
+        run_int_mid_test("INT-mid-RTR", 32'h0000_287C, 2, 5, 32'd9007, 32'h0000_008A);
+
+        run_int_mid_test("INT-mid-RTE", 32'h0000_2948, 2, 5, 32'd9008, 32'h0000_008A);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 

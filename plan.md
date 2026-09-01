@@ -4783,3 +4783,68 @@ updated: Category F 12->14 sources (3 locations: the summary table row, the "Wha
 left" tally, and Category F's own "Coverage depth" paragraph). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. Stage 3
 (`INT-mid-MOVEmm`/`INT-mid-RTR`/`INT-mid-RTE`) is next.
+
+## Phase 203 (pipeline-stall breadth extension plan, Stage 3): INT-mid-MOVEmm/INT-mid-RTR/INT-mid-RTE
+
+Third stage of `~/.claude/plans/elegant-gliding-fog.md`. `INT-mid-MOVEmm` (reuses B-14's
+MOVE.L (A0),(A1) encoding), `INT-mid-RTR` and `INT-mid-RTE` (reuse B-15/B-16's own
+2-phase stack-frame-restore encodings) -- the first control-transfer/stack-restore FSM
+shapes exercised by this mechanism, closing Category F to 17 of ~19-23 sources.
+
+This stage took an extremely long, winding investigation to land -- worth recording in
+detail since the eventual root cause is a single, well-precedented testbench mistake,
+but getting there involved ruling out a large amount of misleading evidence first. The
+very first attempt (a JMP-based skip mechanism copying INT-mid-CHK2's own bound-data
+skip) hit a real, reproducible-looking failure: a JMP's own 32-bit absolute-address
+extension words read back as zero (`ext_valid` asserting one tick before `ext_data`
+caught up), sending decode to a wild target. Removing the JMP (falling through instead,
+matching every other back-to-back interrupt-mid-test transition already in this file)
+"fixed" that specific symptom but uncovered a *different* one: MOVEmm's own MOVEA.L
+setup instructions silently failed to update A0/A1, with the FSM instead reading/writing
+through stale register values left over from entirely unrelated, much-earlier tests
+(CHK2's own A0, SBCD's own A1). Extensive isolated-repro testing (TAS after CHK2 with a
+genuine 2nd interrupt: fine; two consecutive MOVEA.L instructions before TAS: fine;
+MOVEmm alone with nothing after it: fine; RTR alone reached fresh via a clean JMP from
+SBCD: fine) kept *not* reproducing the failure in isolation, while the *combined*
+MOVEmm+RTR+RTE build kept failing in shifting, inconsistent ways depending on incidental
+details (address choice, JMP vs fall-through) -- strong evidence of testbench fragility
+rather than a stable RTL defect, prompting an explicit mid-investigation check-in with
+the user (who asked to continue) before the final, decisive trace.
+
+That final trace (direct `$display` on `instr_word`/`dec_valid`/`instr_ack` at the
+exact fetch addresses) found the real root cause: `instr_word` read `0x4E71` (the
+default ROM fill, i.e. NOP) at every address from MOVEmm's own 0x2864 through 0x286E,
+not the real MOVEA.L opcodes -- decode was reading *unwritten* memory. The `rom[]`
+writes for MOVEmm's own code had been placed, in SV program-text order, *after* the
+`run_int_mid_test("INT-mid-CHK2", ...)` call -- the exact "ROM write issued after
+simulated time already passed that address" class this project has hit repeatedly
+(Phase 131 I-4/I-5, Phase 126 T4c/T4d): CHK2's own call involves substantial real
+simulated time (interrupt injection, ISR dispatch, RTE), during which the IFU's own
+speculative linear readahead had already raced past 0x2864 -- reading default-filled
+NOPs -- long before the SV code further down in program *text* order got around to
+writing the real bytes there. Moving all of Stage 3's own `rom[]` content (MOVEmm, RTR,
+RTE) to *before* the `run_int_mid_test("INT-mid-CHK2", ...)` call, matching this
+project's own established convention, fixed every single failure across all three new
+tests immediately and completely -- confirming this was 100% a self-inflicted
+testbench-construction bug from start to finish, not an RTL defect of any kind.
+
+Final layout: MOVEmm falls straight through from CHK2's own tail (0x2864, no JMP;
+source/dest data at 0x3104/0x3110, verified not aliasing any *earlier* test's own
+dynamic write target -- e.g. `INT-mid-MOVEP`'s own destination at 0x3620, which an
+intermediate attempt at this investigation collided with, a second real
+address-collision finding along the way, this one a genuine dynamic-runtime collision
+invisible to the project's own static rom[]-literal collision-checker script).
+RTR/RTE, being genuine control-transfer instructions, need no skip mechanism for their
+own frame data (the redirect flushes the prefetch queue before any speculatively-
+fetched frame bytes are ever decoded) and chain via plain fall-through
+(MOVEmm→RTR→RTE), matching this file's own established back-to-back convention
+throughout.
+
+Results: `tb/stall_fsm_tb.sv` 0 failures (every one of the 18 new checks across
+MOVEmm/RTR/RTE passes, including MOVEmm's own data-correctness check), `make test`
+36/36. Testbench-only (no RTL touched at any point in this entire investigation,
+confirmed via `git diff --stat rtl/`) -- no Harte re-run needed. `docs/stalls.md`
+updated: Category F 14→17 sources (3 locations). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. Stage 4
+(`INT-mid-PFLUSH`/`INT-mid-PTEST`/`INT-mid-PMOVE64`, closing Category F in full) is
+next.
