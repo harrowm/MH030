@@ -5094,3 +5094,34 @@ real cross-boundary data-flow check. No known correctness gap remains in
 `docs/stalls.md`; what remains everywhere is purely breadth, matching this plan's own
 starting premise. See `plan.md`'s own Phase 201-207 entries for the full stage-by-stage
 history.
+
+## Phase 209 (deferred-items closure plan, Stage 1): doc correction — RMW write-phase confirmation
+
+Pure documentation fix, no code. A deep audit of all deferred/open items across
+`CLAUDE.md`/`plan.md`/`docs/stalls.md`/`port3.md` (forked this session, then
+spot-checked directly against the RTL — one fork finding turned out stale,
+corrected before planning) found `CLAUDE.md`'s own S-State Signal Timing
+section still hedged that RMW's write-phase S1/S3 stagger was "expected...
+not yet independently re-confirmed line-for-line" against the manual. This was
+actually already confirmed: Phase 207's own RMW write-phase S1+S7 removal work
+read MC68030UM.pdf Section 7.3.3 directly before touching any RTL, confirming
+RMW is a genuine 12-state cycle (S0-S11) with S6-S11 identical in shape to an
+ordinary write cycle, and that AS stays continuously asserted across the whole
+indivisible read+write sequence (Figure 7-30) — the hedge was simply never
+removed once the confirmation landed. Updated the note to state this directly,
+citing Phase 207. `make test` 36/36 sanity check (no functional change).
+
+This begins a new 12-stage plan (`~/.claude/plans/elegant-gliding-fog.md`,
+overwriting the completed pipeline-stall breadth extension plan per this
+project's established "different task, start fresh" convention) working
+through every item the deferred-items audit found genuinely still open:
+doc/investigation cleanup (Stages 1-3), a real CAS correctness bug plus its
+own bus-level locking (Stages 4-5), bounded cpSAVE/cpRESTORE EA extension
+(Stages 6-7), one remaining MOVE mem-to-mem EA sub-case (Stage 8), the
+delicate BERR-during-fill cache gap (Stage 9), and two open-ended
+investigations sequenced last (Stages 10-11) plus a timing re-measurement
+(Stage 12). Two items were explicitly excluded from the plan as too large for
+a single stage (genuine memory-indirect EA extended beyond `MOVE <ea>,dst`,
+and MOVEM's own genuine memory-indirect) — flagged for a dedicated future plan
+if pursued. See the plan file for the full stage list and rationale. Stage 2
+(MMU LIMIT residuals) is next.
