@@ -129,6 +129,36 @@ module m68030_ifu (
     assign ifu_addr     = fetch_addr_r;
     assign ifu_req      = fetch_pend_r;
     assign fc_out       = supervisor ? 3'b110 : 3'b010;
+    // Deferred-items closure plan Stage 3 (plan.md): MC68030UM p.6-19
+    // distinguishes "faults immediately (data) or pending-on-use
+    // (instruction)" -- confirmed, via a dedicated tb/ifu_tb.sv test
+    // (IFU-12) plus a direct trace against tb/cache_tb.sv's own I-5, that
+    // this RTL does NOT implement the instruction-fetch deferral: bus_err
+    // dispatches the instant the underlying speculative prefetch fails,
+    // even while decode is still several words behind and would never
+    // have reached that address (e.g. a branch not yet taken). A first
+    // attempt gated this output on `decode_pc_r >= bus_err_addr_r`
+    // (correct for pure linear-readahead speculation, and this DOES pass
+    // that case -- see IFU-12's own tb/ifu_tb.sv coverage) but caused a
+    // real regression in tb/cache_tb.sv's own I-5: when the faulted word
+    // is itself needed as the CURRENT (not-yet-dispatched) instruction's
+    // own extension word, decode_pc_r never advances to reach it at all
+    // -- it sits pinned at the START of that instruction indefinitely,
+    // since dispatch (and therefore decode_pc_r's own advance) requires
+    // exactly the missing data to ever happen. A correct general fix
+    // needs cross-module visibility into whether decode is genuinely
+    // stalled needing more prefetch data than is currently queued (e.g.
+    // eu_seq.sv's own need_ext), not available locally in this file today
+    // -- threading that signal back into the IFU is a real, substantial
+    // change to the queue/decode interface, out of scope for this
+    // investigation stage. Reverted to the original unconditional
+    // dispatch (confirmed correct for the "decode already needs this
+    // word" case, which is the common one) rather than ship a fix that's
+    // only correct for pure speculative readahead. See tb/ifu_tb.sv's own
+    // IFU-12 for a permanent regression-detector of the confirmed-but-
+    // unfixed gap, matching this project's own established "assert
+    // today's actual behavior so make test stays green while the gap
+    // stays visible" precedent (Phase 106).
     assign bus_err      = bus_err_r;
     assign bus_err_addr = bus_err_addr_r;
     assign addr_err     = decode_pc_r[0];

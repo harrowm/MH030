@@ -5184,3 +5184,65 @@ documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline
 verification entirely from MMU-21 itself). **Closes Stage 2.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 12-stage plan. Stage 3
 (instruction-fetch BERR pending-until-use investigation) is next.
+
+## Phase 211 (deferred-items closure plan, Stage 3): instruction-fetch BERR pending-until-use -- investigated, confirmed real, not fixed
+
+Investigated the one lower-confidence claim from Phase 158 Stage 8's own
+writeup: whether a BERR on a *speculative* instruction fetch correctly stays
+pending, only faulting once the fetched word is actually about to be
+consumed by decode, per MC68030UM p.6-19's own "faults immediately (data) or
+pending-on-use (instruction)" distinction. This was flagged as "plausibly
+already satisfied for free by this project's existing IFU/decode
+architecture, but not verified end-to-end."
+
+**Confirmed real via a dedicated `tb/ifu_tb.sv` test (IFU-12)**: `bus_err`
+(`m68030_ifu.sv`'s own top-level output, `assign bus_err = bus_err_r`)
+dispatches the instant the underlying speculative prefetch fails, even while
+decode is still 2 whole words behind and would never have reached that
+address without further instructions retiring first (e.g. an intervening,
+not-yet-resolved branch). No deferral of any kind exists.
+
+**Attempted fix, found genuinely insufficient, reverted**: gated `bus_err` on
+`decode_pc_r >= bus_err_addr_r` (the faulted longword's own base address) --
+correct for pure linear-readahead speculation (this DOES pass IFU-12's own
+first sub-case) and, critically, requires no new state, since an intervening
+flush that would let decode_pc_r "skip past" the fault also unconditionally
+resets `bus_err_r` on the same transition (already-existing logic, verified
+unchanged). But this broke a real regression in `tb/cache_tb.sv`'s own I-5
+(BERR-mid-linefill for the I-cache, Phase 131): direct tracing showed
+`decode_pc` genuinely PINNED at the instruction *before* the faulted address
+for the entire remaining test budget -- because the faulted word was itself
+needed as that instruction's own extension word (a JMP.L's own absolute-
+address operand, in I-5's own specific case). Dispatch (and therefore any
+`decode_pc_r` advance at all) requires exactly the missing data, so
+`decode_pc_r` can structurally never "catch up" to it -- the gate condition
+that correctly captures "pure speculative readahead" is the wrong condition
+for "decode already needs this exact word."
+
+A fully correct general fix needs cross-module visibility into whether
+decode is genuinely stalled needing more prefetch data than is currently
+queued (`eu_seq.sv`'s own `need_ext` is the closest existing signal) -- not
+available locally in `m68030_ifu.sv` today. Threading that back into the IFU
+is a real, substantial change to the queue/decode interface boundary,
+correctly out of scope for a single investigation stage; the risk of a
+narrower, wrong gate (as just demonstrated) outweighs the value of a partial
+fix here.
+
+**Reverted the RTL to its original, unconditional-dispatch form** (confirmed
+correct for the common "decode already needs this word" case) and rewrote
+IFU-12 to characterize the confirmed gap directly rather than assert a
+not-actually-safe fix, matching this project's own established "assert
+today's actual behavior so `make test` stays green while the gap stays
+visible" precedent (Phase 106): IFU-12a documents the confirmed premature-
+dispatch gap; IFU-12b documents the separate, already-correctly-working half
+of the story (a flush arriving before the underlying fetch even completes
+fully suppresses the fault via the stub's own request-cancel logic, no
+dispatch at all -- genuinely unaffected by the gap above).
+
+Results: `tb/ifu_tb.sv` 0 failures (7 new checks), `make test` 36/36
+(including `cache`'s own I-5, confirmed still green). `git diff --stat rtl/`
+shows a pure comment-only diff (30 insertions, 0 functional lines changed) --
+no Harte re-run needed. **Closes Stage 3 as a confirmed-but-deferred
+investigation**, matching this plan's own explicit allowance for that
+outcome. See `~/.claude/plans/elegant-gliding-fog.md` for the full 12-stage
+plan. Stage 4 (CAS write-on-mismatch semantics) is next.

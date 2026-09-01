@@ -355,6 +355,74 @@ module ifu_tb;
         supervisor = 1'b1;
 
         // ================================================================
+        // IFU-12 (deferred-items closure plan, Stage 3): investigated
+        // whether instruction-fetch BERR stays pending until the faulted
+        // word is actually about to be consumed by decode, rather than
+        // firing the instant the speculative prefetch itself fails --
+        // MC68030UM p.6-19's own distinction ("faults immediately (data)
+        // or pending-on-use (instruction)"), flagged but never
+        // independently traced end to end (Phase 158 Stage 8's own
+        // "lower-confidence... not verified this stage" note).
+        //
+        // CONFIRMED REAL GAP, NOT FIXED THIS STAGE: a first attempt gated
+        // `bus_err` on decode_pc_r having caught up to the faulted
+        // address -- correct for pure linear-readahead speculation (IFU-12a
+        // below), but it broke tb/cache_tb.sv's own I-5: when the faulted
+        // word is needed as the CURRENT (not yet dispatched) instruction's
+        // own extension word, decode_pc_r never advances to reach it at
+        // all (dispatch, and therefore any decode_pc_r advance, requires
+        // exactly that missing data). A correct general fix needs
+        // cross-module visibility into whether decode is genuinely
+        // stalled needing more prefetch data (eu_seq.sv's own need_ext),
+        // not available locally in m68030_ifu.sv today -- out of scope for
+        // this investigation stage. Reverted to the original unconditional
+        // dispatch. IFU-12a documents the confirmed-but-unfixed gap
+        // directly (asserts today's actual behavior, matching this
+        // project's own Phase 106 precedent, so it stays visible rather
+        // than silently accepted); IFU-12b documents the separate,
+        // already-correctly-working half of the story (a flush arriving
+        // before the underlying fetch even completes fully suppresses the
+        // fault, no dispatch at all).
+        // ================================================================
+        $display("--- IFU-12: instruction-fetch BERR pending-until-use (confirmed gap, not fixed) ---");
+
+        // IFU-12a: a first fetch (0x5000) succeeds, immediately triggering
+        // the IFU's own auto-refetch (q_cnt<=2) for the NEXT longword
+        // (0x5004), which BERRs -- decode_pc stays at 0x5000 throughout (no
+        // drain issued), 2 whole words behind the faulted address. Real
+        // 68030 silicon would hold this pending; this RTL dispatches it
+        // immediately regardless.
+        stub_clear();
+        stub_add(32'h0000_5000, 32'h1111_2222, 1'b0);
+        stub_add(32'h0000_5004, 32'h0, 1'b1);
+        write_pc(32'h0000_5000);
+        repeat(2*BIU_LAT+6) @(posedge clk_4x); #1;
+        check("IFU-12a: CONFIRMED GAP -- fault dispatches even though decode is still 2 words behind",
+              bus_err);
+        check32("IFU-12a: decode_pc still at 0x5000 (nothing drained, not actually needed yet)",
+                decode_pc, 32'h0000_5000);
+        check32("IFU-12a: bus_err_addr=0x5004", bus_err_addr, 32'h0000_5004);
+
+        // IFU-12b: same shape, but the flush (an already-resolved branch)
+        // arrives BEFORE the underlying fetch even completes -- the stub's
+        // own cancel-on-deassert logic means ifu_berr never even fires for
+        // the abandoned request, so bus_err_r never sets in the first
+        // place. Genuinely different from, and unaffected by, the gap
+        // above -- this half already works correctly.
+        stub_clear();
+        stub_add(32'h0000_6000, 32'h3333_4444, 1'b0);
+        stub_add(32'h0000_6004, 32'h0, 1'b1);
+        stub_add(32'h0000_7000, 32'h5555_6666, 1'b0);
+        write_pc(32'h0000_6000);
+        repeat(BIU_LAT + 1) @(posedge clk_4x); #1;  // mid-flight, before the 2nd fetch's own berr lands
+        write_pc(32'h0000_7000);
+        check("IFU-12b: fault fully suppressed by an early flush, never dispatched", !bus_err);
+        wait_valid(1);
+        check("IFU-12b: normal fetching resumes after the flush", instr_valid);
+        check32("IFU-12b: decode_pc=0x7000", decode_pc, 32'h0000_7000);
+        check16("IFU-12b: instr_word=0x5555 from the new address", instr_word, 16'h5555);
+
+        // ================================================================
         // Done
         // ================================================================
         @(posedge clk_4x); #1;
