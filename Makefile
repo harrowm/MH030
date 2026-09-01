@@ -492,6 +492,17 @@ buscmp-memind21: $(SIM)/cosim_grp winuae/tests/memind21_ref.log tests/memind21.h
 	    | grep "^BUS" > /tmp/_dut_memind21.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind21.log winuae/tests/memind21_ref.log \
 	    --reads-only --dut-may-continue --allow-adjacent-swap
+# memind26 (deferred-items closure plan Stage 8, plan.md): MOVE mem-to-mem
+# plain-src (d16,An)-src indexed-dst with a LONG destination bd -- the one
+# sub-case Phase 143's own memind20.s left out of scope. Full comparison
+# (reads AND the write) matches Musashi/WinUAE exactly aside from the same
+# benign prefetch-interleave adjacent reordering documented for memind9.s/
+# 14.s/19.s/20.s -- --allow-adjacent-swap tolerates it cleanly.
+buscmp-memind26: $(SIM)/cosim_grp winuae/tests/memind26_ref.log tests/memind26.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind26.hex +grp=memind26 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind26.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind26.log winuae/tests/memind26_ref.log \
+	    --dut-may-continue --allow-adjacent-swap
 # memind15 (Phase 149, plan.md): full comparison, NOT --reads-only -- the
 # phantom read this file's own header used to document is gone now that
 # MOVE Dn,(d8,An,Xn) is a genuine single-phase write via rd_c, so the full
@@ -520,7 +531,7 @@ buscmp-memind25: $(SIM)/cosim_grp winuae/tests/memind25_ref.log tests/memind25.h
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
-              buscmp-memind15 buscmp-memind24 buscmp-memind25
+              buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

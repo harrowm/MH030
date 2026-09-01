@@ -5538,3 +5538,52 @@ sketched), `make test` 36/36. Testbench-only -- `git diff --stat rtl/`
 empty, no Harte re-run needed. **Closes Stage 7.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the remaining 5-stage
 backlog. Stage 8 (MOVE mem-to-mem plain-src (d16,An) long-bd) is next.
+
+## Phase 216 (deferred-items closure plan, Stage 8): MOVE mem-to-mem plain-src (d16,An) long-bd
+
+Extended the one sub-case Phase 143's own memind20.s left out of scope:
+`MOVE (d16,An),(bd,An,Xn)` with a LONG (32-bit) destination base
+displacement. This arm's own 2-word baseline ((d16,An)-src's own d16
+word at q1, dst descriptor at q2) already correctly counted the right
+number of extension words for long bd via the shared `movem_bd_words`
+helper -- confirmed directly (`movem_bd_words` already returns 2 for
+`bdsz==11`) -- the gap was purely that (a) `is_move_mm_d16src_idxdst_wordbd`'s
+own gate condition explicitly checked `bdsz==2'b10` (word only, never
+`2'b11`) and its `ext_count` was a hardcoded `3'd3` literal rather than
+using `movem_bd_words`, and (b) `eu_seq.sv`'s own `dec_dst_ea_offset`
+value-extraction for this specific `f_mode==101` sub-case had no long-bd
+branch at all, falling through to the brief 8-bit interpretation.
+
+`rtl/m68030_seq.sv`: widened the gate to `peek_fi_bdsz_movem[1]`
+(word(10)/long(11), matching `q3bd_words`'/`movem_bd_words`' own already-
+established convention elsewhere) and `ext_count` to `3'd2 +
+movem_bd_words`; renamed `is_move_mm_d16src_idxdst_wordbd` ->
+`is_move_mm_d16src_idxdst_full`, matching Phase 147's own precedent for
+renaming an arm once it stops being word-bd-only. `rtl/eu_seq.sv`: added
+a long-bd branch to `dec_dst_ea_offset`'s `f_mode==3'b101` case, reading
+`{q3_word, ext34_data[15:0]}` -- the same "high half at the word-bd's own
+slot, low half one word further out (q4)" shape `fi_bd` itself already
+uses at its own (different, 1-word-baseline) position, applied here one
+word later to match this arm's own 2-word baseline.
+
+New `tests/memind26.s` (`MOVE.L ($8,A4),(-$10000,A5,D1.L)`, the usual
+"base register set above the 4KB cosim window, large-magnitude
+displacement forces full-format+long encoding" technique already used by
+memind13/16/17/20) -- compared cleanly against Musashi/WinUAE: **full
+comparison** (reads AND the write both match exactly), the only
+difference being the same benign prefetch-interleave adjacent reordering
+already documented for memind9/14/19/20, tolerated cleanly by
+`--allow-adjacent-swap` with zero extra flags needed. Wired into `make
+cosim_memind` as `buscmp-memind26`.
+
+Results: `make test` 36/36, `make cosim_grp` 8/8, `make cosim_memind`
+13/13 (was 12/12), full 124-suite Harte sweep (mandatory --
+`m68030_seq.sv`/`eu_seq.sv` changed) -- PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to
+baseline, zero regressions (Harte has zero coverage of this 68020+-only
+addressing-mode combination -- the sweep gates the shared decode/
+ext_count machinery this touches, not the new arm directly). **Closes
+Stage 8.** See `~/.claude/plans/elegant-gliding-fog.md` for the
+remaining 4-stage backlog. Stage 9 (BERR-during-fill per-beat
+discrimination) is next -- the most architecturally delicate remaining
+stage.

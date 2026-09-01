@@ -350,8 +350,10 @@ module m68030_seq (
     // a 2-word baseline instead (src's own d16 at q1, descriptor at q2) --
     // same "q1=other data, q2=descriptor" shape as abs.W-src/PC-rel-src/
     // MOVE.B/W's own imm-src, reusing peek_fi_full_movem/movem_bd_words
-    // directly; only WORD bd is achievable there (long bd would need a
-    // 4th word not wired for this specific sub-case, out of scope).
+    // directly -- deferred-items closure plan Stage 8 (plan.md) added long
+    // bd here too, the same peek position/mechanism already correctly
+    // computing 2 words for it (movem_bd_words), just never previously
+    // gated in or given its own value-extraction in eu_seq.sv.
     logic is_move_mm_plainsrc_idxdst_full;
     assign is_move_mm_plainsrc_idxdst_full =
         (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
@@ -361,12 +363,25 @@ module m68030_seq (
     logic [2:0] move_mm_plainsrc_idxdst_ext_count;
     assign move_mm_plainsrc_idxdst_ext_count = 3'd1 + memind_bd_words;
 
-    logic is_move_mm_d16src_idxdst_wordbd;
-    assign is_move_mm_d16src_idxdst_wordbd =
+    // Deferred-items closure plan Stage 8 (plan.md): renamed from
+    // is_move_mm_d16src_idxdst_wordbd (same convention as Phase 147's own
+    // imml/absl renames) once long bd joined word bd here -- widened the
+    // gate from bdsz==10 (word only) to bdsz[1] (word(10)/long(11), not
+    // null(01)/rsvd(00), matching q3bd_words'/movem_bd_words' own
+    // established convention elsewhere), and ext_count from a fixed 3 to
+    // 2+movem_bd_words (word=3, long=4). movem_bd_words already computed
+    // the correct word count for long bd here -- the gap was purely that
+    // this arm's own gate/ext_count never used it, and eu_seq.sv's own
+    // dec_dst_ea_offset never had a q4-based long-bd value extraction for
+    // this specific (d16,An)-src sub-case (fixed alongside this).
+    logic is_move_mm_d16src_idxdst_full;
+    assign is_move_mm_d16src_idxdst_full =
         (f_group == 4'h1 || f_group == 4'h2 || f_group == 4'h3) &&
         (f_mode == 3'b101) &&
         (f_move_dst_mode_s == 3'b110) &&
-        peek_fi_full_movem && (peek_fi_bdsz_movem == 2'b10) && (peek_fi_iis_movem == 3'b000);
+        peek_fi_full_movem && peek_fi_bdsz_movem[1] && (peek_fi_iis_movem == 3'b000);
+    logic [2:0] move_mm_d16src_idxdst_ext_count;
+    assign move_mm_d16src_idxdst_ext_count = 3'd2 + movem_bd_words;
 
     // Stage 1 (plan.md Phase 116): the same brief-only-EA-decode gap Phase 115
     // fixed for MOVE also exists in every other f_mode==110 family's own
@@ -705,8 +720,8 @@ module m68030_seq (
             ext_count = move_mm_absl_idxdst_ext_count;
         else if (is_move_mm_plainsrc_idxdst_full)
             ext_count = move_mm_plainsrc_idxdst_ext_count;
-        else if (is_move_mm_d16src_idxdst_wordbd)
-            ext_count = 3'd3;  // d16-src(1) + descriptor(1) + word-bd(1)
+        else if (is_move_mm_d16src_idxdst_full)
+            ext_count = move_mm_d16src_idxdst_ext_count;  // d16-src(1)+descriptor(1)+bd
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)

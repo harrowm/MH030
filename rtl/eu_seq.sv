@@ -2456,14 +2456,18 @@ module eu_seq (
                             // here, not bd), so needs a fresh q3_word-based extraction,
                             // same shape MOVEM's own bespoke mode110 arm (Phase 138) and
                             // MOVE.B/W's own imm-src arm (Phase 141) already use for an
-                            // analogous "one word further out" need. Long bd stays
-                            // unsupported for (d16,An)-src specifically (would need a
-                            // genuine q4 on top of its already-2-word baseline -- q4
-                            // itself exists but isn't wired for this sub-case, out of
-                            // scope this phase); word bd is the value this phase adds.
+                            // analogous "one word further out" need. Deferred-items
+                            // closure plan Stage 8 (plan.md): long bd's own low half is
+                            // one word further out still, at q4 (ext34_data[15:0]) --
+                            // the exact same "high half at the word bd's own slot, low
+                            // half one word further" shape fi_bd itself already uses at
+                            // its own (different) baseline, just applied here one word
+                            // later to match this arm's own 2-word baseline.
                             dec_dst_ea_offset      = (f_mode == 3'b101)
                                                    ? ((ext_data[8] && ext_data[5:4] == 2'b10 && ext_data[2:0] == 3'b000)
                                                       ? {{16{q3_word[15]}}, q3_word}
+                                                      : (ext_data[8] && ext_data[5:4] == 2'b11 && ext_data[2:0] == 3'b000)
+                                                      ? {q3_word, ext34_data[15:0]}
                                                       : {{24{ext_data[7]}}, ext_data[7:0]})
                                                    : ((fi_is_full && fi_iis == 3'b000)
                                                       ? fi_bd
