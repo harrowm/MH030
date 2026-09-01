@@ -4743,3 +4743,43 @@ summary-table row still said "3 pairs" despite Phase 191 already having brought 
 4; both fixed alongside this stage's own real addition). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. Stage 2
 (INT-mid-CMP2/CHK2) is next.
+
+## Phase 202 (pipeline-stall breadth extension plan, Stage 2): INT-mid-CMP2/CHK2
+
+Second stage of `~/.claude/plans/elegant-gliding-fog.md`. `INT-mid-CMP2` (reuses B-13's
+own CMP2 encoding directly) and `INT-mid-CHK2` (same opcode word, differing only in the
+extension word's bit 11 -- new `CHK2_EXT = 16'h1800 = CMP2_EXT | 16'h0800`, derived from
+`eu_seq.sv`'s own decode comment "ext[11]=CHK2(1)/CMP2(0)" and confirmed bit-for-bit by
+hand before use). CMP2 needed no explicit bound data (default-filled memory is fine,
+same as B-10/B-11's convention, since CMP2 never traps). CHK2 needed real, carefully-
+chosen bound data since it genuinely can trap on an out-of-bounds compare (vector 6) --
+found via a first attempt using bounds [0,0xFFFFFFFF] with D1=0 that CMP2/CHK2's own
+bounds compare is SIGNED (`eu_seq.sv`'s `cmp2_c_w = $signed(Rn) < $signed(lower) ||
+$signed(Rn) > $signed(upper)`), so 0xFFFFFFFF as an upper bound is signed -1, making
+D1=0 read as out-of-range and genuinely trap to an unconfigured vector-6 table entry,
+hanging the whole test; fixed by using [0,0x7FFFFFFF] instead (max positive signed
+long), guaranteeing D1=0 is always in-bounds regardless of interrupt timing.
+
+**Found and fixed a second, unrelated bug along the way, via direct trace** (temporary
+`$display` instrumentation on `mem_ack`/`mem_abort`/`cmp2_run_r`/`chk_trap`/`exc_active`
+and `ifu_decode_pc`, removed before finalizing): a JMP inserted to skip CHK2's own
+bound-data words (placed in the natural NOP-fall-through path between CMP2's tail and
+CHK2's own code, which would otherwise have decode try to execute that data as
+instructions -- itself a real, first-encountered gotcha, since the file's `# Notes on
+address reuse` per-test convention had never before needed a JMP mid-Category-F-chain)
+had its own 32-bit absolute-address operand malformed: `JMP (xxx).L` needs its target as
+TWO words (hi then lo), but a first attempt supplied one address word followed by a
+`NOP_OP` filler as if it were harmless padding -- it isn't; it's the low half of the
+32-bit target, so the JMP landed at `{0x2850, 0x4E71} = 0x28504E71`, an obviously
+invalid address, confirmed directly via the trace showing `ifu_decode_pc` reading
+exactly that garbage value the instant the JMP fired, followed immediately by
+`mem_abort`/`exc_active` (an address error). Fixed by matching every other
+`JMP_ABS_L_OP` site in this file (`{JMP_ABS_L_OP, 16'h0000}` then `{16'hADDR_HI,
+16'hADDR_LO}`) -- `16'h0000`/target rather than target/`NOP_OP`.
+
+Results: `tb/stall_fsm_tb.sv` 0 failures, `make test` 36/36. Testbench-only (no RTL
+touched, confirmed via `git diff --stat rtl/`) -- no Harte re-run needed. `docs/stalls.md`
+updated: Category F 12->14 sources (3 locations: the summary table row, the "What's
+left" tally, and Category F's own "Coverage depth" paragraph). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 8-stage plan. Stage 3
+(`INT-mid-MOVEmm`/`INT-mid-RTR`/`INT-mid-RTE`) is next.

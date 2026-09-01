@@ -249,6 +249,11 @@ module stall_fsm_tb;
     // f_mode=010=(An), f_reg=A0(000). Ext: D/A=0(Dn), Rn=D1(001), bit11=0(CMP2 not CHK2).
     localparam CMP2_L_A0_D1   = 16'h04D0;
     localparam CMP2_EXT       = 16'h1000;
+    // CHK2 shares CMP2's own opcode word entirely -- only the extension
+    // word's bit 11 differs (0=CMP2, 1=CHK2, per eu_seq.sv's own
+    // "ext[11]=CHK2(1)/CMP2(0)" decode comment). Pipeline-stall breadth
+    // extension plan (elegant-gliding-fog.md), Stage 2.
+    localparam CHK2_EXT       = 16'h1800;
     // MOVE.L (A0),(A1): both src and dst memory-indirect.
     localparam MOVE_L_A0_A1   = 16'h2290;
     localparam MOVEA_L_IMM_A7 = 16'h2E7C;
@@ -2987,10 +2992,74 @@ module stall_fsm_tb;
         rom[16'h2790/4] = {16'h27B5, SBCD_A1_A0};
         rom[16'h2794/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h2798/4] = {16'd9003, NOP_OP};
-        // Temporary park -- Stage 2 will redirect this on to its own new
-        // tests instead of parking permanently here.
-        rom[16'h279C/4] = {BRA_SELF, NOP_OP};
+        // Redirect on to Stage 2's own new tests instead of parking
+        // permanently here (was BRA_SELF).
+        rom[16'h279C/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h27A0/4] = {16'h2800, NOP_OP};
         run_int_mid_test("INT-mid-SBCD", 32'h0000_2784, 3, 5, 32'd9003, 32'h0000_008A);
+
+        // ===================================================================
+        // Stage 2 (elegant-gliding-fog.md): INT-mid-CMP2/INT-mid-CHK2 -- 2
+        // more Category F sources, reusing B-13's own CMP2 encoding. CHK2
+        // shares the identical opcode word, differing only in the extension
+        // word's bit 11 (CHK2_EXT, above); unlike CMP2, CHK2 can genuinely
+        // trap (vector 6) on an out-of-bounds compare, so its own test
+        // explicitly clears D1 and sets an all-encompassing [0,0xFFFFFFFF]
+        // bound in memory first, guaranteeing D1=0 is always in-bounds --
+        // same "can't trap and redirect execution out from under this test"
+        // reasoning B-13's own header comment already established for CMP2.
+        // ===================================================================
+
+        // INT-mid-CMP2: D1 left at whatever value prior tests leave it
+        // (same as B-13's own convention) -- CMP2 never traps regardless,
+        // so its own bound data doesn't need to be set explicitly either
+        // (default-filled memory is fine, matching B-10/B-11's own
+        // no-explicit-data convention).
+        rom[16'h2800/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h2804/4] = {16'h2830, CMP2_L_A0_D1};
+        rom[16'h2808/4] = {CMP2_EXT, CLR_L_D5};
+        rom[16'h280C/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h2810/4] = {16'd9004, JMP_ABS_L_OP};
+        // Explicit JMP over CHK2's own bound-data words at 0x2820/0x2824
+        // below -- NOP fall-through would otherwise walk straight into
+        // that data and try to decode it as instructions (confirmed the
+        // hard way: a first attempt without this JMP hung with "reached
+        // own code" never firing for INT-mid-CHK2, traced to decode_pc
+        // never getting past the data region at all). JMP (xxx).L's own
+        // 32-bit absolute address operand is TWO words (hi then lo), not
+        // one word plus a NOP filler -- a first attempt got this backwards
+        // ({16'h2850, NOP_OP}, giving a garbage target of 0x28504E71,
+        // exactly matching a direct trace of ifu_decode_pc) and had to be
+        // corrected to the {hi,lo} pattern every other JMP_ABS_L_OP site
+        // in this file already uses.
+        rom[16'h2814/4] = {16'h0000, 16'h2850};
+        // CMP2/CHK2's own bounds-check FSM reads a lower and upper bound
+        // longword from memory before comparing -- 2 bus cycles, the same
+        // read-src/read-dst shape CHK's own indexed form uses (Phase 84).
+        run_int_mid_test("INT-mid-CMP2", 32'h0000_2800, 2, 5, 32'd9004, 32'h0000_008A);
+
+        // INT-mid-CHK2: D1 explicitly cleared (=0), bound data explicitly
+        // set to [0,0x7FFFFFFF] so the compare is guaranteed to succeed
+        // (no trap) regardless of the interrupt's own timing. CMP2/CHK2's
+        // own bounds compare is SIGNED (eu_seq.sv's cmp2_c_w:
+        // $signed(Rn) < $signed(lower) || $signed(Rn) > $signed(upper)) --
+        // 0xFFFFFFFF as an upper bound is signed -1, which would make
+        // D1=0 read as out-of-range and genuinely trap (confirmed the
+        // hard way: a first attempt using 0xFFFFFFFF hung with an address
+        // error, traced to CHK2 trapping to vector 6's own unconfigured,
+        // default-filled table entry). 0x7FFFFFFF (max positive signed
+        // long) is the correct all-encompassing upper bound instead.
+        rom[16'h2820/4] = 32'h0000_0000;  // lower bound
+        rom[16'h2824/4] = 32'h7FFF_FFFF;  // upper bound
+        rom[16'h2850/4] = {CLR_L_D1, MOVEA_L_IMM_A0};
+        rom[16'h2854/4] = {16'h0000, 16'h2820};
+        rom[16'h2858/4] = {CMP2_L_A0_D1, CHK2_EXT};
+        rom[16'h285C/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h2860/4] = {16'h0000, 16'd9005};
+        // Temporary park -- Stage 3 will redirect this on to its own new
+        // tests instead of parking permanently here.
+        rom[16'h2864/4] = {BRA_SELF, NOP_OP};
+        run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
