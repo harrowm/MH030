@@ -182,6 +182,9 @@ module mmu_xlate_tb;
     localparam PMOVE_CRP_EXT  = 16'h4800;  // op_type=010(PMOVE),sub=100(CRP),dr=0(load)
     localparam PMOVE_TC_EXT   = 16'h4400;  // op_type=010(PMOVE),sub=010(TC),dr=0(load)
     localparam PMOVE_TT0_EXT  = 16'h4200;  // op_type=010(PMOVE),sub=001(TT0),dr=0(load)
+    localparam PTEST_A0_OP    = 16'hF010;  // deferred-items closure plan Stage 10 (plan.md)
+    localparam PTEST_EXT      = 16'h8000;  // op_type=100(PTEST) -- same values as stall_fsm_tb.sv's own B-20
+    localparam NOP_OP         = 16'h4E71;
     localparam RTE_OP         = 16'h4E73;
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
@@ -416,7 +419,13 @@ module mmu_xlate_tb;
         rom[16'h0550/4] = {MOVE_L_IMM_A2_IND, 16'h1234};   // MOVE.L #0x12345678,(A2) -- WRITE
         rom[16'h0554/4] = {16'h5678, CLR_L_D0};
         rom[16'h0558/4] = {ADDI_L_D0, 16'h0000};
-        rom[16'h055C/4] = {16'd666, BRA_SELF};             // marker D0=666 (write done, M should now be set)
+        // Deferred-items closure plan Stage 10 (plan.md): Phase 5's own
+        // trailing BRA_SELF replaced with a JMP to a new investigation
+        // block at 0x0600 (0x0560-0x0566 confirmed unused) -- the D0==666
+        // marker check below still fires correctly, since it happens
+        // before this jump ever executes.
+        rom[16'h055C/4] = {16'd666, JMP_ABS_L_OP};          // marker D0=666 (write done, M should now be set)
+        rom[16'h0560/4] = {16'h0000, 16'h070C};             // JMP 0x0000070C
 
         // Vector-2 handler: fix the descriptor at 0x3008 (page frame
         // 0x00000000, DT=01), then RTE. TT0 already covers this handler's
@@ -426,6 +435,43 @@ module mmu_xlate_tb;
         rom[16'h0504/4] = {16'h3008, MOVE_L_IMM_A1_IND};   // MOVE.L #imm,(A1)
         rom[16'h0508/4] = {16'h0000, 16'h0001};
         rom[16'h050C/4] = {RTE_OP, 16'h4E71};
+
+        // -------------------------------------------------------------
+        // Phase 6 (deferred-items closure plan Stage 10, plan.md):
+        // investigating a genuine, sustained instruction-fetch hang first
+        // found in Phase 236 (plan.md) -- under a fresh TC.E re-enable +
+        // I-cache miss + cache-line-crossing fetch, right after a real
+        // PTEST/ATC-install. Phase 236's own wording: "a fetch that
+        // crosses from PTEST's own 16-byte I-cache line into the next
+        // one (needed to fetch ADDI's own immediate operand)" -- i.e.
+        // PTEST itself stays within one line (an earlier attempt this
+        // stage deliberately straddled PTEST's own opcode+ext instead
+        // and did NOT reproduce the hang, ruling that shape out), but
+        // the FOLLOWING ADDI.L's own 3-word span (opcode+32-bit
+        // immediate) straddles the very next boundary.
+        //
+        // Reuses B-20's own exact TC/TT0 values (TT0 fully transparent,
+        // LAM=0xFF matches any VA, so PTEST resolves without any real
+        // page-table data) at fresh addresses (0x3B00/0x3B04, confirmed
+        // unused elsewhere in this file). Base address 0x070C chosen so
+        // PTEST lands at offset 6 within its own line (0x0720-0x072F,
+        // fully non-crossing) and ADDI.L's own opcode lands at offset 12
+        // of the FOLLOWING line (0x0730-0x073F) -- its own 6-byte span
+        // (0x072C-0x0731) genuinely straddles that boundary.
+        // -------------------------------------------------------------
+        rom[16'h3B00/4] = 32'h8000_0000;  // TC: E=1
+        rom[16'h3B04/4] = 32'h00FF_80E0;  // TT0: LAM=0xFF (any VA), E=1, FCM=any
+
+        rom[16'h070C/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h0710/4] = {16'h3B04, PMOVE_A0_OP};        // PMOVE (A0),TT0
+        rom[16'h0714/4] = {PMOVE_TT0_EXT, MOVEA_L_IMM_A0};
+        rom[16'h0718/4] = {16'h0000, 16'h3B00};
+        rom[16'h071C/4] = {PMOVE_A0_OP, PMOVE_TC_EXT};    // PMOVE (A0),TC
+        rom[16'h0720/4] = {MOVEA_L_IMM_A0, 16'h2000};
+        rom[16'h0724/4] = {16'h5000, PTEST_A0_OP};        // A0 = VA 0x20005000 ; PTEST opcode @0x0726
+        rom[16'h0728/4] = {PTEST_EXT, CLR_L_D5};          // PTEST ext @0x0728 ; CLR.L D5 @0x072A (still line 0x0720-0x072F)
+        rom[16'h072C/4] = {ADDI_L_D5, 16'h0000};          // ADDI opcode @0x072C (offset 12) -- own imm crosses into 0x0730
+        rom[16'h0730/4] = {16'd999, BRA_SELF};            // marker D5=999 (PTEST + crossing ADDI fetch survived)
 
         saw_walk_read_addr       = 1'b0;
         saw_translated_data_read = 1'b0;
@@ -604,6 +650,28 @@ module mmu_xlate_tb;
                 m_writeback_data, 32'h0000_0019);
         check32("Phase 5: the descriptor's own backing memory now shows both U and M set",
                 rom[16'h3010/4], 32'h0000_0019);
+
+        // -------------------------------------------------------------
+        // Phase 6 (deferred-items closure plan Stage 10, plan.md): does
+        // PTEST's own opcode+ext straddling a 16-byte I-cache line
+        // boundary, right after a fresh TC.E re-enable, reproduce
+        // Phase 236's own hang?
+        // -------------------------------------------------------------
+        begin
+            int t;
+            logic saw_d5_999;
+            saw_d5_999 = 1'b0;
+            for (t = 0; t < 50000; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_eu.u_rf.d_reg[5] === 32'd999) begin saw_d5_999 = 1'b1; break; end
+            end
+            if (!saw_d5_999) begin
+                $display("Phase6-DIAG t=%0t decode_pc=%h ifu_bus_err=%b exc_active=%b eu_berr=%b D5=%h",
+                    $time, u_top.ifu_decode_pc, u_top.ifu_bus_err, u_top.u_exc.exc_active,
+                    u_top.eu_berr, u_top.u_eu.u_rf.d_reg[5]);
+            end
+            check("Phase 6: ADDI's own immediate-operand fetch straddling the line right after PTEST survives (D5=999)", saw_d5_999);
+        end
 
         $display("=== TOTAL: %0d failure(s) ===", fail_count);
         if (fail_count == 0) $display("ALL TESTS PASSED");

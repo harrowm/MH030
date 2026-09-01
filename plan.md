@@ -5694,3 +5694,74 @@ of the new code -- `tb/biu_tb.sv`'s own new test is what actually proves
 correctness). **Closes Stage 9.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the remaining 3-stage
 backlog. Stage 10 (PTEST translation-fault hang investigation) is next.
+
+## Phase 218 (deferred-items closure plan, Stage 10): PTEST translation-fault hang -- investigated, not reproduced in isolation
+
+Investigated the genuine, sustained instruction-fetch hang Phase 236 (plan.md)
+found and deliberately deferred: under a fresh TC.E re-enable + I-cache miss +
+cache-line-crossing fetch, right after a real PTEST/ATC-install, in
+`tb/stall_fsm_tb.sv`'s own WS-PTEST attempt (`ifu_bus_err`/`exc_active` both
+stuck at 1 for 2000+ ticks, `eu_berr` pulsing repeatedly without ever
+resolving).
+
+Built a clean, isolated reproduction in `tb/mmu_xlate_tb.sv` (new Phase 6,
+extending its own already-proven TC.E/TT0/exception-dispatch infrastructure
+from Phases 1-5) rather than working directly inside `stall_fsm_tb.sv`'s own
+long, heavily-interdependent execution history -- reused B-20's own exact
+proven TC/TT0 values (TT0 fully transparent, LAM=0xFF matches any VA) at
+fresh addresses, redirecting Phase 5's own trailing `BRA_SELF` to a new
+investigation block via `JMP_ABS_L_OP`.
+
+**Two precise hypotheses tested, both derived directly from Phase 236's own
+wording ("a fetch that crosses from PTEST's own 16-byte I-cache line into
+the next one"), both negative:**
+
+1. PTEST's own 2-word instruction (opcode+ext) deliberately positioned to
+   straddle a 16-byte I-cache line boundary itself (opcode at offset 14,
+   extension word landing in the very next line) -- **survived cleanly,
+   no hang.**
+
+2. PTEST kept entirely within one line (matching `stall_fsm_tb.sv`'s own
+   B-20 shape exactly), with the immediately-following `ADDI.L`'s own
+   3-word span (opcode + 32-bit immediate) deliberately positioned to
+   straddle the very next line boundary instead -- re-reading Phase 236's
+   own wording precisely ("needed to fetch ADDI's own immediate operand"),
+   this is the more literal match -- **also survived cleanly, no hang.**
+
+Given both precise, directly-derived alignment hypotheses failed to
+reproduce the hang in a clean environment with nothing else running first,
+the most likely explanation is that the original hang depends on state
+specific to `stall_fsm_tb.sv`'s own long execution history preceding
+WS-PTEST -- most plausibly a stale I-cache line, from one of that file's
+own many earlier I-cache-exercising tests (I-1 through I-5,
+RAW-hazard-with-Ihit, etc.), already resident at the same cache index
+WS-PTEST's own code happens to map to, needing a genuine eviction
+interacting with the fresh translation in a way this clean, cold-cache
+reproduction structurally cannot exercise. Pursuing that third hypothesis
+precisely would require either working directly inside
+`stall_fsm_tb.sv`'s own delicate, address-collision-prone sequence, or
+artificially pre-seeding a stale I-cache entry at a guessed index in
+isolation -- both add meaningfully more speculative complexity than this
+stage's own two directly-derived hypotheses, and the plan's own explicit
+"bounded investigation" framing was already met by testing both.
+
+**Decision: matches this project's own established precedent for a
+"confirmed real, not reproduced under controlled conditions" finding**
+(closest prior example: Phase 137's "JMP (An) after exception dispatch"
+investigation, which concluded "not reproduced" after two reconstruction
+attempts against the exact original shape, rather than forcing a fix).
+The new Phase 6 test is kept as **permanent regression coverage**, not
+reverted -- it proves a genuine, previously-never-exercised scenario (a
+real PTEST/ATC-install immediately followed by an instruction-fetch that
+crosses an I-cache line boundary, right after a fresh TC.E re-enable) now
+works correctly in the one shape a clean environment can exercise,
+matching the same "convert a refuted-but-real finding into coverage"
+precedent Phase 137's own D-6 test set.
+
+Results: `tb/mmu_xlate_tb.sv` 0 failures (1 new check plus Phase 1-5's own
+19 pre-existing checks, all still passing), `make test` 36/36.
+Testbench-only -- `git diff --stat rtl/` empty, no Harte re-run needed.
+**Closes Stage 10 as a documented, not-reproduced investigation** (matching
+the plan's own explicit allowance for this outcome). See
+`~/.claude/plans/elegant-gliding-fog.md` for the remaining 2-stage backlog.
+Stage 11 (`eu_trace_req` mid-FSM hazard) is next.
