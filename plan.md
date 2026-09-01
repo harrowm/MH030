@@ -5842,3 +5842,82 @@ Results: `make test` 36/36 (including the new `mmu_xlate` Phase 7 checks),
 only the comment hunk, no Harte re-run needed. **Closes Stage 11.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the one remaining stage.
 Stage 12 (Burst-mode timing residual) is next -- the last stage in this plan.
+
+## Phase 220 (deferred-items closure plan, Stage 12 — closes the plan in full): Burst-mode timing residual -- confirmed already at its practical floor
+
+Stage 12 asked whether Phase 212's own 4-beat-burst timing (cut to ~1.5x real
+silicon and left there) had further avoidable overhead, using the same
+avoidable-vs-load-bearing split Phase 163's own Tracks A-D used for the
+ordinary bus-cycle gap.
+
+**Re-measured the current number first** (a temporary trace in `tb/biu_tb.sv`'s
+own PCB-1 test, since removed): full 4-beat burst read still measures exactly
+**30 ticks (7.5 clocks)**, bit-identical to Phase 212's own figure -- confirms
+nothing in Phases 213-219 disturbed burst timing. Real silicon (MC68030UM.pdf
+7.3.4/7.3.7, already read directly in Phase 212): 10 states = 5 clocks. Ratio
+unchanged at 1.5x.
+
+**Split the gap into its two components and traced each directly** rather
+than re-deriving from memory:
+
+1. **Dispatch overhead (measured 30 vs. the FSM's own 28-tick/14-state
+   prediction)**: added a temporary trace watching `u_cycle_gen.state`
+   directly from the moment `eu_burst_req_tb` asserts. Confirmed exactly 2
+   ticks elapse before `state` first reaches `ST_BURST_S0` -- and
+   `biu_tb.sv` feeds `eu_burst_req` straight into `biu_cycle_gen`'s own port
+   with **no intermediary module** (unlike the `biu_cache_if.sv`/
+   `biu_sizing_fsm.sv` hops Track A/C/D found and fast-pathed) -- so there is
+   no extra registered hop available to eliminate here. The 2-tick gap is the
+   bare `ST_IDLE` dispatch floor Phase 163 item 4 already investigated and
+   confirmed structurally unavoidable (`state_adv`'s own 2-tick minimum hold
+   applies uniformly regardless of when a request arrives within that
+   window -- bypassing it for just one transition would break the whole
+   FSM's synchronous discipline). Not a new finding: the same already-closed
+   phenomenon, newly confirmed to apply to burst dispatch too.
+
+2. **Within-FSM state-count gap (14 states/7 clocks vs. real silicon's 10
+   states/5 clocks)**: Phase 212's own comment in `biu_cycle_gen.sv` already
+   attributes this to `berr_abort_r`'s own genuine 1-cycle register-settle
+   requirement (S6 must exist as a distinct, later-read state since
+   `berr_abort_r` is set combinationally the same cycle S5 samples `berr_s`,
+   and only reads as a stable, settled value one cycle later). Checked for a
+   Track-D-style *additional* hop layered on top of that by reading
+   `biu_burst_ctrl.sv`'s own ack-registration logic directly: `eu_burst_ack_r`
+   is set via `always_ff @(posedge clk_4x) if (at_burst_s7) ...`, and
+   `at_burst_s7` (mapped to `state==ST_BURST_S6`) is true for S6's *entire*
+   2-tick hold -- so the ack becomes visible on the very first edge inside
+   that window, landing within S6's own already-necessary duration rather
+   than adding a further tick beyond it. S6 does double duty (both the
+   loop-vs-done decision AND the ack-registration) with zero extra state
+   needed -- there is no Track-D-style spare `CI_DONE`-shaped state hiding
+   here to eliminate. Confirms Phase 212's own attribution was already
+   complete, not partial.
+
+**Conclusion: burst-mode timing is already at its practical floor**, the
+same outcome the plan's own text explicitly anticipated (Track B's BSR/JSR
+precedent). Both components of the remaining ~1.5x gap are now confirmed,
+not just claimed: the 2-tick dispatch floor is structural (same as every
+other bus-cycle type in the chip), and the 4-tick within-FSM gap is a real,
+necessary register-settle requirement of the extensively-hardened
+BERR-abort machinery (Phases 108-114) that this project has consistently and
+deliberately avoided touching without overwhelming justification (most
+recently: this very session's own Stage 5 CAS deferral). No RTL change --
+all temporary trace instrumentation added and fully removed within this
+stage; `git diff --stat` is empty for every tracked file.
+
+Results: `make test` 36/36 (unchanged; no RTL or permanent testbench file
+was modified this stage). No Harte re-run needed.
+
+**This closes Stage 12, and with it, the entire 12-stage deferred-items
+closure plan (`~/.claude/plans/elegant-gliding-fog.md`, Phases 209-220) in
+full.** Every genuinely open item the original audit found has now been
+either fixed (Stages 6, 8, 9), investigated and confirmed already-correct or
+already-optimal (Stages 1, 3 [confirmed real, documented, not chased
+further], 5 [deferred with a documented architectural reason], 11, 12), or
+corrected where the audit's own claim was itself wrong (Stage 4). No RTL
+correctness gap remains open anywhere in this plan's own scope. Two items
+were excluded from the plan entirely at the outset (genuine two-level
+memory-indirect EA beyond `MOVE <ea>,dst`, and MOVEM's own genuine
+memory-indirect) and remain open for a future dedicated plan if the user
+wants them pursued; back-to-back FSM composition breadth remains
+open-ended by design, as already documented in `docs/stalls.md`.
