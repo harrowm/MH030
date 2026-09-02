@@ -6184,3 +6184,57 @@ permanent regression coverage), `make cosim_grp` (8/8), `make cosim_memind`
 sweep all stayed bit-identical to baseline (except for the one real bug
 fix, itself independently verified against Musashi/WinUAE) across every
 RTL-touching stage.
+
+## Phase 225: CLAUDE.md archival + shared testbench helpers (efficiency/clarity follow-up, no formal plan)
+
+User asked for other code-improvement candidates after the ext_count de-duplication
+plan closed; a survey fork identified `CLAUDE.md`'s own size (513KB / ~670 lines,
+253 phase entries, loaded into every session) and a real testbench-side duplication
+(`tb/stall_fsm_tb.sv`/`tb/cache_tb.sv` each independently declaring byte-for-byte
+identical `check`/`check32`/`run_and_check` helpers) as the two highest-value, lowest-
+risk candidates. User approved doing both.
+
+**CLAUDE.md archival**: `cp CLAUDE.md CLAUDE.md.old` (full, byte-for-byte archive --
+nothing lost), then condensed the active `CLAUDE.md` from 669 lines / 513KB down to
+359 lines / 24KB (95.4% smaller): every "living reference" section (Project Overview,
+Design Constraints, Module Hierarchy, BIU Cycle Types, S-State Signal Timing, FC
+Values, Exception Stack Frame Formats, Verification Commands, SIZ Encoding, Style
+Rules) kept verbatim; the 253-entry phase-by-phase "Completed phases" narrative
+replaced with an ~18-paragraph condensed summary covering every major initiative's
+outcome, pointing to `CLAUDE.md.old` for full derivations. Mirrors the `plan.md` ->
+`plan.md.old` precedent set at that project's own Phase 162. Found and fixed one
+genuinely stale note while in there: the "S-State Signal Timing (Critical)" section's
+own closing paragraph still described the RTL as using the old, incorrect 8-state
+model as if unfixed -- but Phases 205-208 (READ/WRITE/RMW/IACK/init) and 212-213
+(burst/CAS2) had already fixed this in full; rewrote the closing paragraph and the
+"IACK note" (which still said "DS asserts at S3," the old model's own timing, not the
+now-correct S1) to reflect the RTL's actual, current, verified-correct state. Confirmed
+nothing in `Makefile`/`scripts/` programmatically parses `CLAUDE.md` (one comment-string
+hit, unaffected) before restructuring. `CLAUDE.md.old` tracked in git, matching
+`plan.md.old`'s own precedent.
+
+**Shared testbench helpers**: confirmed via direct diff that `check`/`check32`/
+`run_and_check` (+ the `int fail_count = 0;` declaration they depend on) are
+byte-for-byte identical between `tb/stall_fsm_tb.sv` and `tb/cache_tb.sv`, using the
+same `u_top.u_eu.u_rf.d_reg[...]`/`clk_4x` naming conventions both files already share.
+Found a 3rd file (`tb/mmu_xlate_tb.sv`) with an identical `check`/`check32` (no
+`run_and_check`) -- noted as a future candidate, deliberately not folded in here to
+keep this change scoped to exactly what was asked. Deliberately did NOT centralize
+`check8` (unique to `stall_fsm_tb.sv`), or either file's own park/config-codegen
+helpers (`claim_park`/`run_berr_mid_test`/`run_int_mid_test` in `stall_fsm_tb.sv`;
+`emit_set_cacr`/`emit_set_caar`/`emit_set_sfc`/`wait_cleared_then_set`/
+`run_dberr_mid_test` in `cache_tb.sv`) -- none of these are actual duplicates (each
+file's own version differs in real, file-specific ways), so sharing them would force
+an abstraction where none is warranted rather than eliminate a real "must stay in
+sync" risk. New `tb/common_helpers.svh` (` ``include ``'d by both files, reusing the
+`-I tb` mechanism the ext_count de-duplication plan already added to `IVFLAGS`);
+`Makefile`'s `$(SIM)/cache`/`$(SIM)/stall_fsm` targets gained it as an order-only
+prerequisite (mirroring `tb/ext_count_overlap_flags.svh`'s own precedent -- both
+targets' recipes use `$^` directly as iverilog's source list, so a `.svh` meant only
+for `` `include `` must stay order-only, not a normal prerequisite, to avoid being
+passed as a raw top-level compile source).
+
+Results: both `sim/cache`/`sim/stall_fsm` compile clean and pass with `$finish`
+timestamps byte-identical to the pre-refactor baseline (147736/582526, confirming
+zero behavioral drift), `make test` 37/37 (unchanged), `make cosim_grp` 8/8. Pure
+testbench change -- `git diff --stat -- rtl/` empty, no Harte re-run needed.

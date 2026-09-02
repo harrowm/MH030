@@ -299,31 +299,10 @@ module cache_tb;
     // -------------------------------------------------------------------
     // Checks
     // -------------------------------------------------------------------
-    int fail_count = 0;
-    task automatic check(input string name, input logic cond);
-        if (cond) $display("PASS  %s", name);
-        else begin $display("FAIL  %s", name); fail_count++; end
-    endtask
-    task automatic check32(input string name, input logic [31:0] got, input logic [31:0] exp);
-        if (got === exp) $display("PASS  %s (got %08h)", name, got);
-        else begin $display("FAIL  %s: got %08h exp %08h", name, got, exp); fail_count++; end
-    endtask
-
-    task automatic run_and_check(
-        input string       name,
-        input int          reg_idx,
-        input logic [31:0] exp_val,
-        input int          budget
-    );
-        int t;
-        logic saw_ack;
-        saw_ack = 0;
-        for (t = 0; t < budget; t++) begin
-            @(posedge clk_4x); #1;
-            if (u_top.u_eu.u_rf.d_reg[reg_idx] === exp_val) begin saw_ack = 1'b1; break; end
-        end
-        check(name, saw_ack);
-    endtask
+    // check/check32/run_and_check (+ fail_count) are shared with
+    // tb/stall_fsm_tb.sv via tb/common_helpers.svh -- see that file's own
+    // header for why.
+`include "common_helpers.svh"
 
     // Waits for reg_idx to read 0 first, then waits for it to reach
     // exp_val -- used for back-to-back subroutine calls that reuse the

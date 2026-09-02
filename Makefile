@@ -164,10 +164,10 @@ $(SIM)/top:        $(TOP_SRCS) tb/mem_model.sv tb/top_tb.sv | $(SIM)
 $(SIM)/cosim_boot:    $(TOP_SRCS) tb/cosim_boot_tb.sv | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/cache:         $(TOP_SRCS) tb/cache_tb.sv | $(SIM)
+$(SIM)/cache:         $(TOP_SRCS) tb/cache_tb.sv | tb/common_helpers.svh $(SIM)
 	$(IVCOMP)
 
-$(SIM)/stall_fsm:     $(TOP_SRCS) tb/stall_fsm_tb.sv | $(SIM)
+$(SIM)/stall_fsm:     $(TOP_SRCS) tb/stall_fsm_tb.sv | tb/common_helpers.svh $(SIM)
 	$(IVCOMP)
 
 $(SIM)/mmu_xlate:     $(TOP_SRCS) tb/mmu_xlate_tb.sv | $(SIM)
