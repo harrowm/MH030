@@ -40,4 +40,17 @@ function automatic logic       eaf_is_full(input logic [15:0] w); eaf_is_full = 
 function automatic logic [1:0] eaf_bdsz   (input logic [15:0] w); eaf_bdsz    = w[5:4]; endfunction
 function automatic logic [2:0] eaf_iis    (input logic [15:0] w); eaf_iis     = w[2:0]; endfunction
 
+// Stage 4 (optional, ext_count de-duplication plan, plan.md): 2-bit
+// displacement-size field -> word count (01=null,10=word,11=long ->
+// 0/1/2 extra extension words). Shared by m68030_seq.sv's own
+// memind_bd_words/movem_bd_words/q3bd_words (called with bdsz directly)
+// and memind_od_words/movem_od_words (called with iis[1:0] -- only bit[1]
+// and the literal value 2'b11 matter for the word count either way, same
+// as for bdsz). Intra-m68030_seq.sv only -- eu_seq.sv doesn't need a word
+// *count* here, it computes the actual displacement *value* directly via
+// fi_bd.
+function automatic logic [2:0] eaf_disp_words(input logic [1:0] sz);
+    eaf_disp_words = (sz == 2'b10) ? 3'd1 : (sz == 2'b11) ? 3'd2 : 3'd0;
+endfunction
+
 `default_nettype wire

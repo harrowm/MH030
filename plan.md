@@ -6143,3 +6143,44 @@ path this stage directly touches. **Closes Stage 3 -- the core of the
 originally-requested de-duplication is now done.** Stage 4 (optional,
 smaller, intra-`m68030_seq.sv` displacement-size-to-word-count sharing)
 remains, independently includable or droppable.
+
+## Phase 224 (ext_count de-duplication plan, Stage 4 -- closes the plan in full): shared displacement-size-to-word-count
+
+The last, optional, intra-`m68030_seq.sv`-only item: the 2-bit
+displacement-size-field-to-word-count mapping (`01=null,10=word,11=long`
+-> `0/1/2` extra extension words), previously hand-copied 3 times
+(`memind_bd_words`/`memind_od_words`, `movem_bd_words`/`movem_od_words`,
+`q3bd_words`). Added `eaf_disp_words` to `rtl/opcode_fields.sv` and replaced
+all 5 individual call sites (2 inside `always_comb` blocks, 1 a plain
+`assign` -- the mechanism was already proven safe for both call styles by
+Stage 2's own throwaway scratch-compile validation). `memind_od_words`'s and
+`movem_od_words`'s own extra `(iis==3'b000)?0:...` guard was dropped as
+provably redundant (`eaf_disp_words(iis[1:0])` already returns 0 whenever
+`iis[1:0]==00`, which is implied by `iis==000` -- verified by exhaustively
+checking every 3-bit `iis` value against the original 4-way ternary before
+simplifying, not assumed) -- documented in-line rather than silently
+dropped.
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind`
+14/14, full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes
+Stage 4, and with it, the entire ext_count de-duplication plan
+(`~/.claude/plans/elegant-gliding-fog.md`, Phases 221-224) in full.**
+
+Summary of the whole plan: Stage 1 built an exhaustive opcode-sweep
+overlap-detection testbench that, after two rounds of real false-positive
+elimination (value-disagreement filtering, then automatic format-dependence
+analysis), found and fixed a genuine, previously-undiscovered latent bug
+(MOVE indexed-src to memory-dst under-counting extension words in
+full-format). Stages 2-3 eliminated the actual mechanism behind that bug
+class and every prior instance of it in this project's history (Phase 96,
+150, 161 Stage A5, 216): hand-copied bit positions across `eu_seq.sv` and
+`m68030_seq.sv`, now centralized in `rtl/opcode_fields.sv` as the single
+source of truth for opcode-field extraction and mode=110 extension-word
+classification. Stage 4 closed the one remaining intra-file duplication.
+`make test` (37/37, up from 36 -- the new `ext_count_overlap` sweep is now
+permanent regression coverage), `make cosim_grp` (8/8), `make cosim_memind`
+(14/14, up from 12 -- `memind27.s` is new), and the full 124-suite Harte
+sweep all stayed bit-identical to baseline (except for the one real bug
+fix, itself independently verified against Musashi/WinUAE) across every
+RTL-touching stage.

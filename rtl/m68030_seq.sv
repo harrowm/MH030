@@ -198,14 +198,16 @@ module m68030_seq (
     // 68000-captured and has zero coverage of this 68020+-only mode.
     logic [2:0] memind_bd_words, memind_od_words, memind_ext_count;
     always_comb begin
-        memind_bd_words = (peek_fi_bdsz == 2'b10) ? 3'd1 :
-                           (peek_fi_bdsz == 2'b11) ? 3'd2 : 3'd0;
+        // eaf_disp_words: shared with movem_bd_words/movem_od_words/
+        // q3bd_words below (rtl/opcode_fields.sv, ext_count
+        // de-duplication plan Stage 4, plan.md).
+        memind_bd_words = eaf_disp_words(peek_fi_bdsz);
         // od words only apply once genuine indirect action is selected
         // (iis != 000); iis[1:0] then gives the od size the same way bdsz
-        // gives the bd size (01=null, 10=word, 11=long).
-        memind_od_words = (peek_fi_iis == 3'b000) ? 3'd0 :
-                           (peek_fi_iis[1:0] == 2'b10) ? 3'd1 :
-                           (peek_fi_iis[1:0] == 2'b11) ? 3'd2 : 3'd0;
+        // gives the bd size (01=null, 10=word, 11=long) -- the iis==000
+        // case needs no separate guard, since iis[1:0]==00 whenever
+        // iis==000 too, and eaf_disp_words already returns 0 for that.
+        memind_od_words = eaf_disp_words(peek_fi_iis[1:0]);
         memind_ext_count = 3'd1 + memind_bd_words + memind_od_words;
     end
 
@@ -236,11 +238,8 @@ module m68030_seq (
     logic [2:0]  peek_fi_iis_movem;   assign peek_fi_iis_movem  = eaf_iis(ifu_ext_data[15:0]);
     logic [2:0] movem_bd_words, movem_od_words, movem_ext_count;
     always_comb begin
-        movem_bd_words = (peek_fi_bdsz_movem == 2'b10) ? 3'd1 :
-                          (peek_fi_bdsz_movem == 2'b11) ? 3'd2 : 3'd0;
-        movem_od_words = (peek_fi_iis_movem == 3'b000) ? 3'd0 :
-                          (peek_fi_iis_movem[1:0] == 2'b10) ? 3'd1 :
-                          (peek_fi_iis_movem[1:0] == 2'b11) ? 3'd2 : 3'd0;
+        movem_bd_words = eaf_disp_words(peek_fi_bdsz_movem);
+        movem_od_words = eaf_disp_words(peek_fi_iis_movem[1:0]);
         movem_ext_count = 3'd2 + movem_bd_words + movem_od_words;
     end
     // is_movem itself only covers the -(An)/(An)+/(An) modes (f_mode ∈
@@ -323,8 +322,7 @@ module m68030_seq (
     // both signals below since they have the identical baseline/descriptor
     // position.
     logic [2:0] q3bd_words;
-    assign q3bd_words = (peek_fi_bdsz_q3 == 2'b10) ? 3'd1 :
-                         (peek_fi_bdsz_q3 == 2'b11) ? 3'd2 : 3'd0;
+    assign q3bd_words = eaf_disp_words(peek_fi_bdsz_q3);
     logic is_move_mm_imml_idxdst_full;
     assign is_move_mm_imml_idxdst_full =
         (f_group == 4'h2) &&                       // MOVE.L
