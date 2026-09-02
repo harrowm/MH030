@@ -509,11 +509,16 @@ module eu_seq (
 
     // full extension word field extractions from ext_data[15:0] = ext0
     // (ext_data[15:0] is the first extension word; ext_data[31:16] is the second.)
-    logic        fi_is_full;  assign fi_is_full = ext_data[8];       // 0=brief, 1=full
+    // eaf_is_full/eaf_bdsz/eaf_iis: shared with m68030_seq.sv's own
+    // peek_fi_*/peek_fi_*_movem/peek_fi_*_q3 (rtl/opcode_fields.sv,
+    // ext_count de-duplication plan Stage 3, plan.md) -- previously these
+    // exact bit positions (8/[5:4]/[2:0]) were hand-copied 4 separate times
+    // across the two files.
+    logic        fi_is_full;  assign fi_is_full = eaf_is_full(ext_data[15:0]); // 0=brief, 1=full
     logic        fi_bs;       assign fi_bs      = ext_data[7];       // base suppress
     logic        fi_is_s;     assign fi_is_s    = ext_data[6];       // index suppress
-    logic [1:0]  fi_bdsz;     assign fi_bdsz    = ext_data[5:4];     // bd size: 01=null,10=word,11=long
-    logic [2:0]  fi_iis;      assign fi_iis     = ext_data[2:0];     // I/IS: 000=none, 001-011=indirect
+    logic [1:0]  fi_bdsz;     assign fi_bdsz    = eaf_bdsz(ext_data[15:0]); // bd size: 01=null,10=word,11=long
+    logic [2:0]  fi_iis;      assign fi_iis     = eaf_iis(ext_data[15:0]);  // I/IS: 000=none, 001-011=indirect
     // base displacement: word in ext_data[31:16] when fi_bdsz==10 (word);
     // long (fi_bdsz==11) needs a second word -- ext_data[31:16] is already
     // the high half (m68030_seq.sv's memind-specific q1/q2 swap puts the

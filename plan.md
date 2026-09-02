@@ -6105,3 +6105,41 @@ anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, exactly as
 expected for a provable no-op refactor. **Closes Stage 2.** Stage 3 (the
 core of the original ask -- shared mode=110 extension-word extraction) is
 next.
+
+## Phase 223 (ext_count de-duplication plan, Stage 3 -- the core of the original ask): shared mode=110 extension-word extraction
+
+Added `eaf_is_full`/`eaf_bdsz`/`eaf_iis` to `rtl/opcode_fields.sv` (already
+present from Stage 2's own single-write of the whole file). Replaced all 4
+independent hand-copies of the mode=110 full-format extension-word bit
+positions (bit 8 / bits[5:4] / bits[2:0]) with calls to the shared
+functions:
+
+- `eu_seq.sv`'s `fi_is_full`/`fi_bdsz`/`fi_iis` -> `eaf_is_full(ext_data[15:0])`
+  / `eaf_bdsz(ext_data[15:0])` / `eaf_iis(ext_data[15:0])`.
+- `m68030_seq.sv`'s `peek_fi_full`/`peek_fi_bdsz`/`peek_fi_iis` (the
+  "q1-in-the-high-half" convention) -> the same 3 functions called on
+  `ifu_ext_data[31:16]`.
+- `m68030_seq.sv`'s `peek_fi_full_movem`/`peek_fi_bdsz_movem`/
+  `peek_fi_iis_movem` (the "q1-in-the-low-half" MOVEM/CMP2CHK2/most
+  MOVE-mem-to-mem convention) -> called on `ifu_ext_data[15:0]`.
+- `m68030_seq.sv`'s `peek_fi_full_q3`/`peek_fi_bdsz_q3`/`peek_fi_iis_q3`
+  (the "descriptor lives at q3" convention) -> called on `ifu_q3_word`.
+
+Each replacement is a provable index-arithmetic identity (e.g.
+`eaf_is_full(ifu_ext_data[31:16]) == ifu_ext_data[31:16][8] ==
+ifu_ext_data[24]`, the old hardcoded offset `m68030_seq.sv`'s own comment
+used to spell out by hand). After this stage there is exactly **one** place
+in the whole codebase where bits `8`/`5:4`/`2:0` of a mode=110 extension
+word are ever written down -- closing off the actual mechanism (hand-copied
+bit positions silently drifting apart) that caused this bug class
+historically, and that Stage 1's own sweep just found a fresh instance of.
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind`
+14/14, full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline --
+`cosim_memind`'s own 14 targets are especially meaningful here as this
+project's primary regression coverage for the mode=110 memory-indirect EA
+path this stage directly touches. **Closes Stage 3 -- the core of the
+originally-requested de-duplication is now done.** Stage 4 (optional,
+smaller, intra-`m68030_seq.sv` displacement-size-to-word-count sharing)
+remains, independently includable or droppable.

@@ -175,9 +175,13 @@ module m68030_seq (
     // offset by +16 since this file's ifu_ext_data has word1 in the high half
     // (opposite convention from eu_seq.sv's own ext_data — see this file's
     // header comment).
-    logic        peek_fi_full;  assign peek_fi_full = ifu_ext_data[24];    // bit8
-    logic [1:0]  peek_fi_bdsz;  assign peek_fi_bdsz = ifu_ext_data[21:20]; // bits5:4
-    logic [2:0]  peek_fi_iis;   assign peek_fi_iis  = ifu_ext_data[18:16]; // bits2:0
+    // eaf_is_full/eaf_bdsz/eaf_iis: shared with eu_seq.sv's own fi_is_full/
+    // fi_bdsz/fi_iis (rtl/opcode_fields.sv, ext_count de-duplication plan
+    // Stage 3, plan.md) -- previously these exact bit positions (8/[5:4]/
+    // [2:0]) were hand-copied 4 separate times across the two files.
+    logic        peek_fi_full;  assign peek_fi_full = eaf_is_full(ifu_ext_data[31:16]); // bit8
+    logic [1:0]  peek_fi_bdsz;  assign peek_fi_bdsz = eaf_bdsz(ifu_ext_data[31:16]);    // bits5:4
+    logic [2:0]  peek_fi_iis;   assign peek_fi_iis  = eaf_iis(ifu_ext_data[31:16]);     // bits2:0
 
     // MOVE <ea>,dst with a mode=110 full-format source EA (memory-indirect,
     // or plain (bd,An,Xn) with a non-null bd) needs more than the 1
@@ -226,9 +230,10 @@ module m68030_seq (
     // memory-indirect -- but movem_ext_count still accounts for their words
     // to avoid desyncing the IFU stream even where the resulting EA value
     // itself is wrong, mirroring memind_ext_count's own reasoning above.
-    logic        peek_fi_full_movem;  assign peek_fi_full_movem = ifu_ext_data[8];
-    logic [1:0]  peek_fi_bdsz_movem;  assign peek_fi_bdsz_movem = ifu_ext_data[5:4];
-    logic [2:0]  peek_fi_iis_movem;   assign peek_fi_iis_movem  = ifu_ext_data[2:0];
+    // Same shared eaf_* extraction as peek_fi_full/etc above (rtl/opcode_fields.sv).
+    logic        peek_fi_full_movem;  assign peek_fi_full_movem = eaf_is_full(ifu_ext_data[15:0]);
+    logic [1:0]  peek_fi_bdsz_movem;  assign peek_fi_bdsz_movem = eaf_bdsz(ifu_ext_data[15:0]);
+    logic [2:0]  peek_fi_iis_movem;   assign peek_fi_iis_movem  = eaf_iis(ifu_ext_data[15:0]);
     logic [2:0] movem_bd_words, movem_od_words, movem_ext_count;
     always_comb begin
         movem_bd_words = (peek_fi_bdsz_movem == 2'b10) ? 3'd1 :
@@ -307,9 +312,10 @@ module m68030_seq (
     logic [2:0] move_mm_immw_idxdst_ext_count;
     assign move_mm_immw_idxdst_ext_count = 3'd2 + movem_bd_words + movem_od_words;
 
-    logic        peek_fi_full_q3;  assign peek_fi_full_q3 = ifu_q3_word[8];
-    logic [1:0]  peek_fi_bdsz_q3;  assign peek_fi_bdsz_q3 = ifu_q3_word[5:4];
-    logic [2:0]  peek_fi_iis_q3;   assign peek_fi_iis_q3  = ifu_q3_word[2:0];
+    // Same shared eaf_* extraction as peek_fi_full/etc above (rtl/opcode_fields.sv).
+    logic        peek_fi_full_q3;  assign peek_fi_full_q3 = eaf_is_full(ifu_q3_word);
+    logic [1:0]  peek_fi_bdsz_q3;  assign peek_fi_bdsz_q3 = eaf_bdsz(ifu_q3_word);
+    logic [2:0]  peek_fi_iis_q3;   assign peek_fi_iis_q3  = eaf_iis(ifu_q3_word);
     // Phase 147 (plan.md): bd word count for the "descriptor@q3, 3-word
     // baseline" shape (MOVE.L imm-src / abs.L-src) -- word bd needs 1 more
     // word (q4), long bd needs 2 more (q4+q5, unlocked by Phase 145's own
