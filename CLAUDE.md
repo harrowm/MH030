@@ -306,6 +306,24 @@ identical `check`/`check32`/`run_and_check` helpers into a shared
 `tb/common_helpers.svh` — the testbench-side analogue of the ext_count
 de-duplication effort above. See `plan.md §Phase 225` for the full writeup.
 
+**rtl/eu_seq.sv split (Phase 226)**: the 11,001-line `eu_seq.sv` (3.7x over this
+file's own "~3000 lines per module" guideline, by far the largest file in the
+project) was split via `` `include `` — not a real module split (would need
+~70+ `dec_*` decode signals turned into module ports, real port-plumbing-bug
+risk) — into `rtl/eu_seq_decode.svh` (pure combinational decode) and
+`rtl/eu_seq_execute.svh` (stall/hazard, EX/WB latches, every per-instruction
+FSM), with `rtl/eu_seq.sv` itself reduced to a 599-line spine (ports,
+parameters, shared helpers) that `` `include ``s both back in at the exact
+point they used to live — same compiled module, byte-identical elaborated
+output. Along the way, found the Verilator backend (`sim/vmustest`,
+`sim/harte_vbatch`) had never needed an `-I` flag before (nothing in `rtl/`
+had used `` `include `` until now) and fixed both `VLATOR_FLAGS` variables;
+also found GNU Make 3.81's own no-recipe dependency-only rules do *not*
+propagate staleness (confirmed empirically, `make -n` reports "Nothing to be
+done") — fixed with a `@touch $@` recipe, the standard idiom for this case.
+Full 124-suite Harte sweep bit-identical to baseline, as expected for a pure
+text-relocation change. See `plan.md §Phase 226` for the full writeup.
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

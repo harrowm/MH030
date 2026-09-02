@@ -26,6 +26,25 @@ EU_SRCS := \
     rtl/eu_seq.sv \
     rtl/m68030_eu.sv
 
+# rtl/eu_seq.sv's own body is split across two `` `include ``'d fragments
+# (rtl/eu_seq_decode.svh, rtl/eu_seq_execute.svh) for navigability -- pure
+# text substitution, same compiled module. This rule means every target that
+# already lists rtl/eu_seq.sv as a prerequisite (directly or via $(EU_SRCS),
+# which is nearly every target in this Makefile) correctly rebuilds if
+# either .svh changes, without needing per-target edits (unlike
+# tb/common_helpers.svh's own order-only-prereq approach, appropriate there
+# since only 2 targets consume it). A no-recipe rule alone does NOT do this
+# under GNU Make 3.81 (confirmed empirically: `make -n` reports "Nothing to
+# be done" and never propagates staleness downstream) -- Make's own
+# staleness check for a target vs. rtl/eu_seq.sv is purely an mtime
+# comparison, and nothing ever bumps rtl/eu_seq.sv's own mtime without an
+# actual recipe. `touch $@` is the standard GNU Make idiom for exactly this
+# "propagate a dependency without regenerating content" case -- it only
+# runs (and only bumps the mtime) when a .svh is genuinely newer, content is
+# never touched, so this has zero effect on `git status`/content hashing.
+rtl/eu_seq.sv: rtl/eu_seq_decode.svh rtl/eu_seq_execute.svh
+	@touch $@
+
 BIU_SRCS := \
     rtl/biu_eclk_gen.sv \
     rtl/biu_cycle_gen.sv \
@@ -201,7 +220,7 @@ $(SIM)/mustest: $(TOP_SRCS) tb/mustest_tb.sv | $(SIM)
 # ── Verilator build for mustest (100-1000x faster than Icarus) ───────────────
 VLATOR       := verilator
 VOBJ         := obj_mustest
-VLATOR_FLAGS := --cc -sv --Mdir $(VOBJ) --top-module mustest_tb \
+VLATOR_FLAGS := --cc -sv -Irtl --Mdir $(VOBJ) --top-module mustest_tb \
                 --x-assign 0 --x-initial 0 -Wno-fatal -Wno-WIDTHTRUNC \
                 -Wno-WIDTHEXPAND -Wno-CASEINCOMPLETE -Wno-INITIALDLY \
                 --public -fno-dfg
@@ -219,7 +238,7 @@ sim/vmustest: $(VOBJ)/Vmustest_tb | $(SIM)
 # ── Verilator build for the batched Harte runner (see plan.md's Harte-sweep-
 # performance investigation) ─────────────────────────────────────────────────
 VOBJ_HARTE := obj_harte_vbatch
-VLATOR_FLAGS_HARTE := --cc -sv --Mdir $(VOBJ_HARTE) --top-module harte_verilator_tb \
+VLATOR_FLAGS_HARTE := --cc -sv -Irtl --Mdir $(VOBJ_HARTE) --top-module harte_verilator_tb \
                 --x-assign 0 --x-initial 0 -Wno-fatal -Wno-WIDTHTRUNC \
                 -Wno-WIDTHEXPAND -Wno-CASEINCOMPLETE -Wno-INITIALDLY \
                 --public -fno-dfg

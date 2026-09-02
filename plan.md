@@ -6238,3 +6238,70 @@ Results: both `sim/cache`/`sim/stall_fsm` compile clean and pass with `$finish`
 timestamps byte-identical to the pre-refactor baseline (147736/582526, confirming
 zero behavioral drift), `make test` 37/37 (unchanged), `make cosim_grp` 8/8. Pure
 testbench change -- `git diff --stat -- rtl/` empty, no Harte re-run needed.
+
+## Phase 226: Split rtl/eu_seq.sv for navigability (Stage 1, `` `include ``-based, no formal plan numbering beyond this)
+
+Third and last item from the efficiency/clarity survey (CLAUDE.md archival and shared
+testbench helpers already done): `rtl/eu_seq.sv` was 11,001 lines, 3.7x over this
+project's own CLAUDE.md guideline of "keep each module under ~3000 lines," and by far
+the largest file in the project (next-largest, `biu_cycle_gen.sv`, is ~1,650 lines).
+
+Entered plan mode; a dedicated Explore pass read the whole file and confirmed a
+single, clean, already-comment-marked boundary at line 6291/6292 -- everything
+583-6291 is the file's own "DECODE stage -- purely combinational" section (one giant
+`always_comb`/`case (f_group)`, no state, no side effects); everything 6292-10998 is
+"WB stage signal declarations" onward (stall/hazard logic, the EX-stage latch, ~25
+per-instruction-family FSMs, the WB-stage latch, and the trailing output assigns).
+Lines 1-582 (port list, local parameters, pre-extracted instruction-field assigns,
+shared helper functions/tasks) and 10999-11001 (`endmodule`/`` `default_nettype
+wire ``) are used by/belong to both halves and stay in the main file. Chose a pure
+`` `include ``-based text split over a real module split (which would need ~70+
+internal `dec_*` decode signals turned into module ports -- the exact "forgot to
+wire a port" bug class this project has hit repeatedly) -- `` `include `` is pure
+preprocessor text substitution, so the elaborated/compiled module is byte-identical
+to before, sidestepping that risk entirely. Same technique already proven in this
+project for `tb/common_helpers.svh`/`tb/ext_count_overlap_flags.svh`.
+
+**Execution**: `sed -n` extraction (never hand-retyped, given this is the single most
+heavily-tested file in the project) of lines 583-6291 into new `rtl/eu_seq_decode.svh`
+(5,709 lines + a header comment) and 6292-10998 into new `rtl/eu_seq_execute.svh`
+(4,707 lines + a header comment) -- both boundaries independently re-verified via
+direct `sed` reads (not just trusted from the Explore report) before extracting.
+Fidelity check: `diff`'d each new file's body (excluding its own prepended header)
+against the corresponding original line range -- byte-identical, both. Rebuilt
+`rtl/eu_seq.sv` itself down to 599 lines: the original 1-582 verbatim, two
+`` `include ``s, then the original 10999-11001 verbatim -- diff-verified identical to
+the original head/tail too.
+
+**Makefile**: added `rtl/eu_seq.sv: rtl/eu_seq_decode.svh rtl/eu_seq_execute.svh`
+so every target already depending on `rtl/eu_seq.sv` (directly or via `$(EU_SRCS)`,
+nearly every target in the file) rebuilds if either `.svh` changes. **Found via direct
+empirical testing that a no-recipe version of this rule does NOT actually propagate
+staleness under GNU Make 3.81** (`make -n` reported "Nothing to be done" and never
+cascaded to dependents) -- Make's own staleness check is a pure mtime comparison, and
+nothing ever bumps `rtl/eu_seq.sv`'s own on-disk mtime without a recipe running. Fixed
+with the standard GNU Make idiom for exactly this case, `@touch $@` as the recipe
+(only fires when a `.svh` is genuinely newer; content is never touched, so `git
+status` is unaffected) -- re-verified both directions (`make -n` shows the rebuild
+chain when a `.svh` is touched; a clean second run reports "up to date").
+
+**Found a second real gap via the full verification gate**: the Verilator backend
+(used for both `sim/vmustest` and the Harte-sweep `sim/harte_vbatch`) had never
+needed an `-I` flag before, since nothing in `rtl/` had ever used `` `include ``
+until this change -- both builds failed with "Cannot find include file." Fixed by
+adding `-Irtl` to both `VLATOR_FLAGS` and `VLATOR_FLAGS_HARTE` (Verilator needs the
+flag and its value joined with no space, unlike Icarus's `-I rtl`, confirmed by
+trying the spaced form first and seeing Verilator mis-parse `rtl` as a positional
+module-name argument instead).
+
+Results: `make test` 37/37 (unchanged), `make cosim_grp` 8/8, `make cosim_memind`
+14/14, full 124-suite Harte sweep (mandatory, and the strongest possible verification
+story here since this change is pure text relocation -- the preprocessed output fed
+to the compiler is byte-identical to before, so results are expected to be *exactly*
+unchanged, not just "still passing") -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. Stage 2 (further
+splitting each `.svh` to bring every file under the ~3000-line guideline strictly)
+remains optional, not pursued -- this 2-way split already reduces the largest single
+file from 11,001 to 5,709 lines and, more importantly, makes every resulting file
+thematically coherent (pure decode vs. pure execute/WB/FSM) rather than mixing every
+concern in one file.
