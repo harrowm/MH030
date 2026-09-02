@@ -6069,3 +6069,39 @@ has zero coverage of full-format extension words, a 68020+-only feature --
 de-duplication plan**, having found and fixed a genuine bug along the way --
 Stages 2-4 (sharing the primitive field/extension-word bit extraction
 itself) are next.
+
+## Phase 222 (ext_count de-duplication plan, Stage 2): shared opcode-field extraction
+
+Validated the chosen mechanism (a plain file-scope `function automatic`, no
+package/import -- this project has zero SystemVerilog package precedent) via
+a throwaway scratch compile under this project's exact toolchain
+(`iverilog -g2012 -I rtl`) before touching any production file: a bare
+file-scope function in one `.sv` file, called from both an `assign` and an
+`always_comb` in a second file with no import statement of any kind. Zero
+elaboration errors, correct values from both call sites (the one "sorry:"
+line is the already-documented, harmless Icarus over-broad-sensitivity
+warning this project's own `IVCOMP` filters routinely). Scratch files
+deleted once confirmed.
+
+New `rtl/opcode_fields.sv`: 6 one-line field-extraction functions
+(`opf_group`/`opf_dn`/`opf_dir`/`opf_ss`/`opf_mode`/`opf_reg`), each a
+provable identity to the bit-select it replaces. Replaced `eu_seq.sv`'s and
+`m68030_seq.sv`'s own independently-declared `f_group`/`f_dn`/`f_dir`/
+`f_ss`/`f_mode`/`f_reg` assigns (byte-for-byte identical bit positions in
+both files before this change) with calls to the shared functions -- 12
+one-line edits total, zero changes to any of the hundreds of downstream call
+sites in either file, since the signal names/widths/semantics are
+unchanged.
+
+Makefile: added `rtl/opcode_fields.sv` as the new first entry in `EU_SRCS`
+(propagates to every target already consuming `$(EU_SRCS)`/`$(TOP_SRCS)`)
+plus explicitly to the two targets that don't (`seq_ctrl`, and Stage 1's own
+new `ext_count_overlap`) -- confirmed via re-grepping the whole Makefile
+that no other target needed touching.
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
+full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline, exactly as
+expected for a provable no-op refactor. **Closes Stage 2.** Stage 3 (the
+core of the original ask -- shared mode=110 extension-word extraction) is
+next.

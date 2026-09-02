@@ -14,6 +14,7 @@ IVCOMP = { $(IV) $(IVFLAGS) -o $@ $^ 2>&1 || { echo "ERROR: $@ compile failed"; 
 
 # ── Source lists (reused across many tests) ────────────────────────────────
 EU_SRCS := \
+    rtl/opcode_fields.sv \
     rtl/eu_regfile.sv \
     rtl/eu_alu.sv \
     rtl/eu_shifter.sv \
@@ -120,13 +121,13 @@ $(SIM)/cmpm:       $(EU_SRCS)                         tb/cmpm_tb.sv        | $(S
 $(SIM)/ifu:        rtl/m68030_ifu.sv                  tb/ifu_tb.sv        | $(SIM)
 	$(IVCOMP)
 
-$(SIM)/seq_ctrl:      rtl/m68030_seq.sv                  tb/seq_ctrl_tb.sv        | $(SIM)
+$(SIM)/seq_ctrl:      rtl/opcode_fields.sv rtl/m68030_seq.sv  tb/seq_ctrl_tb.sv        | $(SIM)
 	$(IVCOMP)
 
 tb/ext_count_overlap_flags.svh: rtl/m68030_seq.sv scripts/gen_ext_count_overlap_flags.py
 	python3 scripts/gen_ext_count_overlap_flags.py rtl/m68030_seq.sv tb/ext_count_overlap_flags.svh
 
-$(SIM)/ext_count_overlap: rtl/m68030_seq.sv tb/ext_count_overlap_tb.sv \
+$(SIM)/ext_count_overlap: rtl/opcode_fields.sv rtl/m68030_seq.sv tb/ext_count_overlap_tb.sv \
                    | tb/ext_count_overlap_flags.svh $(SIM)
 	$(IVCOMP)
 

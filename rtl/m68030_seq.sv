@@ -63,12 +63,15 @@ module m68030_seq (
     // -----------------------------------------------------------------------
     // Pre-extract instruction fields
     // -----------------------------------------------------------------------
-    logic [3:0] f_group;  assign f_group = instr_word[15:12];
-    logic [2:0] f_dn;     assign f_dn    = instr_word[11:9];
-    logic       f_dir;    assign f_dir   = instr_word[8];
-    logic [1:0] f_ss;     assign f_ss    = instr_word[7:6];
-    logic [2:0] f_mode;   assign f_mode  = instr_word[5:3];
-    logic [2:0] f_reg;    assign f_reg   = instr_word[2:0];
+    // See rtl/opcode_fields.sv (ext_count de-duplication plan, plan.md,
+    // Stage 2) -- the shared, single-source-of-truth primitive extraction
+    // eu_seq.sv's own identical fields are also built from.
+    logic [3:0] f_group;  assign f_group = opf_group(instr_word);
+    logic [2:0] f_dn;     assign f_dn    = opf_dn(instr_word);
+    logic       f_dir;    assign f_dir   = opf_dir(instr_word);
+    logic [1:0] f_ss;     assign f_ss    = opf_ss(instr_word);
+    logic [2:0] f_mode;   assign f_mode  = opf_mode(instr_word);
+    logic [2:0] f_reg;    assign f_reg   = opf_reg(instr_word);
 
     // -----------------------------------------------------------------------
     // Extension-word count (0, 1, or 2)

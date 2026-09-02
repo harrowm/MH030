@@ -353,12 +353,15 @@ module eu_seq (
     logic [1:0] f_shf_tt;  // instr_word[4:3]   — shift type (00=AS,01=LS,10=ROX,11=RO)
     logic [1:0] f_move_sz; // MOVE size from [15:12]: 01=byte,11=word,10=long
 
-    assign f_group   = instr_word[15:12];
-    assign f_dn      = instr_word[11:9];
-    assign f_dir     = instr_word[8];
-    assign f_ss      = instr_word[7:6];
-    assign f_mode    = instr_word[5:3];
-    assign f_reg     = instr_word[2:0];
+    // See rtl/opcode_fields.sv (ext_count de-duplication plan, plan.md,
+    // Stage 2) -- the shared, single-source-of-truth primitive extraction
+    // m68030_seq.sv's own identical fields are also built from.
+    assign f_group   = opf_group(instr_word);
+    assign f_dn      = opf_dn(instr_word);
+    assign f_dir     = opf_dir(instr_word);
+    assign f_ss      = opf_ss(instr_word);
+    assign f_mode    = opf_mode(instr_word);
+    assign f_reg     = opf_reg(instr_word);
     assign f_shf_i   = instr_word[5];
     assign f_shf_tt  = instr_word[4:3];
     // MOVE size: [15:12] encodes 01=byte, 10=long, 11=word → internal: byte=01,word=10,long=00
