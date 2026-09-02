@@ -5921,3 +5921,151 @@ memory-indirect EA beyond `MOVE <ea>,dst`, and MOVEM's own genuine
 memory-indirect) and remain open for a future dedicated plan if the user
 wants them pursued; back-to-back FSM composition breadth remains
 open-ended by design, as already documented in `docs/stalls.md`.
+
+## Phase 221 (ext_count de-duplication plan, Stage 1): exhaustive opcode-sweep overlap-detection testbench -- found and fixed a genuine, previously-undiscovered ext_count bug
+
+A prior analysis pass (no code changed, reported to the user directly)
+compared this project's decoder against `TobiFlex/TG68K.C` (a mature,
+FPGA-proven 68000/68010/68020 core) and found both use the same
+architectural idiom -- one large combinational decode process with nested
+`case`/`if` on opcode fields, not a lookup-table/ROM decoder -- confirming
+this project's own shape matches how real, proven RTL cores are built. The
+analysis *did* find a genuine, concrete duplication: `eu_seq.sv` and
+`m68030_seq.sv` both independently re-derive identical low-level bit
+extraction (opcode field decode; mode=110 full-format extension-word
+classification) from the same `instr_word`. A follow-up Plan subagent
+independently re-confirmed every fact and produced a 4-stage de-duplication
+plan (`~/.claude/plans/elegant-gliding-fog.md`), approved by the user.
+
+**Stage 1**: an exhaustive opcode-sweep testbench checking that at most one
+of `m68030_seq.sv`'s own 48 `ext_count` if/else-if branch conditions is ever
+true for the same input. New `scripts/gen_ext_count_overlap_flags.py`
+(re-parses the real RTL source every run -- deliberately not a hand-typed
+list of ~50 branch conditions, which would itself be exactly the kind of
+"two places must stay in sync" duplication this whole effort exists to
+eliminate) extracts every branch's own condition AND its `ext_count = ...`
+result value verbatim, via a comment-aware balanced-paren scanner. New
+`tb/ext_count_overlap_tb.sv` sweeps all 65,536 `instr_word` values across 6
+representative extension-word "peek" configurations (brief, and 5
+full-format shapes spanning null/word/long bd crossed with direct/indirect
+od -- confirmed sufficient since the chain's own classifiers only ever
+distinguish is_full / bdsz[1] / (iis==0 vs !=0), never a finer bit
+combination) -- 393,216 total combinations, ~4 seconds under Icarus.
+
+**Two rounds of false-positive elimination were needed before the check was
+meaningful, each a real design lesson, not just debugging**:
+1. A naive "any 2+ branches true" check found ~46,300 "overlaps" with zero
+   real bugs: a broad catch-all bucket near the chain's end (an OR of ~30
+   unrelated `is_*` conditions, all mapping to the same `ext_count` value)
+   routinely, harmlessly overlaps with earlier specific branches it's never
+   actually reached for (if/else-if stops at the first match). Fixed by
+   also comparing each branch's own **value** -- two branches merely being
+   simultaneously true isn't a bug; only a *value disagreement* matters.
+2. Even value-disagreement-filtered, a large residual remained: the
+   mode=110 full-format EA rollout's own established architecture (Phases
+   116-147) always positions a full-format-AWARE override branch EARLIER
+   than the pre-existing brief-only branch it needs to override, leaving
+   the brief branch deliberately unmodified (still correct for brief,
+   never reached for full since shadowed). This is the identical harmless
+   shape as (1), just without the large-OR-count tell. Generalized
+   automatically rather than hand-excluded: `compute_format_dependent_names()`
+   computes, via transitive closure over every `assign` in `m68030_seq.sv`,
+   which branches can only be true when the extension word is in full
+   format (depend on `peek_fi_full`/`peek_fi_full_movem`/`peek_fi_full_q3`).
+   A format-independent branch disagreeing with an EARLIER format-dependent
+   one is this established override pattern, not a bug -- confirmed by hand
+   against all 9 distinct signatures the un-generalized check found (every
+   one was exactly `is_movem_idx_full`/`is_cmp2chk2_idx_full`/the various
+   `is_move_mm_*_idxdst_full` arms/`is_memind_full`, each correctly
+   preceding and shadowing its own pre-existing brief-only sibling).
+   Distinct-signature dedup (a fixed-size linear-scan table, since Icarus
+   13 has no associative-array support per this project's own established
+   finding) made working through the residual tractable -- 9 signatures,
+   not an unbounded per-opcode stream.
+
+**One further, deliberately narrow, hand-justified exception**
+(`KNOWN_REFINEMENT_PAIRS`, explicitly NOT meant to grow) was needed for a
+relationship the fix itself introduced: `is_move_idx_src_memdst_full` (see
+below) and `is_memind_full` are BOTH format-dependent, so the general
+heuristic can't separate them -- but the former is a strict refinement of
+the latter (adds "destination is also memory" on top of the same
+`is_move_idx_src` term feeding `is_memind_full`'s own disjunction), resolved
+by index (verified: the refiner must appear strictly earlier in the chain,
+checked at generation time, not assumed).
+
+**The genuine bug found**: sweeping with the false-positive filters correctly
+in place surfaced a REAL, previously-undiscovered latent bug, exactly the
+kind Stage 1 was designed to catch. `is_memind_full` (mode110_ea_src's own
+generic "indexed source, full format" match, which includes
+`is_move_idx_src` unconditionally) was winning ext_count's own priority
+chain for **MOVE (d8,An,Xn),<memory dst>** in full-format -- computing
+`ext_count` from the SOURCE's own bd/od requirement alone, silently ignoring
+that a MOVE mem-to-mem instruction's own DESTINATION is *also* memory and
+needs its own extension word (0 more for dst=(An)/(An)+/-(An), 1 more for
+dst=(d16,An)). Root-caused with a bounded investigation (checked whether
+`eu_seq.sv` even implements this EA combination before assuming it was
+purely missing decode): it does -- a dedicated `f_mode==3'b110` arm inside
+"dst = memory (An)/.../.../(d16,An)" (correctly `ext_count`-aware in its own
+header comment) -- but had never been exercised with a genuinely
+FULL-format source before; it only ever read a fixed 8-bit brief
+displacement byte, silently misreading a full-format extension word's own
+unrelated bits as if they were one. Never caught before: Harte has zero
+full-format-extension-word coverage (68000-captured corpus, this is a
+68020+-only feature), and this project's own `tests/memind*.s` cosim suite,
+despite being extensive (Phases 115-147), never happened to try an indexed
+SOURCE combined with a non-indexed memory destination specifically.
+
+**Fix**: `rtl/m68030_seq.sv` -- new `is_move_idx_src_memdst_full` classifier
+(`is_move_idx_src && peek_fi_full && dst-is-memory`), computing
+`ext_count = 1 + memind_bd_words + (dst==101 ? 1 : 0)`, inserted immediately
+ahead of `is_memind_full`'s own branch in the chain. `eu_seq.sv`'s own
+`f_mode==3'b110` arm: for dst != (d16,An) (1-word baseline, the
+`is_memind_full` swap already correctly relocates the descriptor), switched
+from a fixed brief-byte read to the standard `fi_is_full ? fi_bd : <brief>`
+template used throughout the rest of the mode=110 EA rollout. For
+dst == (d16,An) specifically -- a genuinely harder 2-word-baseline shape
+where the swap would conflict with the destination's own d16 needing a
+stable position -- `m68030_seq.sv`'s own `eu_ext_data` swap trigger was
+narrowed to exclude just this one sub-case (`!(is_move_idx_src &&
+f_move_dst_mode_s==3'b101)`), and `eu_seq.sv` reads the source's own
+is-full bit directly from its natural, un-swapped high-half position
+instead, scoped to null base displacement (the common case, fully correct);
+word/long bd at this specific dst mode would need a genuine 3rd/4th
+extension word this arm doesn't have -- documented, deliberately not
+attempted, matching the "least-wrong fallback" boundary the entire mode=110
+EA rollout (Phases 116-147) already established for combinations needing
+more words than an arm currently has.
+
+**Verification**: new `tests/memind27.s` -- two instructions covering both
+fixed sub-cases. The dst=(d16,An) null-bd case needed hand-encoding via
+`dc.w` (opcode `0x2770` + ext word `0x1910` + d16 `0x0008`): vasm has no
+mnemonic syntax to request genuine null base-displacement (bdsz=01) for a
+plain (non-indirect) indexed EA without also requesting genuine
+memory-indirect brackets, a different, harder, unrelated addressing mode
+(confirmed via a standalone assembler probe: plain `(a0,d1.l)` gives brief
+format, `.w`/`.l` suffixes force a real bd WORD/LONG to exist, never bdsz=01
+alone) -- since Musashi decodes the raw bytes completely independently of
+vasm, this is a genuine, independent cross-check of the hand-derivation, not
+an assembler-trusting one. Both instructions match Musashi/WinUAE exactly
+(reads and both computed writes), aside from the same benign
+prefetch-interleave adjacent reordering already documented for
+memind9/14/19/20/22.s (`--allow-adjacent-swap` tolerates it cleanly). Wired
+into `make cosim_memind` (now 14/14).
+
+Wired `$(SIM)/ext_count_overlap` into the Makefile (`tb/ext_count_overlap_flags.svh`
+regenerated fresh via a Make rule depending on `rtl/m68030_seq.sv` and the
+generator script itself, so it can never silently go stale) and into
+`ALL_TESTS` (36→37) as permanent regression coverage, locking in the "chain
+branches are mutually exclusive" invariant going forward. `IVFLAGS` gained
+`-I tb` (needed for the new file's own `` `include ``  -- confirmed zero
+impact on every other target, since this is the first `` `include `` used
+anywhere in this project).
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
+full 124-suite Harte sweep -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline (expected: Harte
+has zero coverage of full-format extension words, a 68020+-only feature --
+`tests/memind27.s` is the real gate here). **Closes Stage 1 of the ext_count
+de-duplication plan**, having found and fixed a genuine bug along the way --
+Stages 2-4 (sharing the primitive field/extension-word bit extraction
+itself) are next.

@@ -495,6 +495,44 @@ module m68030_seq (
     logic is_memind_full;
     assign is_memind_full = mode110_ea_src && peek_fi_full;
 
+    // deferred-items closure follow-up (plan.md, "De-duplicate ext_count's
+    // decode primitives against eu_seq.sv" Stage 1's own exhaustive
+    // opcode-sweep overlap-detection testbench): MOVE (d8,An,Xn),<memory
+    // dst> in full-format form. is_move_idx_src (folded into
+    // mode110_ea_src/is_memind_full above) is correct for the "dst is
+    // Dn/An" case (a plain indexed-src load into a register, is_move_mm
+    // never fires there) but is_memind_full's own generic 1-word-plus-bd
+    // formula is WRONG whenever the destination is ALSO memory
+    // (f_move_dst_mode_s in {010,011,100,101}) -- that makes this a real
+    // MOVE-mem-to-mem instruction, and eu_seq.sv's own dedicated decode
+    // for exactly this shape (the `f_mode==3'b110` arm inside its own
+    // "dst = memory (An)/(An)+/-(An)/(d16,An)" block) needs ext_count to
+    // additionally include the destination's own extension word (0 for
+    // dst in {010,011,100}, 1 more for dst==101/(d16,An_dst) -- matching
+    // that decode block's own header comment, "ext_count depends on dst:
+    // 1 for modes 2/3/4, 2 for mode 5"). Sweeping all 65,536 opcodes
+    // found is_memind_full silently winning this case by priority
+    // (checked first in the chain) and giving the SOURCE's own word
+    // count alone, under-draining the IFU by the destination's own
+    // extension word whenever dst==(d16,An) -- confirmed a genuine,
+    // previously-undiscovered gap: Harte has zero full-format-extension-
+    // word coverage (68000-captured corpus), and this project's own
+    // memind test suite never happened to try an indexed SOURCE
+    // specifically (every prior phase's own coverage has indexed as a
+    // destination, or as a single-operand target for other instruction
+    // families, never as MOVE's own mem-to-mem source). Scoped to
+    // non-indirect full-format (fi_iis==000) only, matching the
+    // established boundary the entire mode=110 EA rollout (Phases
+    // 116-147) already drew for genuine memory-indirect -- see
+    // eu_seq.sv's own matching fix for the EA-value side of this.
+    logic is_move_idx_src_memdst_full;
+    assign is_move_idx_src_memdst_full = is_move_idx_src && peek_fi_full &&
+        (f_move_dst_mode_s == 3'b010 || f_move_dst_mode_s == 3'b011 ||
+         f_move_dst_mode_s == 3'b100 || f_move_dst_mode_s == 3'b101);
+    logic [2:0] move_idx_src_memdst_ext_count;
+    assign move_idx_src_memdst_ext_count =
+        3'd1 + memind_bd_words + ((f_move_dst_mode_s == 3'b101) ? 3'd1 : 3'd0);
+
     // absolute EA (xxx).W/(xxx).L
     // PC-relative (d16,PC) and (d8,PC,Xn) also use f_mode=111
     //   f_reg sub-type: 000=abs.W(1ext), 001=abs.L(2ext), 010=(d16,PC)(1ext), 011=(d8,PC,Xn)(1ext)
@@ -722,6 +760,13 @@ module m68030_seq (
             ext_count = move_mm_plainsrc_idxdst_ext_count;
         else if (is_move_mm_d16src_idxdst_full)
             ext_count = move_mm_d16src_idxdst_ext_count;  // d16-src(1)+descriptor(1)+bd
+        // Checked ahead of is_memind_full's own (otherwise-first) match below --
+        // MOVE (d8,An,Xn),<memory dst> needs the destination's own extension
+        // word counted too, which is_memind_full's generic source-only formula
+        // doesn't know about. See is_move_idx_src_memdst_full's own declaration
+        // above for the full derivation.
+        else if (is_move_idx_src_memdst_full)
+            ext_count = move_idx_src_memdst_ext_count;
         else if (is_memind_full)
             ext_count = memind_ext_count;
         else if (is_imm_g0)
@@ -995,8 +1040,37 @@ module m68030_seq (
     // is a *different* code shape (2-word baseline, q1=d16/q2=descriptor)
     // that was never affected -- its own dedicated q3_word-based extraction
     // in eu_seq.sv doesn't touch fi_is_full/fi_bd at all.
+    //
+    // Deferred-items closure follow-up (plan.md, ext_count de-duplication
+    // Stage 1 sweep finding): is_move_idx_src_memdst_full's own dst==101
+    // ((d16,An_dst)) sub-case is EXCLUDED from this swap, unlike every
+    // other is_memind_full-triggering family. Reasoning: for dst in
+    // {010,011,100} (this arm's own 1-word baseline), the swap correctly
+    // relocates q1 (the source's own descriptor, naturally in
+    // ifu_ext_data's HIGH half) into eu_ext_data's LOW half where
+    // fi_is_full/fi_bd expect it -- genuinely needed whenever the source's
+    // own bd pushes ext_count to 2+ (a null-bd, ext_count==1 case would
+    // have landed q1 in the low half via the plain ext_count-based
+    // fallback below anyway, but a word/long-bd case would NOT without
+    // this swap). For dst==101 specifically, though, q2 is not spare
+    // capacity for the source's own bd -- it's the DESTINATION's own d16
+    // value, a genuinely different piece of data that must stay at a
+    // fixed, known position regardless of the source's own bd size.
+    // Swapping it into the high half (where dec_dst_ea_offset would then
+    // need to chase it) buys nothing, since eu_seq.sv's own dst==101
+    // branch (in its "dst = memory (An)/.../.../(d16,An)" block, the
+    // f_mode==3'b110 arm) reads the source's own is_full/bdsz bits
+    // directly from the natural, un-swapped high-half position instead
+    // (mirroring m68030_seq.sv's own peek_fi_full/bdsz/iis convention
+    // exactly) -- scoped to the null-bd sub-case for the source (the
+    // common case); word/long bd at dst==101 specifically falls back to
+    // treating q2 as the destination's own d16 regardless, the same
+    // "least-wrong fallback, documented not fixed" boundary the rest of
+    // this EA rollout (Phases 116-147) already established for combinations
+    // genuinely needing a 4th extension word this arm doesn't have.
     // -----------------------------------------------------------------------
-    assign eu_ext_data = (is_memind_full || is_move_mm_plainsrc_idxdst_full)
+    assign eu_ext_data = ((is_memind_full && !(is_move_idx_src && f_move_dst_mode_s == 3'b101))
+                          || is_move_mm_plainsrc_idxdst_full)
                         ? {ifu_ext_data[15:0], ifu_ext_data[31:16]}
                         : (ext_count >= 3'd2) ? ifu_ext_data
                                               : {16'h0, ifu_ext_data[31:16]};

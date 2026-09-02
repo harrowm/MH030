@@ -4,7 +4,7 @@ SHELL     := bash
 # ── Simulator ──────────────────────────────────────────────────────────────
 IV       := iverilog
 VVP      := vvp
-IVFLAGS  := -g2012 -I rtl
+IVFLAGS  := -g2012 -I rtl -I tb
 SIM      := sim
 
 # Suppress the hundreds of harmless "sorry: constant selects" lines from
@@ -121,6 +121,13 @@ $(SIM)/ifu:        rtl/m68030_ifu.sv                  tb/ifu_tb.sv        | $(SI
 	$(IVCOMP)
 
 $(SIM)/seq_ctrl:      rtl/m68030_seq.sv                  tb/seq_ctrl_tb.sv        | $(SIM)
+	$(IVCOMP)
+
+tb/ext_count_overlap_flags.svh: rtl/m68030_seq.sv scripts/gen_ext_count_overlap_flags.py
+	python3 scripts/gen_ext_count_overlap_flags.py rtl/m68030_seq.sv tb/ext_count_overlap_flags.svh
+
+$(SIM)/ext_count_overlap: rtl/m68030_seq.sv tb/ext_count_overlap_tb.sv \
+                   | tb/ext_count_overlap_flags.svh $(SIM)
 	$(IVCOMP)
 
 $(SIM)/pipeline:    rtl/m68030_ifu.sv rtl/m68030_seq.sv $(EU_SRCS) \
@@ -240,7 +247,7 @@ ALL_TESTS := \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/ctrl_flow $(SIM)/ea_modes $(SIM)/data_move $(SIM)/alu_reg $(SIM)/alu_mem $(SIM)/bitfield $(SIM)/bcd_pack $(SIM)/system $(SIM)/exception $(SIM)/atomic \
     $(SIM)/special_instr $(SIM)/ea_extended $(SIM)/cmpm \
-    $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
+    $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/ext_count_overlap $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate
 
@@ -503,6 +510,19 @@ buscmp-memind26: $(SIM)/cosim_grp winuae/tests/memind26_ref.log tests/memind26.h
 	    | grep "^BUS" > /tmp/_dut_memind26.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind26.log winuae/tests/memind26_ref.log \
 	    --dut-may-continue --allow-adjacent-swap
+# memind27 (deferred-items closure follow-up, plan.md, ext_count
+# de-duplication Stage 1): MOVE (bd,An,Xn),<memory dst> in full-format --
+# the real bug found by tb/ext_count_overlap_tb.sv's own exhaustive sweep.
+# Full comparison (reads AND both writes) matches Musashi/WinUAE exactly
+# aside from the same benign prefetch-interleave adjacent reordering
+# documented for memind9.s/14.s/19.s/20.s/22.s -- --allow-adjacent-swap
+# tolerates it cleanly (every value, including both computed writes,
+# matches byte-for-byte).
+buscmp-memind27: $(SIM)/cosim_grp winuae/tests/memind27_ref.log tests/memind27.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind27.hex +grp=memind27 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind27.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind27.log winuae/tests/memind27_ref.log \
+	    --dut-may-continue --allow-adjacent-swap
 # memind15 (Phase 149, plan.md): full comparison, NOT --reads-only -- the
 # phantom read this file's own header used to document is gone now that
 # MOVE Dn,(d8,An,Xn) is a genuine single-phase write via rd_c, so the full
@@ -531,7 +551,7 @@ buscmp-memind25: $(SIM)/cosim_grp winuae/tests/memind25_ref.log tests/memind25.h
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
-              buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26
+              buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

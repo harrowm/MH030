@@ -2179,11 +2179,11 @@ module eu_seq (
                                 end
                             end
                         end else if (f_mode == 3'b110) begin
-                            // MOVE (d8,An_src,Xn), (indirect_dst): indexed source, indirect dst.
-                            // ext_count depends on dst: 1 for modes 2/3/4, 2 for mode 5 (d16).
-                            // eu_ext_data layout: ext_count=1→{16'h0,brief}, ext_count=2→{brief,d16}.
-                            // brief_ext: in ext_data[15:0] when dst modes 2/3/4 (no dst ext word);
-                            //            in ext_data[31:16] when dst mode 5 (d16 in ext_data[15:0]).
+                            // MOVE (d8/bd,An_src,Xn),<memory dst>: indexed source (brief or
+                            // full-format), memory dst. ext_count depends on dst: 1 for modes
+                            // 2/3/4, 2+ for mode 5 (d16) -- see is_move_idx_src_memdst_full in
+                            // m68030_seq.sv for the full ext_count derivation (deferred-items
+                            // closure follow-up, plan.md).
                             // dyn_bit switches rd_b from src_Xn to dst_An at move_mm_read_ack,
                             // so move_mm_dst_addr_r = An_dst + dec_dst_ea_offset. ✓
                             dec_valid       = 1'b1;
@@ -2201,18 +2201,43 @@ module eu_seq (
                             dec_dyn_bit_reg    = f_dn;  // dst_An → rd_b after dyn_bit
                             dec_dyn_bit_is_an  = 1'b1;
                             if (f_move_dst_mode == 3'b101) begin
-                                // dst = (d16,An): ext_count=2, brief in [31:16], d16 in [15:0]
+                                // dst = (d16,An): m68030_seq.sv deliberately excludes THIS
+                                // sub-case from the is_memind_full swap (see its own
+                                // eu_ext_data comment for the full reasoning) -- q1 (source's
+                                // own descriptor) always stays at its natural, un-swapped
+                                // high-half position. ext_data[24] is q1's own is-full bit
+                                // (same position as m68030_seq.sv's own peek_fi_full), not
+                                // the shared fi_is_full (which assumes q1 already relocated
+                                // to the low half -- true for the dst != 101 sub-case below,
+                                // not this one). Full-format's own bits[23:16] are NOT a
+                                // valid displacement byte (that layout only applies to
+                                // brief) -- for null bd (the common full-format case here)
+                                // the real displacement is architecturally 0; word/long bd
+                                // would need a genuine 3rd/4th extension word this arm
+                                // doesn't have (q2 is already spoken for by dst's own d16),
+                                // so this deliberately treats every full-format bd size the
+                                // same way (displacement 0) rather than mis-read a byte that
+                                // isn't a displacement at all for the non-null-bd case --
+                                // the same "least-wrong fallback, documented not fixed"
+                                // boundary every other family in this rollout uses for a
+                                // combination needing more words than it currently has.
                                 dec_dst_reg   = {ext_data[31], ext_data[30:28]}; // src_Xn → rd_b
                                 dec_xn_wl     = ext_data[27];
                                 dec_xn_scale  = ext_data[26:25];
-                                dec_ea_offset = {{24{ext_data[23]}}, ext_data[23:16]};  // d8_src
+                                dec_ea_offset = ext_data[24]
+                                              ? 32'd0                                   // full-format: bd=0 (null-bd correct, word/long a documented fallback)
+                                              : {{24{ext_data[23]}}, ext_data[23:16]};  // brief: real d8_src
                                 dec_dst_ea_offset = {{16{ext_data[15]}}, ext_data[15:0]};
                             end else begin
-                                // dst = (An)/(An)+/-(An): ext_count=1, brief in [15:0]
+                                // dst = (An)/(An)+/-(An): ext_count=1(+bd words), brief or
+                                // full in [15:0] (is_memind_full's own swap already relocates
+                                // q1 here -- see eu_seq.sv's own fi_is_full/fi_bd, already the
+                                // standard template used throughout the mode=110 EA rollout).
                                 dec_dst_reg   = {ext_data[15], ext_data[14:12]}; // src_Xn → rd_b
                                 dec_xn_wl     = ext_data[11];
                                 dec_xn_scale  = ext_data[10:9];
-                                dec_ea_offset = {{24{ext_data[7]}}, ext_data[7:0]};  // d8_src
+                                dec_ea_offset = fi_is_full ? fi_bd
+                                              : {{24{ext_data[7]}}, ext_data[7:0]};
                                 case (f_move_dst_mode)
                                     3'b010: ;  // dst EA = An_dst + 0
                                     3'b011: begin  // (An_dst)+
