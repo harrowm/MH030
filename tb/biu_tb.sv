@@ -2146,6 +2146,116 @@ module biu_tb;
         end
 
         // ===================================================================
+        // D-cache burst: BERR at/before the requested word -- genuine retry
+        // (10-item backlog Stage 6, plan.md). Requests woff=2; the first
+        // attempt fails with dc_burst_beat_at_berr=0 (strictly before the
+        // requested word), the harder case Stage 9 above deliberately left
+        // faulting unconditionally. Must NOT fault yet -- one retry is
+        // taken first. Two outcomes checked: the retry succeeding (6a) and
+        // the retry also failing, which must THEN escalate to a real fault
+        // (6b) -- proving both halves of "one genuine retry, not zero and
+        // not infinite."
+        // ===================================================================
+        begin
+            int t;
+            $display("--- D-cache burst: BERR at/before requested word -- retry succeeds (Stage 6a) ---");
+            use_cache   = 1'b1;
+            cacr_tb     = 32'h0000_1100;  // DBE=1 | dcache_en=1
+            eu_addr_tb  = 32'h0000_3C08;  // woff=2 within its own, otherwise-unused line
+            eu_rw_tb    = 1'b1;
+            eu_siz_tb   = 2'b00;
+            eu_req_tb   = 1'b1;
+
+            for (t = 0; t < 20 && u_cache.state !== u_cache.CI_D_BURST0; t++)
+                @(posedge clk_4x);
+            check("Stage6a-Dburst: reached CI_D_BURST0", u_cache.state === u_cache.CI_D_BURST0);
+            check("Stage6a-Dburst: requested word is woff=2", u_cache.woff_r === 2'd2);
+            #1;
+            // First attempt: fails at beat 0, strictly before the
+            // requested word (woff_r=2 >= beat_at_berr=0) -- the harder
+            // case. Must not complete yet.
+            dc_burst_beat_at_berr_tb = 2'd0;
+            dc_burst_berr_tb         = 1'b1;
+            #1;
+            check("Stage6a-Dburst: first failure does NOT complete (no ack)", !cache_eu_ack);
+            check("Stage6a-Dburst: first failure does NOT fault yet (retry pending)", !cache_eu_berr);
+            check("Stage6a-Dburst: still in CI_D_BURST0 (retry re-uses the same state)",
+                  u_cache.state === u_cache.CI_D_BURST0);
+            check("Stage6a-Dburst: dc_burst_req stays asserted (redispatch)", u_cache.dc_burst_req_r === 1'b1);
+            // dc_retry_used_r is a registered (always_ff) signal -- it isn't
+            // visible at the same #1 point as the combinational eu_ack/
+            // eu_berr fast-path checks above, needs the next real edge.
+            @(posedge clk_4x); #1;
+            check("Stage6a-Dburst: dc_retry_used_r now set", u_cache.dc_retry_used_r === 1'b1);
+            dc_burst_berr_tb = 1'b0;
+
+            // Retry succeeds: a full 4-beat completion, fresh data.
+            dc_burst_rdata0_tb = 32'h1111_0000;
+            dc_burst_rdata1_tb = 32'h1111_1111;
+            dc_burst_rdata2_tb = 32'h1111_2222;  // the requested word (woff=2)
+            dc_burst_rdata3_tb = 32'h1111_3333;
+            dc_burst_beat_tb   = 2'd3;
+            dc_burst_ack_tb    = 1'b1;
+            #1;
+            check("Stage6a-Dburst: retry succeeds (eu_ack), not faulted", cache_eu_ack && !cache_eu_berr);
+            check32("Stage6a-Dburst: returns the requested word's own retried data",
+                    cache_eu_rdata, 32'h1111_2222);
+            @(posedge clk_4x); #1;
+            dc_burst_ack_tb = 1'b0;
+            check("Stage6a-Dburst: word 2 (the requested word) marked valid after retry",
+                  u_cache.valid_d[u_cache.idx_r][2] === 1'b1);
+
+            eu_req_tb = 1'b0;
+            cacr_tb   = 32'h0;
+            use_cache = 1'b0;
+            repeat(4) @(posedge clk_4x);
+        end
+
+        begin
+            int t;
+            $display("--- D-cache burst: BERR at/before requested word -- retry also fails (Stage 6b) ---");
+            use_cache   = 1'b1;
+            cacr_tb     = 32'h0000_1100;  // DBE=1 | dcache_en=1
+            eu_addr_tb  = 32'h0000_3D08;  // a fresh line, woff=2
+            eu_rw_tb    = 1'b1;
+            eu_siz_tb   = 2'b00;
+            eu_req_tb   = 1'b1;
+
+            for (t = 0; t < 20 && u_cache.state !== u_cache.CI_D_BURST0; t++)
+                @(posedge clk_4x);
+            check("Stage6b-Dburst: reached CI_D_BURST0", u_cache.state === u_cache.CI_D_BURST0);
+            #1;
+            dc_burst_beat_at_berr_tb = 2'd0;
+            dc_burst_berr_tb         = 1'b1;
+            #1;
+            check("Stage6b-Dburst: first failure retries, not faults", !cache_eu_berr);
+            // dc_retry_used_r is registered -- needs the next real edge,
+            // same reasoning as Stage 6a above.
+            @(posedge clk_4x); #1;
+            check("Stage6b-Dburst: dc_retry_used_r set after the first failure",
+                  u_cache.dc_retry_used_r === 1'b1);
+            dc_burst_berr_tb = 1'b0;
+
+            // Retry ALSO fails, same harder-case shape (still at/before the
+            // requested word) -- must now escalate to a real fault. No
+            // combinational fast path exists for this branch (unlike the
+            // success arms above), so this needs a genuine clock edge to
+            // see the registered CI_BERR transition.
+            dc_burst_beat_at_berr_tb = 2'd0;
+            dc_burst_berr_tb         = 1'b1;
+            @(posedge clk_4x); #1;
+            check("Stage6b-Dburst: second failure escalates to a real fault (CI_BERR)",
+                  u_cache.state === u_cache.CI_BERR);
+            check("Stage6b-Dburst: eu_berr now asserted", cache_eu_berr === 1'b1);
+            dc_burst_berr_tb = 1'b0;
+
+            eu_req_tb = 1'b0;
+            cacr_tb   = 32'h0;
+            use_cache = 1'b0;
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // ===================================================================
         // D-cache burst: genuine per-beat CIIN discrimination (10-item
         // backlog Stage 3, plan.md). Full-success (dc_burst_beat=3) burst
         // with a deliberately MIXED per-beat CIIN pattern (beats 0 and 3

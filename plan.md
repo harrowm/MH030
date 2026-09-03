@@ -6624,3 +6624,83 @@ TIMEOUT 0, bit-identical to baseline. **Closes Stage 5.** See
 needing a genuine retry) is next -- explicitly flagged in the plan as the riskiest
 RTL stage, sitting directly on top of the heavily-hardened BERR-abort machinery from
 Phases 108-114.
+
+## Phase 232 (10-item backlog, Stage 6 of 10 -- the plan's own flagged riskiest RTL
+stage): BERR-during-fill's harder sub-case, a genuine retry
+
+The deferred-items closure plan's own Stage 9 (Phase 217) had already fixed the
+"easier" sub-case: a burst beat failing AFTER the CPU's own requested word doesn't
+fault at all (the microsequencer "has not yet requested" that later data), completing
+successfully with the words that DID arrive. The harder case it deliberately left
+open: a beat failing AT OR BEFORE the requested word (`woff_r >= dc_burst_beat_at_
+berr`) stayed unconditionally faulting, even though real hardware allows a fresh
+attempt.
+
+Investigated the exact mechanism before writing any RTL, per the plan's own explicit
+caution for this stage. Key findings that shaped the design: `biu_cycle_gen.sv`'s FSM
+always returns cleanly to `ST_IDLE` after ANY burst outcome, success or BERR-abort
+(`berr_abort_r` self-clears at S7, unconditionally) -- so simply keeping `dc_burst_
+req_r` asserted across the failure (an idiom this exact file already uses for the
+degraded-fallback continuation path, "`dc_burst_req_r` stays asserted for the next
+request") causes `biu_cycle_gen`'s own `else if (eu_burst_req) state_nxt = ST_BURST_
+S0` to redispatch a genuinely fresh burst the moment it next sees `ST_IDLE`, and
+`biu_burst_ctrl.sv`'s own `at_idle && eu_burst_req` latch resets `burst_beat_r`/
+`cback_ok_r` to 0 exactly as it would for any other fresh dispatch. No new cross-
+module plumbing was needed at all -- the retry is expressible entirely within
+`biu_cache_if.sv`'s own existing `CI_D_BURST0` state.
+
+**Found and avoided a related pre-existing gap while designing the retry's own
+address**: the degraded-fallback path's own continuation addressing (`dc_burst_addr_r
+<= fill_base_r + 4/8/12`) reuses `fill_base_r`, which is latched ONLY from the
+pre-translation `eu_addr` at `CI_IDLE` dispatch time -- genuinely wrong for a
+translated access, where the real burst address comes from `xl_pa` instead (set
+directly at `CI_XLATE`'s own dispatch to `CI_D_BURST0`, never re-synced into
+`fill_base_r`). This is a real, narrow, pre-existing gap in the neighboring code
+(masked in every existing test by `mmu_xlate_tb.sv`'s own transparent/identity TT0
+window), not something introduced this stage -- documented here rather than fixed
+(out of scope for a retry-focused stage), and deliberately NOT inherited by the new
+retry code: since `dc_burst_addr_r` already holds whichever of the two (logical or
+translated) was actually used for the just-failed attempt, the retry simply leaves it
+untouched rather than re-deriving it from `fill_base_r`, sidestepping the bug
+entirely for both translated and untranslated accesses alike.
+
+**Implementation**: one new register, `dc_retry_used_r` (reset to 0 at both `CI_D_
+BURST0` dispatch sites, the untranslated and translated paths). In the harder-case
+branch (`woff_r >= dc_burst_beat_at_berr`): if `!dc_retry_used_r`, set it and leave
+`state`/`dc_burst_req_r`/`dc_burst_addr_r` alone (implicit hold -- no reassignment
+needed) to trigger the redispatch described above; if already used, escalate to
+`CI_BERR` exactly as before. The retry re-enters this exact same code on its own
+outcome, so a partial success (the retry's own failure landing after `woff_r` this
+time) falls through to the existing `if (woff_r < dc_burst_beat_at_berr)` success
+branch automatically, with no special-casing needed for that case.
+
+**Verification**: two new `tb/biu_tb.sv` tests (Stage 6a/6b), mirroring Stage 9's own
+established direct-port-injection technique (`biu_cache_if` and `biu_cycle_gen`
+instantiated and driven independently in this file, so the retry's own redispatch
+doesn't need real S-state navigation -- `dc_burst_ack_tb`/`dc_burst_berr_tb` are
+driven straight into `biu_cache_if`'s own ports). Stage 6a: first attempt fails
+strictly before the requested word (`woff_r`=2, `beat_at_berr`=0) -- confirms no
+premature ack/fault, `dc_retry_used_r` becomes set, state/req stay held for redispatch
+-- then the retry succeeds with fresh data, confirming the requested word's own
+retried value is returned and cached correctly. Stage 6b: same first failure, but the
+retry ALSO fails the same way -- confirms escalation to a real `CI_BERR`/`eu_berr`
+this time, proving the mechanism is "one retry," not zero or infinite. Two bugs found
+and fixed while building these tests (both testbench-only, not RTL): (1) `dc_retry_
+used_r` is a registered signal, sampled too early at the same `#1` combinational
+fast-path point the existing ack/berr checks use -- needed its own check moved to
+after a real `@(posedge clk_4x)`; (2) Stage 6a's first chosen address (`0x3E08`)
+collided with the pre-existing CIIN-burst test's own cache line (`0x3E00`, same
+16-byte line), causing that LATER test to spuriously HIT instead of dispatching a
+fresh burst -- moved to a genuinely unused address (`0x3C08`).
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14, full
+124-suite Harte sweep (mandatory -- this is the single highest-blast-radius RTL
+change in the whole 10-item backlog, sitting directly on the BERR-abort machinery
+from Phases 108-114) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP
+281221, TIMEOUT 0, bit-identical to baseline. **Closes Stage 6** -- the plan's own
+explicit permission to "come back re-deferred" for this stage wasn't needed; the
+investigation found a clean, surgical implementation reusing an already-proven idiom.
+See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage
+7 (CAS's own genuine bus-level lock) is next -- also explicitly flagged as high-risk,
+this time RTL surgery on `biu_cycle_gen.sv`'s own shared per-state AS pin-driving
+logic, used by every single bus access in the project.

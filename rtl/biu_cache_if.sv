@@ -338,6 +338,17 @@ module biu_cache_if (
     logic        dc_burst_req_r;
     logic [31:0] dc_burst_addr_r;
 
+    // 10-item backlog Stage 6 (plan.md): a BERR on a beat AT OR BEFORE the
+    // CPU's own actually-requested word (woff_r >= dc_burst_beat_at_berr)
+    // used to fault unconditionally -- real 68030 silicon (and this RTL,
+    // for the "after" sub-case, Stage 9 of the earlier deferred-items
+    // closure plan) allows a fresh attempt, so one genuine retry is
+    // warranted before escalating to a real Bus Error. Reset to 0 at both
+    // CI_D_BURST0 dispatch sites below; set once the first retry is spent
+    // so a second failure at/before the requested word escalates for real
+    // rather than retrying forever.
+    logic        dc_retry_used_r;
+
     // Combinatorial hit detection (in CI_IDLE, before latching)
     wire [3:0]  idx  = eu_addr[7:4];
     wire [1:0]  woff = eu_addr[3:2];
@@ -406,6 +417,7 @@ module biu_cache_if (
             xlate_fault_r <= 1'b0;
             dc_burst_req_r  <= 1'b0;
             dc_burst_addr_r <= 32'h0;
+            dc_retry_used_r <= 1'b0;
             for (k = 0; k < 16; k++) begin
                 for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0;
             end
@@ -476,6 +488,7 @@ module biu_cache_if (
                             state           <= CI_D_BURST0;
                             dc_burst_req_r  <= 1'b1;
                             dc_burst_addr_r <= {eu_addr[31:4], 4'h0};
+                            dc_retry_used_r <= 1'b0;
                         end else begin
                             state <= CI_D_MISS;
                         end
@@ -537,6 +550,7 @@ module biu_cache_if (
                             state           <= CI_D_BURST0;
                             dc_burst_req_r  <= 1'b1;
                             dc_burst_addr_r <= {xl_pa[31:4], 4'h0};
+                            dc_retry_used_r <= 1'b0;
                         end else begin
                             state <= CI_D_MISS;
                         end
@@ -754,10 +768,10 @@ module biu_cache_if (
                         // correctly, since they were never actually
                         // fetched. The harder "beat is at or before the
                         // requested word" case (woff_r >=
-                        // dc_burst_beat_at_berr) still needs a genuine
-                        // retry mechanism this RTL doesn't have -- stays
-                        // unconditionally faulting, deliberately out of
-                        // scope for this stage.
+                        // dc_burst_beat_at_berr) gets one genuine retry
+                        // (10-item backlog Stage 6, plan.md) before
+                        // escalating to a real fault -- see the final
+                        // else below.
                         if (woff_r < dc_burst_beat_at_berr) begin
                             case (woff_r)
                                 2'd0: fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
@@ -781,6 +795,42 @@ module biu_cache_if (
                             valid_d[idx_r][3] <= (2'd3 < dc_burst_beat_at_berr) && !dc_burst_ciin3;
                             state          <= CI_IDLE;
                             dc_burst_req_r <= 1'b0;
+                        end else if (!dc_retry_used_r) begin
+                            // 10-item backlog Stage 6 (plan.md): first
+                            // failure at/before the requested word -- retry
+                            // once. dc_burst_addr_r is deliberately left
+                            // untouched here (NOT re-derived from
+                            // fill_base_r, unlike the degraded-fallback
+                            // path's own +4/+8/+12 continuations above) --
+                            // fill_base_r is only ever latched from the
+                            // pre-translation eu_addr (CI_IDLE) and is
+                            // genuinely wrong for a translated access (the
+                            // real burst address for that case comes from
+                            // xl_pa instead, see CI_XLATE's own dispatch
+                            // above); dc_burst_addr_r itself, by contrast,
+                            // already holds whichever of the two was
+                            // actually used for the just-failed attempt, so
+                            // simply not reassigning it re-requests the
+                            // exact same (correct) frozen address either
+                            // way. dc_burst_req_r stays asserted (same
+                            // established pattern as the degraded-fallback
+                            // path above) and state stays at CI_D_BURST0
+                            // (no reassignment needed), so biu_cycle_gen's
+                            // own FSM -- which always returns cleanly to
+                            // ST_IDLE after any burst outcome, success or
+                            // BERR-abort (berr_abort_r self-clears at S7) --
+                            // sees eu_burst_req still held and redispatches
+                            // a genuinely fresh ST_BURST_S0, which
+                            // biu_burst_ctrl.sv's own "at_idle && eu_burst_
+                            // req" latch treats identically to any other
+                            // fresh burst request (burst_beat_r/cback_ok_r
+                            // reset to 0, burst_addr_r/fc_r re-latched).
+                            // The retry re-enters this exact branch of code
+                            // on its own outcome, so a partial success
+                            // (this attempt's own failure beat landing
+                            // after woff_r this time) is already handled by
+                            // the `if` above with no special-casing needed.
+                            dc_retry_used_r <= 1'b1;
                         end else begin
                             xlate_fault_r  <= 1'b0;  // real bus error, not a translation fault
                             state          <= CI_BERR;

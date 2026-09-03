@@ -398,16 +398,39 @@ becoming true later pops the fault visible with no new state machine. `tb/ifu_tb
 own IFU-12a now asserts the fixed "stays pending" behavior directly, plus a new
 IFU-12a2 proves dispatch once `need_ext` asserts; `tb/cache_tb.sv`'s own I-5 (the case
 that broke the earlier attempt) stays green. Full Harte sweep bit-identical to
-baseline. See `plan.md §Phase 231` for the full writeup. Stage 6 (BERR-during-fill's
-harder sub-case, a genuine retry) is next — the riskiest RTL stage in the plan.
+baseline. See `plan.md §Phase 231` for the full writeup. **Stage 6 (Phase 232, the
+plan's own flagged riskiest RTL stage)**: BERR-during-fill's harder sub-case — a burst
+beat failing AT OR BEFORE the CPU's own requested word (`woff_r >= dc_burst_beat_at_
+berr`) used to fault unconditionally (the easier "after" sub-case was already fixed
+by the earlier deferred-items closure plan's own Stage 9). Investigated the mechanism
+first: `biu_cycle_gen.sv`'s FSM always returns cleanly to `ST_IDLE` after any burst
+outcome (`berr_abort_r` self-clears at S7 unconditionally), so simply keeping `dc_
+burst_req_r` asserted across the failure — an idiom `biu_cache_if.sv` already uses
+for its own degraded-fallback continuation path — causes a genuinely fresh burst
+redispatch with no new cross-module plumbing needed at all. Implemented as one new
+register, `dc_retry_used_r`, gating one retry before escalating to `CI_BERR`; the
+retry re-enters the exact same code on its own outcome, so a partial success falls
+through to the existing success branch automatically. Found and deliberately avoided
+inheriting a related pre-existing gap while designing this: the degraded-fallback
+path's own `fill_base_r` is latched pre-translation and is wrong for a translated
+burst (the real address comes from `xl_pa` instead, never re-synced into `fill_base_
+r`) — documented, not fixed (out of scope), and sidestepped by leaving `dc_burst_
+addr_r` untouched on retry rather than re-deriving it. Verified via two new `tb/biu_
+tb.sv` tests (Stage 6a: retry succeeds; Stage 6b: retry also fails, escalates for
+real), finding and fixing two testbench-only bugs along the way (a registered-signal
+sampled-too-early timing issue; a cache-line address collision with a later,
+pre-existing test). Full Harte sweep bit-identical to baseline. **Closed cleanly** —
+the plan's own explicit permission to defer this stage wasn't needed. See `plan.md
+§Phase 232` for the full writeup. Stage 7 (CAS's own genuine bus-level lock) is next
+— also flagged high-risk, RTL surgery on `biu_cycle_gen.sv`'s shared per-state AS pin
+logic used by every bus access in the project.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
-10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-5 of 10 done
-(Phase 227-231); Stage 6 (BERR-during-fill's harder sub-case, a genuine retry) is
-next.**
+10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-6 of 10 done
+(Phase 227-232); Stage 7 (CAS's own genuine bus-level lock) is next.**
 
 ## Verification Commands
 
