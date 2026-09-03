@@ -568,10 +568,33 @@ buscmp-memind25: $(SIM)/cosim_grp winuae/tests/memind25_ref.log tests/memind25.h
 	    | grep "^BUS" > /tmp/_dut_memind25.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind25.log winuae/tests/memind25_ref.log \
 	    --dut-may-continue
+# memind28 (10-item backlog Stage 9a, plan.md): LEA's own genuine
+# memory-indirect EA, ([bd,An],Xn,od) with fi_iis!=0 -- the first family
+# beyond MOVE/MOVEA to support it. LEA never dereferences its own final
+# EA, so the bus trace should show only ONE extra access beyond the
+# instruction fetches (the inner pointer read) and never a second access
+# at the resolved address; the computed EA is then stored to memory so the
+# full comparison (not reads-only) directly proves the resolved value too.
+buscmp-memind28: $(SIM)/cosim_grp winuae/tests/memind28_ref.log tests/memind28.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind28.hex +grp=memind28 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind28.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind28.log winuae/tests/memind28_ref.log \
+	    --dut-may-continue
+# memind29 (10-item backlog Stage 9a, plan.md): PEA's own genuine
+# memory-indirect EA -- same shape as memind28, but PEA still needs a real
+# outer bus cycle (a WRITE of the resolved EA to the stack, not a read at
+# the resolved address like MOVE's own case). Full comparison directly
+# proves both the inner pointer read AND the pushed value.
+buscmp-memind29: $(SIM)/cosim_grp winuae/tests/memind29_ref.log tests/memind29.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind29.hex +grp=memind29 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind29.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind29.log winuae/tests/memind29_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
-              buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27
+              buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
+              buscmp-memind28 buscmp-memind29
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

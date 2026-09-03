@@ -471,17 +471,42 @@ it to MOVEM's own existing register-iteration logic as its starting address. Thi
 a genuine merge of two independently-complex state machines, materially larger than
 the queue-widening just completed and closer in shape to Stage 9's own explicitly-
 flagged scope — deferred as a separate follow-up rather than rushed. Full Harte sweep
-bit-identical to baseline. See `plan.md §Phase 234` for the full writeup. Stage 9
-(memory-indirect EA beyond MOVE, the plan's own largest item) is next.
+bit-identical to baseline. See `plan.md §Phase 234` for the full writeup. **Stage 9
+(Phase 235, survey)**: memory-indirect EA beyond MOVE. Only MOVE/MOVEA support genuine
+indirect (`fi_iis!=000`) today, via `ex_is_memind` — a 3-phase FSM hardwired to MOVE's
+own register-load semantics, not a reusable primitive. Every other family (LEA, CHK,
+JSR/JMP, general ALU-with-EA-source, CMP2/CHK2, TAS) has the same shallow gap (indexed
+EA works, `fi_iis` never checked) but needs its own execute-side work. Risk-tiered:
+LEA+PEA safe to batch (no outer memory access needed); JMP/JSR, ALU-with-EA-source,
+CMP2/CHK2 need outer-stage generalization; TAS (and likely Scc) needs a second bespoke
+FSM extension, already flagged once before as deliberately deferred. User chose to
+push through the full scope. See `plan.md §Phase 235`. **Stage 9a (Phase 236)**: LEA
+and PEA now support genuine memory-indirect EA — the first families beyond MOVE/MOVEA.
+LEA needed a new `memind_addr_only_r` path (skips the outer bus cycle entirely,
+completing via a direct register write the moment the inner pointer read lands —
+matches real hardware, which never dereferences LEA's own final EA). PEA needed a
+real outer cycle but shaped as a WRITE (push to the stack) rather than a read;
+found and resolved a real conflict with PEA's own existing `dec_is_pea_idx` mechanism
+along the way (setting it for the memind case would have broken the FSM's own
+inner-address capture — resolved by extending `ex_an_new`'s own mux with an
+independent `(ex_is_pea && ex_is_memind)` arm instead of reusing that flag). Confirmed
+word-count sizing needs zero changes for any of these families — `m68030_seq.sv`'s
+generic `mode110_ea_src`/`memind_ext_count` mechanism (already proven for Stage 8's
+own MOVEM work) already handles them all. Two new cosim tests (`tests/memind28.s`,
+`tests/memind29.s`) matched Musashi's own bus trace exactly on the first real attempt.
+Full Harte sweep bit-identical to baseline. See `plan.md §Phase 236` for the full
+writeup. Stage 9b (JMP/JSR, general ALU-with-EA-source, CMP2/CHK2 — needs the shared
+FSM's outer stage generalized for address-only and read-then-combine consumers) is
+next.
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 16/16,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
 10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-7 of 10 done
-(Phase 227-233); Stage 8 partially done (Phase 234, IFU queue widened to 7 words;
-MOVEM's own genuine-indirect decode/execute integration deferred); Stage 9
-(memory-indirect EA beyond MOVE) is next.**
+(Phase 227-233); Stage 8 partially done (Phase 234); Stage 9 survey done (Phase 235),
+Stage 9a done (Phase 236, LEA+PEA genuine memory-indirect EA); Stage 9b (JMP/JSR,
+ALU-EA, CMP2/CHK2) is next.**
 
 ## Verification Commands
 

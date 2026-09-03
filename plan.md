@@ -6905,6 +6905,75 @@ shared-FSM shape) needs a second bespoke FSM extension -- hardest, already flagg
 once by this project as deliberately deferred.
 
 **Decision, per the plan's own explicit instruction to confirm with the user before
-implementing**: reported scope back rather than proceeding. See conversation for the
-user's own chosen direction for this stage. No RTL or testbench changed this pass.
-See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan.
+implementing**: reported scope back rather than proceeding. The user chose to push
+through the full scope. See `~/.claude/plans/elegant-gliding-fog.md` for the full
+10-item backlog plan.
+
+## Phase 236 (10-item backlog, Stage 9a of 10 -- LEA + PEA): the first families beyond
+MOVE/MOVEA to support genuine memory-indirect EA
+
+Confirmed the survey's own risk-tiering: LEA and PEA were genuinely the smallest,
+safest pieces, but "bolt-on" undersold the real work needed -- the existing `ex_is_
+memind` FSM (`memind_start_r`/`memind_inner_r`/`memind_outer_r`, `eu_seq_execute.svh`)
+is hardwired to MOVE's own "load a value into a register" semantics, and neither LEA
+nor PEA share that shape: LEA never dereferences its own final EA at all (no outer bus
+cycle needed, unlike MOVE), and PEA needs an outer cycle but as a WRITE to the stack
+carrying the resolved EA as data, not a READ at the resolved address. Both needed
+genuine (if small) new FSM branches, not a pure decode-arm tweak.
+
+**LEA**: added `memind_addr_only_r` (captured `<= dec_is_lea` at dispatch). At
+`memind_inner_r && mem_ack`, if set, skips `memind_outer_r` entirely and completes
+directly via a new `memind_addr_wr_en` (`memind_inner_r && mem_ack && memind_addr_
+only_r`), writing `mem_rdata + memind_post_xn_r + memind_od_r` (the just-arrived
+pointer plus the already-captured post-indexed Xn/outer-displacement) straight to
+`memind_dest_r` through the shared `wr_en`/`wr_sel`/`wr_data` register-file port --
+matching real 68030 semantics exactly (a memory-indirect LEA needs exactly one real
+bus read, the inner pointer fetch, and pure arithmetic on top, never a second access
+at its own computed address).
+
+**PEA**: needed a still-real outer cycle, but shaped as a write. Added `memind_is_pea_r`
+(`<= dec_is_pea`) and `memind_pea_wr_addr_r` (captures `ex_cur_sp - 4` at dispatch time
+-- `ex_cur_sp` itself isn't safe to re-read later in the sequence, since PEA's own A7
+predecrement retires independently and could apply before the deferred outer phase
+runs). `memind_is_rd_r` is set to `!dec_is_pea` at dispatch (PEA's outer phase is a
+write); the shared `mem_addr`/`mem_wdata` muxes gained a `memind_outer_r && memind_is_
+pea_r` case (address = `memind_pea_wr_addr_r`, data = `memind_outer_addr_w`, the
+resolved pointer+post_xn+od). **Found and resolved a real conflict with PEA's own
+existing indexed-EA mechanism while designing this**: PEA's brief/indexed case already
+uses `dec_is_pea_idx`/`ex_is_pea_idx` to redirect `ex_ea` to `ex_cur_sp-4` (since `rd_a`
+holds An, not A7, for that case) -- setting the SAME flag for the memind case would
+have broken the memind FSM's own inner-address capture (`memind_inner_addr_r <= ex_ea`
+needs `An+bd(+Xn)`, not `ex_cur_sp-4`). Resolved by deliberately NOT setting `dec_is_
+pea_idx` for the memind sub-case (so `ex_ea` falls through to the normal `An+bd+Xn`
+path the FSM needs) while extending `ex_an_new`'s own separate mux with an explicit
+`(ex_is_pea && ex_is_memind)` arm, so A7's own predecrement still gets the correct
+`ex_cur_sp`-relative treatment independently of `ex_ea`.
+
+Both decode arms follow MOVE's own established pattern exactly (`fi_is_full && fi_iis
+!= 3'b000` gates the indirect sub-case; `dec_memind_is_post = fi_iis[2]`; `dec_memind_
+od = fi_od`; `dec_is_idx = !fi_is_s && !fi_iis[2]`; `dec_ea_offset = fi_bd`) --
+confirmed the word-count sizing side needs zero changes: `is_lea_idx` was already part
+of `m68030_seq.sv`'s own generic `mode110_ea_src` set, so `memind_ext_count` (the same
+formula MOVEM's own Stage 8 already relied on) already correctly sizes drain for
+LEA/PEA's genuine-indirect case too -- this generic-sizing finding likely applies to
+every other family the survey listed as well.
+
+**Verification**: two new cosim tests, `tests/memind28.s` (LEA) and `tests/memind29.s`
+(PEA), both post-indexed word-bd/null-od `([bd,An],Xn)` forms with a genuine pointer
+fetched from memory. Both matched Musashi's own reference bus trace exactly on the
+first real attempt (an earlier apparent LEA failure turned out to be a stale,
+pre-Stage-9a `sim/cosim_grp` binary that hadn't been rebuilt -- re-confirmed correct
+immediately after a clean rebuild, not a real bug). Wired into `make cosim_memind`
+(16/16 total now, was 14). Full comparison (not reads-only) directly proves the
+resolved address itself, not just the reads leading up to it -- LEA's own trace shows
+zero access at its own computed EA (matching real hardware); PEA's own trace shows
+exactly one write, at A7-4, carrying the resolved EA.
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 16/16, full
+124-suite Harte sweep (mandatory -- extends the shared `ex_is_memind` FSM every other
+memory-indirect-capable family will eventually reuse) -- PASS 702142, FAIL 2 (same
+documented ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes
+Stage 9a.** See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog
+plan. Stage 9b (JMP/JSR, general ALU-with-EA-source, CMP2/CHK2 -- the survey's own
+medium-risk tier, needing the shared FSM's outer stage generalized for address-only
+and read-then-combine consumers) is next.

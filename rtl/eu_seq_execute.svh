@@ -631,6 +631,29 @@
     logic        memind_is_rd_r;       // memory-indirect outer access is always a read
     logic [1:0]  memind_siz_r;         // transfer size for outer read
     logic [3:0]  memind_dest_r;        // destination register for outer read WB
+    // 10-item backlog Stage 9a (plan.md): LEA ([bd,An],Xn,od),Am never
+    // dereferences its own final EA (LEA/PEA never access memory at the
+    // address they compute, per real 68030 semantics) -- unlike MOVE's own
+    // memind arm, which needs a full outer bus cycle to load a VALUE from
+    // the resolved address. Set for LEA's own memind dispatch only; skips
+    // memind_outer_r entirely and completes with a direct register write
+    // the same cycle the inner (pointer) read's own ack arrives, using
+    // mem_rdata (the just-arrived pointer) + memind_post_xn_r + memind_od_r
+    // as the write value -- see memind_addr_wr_en below.
+    logic        memind_addr_only_r;
+    // 10-item backlog Stage 9a (plan.md): PEA ([bd,An],Xn,od) -- unlike
+    // LEA, PEA DOES need a real outer bus cycle (it pushes the resolved EA
+    // to the stack), but that cycle is a WRITE at the stack address, not a
+    // READ at the resolved address like MOVE's own case. memind_outer_r is
+    // reused for this (still a real bus cycle, just repurposed), gated by
+    // this flag for the mem_addr/mem_wdata/mem_rw selection. memind_is_rd_r
+    // is set to 0 (write) for this case at dispatch time.
+    logic        memind_is_pea_r;
+    // A7-4 (the push address) captured at dispatch time, same cycle as
+    // memind_inner_addr_r -- ex_cur_sp itself isn't safe to re-read later
+    // in the sequence (the predecrement's own an_wr_en, wired independently
+    // via dec_an_upd_en, can retire before the outer write phase runs).
+    logic [31:0] memind_pea_wr_addr_r;
     always_comb begin
         case (move16_beat_r)
             2'd0: move16_wdata_w = move16_data_r[0];
@@ -2214,9 +2237,16 @@
                  :                 (ex_an_base + ex_ea_offset + ex_xn_scaled);
 
     logic [31:0] ex_an_new;   // updated An value for (An)+ / -(An)
-    // for JSR/PEA indexed, A7 update uses ex_cur_sp (rd_b holds Xn, not A7)
-    assign ex_an_new = (ex_is_jsr_idx || ex_is_pea_idx) ? (ex_cur_sp + ex_an_delta)
-                                                         : (ex_an_base + ex_an_delta);
+    // for JSR/PEA indexed, A7 update uses ex_cur_sp (rd_b holds Xn, not A7).
+    // 10-item backlog Stage 9a (plan.md): PEA's own memind case is NOT
+    // marked ex_is_pea_idx (rd_a holds An, needed as ex_ea's own base for
+    // the memind FSM's inner-address capture -- ex_is_pea_idx would
+    // instead force ex_ea to ex_cur_sp-4, wrong for that purpose), but
+    // still needs the SAME ex_cur_sp-relative A7 update every other PEA
+    // form gets, so it's added here independently.
+    assign ex_an_new = (ex_is_jsr_idx || ex_is_pea_idx || (ex_is_pea && ex_is_memind))
+                      ? (ex_cur_sp + ex_an_delta)
+                      : (ex_an_base + ex_an_delta);
 
     // jump target = An_jump + offset (rd_a is the An base for JMP/JSR)
     // absolute EA overrides; ex_xn_scaled adds index for (d8,PC,Xn)
@@ -3048,13 +3078,20 @@
             memind_is_rd_r     <= 1'b1;
             memind_siz_r       <= 2'b00;
             memind_dest_r      <= 4'h0;
+            memind_addr_only_r <= 1'b0;
+            memind_is_pea_r    <= 1'b0;
+            memind_pea_wr_addr_r <= 32'h0;
         end else if (!memind_start_r && !memind_inner_r && !memind_outer_r
                      && instr_ack && dec_is_memind) begin
-            memind_start_r <= 1'b1;
-            memind_is_rd_r <= 1'b1;   // memind only supports load ops
-            memind_siz_r   <= dec_siz;
-            memind_dest_r  <= dec_dest_reg;
-            memind_od_r    <= dec_memind_od;
+            memind_start_r     <= 1'b1;
+            // memind only supports load ops, except PEA's own outer phase,
+            // which is a write of the resolved EA to the stack.
+            memind_is_rd_r     <= !dec_is_pea;
+            memind_siz_r       <= dec_siz;
+            memind_dest_r      <= dec_dest_reg;
+            memind_od_r        <= dec_memind_od;
+            memind_addr_only_r <= dec_is_lea;
+            memind_is_pea_r    <= dec_is_pea;
         end else if (memind_start_r) begin
             // EX holds: rd_a=An (ex_ea = inner addr), rd_b=Xn (for post-indexed outer)
             memind_start_r      <= 1'b0;
@@ -3062,9 +3099,18 @@
             memind_inner_addr_r <= ex_ea;
             // Capture Xn*SCALE for post-indexed outer EA (0 if pre-indexed)
             memind_post_xn_r    <= (ex_is_memind && ex_memind_is_post) ? memind_xn_sc_w : 32'h0;
+            // PEA's own push address (A7-4), captured now -- ex_cur_sp
+            // itself may reflect a since-applied predecrement by the time
+            // the outer write phase actually runs.
+            memind_pea_wr_addr_r <= ex_cur_sp - 32'd4;
         end else if (memind_inner_r && mem_ack) begin
             memind_inner_r <= 1'b0;
-            memind_outer_r <= 1'b1;
+            // 10-item backlog Stage 9a (plan.md): LEA's own address-only
+            // case never dereferences the resolved EA -- complete directly
+            // here (memind_addr_wr_en below fires this same cycle) instead
+            // of dispatching an outer bus cycle that would read a value
+            // LEA never needs.
+            memind_outer_r <= !memind_addr_only_r;
             memind_ptr_r   <= mem_rdata;   // 32-bit pointer from inner read
         end else if (memind_outer_r && mem_ack) begin
             memind_outer_r <= 1'b0;
@@ -4115,6 +4161,17 @@
     logic memind_wr_en;
     assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r;
 
+    // 10-item backlog Stage 9a (plan.md): LEA's own memind case completes
+    // on the INNER read's own ack instead (no outer bus cycle at all --
+    // see memind_addr_only_r's own declaration comment). mem_rdata here is
+    // the just-arrived pointer value itself; memind_post_xn_r/memind_od_r
+    // were already captured back at memind_start_r, so the final resolved
+    // address is available combinationally the same cycle.
+    logic        memind_addr_wr_en;
+    logic [31:0] memind_addr_wr_data;
+    assign memind_addr_wr_en   = memind_inner_r && mem_ack && memind_addr_only_r;
+    assign memind_addr_wr_data = mem_rdata + memind_post_xn_r + memind_od_r;
+
     // BF memory Dn write — non-mutating ops write extracted result to Dn at read ack.
     // BFTST(000) has no Dn destination; BFEXTU/EXTS/FFO(001/010/011) write to ext_data[14:12]=bf_mem_dn_r.
     logic bf_dn_wr_en;
@@ -4128,23 +4185,26 @@
                               ( bf_mem_mutates_r &&  bf_mem_phase_r));
 
     // Word MOVEP writes only [15:0] (siz=10); long writes full 32 bits (siz=00).
-    assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || bf_dn_wr_en ||
-                    (wb_valid && wb_writes_reg);
-    assign wr_sel  = movem_wr_en  ? movem_reg_sel
-                   : movep_wr_en  ? movep_wr_sel
-                   : memind_wr_en ? memind_dest_r
-                   : bf_dn_wr_en  ? {1'b0, bf_mem_dn_r}
-                   :                wb_dest_reg;
-    assign wr_siz  = movem_wr_en  ? 2'b00
-                   : movep_wr_en  ? (movep_long_r ? 2'b00 : 2'b10)
-                   : memind_wr_en ? memind_siz_r
-                   : bf_dn_wr_en  ? 2'b00
-                   :                wb_siz;
-    assign wr_data = movem_wr_en  ? movem_wr_data
-                   : movep_wr_en  ? movep_wr_data
-                   : memind_wr_en ? mem_rdata
-                   : bf_dn_wr_en  ? bf_result_w
-                   :                wb_result_final;
+    assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || memind_addr_wr_en ||
+                    bf_dn_wr_en || (wb_valid && wb_writes_reg);
+    assign wr_sel  = movem_wr_en       ? movem_reg_sel
+                   : movep_wr_en       ? movep_wr_sel
+                   : memind_wr_en      ? memind_dest_r
+                   : memind_addr_wr_en ? memind_dest_r
+                   : bf_dn_wr_en       ? {1'b0, bf_mem_dn_r}
+                   :                     wb_dest_reg;
+    assign wr_siz  = movem_wr_en       ? 2'b00
+                   : movep_wr_en       ? (movep_long_r ? 2'b00 : 2'b10)
+                   : memind_wr_en      ? memind_siz_r
+                   : memind_addr_wr_en ? memind_siz_r
+                   : bf_dn_wr_en       ? 2'b00
+                   :                     wb_siz;
+    assign wr_data = movem_wr_en       ? movem_wr_data
+                   : movep_wr_en       ? movep_wr_data
+                   : memind_wr_en      ? mem_rdata
+                   : memind_addr_wr_en ? memind_addr_wr_data
+                   : bf_dn_wr_en       ? bf_result_w
+                   :                     wb_result_final;
 
     // second Dn write port for 64-bit mul/div high result (Dh or Dr).
     // EXG Dx,Dy also uses wr2 to write primary-reg value to secondary Dn.
@@ -4529,7 +4589,7 @@
                        movep_run_r    ? movep_addr_r :
                        move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
                        memind_inner_r ? memind_inner_addr_r :
-                       memind_outer_r ? memind_outer_addr_w :
+                       memind_outer_r ? (memind_is_pea_r ? memind_pea_wr_addr_r : memind_outer_addr_w) :
                        mem_rmw_run_r  ? mem_rmw_addr_r :
                        move_mm_run_r  ? move_mm_dst_addr_r :
                        addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :
@@ -4573,6 +4633,11 @@
                      : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w
                      : (ex_is_pmove64 && ex_pmove_to_mem) ? pmove64_wr_data_w
                      : (pmove64_run_r && pmove64_to_mem_r) ? pmove64_wr_data_w
+                     // 10-item backlog Stage 9a (plan.md): PEA's own memind
+                     // outer phase pushes the RESOLVED indirect address
+                     // (ptr+post_xn+od), not the ordinary An+d+Xn value the
+                     // generic ex_is_pea case below computes.
+                     : (memind_outer_r && memind_is_pea_r) ? memind_outer_addr_w
                      : ex_is_pea               ? (ex_abs_jmp_en ? (ex_abs_ea_val + (ex_is_idx ? ex_xn_scaled : 32'h0))
                                                                  : (rd_a_data + ex_jump_offset + ex_xn_scaled))
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc

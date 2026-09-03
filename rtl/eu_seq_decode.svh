@@ -2662,11 +2662,26 @@
                             dec_is_idx     = 1'b1;
                             dec_xn_wl      = ext_data[11];
                             dec_xn_scale   = ext_data[10:9];
-                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd extension,
-                            // same template as Stage 1/2.
-                            dec_ea_offset  = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext  = 1'b1;
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd extension,
+                            // same template as Stage 1/2. 10-item backlog Stage 9a
+                            // (plan.md): genuine memory-indirect (fi_iis!=000) --
+                            // same shape as MOVE's own memind arm, but LEA never
+                            // dereferences its own final EA, so dec_writes_reg is
+                            // suppressed here (the memind FSM completes it directly
+                            // via memind_addr_wr_en once the inner pointer read
+                            // lands -- see eu_seq_execute.svh).
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                dec_writes_reg     = 1'b0;
+                                dec_is_memind       = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = fi_bd;
+                            end else begin
+                                dec_ea_offset  = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                         end
                     end else if (f_dir && (f_ss == 2'b10 || f_ss == 2'b00) &&
                                  f_mode == 3'b111 && f_reg == 3'b100) begin
@@ -3433,14 +3448,34 @@
                             dec_src_reg     = {1'b1, f_reg};                   // An → rd_a
                             dec_dst_reg     = {ext_data[15], ext_data[14:12]}; // Xn → rd_b
                             dec_reads_src   = 1'b1;
-                            dec_is_pea_idx  = 1'b1;
                             dec_is_idx      = 1'b1;
                             dec_xn_wl       = ext_data[11];
                             dec_xn_scale    = ext_data[10:9];
-                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
-                            dec_jump_offset = fi_is_full ? fi_bd
-                                            : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext   = 1'b1;
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd. 10-item
+                            // backlog Stage 9a (plan.md): genuine memory-indirect
+                            // (fi_iis!=000) -- PEA still needs a real outer bus cycle
+                            // (unlike LEA), but it's a WRITE of the resolved EA to the
+                            // stack, not a read at the resolved EA -- see the memind
+                            // FSM's own memind_is_pea_r handling in eu_seq_execute.svh.
+                            // Deliberately NOT setting dec_is_pea_idx here: ex_ea must
+                            // resolve to An+bd(+Xn) for the FSM's own inner-address
+                            // capture, not ex_cur_sp-4 (dec_is_pea_idx's usual effect);
+                            // the A7 predecrement itself still gets the same ex_cur_sp
+                            // treatment via ex_an_new's own (ex_is_pea && ex_is_memind)
+                            // arm instead.
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                dec_is_mem_wr      = 1'b0;
+                                dec_is_memind       = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = fi_bd;
+                            end else begin
+                                dec_is_pea_idx  = 1'b1;
+                                dec_jump_offset = fi_is_full ? fi_bd
+                                                : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                         end else if (f_mode == 3'b111) begin
                             // PEA (xxx).W/.L / (d16,PC): EA = absolute value
                             dec_abs_jmp_en = 1'b1;  // carry absolute EA in abs_ea_val path
