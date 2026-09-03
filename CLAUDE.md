@@ -443,16 +443,45 @@ shared pin logic in the project, a prior attempt in adjacent territory already
 produced a hard-to-diagnose hang, and the project's own verification has no
 multi-bus-master test that could even demonstrate today's gap being violated (CAS's
 own single-CPU value semantics are unaffected and already fully verified). No RTL or
-testbench changed. See `plan.md §Phase 233` for the full writeup. Stage 8 (MOVEM's
-own genuine memory-indirect EA) is next.
+testbench changed. See `plan.md §Phase 233` for the full writeup. **Stage 8 (Phase
+234, partial)**: MOVEM's own genuine memory-indirect EA. Widened the prefetch queue
+from 6 to 7 words (`q[6]`/`ext7_valid`), mirroring Phase 145's own already-proven
+pattern exactly, threaded through `m68030_seq.sv`'s own `eu_ext_valid` mux into
+`eu_seq.sv`. **Found and fixed a real, self-introduced regression before it left this
+session**: a first attempt widened the IFU's ambient-readahead fetch trigger
+unconditionally (`q_cnt_d<=5`→`<=6`, mirroring how Phase 147 once widened `<=4`→`<=5`)
+— passed `tb/ifu_tb.sv`'s own full suite but broke `tb/cache_tb.sv`'s own I-3 test
+hard (decode desynced into unrelated NOP-filled memory, loading marker constants from
+other test sections entirely) — the exact "readahead reaches into unintended memory"
+fragility `tb/cache_tb.sv`'s own I-3 comment already documents once having had to
+work around. Root-caused via a two-phase trace and confirmed by bisection that the
+trigger's own unconditional aggressiveness, not the queue-depth widening, was the
+cause. **Fix**: gated the deeper trigger on `need_ext` (Stage 5's own signal —
+decode is genuinely blocked needing an extension word not yet queued) instead of
+unconditional — `q_cnt_d<=5 || (need_ext && q_cnt_d<=6)`. Ambient readahead now
+behaves exactly as before Stage 8 (zero behavior change), and the queue only reaches
+for the 7th word when decode is actually stalled needing it. **Scope decision**:
+investigating the remaining half (MOVEM's own genuine-indirect EA *value*, not just
+word count — `movem_ext_count` already sizes the drain correctly, but the EA arm in
+`eu_seq_decode.svh` still falls back to brief-format for genuine indirection) found
+it needs a real extra bus read merged with the project's own existing `ex_is_memind`
+3-phase FSM (already used by every OTHER family's own genuine-indirect EA,
+`eu_seq_execute.svh`) — resolving the EA *once* per MOVEM instruction, then handing
+it to MOVEM's own existing register-iteration logic as its starting address. This is
+a genuine merge of two independently-complex state machines, materially larger than
+the queue-widening just completed and closer in shape to Stage 9's own explicitly-
+flagged scope — deferred as a separate follow-up rather than rushed. Full Harte sweep
+bit-identical to baseline. See `plan.md §Phase 234` for the full writeup. Stage 9
+(memory-indirect EA beyond MOVE, the plan's own largest item) is next.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
-10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-6 of 10 done
-(Phase 227-232); Stage 7 investigated and re-deferred (Phase 233); Stage 8 (MOVEM's
-own genuine memory-indirect EA) is next.**
+10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-7 of 10 done
+(Phase 227-233); Stage 8 partially done (Phase 234, IFU queue widened to 7 words;
+MOVEM's own genuine-indirect decode/execute integration deferred); Stage 9
+(memory-indirect EA beyond MOVE) is next.**
 
 ## Verification Commands
 

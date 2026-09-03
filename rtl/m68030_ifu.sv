@@ -3,18 +3,25 @@
 
 // MC68030 Instruction Fetch Unit
 //
-// 6-word × 16-bit prefetch queue.  The BIU always returns a 32-bit
-// longword per fetch; the IFU splits it into two 16-bit words and pushes
-// them to the queue tail.  The EU/sequencer drains up to 6 words per
-// cycle (opcode + up to 5 extension words, Phase 145, plan.md — q[5] was
-// already correctly filled by the existing logic below, just never
-// exposed as its own output/drain case until this phase).
-// 6 words supports MOVE.L #imm32, abs.L (5 total words: opcode+2+2), and
-// (Phase 145) genuine memory-indirect EA with long bd + long od together
-// (6 total words: opcode+descriptor+bd_hi+bd_lo+od_hi+od_lo), the last
-// combination this physical 6-word queue can support without growing it
-// further (MOVEM's own genuine-memory-indirect worst case needs a 7th
-// word and remains out of scope — see plan.md Phase 145's own writeup).
+// 7-word × 16-bit prefetch queue (10-item backlog Stage 8, plan.md — grown
+// from 6 words; see plan.md Phase 145's own writeup for why 6 wasn't
+// enough).  The BIU always returns a 32-bit longword per fetch; the IFU
+// splits it into two 16-bit words and pushes them to the queue tail.  The
+// EU/sequencer drains up to 7 words per cycle (opcode + up to 6 extension
+// words — q[5] was already correctly filled by the existing logic below
+// since Phase 145, just never exposed as its own output/drain case until
+// that phase; q[6] is new this stage).
+// 7 words supports MOVE.L #imm32, abs.L (5 total words: opcode+2+2),
+// genuine memory-indirect EA with long bd + long od together (6 total
+// words: opcode+descriptor+bd_hi+bd_lo+od_hi+od_lo, Phase 145), and now
+// (this stage) provides the queue-depth PREREQUISITE for MOVEM's own
+// genuine-memory-indirect worst case (7 total words: opcode+register-
+// mask+descriptor+bd_hi+bd_lo+od_hi+od_lo) -- the decode/execute side
+// that actually resolves that 7th word into a real indirect EA is a
+// separate, larger integration (needs merging with the existing
+// dedicated ex_is_memind 3-phase FSM eu_seq_execute.svh already uses for
+// every OTHER family's own genuine-indirect EA) and remains deferred;
+// see plan.md's own Stage 8 writeup.
 //
 // ext_data format: {q[1], q[2]} — first extension word in bits[31:16],
 // second extension word in bits[15:0].  This is the hardware-accurate
@@ -43,6 +50,7 @@ module m68030_ifu (
     // Drain: 16-bit words consumed by EU/sequencer this cycle
     //   0 = nothing  1 = opcode only  2 = opcode + 1 ext  3 = opcode + 2 ext
     //   4 = opcode + 3 ext  5 = opcode + 4 ext  6 = opcode + 5 ext (Phase 145)
+    //   7 = opcode + 6 ext (10-item backlog Stage 8, plan.md)
     input  logic [2:0]  drain,
 
     // 10-item backlog Stage 5 (plan.md): decode is genuinely blocked on an
@@ -58,6 +66,9 @@ module m68030_ifu (
     output logic [15:0] q3_word,      // q[3] — third extension word
     output logic [31:0] ext34_data,   // {q[3], q[4]} — words 3+4
     output logic [15:0] q5_word,      // q[5] — fifth extension word (Phase 145)
+    output logic [15:0] q6_word,      // q[6] — sixth extension word (10-item
+                                       // backlog Stage 8, plan.md — MOVEM's
+                                       // own genuine memory-indirect EA)
     output logic        instr_valid,  // q_cnt >= 1
     // Plan.md (bus-pipelining-overlap): a genuine "1 extension word is
     // ready" gate, distinct from ext_valid's own q_cnt>=3 -- fills always
@@ -72,6 +83,7 @@ module m68030_ifu (
     output logic        ext4_valid,   // q_cnt >= 4
     output logic        ext5_valid,   // q_cnt >= 5
     output logic        ext6_valid,   // q_cnt >= 6 (Phase 145)
+    output logic        ext7_valid,   // q_cnt >= 7 (10-item backlog Stage 8)
     output logic [31:0] decode_pc,    // PC of instr_word
 
     // BIU longword-read interface
@@ -105,8 +117,8 @@ module m68030_ifu (
     // -----------------------------------------------------------------------
     // State registers
     // -----------------------------------------------------------------------
-    logic [15:0] q    [0:5];      // prefetch queue: q[0] = head (next opcode)
-    logic [2:0]  q_cnt;           // valid word count: 0–6
+    logic [15:0] q    [0:6];      // prefetch queue: q[0] = head (next opcode)
+    logic [2:0]  q_cnt;           // valid word count: 0–7
     logic [31:0] fetch_addr_r;    // next longword address to request
     logic [31:0] decode_pc_r;     // PC of q[0]
     logic        fetch_pend_r;    // outstanding BIU fetch (ifu_req held high)
@@ -126,12 +138,14 @@ module m68030_ifu (
     assign q3_word      = q[3];
     assign ext34_data   = {q[3], q[4]};
     assign q5_word      = q[5];
+    assign q6_word      = q[6];
     assign instr_valid  = (q_cnt >= 3'd1);
     assign ext1_valid   = (q_cnt >= 3'd2);
     assign ext_valid    = (q_cnt >= 3'd3);
     assign ext4_valid   = (q_cnt >= 3'd4);
     assign ext5_valid   = (q_cnt >= 3'd5);
     assign ext6_valid   = (q_cnt >= 3'd6);
+    assign ext7_valid   = (q_cnt >= 3'd7);
     assign decode_pc    = decode_pc_r;
     assign ifu_addr     = fetch_addr_r;
     assign ifu_req      = fetch_pend_r;
@@ -171,21 +185,24 @@ module m68030_ifu (
     assign dn = (drain > q_cnt) ? q_cnt : drain;
 
     // Queue shifted left by dn (drain from head); tail zeroed
-    logic [15:0] qd [0:5];
+    logic [15:0] qd [0:6];
     always_comb begin
         case (dn)
-            3'd1: begin qd[0]=q[1]; qd[1]=q[2]; qd[2]=q[3]; qd[3]=q[4]; qd[4]=q[5]; qd[5]=16'h0; end
-            3'd2: begin qd[0]=q[2]; qd[1]=q[3]; qd[2]=q[4]; qd[3]=q[5]; qd[4]=16'h0; qd[5]=16'h0; end
-            3'd3: begin qd[0]=q[3]; qd[1]=q[4]; qd[2]=q[5]; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
-            3'd4: begin qd[0]=q[4]; qd[1]=q[5]; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
-            3'd5: begin qd[0]=q[5]; qd[1]=16'h0; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
-            // Phase 145: draining all 6 words (opcode+5 ext) empties the
-            // queue entirely -- only reachable when q_cnt==6 (ext6_valid),
-            // the physical maximum this queue can ever hold, so there is
-            // no q[6] to shift in; every slot simply goes to 0/don't-care
-            // (q_cnt_d becomes 0, so nothing downstream reads qd[] as valid).
-            3'd6: begin qd[0]=16'h0; qd[1]=16'h0; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; end
-            default: begin qd[0]=q[0]; qd[1]=q[1]; qd[2]=q[2]; qd[3]=q[3]; qd[4]=q[4]; qd[5]=q[5]; end
+            3'd1: begin qd[0]=q[1]; qd[1]=q[2]; qd[2]=q[3]; qd[3]=q[4]; qd[4]=q[5]; qd[5]=q[6]; qd[6]=16'h0; end
+            3'd2: begin qd[0]=q[2]; qd[1]=q[3]; qd[2]=q[4]; qd[3]=q[5]; qd[4]=q[6]; qd[5]=16'h0; qd[6]=16'h0; end
+            3'd3: begin qd[0]=q[3]; qd[1]=q[4]; qd[2]=q[5]; qd[3]=q[6]; qd[4]=16'h0; qd[5]=16'h0; qd[6]=16'h0; end
+            3'd4: begin qd[0]=q[4]; qd[1]=q[5]; qd[2]=q[6]; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; qd[6]=16'h0; end
+            3'd5: begin qd[0]=q[5]; qd[1]=q[6]; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; qd[6]=16'h0; end
+            3'd6: begin qd[0]=q[6]; qd[1]=16'h0; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; qd[6]=16'h0; end
+            // 10-item backlog Stage 8 (plan.md): draining all 7 words
+            // (opcode+6 ext) empties the queue entirely -- only reachable
+            // when q_cnt==7 (ext7_valid), the physical maximum this queue
+            // can ever hold (mirrors Phase 145's own q_cnt==6 case, now
+            // one slot deeper), so there is no q[7] to shift in; every
+            // slot simply goes to 0/don't-care (q_cnt_d becomes 0, so
+            // nothing downstream reads qd[] as valid).
+            3'd7: begin qd[0]=16'h0; qd[1]=16'h0; qd[2]=16'h0; qd[3]=16'h0; qd[4]=16'h0; qd[5]=16'h0; qd[6]=16'h0; end
+            default: begin qd[0]=q[0]; qd[1]=q[1]; qd[2]=q[2]; qd[3]=q[3]; qd[4]=q[4]; qd[5]=q[5]; qd[6]=q[6]; end
         endcase
     end
 
@@ -215,7 +232,7 @@ module m68030_ifu (
 
         if (!rst_n) begin
             q[0] <= 16'h0; q[1] <= 16'h0; q[2] <= 16'h0;
-            q[3] <= 16'h0; q[4] <= 16'h0; q[5] <= 16'h0;
+            q[3] <= 16'h0; q[4] <= 16'h0; q[5] <= 16'h0; q[6] <= 16'h0;
             q_cnt          <= 3'd0;
             fetch_addr_r   <= 32'h0;
             decode_pc_r    <= 32'h0;
@@ -233,7 +250,7 @@ module m68030_ifu (
             // ifu_ack guarded by fetch_pend_r, so stale data is ignored.
             // The drain-only branch on the next cycle will set fetch_pend_r=1.
             q[0] <= 16'h0; q[1] <= 16'h0; q[2] <= 16'h0;
-            q[3] <= 16'h0; q[4] <= 16'h0; q[5] <= 16'h0;
+            q[3] <= 16'h0; q[4] <= 16'h0; q[5] <= 16'h0; q[6] <= 16'h0;
             q_cnt          <= 3'd0;
             decode_pc_r    <= pc_wr_data;
             fetch_addr_r   <= {pc_wr_data[31:2], 2'b00};  // longword-align
@@ -255,7 +272,7 @@ module m68030_ifu (
                 bus_err_addr_r <= fetch_addr_r;
                 fetch_pend_r   <= 1'b0;
                 q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
-                q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                 q_cnt <= q_cnt_d;
 
             end else if (ifu_ack && fetch_pend_r && !bus_err_r) begin
@@ -266,74 +283,89 @@ module m68030_ifu (
                 // with the updated fetch_addr_r, avoiding address-race with the BIU.
                 fetch_pend_r <= 1'b0;
 
-                // Phase 147 (plan.md): fill_at==5 overflow. A fetch always
-                // returns 2 words, but only 1 physical slot (q[5]) remains
-                // free when q_cnt_d==5 -- this is now reachable because the
-                // fetch trigger below was widened from <=4 to <=5 to fix a
-                // parity-lock bug (see that comment). Keep the first word
-                // at q[5]; stash the second in held_word_r for the next
-                // free slot (injected with zero bus cost in the drain-only
-                // branch below) instead of losing it.
-                if (fill_at == 3'd5) begin
+                // 10-item backlog Stage 8 (plan.md): fill_at==6 overflow --
+                // mirrors Phase 147's own fill_at==5 case exactly, one slot
+                // deeper now that the queue holds 7 words instead of 6. A
+                // fetch always returns 2 words, but only 1 physical slot
+                // (q[6]) remains free when q_cnt_d==6 -- reachable because
+                // the fetch trigger below was widened from <=5 to <=6.
+                // skip_first_r is unconditionally treated as 0 here, same
+                // as Phase 147's own case: it can only ever be 1 on the
+                // very first fill after a flush (fill_at==0 that cycle),
+                // long since cleared by the time fill_at reaches 6.
+                if (fill_at == 3'd6) begin
                     q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
-                    q[3] <= qd[3]; q[4] <= qd[4];
-                    q[5] <= ifu_rdata[31:16];
+                    q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                    q[6] <= ifu_rdata[31:16];
                     held_word_r  <= ifu_rdata[15:0];
                     held_valid_r <= 1'b1;
-                    q_cnt        <= 3'd6;
+                    q_cnt        <= 3'd7;
                 end else begin
                 q_cnt        <= q_cnt_df;
 
                 // Write queue: cases on {skip_first_r, fill_at[2:0]}
                 // skip_first=0: rdata[31:16] at fill_at, rdata[15:0] at fill_at+1
                 // skip_first=1: rdata[15:0]  at fill_at only (first word discarded)
+                // fill_at==5 (10-item backlog Stage 8, plan.md): now a
+                // perfectly ordinary 2-free-slot fill (q[5]+q[6]) since the
+                // queue holds 7 words -- Phase 147's own overflow-stash
+                // handling for this exact fill_at moved to fill_at==6 above.
                 case ({skip_first_r, fill_at})
                     4'b0_000: begin
                         q[0] <= ifu_rdata[31:16]; q[1] <= ifu_rdata[15:0];
-                        q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                        q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b0_001: begin
                         q[0] <= qd[0]; q[1] <= ifu_rdata[31:16];
                         q[2] <= ifu_rdata[15:0];
-                        q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                        q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b0_010: begin
                         q[0] <= qd[0]; q[1] <= qd[1];
                         q[2] <= ifu_rdata[31:16]; q[3] <= ifu_rdata[15:0];
-                        q[4] <= qd[4]; q[5] <= qd[5];
+                        q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b0_011: begin
                         q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
                         q[3] <= ifu_rdata[31:16]; q[4] <= ifu_rdata[15:0];
-                        q[5] <= qd[5];
+                        q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b0_100: begin
                         q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3];
                         q[4] <= ifu_rdata[31:16]; q[5] <= ifu_rdata[15:0];
+                        q[6] <= qd[6];
+                    end
+                    4'b0_101: begin
+                        q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4];
+                        q[5] <= ifu_rdata[31:16]; q[6] <= ifu_rdata[15:0];
                     end
                     4'b1_000: begin
                         q[0] <= ifu_rdata[15:0];
-                        q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                        q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b1_001: begin
                         q[0] <= qd[0]; q[1] <= ifu_rdata[15:0];
-                        q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                        q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b1_010: begin
                         q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= ifu_rdata[15:0];
-                        q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                        q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b1_011: begin
                         q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= ifu_rdata[15:0];
-                        q[4] <= qd[4]; q[5] <= qd[5];
+                        q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                     4'b1_100: begin
                         q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3];
-                        q[4] <= ifu_rdata[15:0]; q[5] <= qd[5];
+                        q[4] <= ifu_rdata[15:0]; q[5] <= qd[5]; q[6] <= qd[6];
+                    end
+                    4'b1_101: begin
+                        q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2]; q[3] <= qd[3]; q[4] <= qd[4];
+                        q[5] <= ifu_rdata[15:0]; q[6] <= qd[6];
                     end
                     default: begin
                         q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
-                        q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                        q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     end
                 endcase
                 end
@@ -351,38 +383,63 @@ module m68030_ifu (
                 // resulting 1-slot-only overflow via held_word_r/
                 // held_valid_r (stash the fetch's 2nd word, no bus cost to
                 // place it once a slot frees up -- see the fill_at==5 case
-                // above and the injection just below).
-                if (held_valid_r && (q_cnt_d < 3'd6)) begin
+                // above and the injection just below). 10-item backlog
+                // Stage 8 (plan.md): threshold/case table widened one slot
+                // deeper (q_cnt_d<3'd7, new 3'd5/3'd6 cases) for the 7-word
+                // queue -- same mechanism, same reasoning, one more slot.
+                if (held_valid_r && (q_cnt_d < 3'd7)) begin
                     // Inject the stashed word into the first free slot
                     // instead of a plain shift-only drain -- zero bus cost.
                     case (q_cnt_d)
-                        3'd0: begin q[0]<=held_word_r; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; end
-                        3'd1: begin q[0]<=qd[0]; q[1]<=held_word_r; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; end
-                        3'd2: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=held_word_r; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; end
-                        3'd3: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=held_word_r; q[4]<=qd[4]; q[5]<=qd[5]; end
-                        3'd4: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=held_word_r; q[5]<=qd[5]; end
-                        default: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=held_word_r; end
+                        3'd0: begin q[0]<=held_word_r; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; q[6]<=qd[6]; end
+                        3'd1: begin q[0]<=qd[0]; q[1]<=held_word_r; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; q[6]<=qd[6]; end
+                        3'd2: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=held_word_r; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; q[6]<=qd[6]; end
+                        3'd3: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=held_word_r; q[4]<=qd[4]; q[5]<=qd[5]; q[6]<=qd[6]; end
+                        3'd4: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=held_word_r; q[5]<=qd[5]; q[6]<=qd[6]; end
+                        3'd5: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=held_word_r; q[6]<=qd[6]; end
+                        default: begin q[0]<=qd[0]; q[1]<=qd[1]; q[2]<=qd[2]; q[3]<=qd[3]; q[4]<=qd[4]; q[5]<=qd[5]; q[6]<=held_word_r; end
                     endcase
                     q_cnt        <= q_cnt_d + 3'd1;
                     held_valid_r <= 1'b0;
                 end else begin
                     // Drain only: just shift the queue
                     q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
-                    q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5];
+                    q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
                     q_cnt <= q_cnt_d;
                 end
 
                 // Issue a new fetch if queue has room (<= 5 words after
-                // drain, widened from <=4 -- see comment above) and we
-                // aren't already holding a stashed word (avoid a second
-                // overflow before the first held word has been placed).
-                // Guard !ifu_ack: biu_cycle_gen holds ifu_ack high for all 4
-                // ticks of S7.  Without this guard the drain-only path re-arms
-                // fetch_pend_r on tick 1 of S7, causing a spurious second fill
-                // (at tick 2) with stale captured_rdata and advancing
-                // fetch_addr_r past the next real fetch address.
+                // drain -- see comment above) and we aren't already holding
+                // a stashed word (avoid a second overflow before the first
+                // held word has been placed). Guard !ifu_ack: biu_cycle_gen
+                // holds ifu_ack high for all 4 ticks of S7.  Without this
+                // guard the drain-only path re-arms fetch_pend_r on tick 1
+                // of S7, causing a spurious second fill (at tick 2) with
+                // stale captured_rdata and advancing fetch_addr_r past the
+                // next real fetch address.
+                //
+                // 10-item backlog Stage 8 (plan.md): the 7th word (q[6])
+                // is reachable via the fill_at==6 overflow path above, but
+                // deliberately NOT via unconditionally widening this
+                // ambient-readahead threshold to <=6 -- a first attempt
+                // did exactly that and broke tb/cache_tb.sv's own I-3
+                // (visit C#2/D#2 loaded garbage, decode desynced into
+                // unrelated NOP-filled memory): letting the IFU always
+                // speculatively read one longword further ahead than
+                // before is precisely the "readahead reaches into
+                // unintended memory" fragility this same file's own I-3
+                // comment (line ~931) already documents once having to
+                // work around. Gated on `need_ext` instead (10-item
+                // backlog Stage 5's own signal: decode is GENUINELY
+                // blocked on an extension word not yet queued) -- the
+                // ambient case stays exactly as conservative as before
+                // Stage 8 (zero behavior change, matching every existing
+                // test's own tuning), and the queue only ever reaches for
+                // the 7th word when decode is actually stalled needing it
+                // (MOVEM's own genuine memory-indirect worst case).
                 if (!fetch_pend_r && !bus_err_r && initialized_r &&
-                    (q_cnt_d <= 3'd5) && !ifu_ack && !held_valid_r) begin
+                    (q_cnt_d <= 3'd5 || (need_ext && q_cnt_d <= 3'd6)) &&
+                    !ifu_ack && !held_valid_r) begin
                     fetch_pend_r <= 1'b1;
                 end
             end

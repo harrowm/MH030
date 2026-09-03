@@ -6778,3 +6778,85 @@ verification for. No RTL or testbench changed -- `git status` clean for this sta
 precedent for exactly this outcome (Phase 158 Stage 8; Phase 213/242 itself). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 8
 (MOVEM's own genuine memory-indirect EA) is next.
+
+## Phase 234 (10-item backlog, Stage 8 of 10 -- partial: IFU queue widened to 7
+words, MOVEM's own genuine-indirect decode/execute integration deferred): the 7th
+prefetch-queue word
+
+Grew the prefetch queue from 6 to 7 words (`q[6]`, `ext7_valid`), mirroring Phase
+145's own already-proven pattern exactly (widen `q[]`/`qd[]`, add a `fill_at==6`
+overflow-stash case reusing `held_word_r`/`held_valid_r`, widen the held-word
+injection threshold, thread `eu_q6_word`/`ifu_ext7_valid` through `m68030_seq.sv`'s
+own `eu_ext_valid` mux end to end into `eu_seq.sv`). Every downstream file
+(`m68030_top.sv`, `m68030_eu.sv`, `eu_seq.sv`, and the handful of testbenches using
+`.*` wildcard connections to `m68030_seq`/`m68030_ifu`) updated to match, following
+the exact precedent Phase 145 already established for `q[5]`/`ext6_valid`.
+
+**Found and fixed a real, self-introduced regression before it ever left this
+session**: a first attempt widened the IFU's own ambient-readahead fetch trigger
+unconditionally from `q_cnt_d<=5` to `q_cnt_d<=6` (mirroring how Phase 147's own
+parity-lock fix once widened `<=4` to `<=5`) — this compiled clean and passed
+`tb/ifu_tb.sv`'s own full suite (including a new dedicated IFU-13 test proving the
+7-word mechanism itself works correctly in isolation), but broke `tb/cache_tb.sv`'s
+own I-3 test hard: decode desynced into unrelated, NOP-filled memory partway through
+the CACR.CI-pulse-then-revisit sequence, loading garbage values that turned out to be
+marker constants from *entirely different, unrelated test sections* elsewhere in the
+same `rom[]` array. Root-caused via a temporary two-phase trace (mirroring `tb/cache_
+tb.sv`'s own `wait_cleared_then_set` task's own logic, since a naive single-phase
+version gave a false-negative first attempt) and confirmed by direct bisection
+(reverting only the trigger threshold, keeping the widened storage/overflow-stash
+logic, fixed I-3 completely) that the trigger's own unconditional aggressiveness --
+not the queue-depth widening itself -- was the cause: letting the IFU always
+speculatively read one longword further ahead than before is precisely the "readahead
+reaches into unintended memory" fragility `tb/cache_tb.sv`'s own I-3 comment (line
+~931) already documents once having had to work around (a *different* instance of the
+same failure class, from before this session).
+
+**Fix**: gated the deeper trigger on `need_ext` (the 10-item backlog Stage 5 signal:
+decode is genuinely blocked on an extension word not yet queued) instead of making it
+unconditional -- `q_cnt_d<=3'd5 || (need_ext && q_cnt_d<=3'd6)`. Ambient ordinary-code
+readahead now behaves *exactly* as before Stage 8 (zero behavior change, confirmed by
+`tb/cache_tb.sv` returning to 0 failures), and the queue only ever reaches for the 7th
+word when decode is actually stalled needing it -- which today means nothing (no
+decode path yet produces `ext_count==6`), and will mean MOVEM's own genuine-indirect
+case once that decode work lands. Updated `tb/ifu_tb.sv`'s own IFU-13 to match:
+confirms ambient readahead alone stops at 6 words, then asserts `need_ext` and
+confirms the 7th word only then becomes reachable -- proving the conditional gate
+itself, not just the mechanism's raw existence.
+
+**Scope decision**: investigating the remaining half of Stage 8 (extending `is_movem_
+2ext`/`movem_ext_count`'s already-correct word-count computation into a real EA
+value for MOVEM's own genuine-indirect case, `eu_seq_decode.svh`'s own MOVEM arm)
+found that `movem_ext_count` in `m68030_seq.sv` already correctly sizes the drain
+count for this case (peeking `fi_bdsz`/`fi_iis` from the extension word exactly like
+every other family in the earlier memory-indirect rollout) -- but the EA arm itself
+(`eu_seq_decode.svh` ~line 3540) still only extracts word/long *base displacement*
+(`fi_iis==000`, no genuine indirection) and explicitly falls back to brief-format
+otherwise. A genuine `fi_iis!=000` indirect EA needs an actual extra bus read (base+bd
+dereferenced through memory to get the real pointer, then +od) -- exactly what the
+project's own existing `ex_is_memind` 3-phase FSM (`memind_start_r`/`memind_inner_r`/
+`memind_outer_r` in `eu_seq_execute.svh`) already implements for every OTHER
+instruction family's own genuine-indirect EA. Real 68030 semantics resolve this
+EA *once* per MOVEM instruction (not once per transferred register) -- MOVEM's own
+existing register-list iteration logic would need to consume the *resolved* address
+from that shared FSM as its own starting point, the same way it already consumes a
+computed address from every other already-supported EA mode. This is a genuine merge
+of two independently-complex state machines (MOVEM's own register-iteration FSM +
+the shared memind FSM), materially larger and riskier than the queue-widening half
+just completed, and closer in shape to Stage 9's own explicitly-flagged "likely needs
+its own sub-plan" scope than to a same-session extension of this stage. **Deferred,
+not implemented this stage** -- the queue-widening prerequisite is complete, tested,
+and immediately reusable once the EA-integration work is scoped and taken on
+separately (own dedicated stage/plan, matching Stage 9's own precedent for
+right-sizing genuinely large items rather than rushing them).
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14, full
+124-suite Harte sweep (mandatory -- widens shared IFU/decode/EU plumbing used by
+every instruction in the chip) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Stage 8 partially
+closed**: queue-widening prerequisite done and verified; MOVEM's own genuine-indirect
+decode/execute integration re-scoped as a separate follow-up (documented above with a
+precise proposal, matching this project's own "investigated, found larger than
+expected, deferred with a proposal" precedent). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 9
+(memory-indirect EA beyond MOVE, the plan's own largest item) is next.

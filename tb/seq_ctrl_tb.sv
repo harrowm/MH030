@@ -14,18 +14,21 @@ module seq_ctrl_tb;
     logic [15:0] ifu_q3_word;
     logic [31:0] ifu_ext34_data;
     logic [15:0] ifu_q5_word;
+    logic [15:0] ifu_q6_word;   // 10-item backlog Stage 8 (plan.md)
     logic        instr_valid;
     logic        ifu_ext1_valid;   // Phase 163 Stage 1 (plan.md)
     logic        ifu_ext_valid;
     logic        ifu_ext4_valid;
     logic        ifu_ext5_valid;
     logic        ifu_ext6_valid;
+    logic        ifu_ext7_valid;  // 10-item backlog Stage 8 (plan.md)
     logic [2:0]  drain;
     logic [15:0] eu_instr_word;
     logic [31:0] eu_ext_data;
     logic [15:0] eu_q3_word;
     logic [31:0] eu_ext34_data;
     logic [15:0] eu_q5_word;
+    logic [15:0] eu_q6_word;    // 10-item backlog Stage 8 (plan.md)
     logic        eu_instr_valid;
     logic        eu_ext_valid;
     logic        eu_instr_ack;

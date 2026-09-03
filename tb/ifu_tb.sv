@@ -42,10 +42,14 @@ module ifu_tb;
     logic [31:0] ext_data;
     logic [15:0] q3_word;
     logic [31:0] ext34_data;
+    logic [15:0] q5_word;
+    logic [15:0] q6_word;   // 10-item backlog Stage 8 (plan.md)
     logic        instr_valid;
     logic        ext_valid;
     logic        ext4_valid;
     logic        ext5_valid;
+    logic        ext6_valid;
+    logic        ext7_valid;  // 10-item backlog Stage 8 (plan.md)
     logic [31:0] decode_pc;
 
     logic [31:0] ifu_addr;
@@ -74,10 +78,14 @@ module ifu_tb;
         .ext_data    (ext_data),
         .q3_word     (q3_word),
         .ext34_data  (ext34_data),
+        .q5_word     (q5_word),
+        .q6_word     (q6_word),
         .instr_valid (instr_valid),
         .ext_valid   (ext_valid),
         .ext4_valid  (ext4_valid),
         .ext5_valid  (ext5_valid),
+        .ext6_valid  (ext6_valid),
+        .ext7_valid  (ext7_valid),
         .decode_pc   (decode_pc),
         .ifu_addr    (ifu_addr),
         .ifu_req     (ifu_req),
@@ -438,6 +446,55 @@ module ifu_tb;
         check("IFU-12b: normal fetching resumes after the flush", instr_valid);
         check32("IFU-12b: decode_pc=0x7000", decode_pc, 32'h0000_7000);
         check16("IFU-12b: instr_word=0x5555 from the new address", instr_word, 16'h5555);
+
+        // ================================================================
+        // IFU-13 (10-item backlog Stage 8, plan.md): the 7-word queue.
+        // Drain stays 0 throughout, letting the queue auto-fill -- but
+        // ONLY as far as 6 words on ambient readahead alone (a first
+        // attempt let the fetch trigger reach 7 unconditionally and broke
+        // tb/cache_tb.sv's own I-3, decode desyncing into unrelated
+        // memory -- see m68030_ifu.sv's own fetch-trigger comment for the
+        // full story). Reaching the 7th word requires `need_ext` asserted
+        // (decode genuinely blocked needing it, mirroring MOVEM's own real
+        // 7-word case), matching this stage's own final design exactly.
+        // 4 longword fetches (8 words) total, of which only 7 ever become
+        // visible (q_cnt/ext7_valid); the 8th lands in held_word_r, the
+        // same overflow-stash mechanism Phase 147 already proved for the
+        // old 6-word ceiling, now one slot deeper.
+        // ================================================================
+        $display("--- IFU-13: 7-word queue (q[6]/ext7_valid) ---");
+        stub_clear();
+        stub_add(32'h0000_2000, 32'h1111_2222, 1'b0);
+        stub_add(32'h0000_2004, 32'h3333_4444, 1'b0);
+        stub_add(32'h0000_2008, 32'h5555_6666, 1'b0);
+        stub_add(32'h0000_200C, 32'h7777_8888, 1'b0);
+        write_pc(32'h0000_2000);
+        wait_valid(6);
+        check("IFU-13: ambient readahead alone stops at 6 words (need_ext=0)", !ext7_valid);
+        check("IFU-13: no fetch dispatched beyond 6 words without need_ext", !ifu_req);
+        need_ext = 1'b1;
+        wait_valid(7);
+        check("IFU-13: ext7_valid once decode genuinely needs the 7th word (need_ext=1)", ext7_valid);
+        check16("IFU-13: instr_word=0x1111", instr_word, 16'h1111);
+        check32("IFU-13: ext_data={q1,q2}=0x2222_3333", ext_data, 32'h2222_3333);
+        check16("IFU-13: q3_word=0x4444", q3_word, 16'h4444);
+        check32("IFU-13: ext34_data={q3,q4}=0x4444_5555", ext34_data, 32'h4444_5555);
+        check16("IFU-13: q5_word=0x6666", q5_word, 16'h6666);
+        check16("IFU-13: q6_word=0x7777 (the 7th word, new this stage)", q6_word, 16'h7777);
+        check("IFU-13: no further fetch dispatched once full (ifu_req=0)", !ifu_req);
+        need_ext = 1'b0;
+
+        // Drain the opcode: the queue shifts AND, in the same cycle,
+        // zero-bus-cost injects the 8th word (stashed in held_word_r) into
+        // the freed slot -- q_cnt stays at 7, q6_word now shows the
+        // previously-held word instead of what shifted into q[5].
+        drain = 3'd1;
+        @(posedge clk_4x); #1;
+        drain = 3'd0;
+        @(posedge clk_4x); #1;
+        check("IFU-13: still ext7_valid after drain+injection (zero bus cost)", ext7_valid);
+        check16("IFU-13: instr_word=0x2222 after drain", instr_word, 16'h2222);
+        check16("IFU-13: q6_word=0x8888 (the previously-stashed 8th word)", q6_word, 16'h8888);
 
         // ================================================================
         // Done

@@ -38,12 +38,16 @@ module m68030_seq (
     input  logic [15:0] ifu_q3_word,      // q[3] — third extension word
     input  logic [31:0] ifu_ext34_data,   // {q[3],q[4]} — words 3+4
     input  logic [15:0] ifu_q5_word,      // q[5] — fifth extension word (Phase 145)
+    input  logic [15:0] ifu_q6_word,      // q[6] — sixth extension word (10-item
+                                           // backlog Stage 8, plan.md)
     input  logic        instr_valid,      // IFU has ≥1 word (q_cnt ≥ 1)
     input  logic        ifu_ext1_valid,   // IFU has ≥2 words (q_cnt ≥ 2, Phase 163 Stage 1)
     input  logic        ifu_ext_valid,    // IFU has ≥3 words (q_cnt ≥ 3)
     input  logic        ifu_ext4_valid,   // IFU has ≥4 words (q_cnt ≥ 4)
     input  logic        ifu_ext5_valid,   // IFU has ≥5 words (q_cnt ≥ 5)
     input  logic        ifu_ext6_valid,   // IFU has ≥6 words (q_cnt ≥ 6, Phase 145)
+    input  logic        ifu_ext7_valid,   // IFU has ≥7 words (q_cnt ≥ 7, 10-item
+                                           // backlog Stage 8)
     output logic [2:0]  drain,            // words to remove from IFU queue
 
     // To m68030_eu
@@ -52,6 +56,7 @@ module m68030_seq (
     output logic [15:0] eu_q3_word,       // q[3] pass-through for 3-ext instructions
     output logic [31:0] eu_ext34_data,    // {q[3],q[4]} for 4-ext instructions
     output logic [15:0] eu_q5_word,       // q[5] pass-through for 5-ext instructions
+    output logic [15:0] eu_q6_word,       // q[6] pass-through for 6-ext instructions
     output logic        eu_instr_valid,
     output logic        eu_ext_valid,
 
@@ -1085,7 +1090,8 @@ module m68030_seq (
     // -----------------------------------------------------------------------
     // ext_valid: ensure required words are present before EU dispatches
     // -----------------------------------------------------------------------
-    assign eu_ext_valid = (ext_count >= 3'd5) ? ifu_ext6_valid :  // Phase 145
+    assign eu_ext_valid = (ext_count >= 3'd6) ? ifu_ext7_valid :  // 10-item backlog Stage 8
+                          (ext_count == 3'd5) ? ifu_ext6_valid :  // Phase 145
                           (ext_count == 3'd4) ? ifu_ext5_valid :
                           (ext_count == 3'd3) ? ifu_ext4_valid :
                           (ext_count == 3'd1) ? ifu_ext1_valid :  // Phase 163 Stage 1
@@ -1099,6 +1105,7 @@ module m68030_seq (
     assign eu_q3_word     = ifu_q3_word;
     assign eu_ext34_data  = ifu_ext34_data;
     assign eu_q5_word     = ifu_q5_word;
+    assign eu_q6_word     = ifu_q6_word;
 
 endmodule
 

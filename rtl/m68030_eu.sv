@@ -22,6 +22,8 @@ module m68030_eu (
     input  logic [15:0] q3_word,      // third extension word (for 3-ext instrs)
     input  logic [31:0] ext34_data,   // ext words 3+4 (for 4-ext instrs like MOVE.L #,abs.L)
     input  logic [15:0] q5_word,      // fifth extension word (Phase 145, for 6-ext instrs)
+    input  logic [15:0] q6_word,      // sixth extension word (10-item backlog
+                                       // Stage 8, plan.md, for 7-ext instrs)
     input  logic        ext_valid,    // ext_data valid this cycle
     output logic        instr_ack,    // EU consumed instruction
     output logic        eu_busy,      // pipeline stall — IFU must hold instr
@@ -263,6 +265,7 @@ module m68030_eu (
         .q3_word      (q3_word),
         .ext34_data   (ext34_data),
         .q5_word      (q5_word),
+        .q6_word      (q6_word),
         .ext_valid    (ext_valid),
         .int_pending  (int_pending),
         .eu_int_ready (eu_int_ready),
