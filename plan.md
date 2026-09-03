@@ -6481,3 +6481,80 @@ modules) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TI
 bit-identical to baseline. **Closes Stage 3.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 4
 (PTEST translation-fault hang, third investigation attempt) is next.
+
+## Phase 230 (10-item backlog, Stage 4 of 10 -- PTEST translation-fault hang, third
+investigation attempt): genuinely reproduced this time, root-caused, fixed. Unlike the
+plan's own hypothesis (a stale/still-resident I-cache line forcing a genuine eviction),
+the real missing ingredient turned out to be much simpler: `tb/mmu_xlate_tb.sv`'s own
+Phase 6 test (Phase 218's "clean repro") never once touched CACR -- confirmed via a
+direct grep before writing any code -- so it never actually enabled the I-cache or
+exercised a genuine multi-beat burst fill at all, unlike Phase 236's own original
+failing context (deep inside `stall_fsm_tb.sv`, with the I-cache genuinely enabled by
+many earlier tests).
+
+Built a new "Phase 8" test: redirect Phase 6's own trailing `JMP 0x00000800` to a new
+block at `0x0900` that enables CACR's EI+IBE bits (`MOVEQ #$11,D7` / `MOVEC D7,CACR`,
+opcode pattern taken directly from `stall_fsm_tb.sv`'s own proven encoding) and then
+re-runs the *identical* PTEST + crossing-line-ADDI sequence Phase 6 already uses (reusing
+Phase 6's own still-live TC/TT0, since nothing in between disturbs them), with a
+distinct marker (D5=888, vs Phase 6's own 999) before falling through to Phase 7's
+original start. **This reproduced a genuine, reliable hang on the first attempt** --
+`exc_active` stuck at 1 for the full 50000-tick budget, never resolving.
+
+Root-caused via a temporary hierarchical trace (decode_pc, `m68030_exc`'s own
+`state_r`/`exc_active`, the I-cache's own `state`, `m68030_seq`'s own `drain`/
+`ext_count`, `pc_wr_en_common`/`branch_taken`, and the IFU's own `q[0..2]` queue
+contents, printed on any state/pc change, since removed). The real `JMP_ABS_L_OP` at
+`0x0922` (whose own 2-word absolute-address operand sits at `0x0924`/`0x0926`, both
+inside the SAME 16-byte I-cache line as the instruction's own opcode, `0x0920-0x092F`)
+retired using **duplicated, wrong** operand words (`q1=0x0378`, `q2=0x4ef9` -- both
+values already present elsewhere in that same line, not the real `0x0000`/`0x0800`
+target), computing a wild jump target `0x03784ef9`. That address is odd, so the CPU
+correctly took a real Address Error exception (vec=3) -- which then hung forever, a
+downstream symptom, not the actual bug.
+
+Traced the wrong-operand-words bug to its source: `tb/mmu_xlate_tb.sv`'s own inline
+memory model (`rd_word = rom[ext_a[13:2]]`) predates the burst-address-freeze fix from
+the earlier backlog plan (real 68030 silicon holds the address bus constant for a whole
+burst, per MC68030UM.pdf 7.3.7 -- `biu_burst_ctrl.sv` was already fixed to match).
+With the address genuinely frozen at the burst's own dispatch address for all 4 beats,
+this model's own purely-combinational, address-keyed read served the **identical**
+32-bit longword for every beat, instead of 4 distinct ones -- corrupting any I-cache
+line whose real content spans more than the first longword. `tb/mem_model.sv` and
+`tb/cache_tb.sv`'s own inline model were already fixed for exactly this (a
+`burst_beat_probe` testbench-only signal hierarchically reading the DUT's own real
+`u_biu.u_cg.u_bc.burst_beat` counter, folded into the read/write address) -- but
+`tb/mmu_xlate_tb.sv` was never updated, and **neither was `tb/stall_fsm_tb.sv`**
+(confirmed via `grep`: byte-for-byte the same unfixed `rd_word = rom[ext_a[13:2]]`
+line) -- almost certainly the actual explanation for Phase 236's own original hang,
+which occurred in that exact file under exactly this condition (I-cache enabled,
+genuine multi-beat burst). Not an RTL bug at all -- a testbench-only gap, shared by at
+least 8 files with their own inline memory models (`cosim_boot_tb.sv`,
+`cosim_grp_tb.sv`, `cosim_smoke_tb.sv`, `cosim_dat_tb.sv`, `mustest_tb.sv`,
+`timing_tb.sv`, `mmu_xlate_tb.sv`, `stall_fsm_tb.sv`), dormant everywhere else since
+none of those files' own *existing* tests ever previously exercised a genuine
+multi-beat burst with real per-beat-distinct data.
+
+**Fixed `tb/mmu_xlate_tb.sv`'s own memory model** (the file this investigation uses),
+mirroring `cache_tb.sv`'s own already-proven `burst_beat_probe` pattern exactly --
+`beat_word_addr = ext_a[13:2] + burst_beat_probe` replacing every bare `ext_a[13:2]`
+site in both the read and write paths. Re-ran: Phase 8 (and Phase 7, which runs after
+it) both pass cleanly, with the JMP now correctly reading its real `0x00000800`
+operand and redirecting there. Deliberately scoped the fix to this one file --
+`stall_fsm_tb.sv` and the other 6 files sharing the same latent gap are flagged as a
+real, dormant exposure but not fixed this stage (a full 8-file sweep, plus
+reconstructing Phase 236's own already-reverted `WS-PTEST` test to directly confirm
+the same mechanism there, is disproportionate to a single investigation stage --
+documented here as a well-grounded follow-up if any of those files' own future tests
+start exercising genuine multi-beat bursts).
+
+Removed the temporary heavy trace, replacing it with a plain wait-loop + DIAG-on-
+failure block matching Phase 6's own established, minimal style -- kept as permanent
+regression coverage.
+
+Results: `make test` 37/37 (`mmu_xlate` unchanged in check count, both Phase 7 and the
+new Phase 8 pass). Testbench-only -- `git diff --stat rtl/` empty, no Harte re-run
+needed. **Closes Stage 4** (reproduced, root-caused, and fixed -- a stronger outcome
+than the plan's own "investigated, not reproduced" fallback). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 5
+(instruction-fetch BERR pending-until-use) is next.

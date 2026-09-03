@@ -358,15 +358,38 @@ unlike the D-cache's per-WORD `valid_d`) — new per-beat CIIN capture threaded 
 each of the 4 `valid_d` bits individually instead of the whole line at once. Verified
 via a new `tb/biu_tb.sv` test with a deliberately mixed per-beat CIIN pattern (beats
 0/3 inhibited, 1/2 not), proving genuine per-word discrimination. Full Harte sweep
-bit-identical to baseline. See `plan.md §Phase 229` for the full writeup. Stage 4
-(PTEST translation-fault hang, third investigation attempt) is next.
+bit-identical to baseline. See `plan.md §Phase 229` for the full writeup. **Stage 4
+(Phase 230)**: PTEST translation-fault hang, third investigation attempt — genuinely
+reproduced this time (unlike the plan's own "stale I-cache line eviction" hypothesis),
+root-caused, and fixed. Real cause: `tb/mmu_xlate_tb.sv`'s own Phase 6 test never
+touched CACR, so it never actually exercised a genuine multi-beat I-cache burst fill
+before — a new "Phase 8" test (same shape as Phase 6, but with CACR's EI+IBE genuinely
+enabled via `MOVEC D7,CACR` first) reproduced a real, reliable hang on the first
+attempt: a `JMP_ABS_L_OP` retired with duplicated/wrong operand words, computing a
+wild odd jump target, taking a real Address Error that then hung forever. Root cause
+(via a temporary trace, since removed): `tb/mmu_xlate_tb.sv`'s own inline memory
+model predates the burst-address-freeze fix (real 68030 silicon holds the address
+bus constant for a whole burst, MC68030UM.pdf 7.3.7) — with the address genuinely
+frozen, this model's purely address-keyed read served the *identical* longword for
+every beat instead of 4 distinct ones. `tb/mem_model.sv`/`tb/cache_tb.sv` were already
+fixed for this (`burst_beat_probe`); `tb/mmu_xlate_tb.sv` was not — and neither is
+`tb/stall_fsm_tb.sv` (confirmed via grep, byte-for-byte the same unfixed line),
+almost certainly the real explanation for Phase 236's own original hang. Not an RTL
+bug — a testbench-only gap shared by 8 files with their own inline memory models,
+dormant everywhere none of their existing tests exercise a genuine multi-beat burst.
+Fixed `tb/mmu_xlate_tb.sv`'s own model this stage (mirroring `cache_tb.sv`'s already-
+proven pattern); the other 7 files' shared exposure is flagged as a real, dormant,
+documented follow-up, not fixed here (disproportionate scope for one investigation
+stage). Testbench-only, `git diff --stat rtl/` empty, no Harte re-run needed. See
+`plan.md §Phase 230` for the full writeup. Stage 5 (instruction-fetch BERR
+pending-until-use) is next.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
-split has shifted slightly across later phases as harness gaps closed). **No outstanding
-plan as of Phase 253/224 — ask the user for direction before assuming any specific next
-step.**
+split has shifted slightly across later phases as harness gaps closed). **In progress:
+10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-4 of 10 done
+(Phase 227-230); Stage 5 (instruction-fetch BERR pending-until-use) is next.**
 
 ## Verification Commands
 

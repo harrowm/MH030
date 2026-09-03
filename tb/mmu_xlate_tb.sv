@@ -55,7 +55,23 @@ module mmu_xlate_tb;
         for (i = 0; i < MEM_WORDS; i++) rom[i] = 32'h4E714E71;
     end
 
-    wire [31:0] rd_word = (ext_a[13:2] < MEM_WORDS) ? rom[ext_a[13:2]] : 32'hDEAD_DEAD;
+    // Backlog plan Stage 4 (plan.md): real 68030 silicon freezes the
+    // address bus for the whole burst (MC68030UM.pdf 7.3.7); this model
+    // used to rely on ext_a itself incrementing per beat (a pre-existing
+    // RTL bug, fixed in biu_burst_ctrl.sv by an earlier backlog stage) to
+    // serve each beat's own distinct word -- with the address genuinely
+    // frozen, every beat read back the SAME longword, corrupting any
+    // genuine multi-beat I-cache/D-cache burst fill (root-caused this
+    // stage: this is what actually produced Phase 236's own original
+    // hang, not PTEST/eviction as originally hypothesized -- see Phase 8
+    // below). burst_beat_probe mirrors cache_tb.sv's own already-proven
+    // fix exactly: testbench-only instrumentation hierarchically
+    // referencing the DUT's own internal beat counter (not a real pin),
+    // reading 0 whenever no burst is in progress so this is a no-op for
+    // every ordinary access.
+    wire [1:0]  burst_beat_probe = u_top.u_biu.u_cg.u_bc.burst_beat;
+    wire [11:0] beat_word_addr   = ext_a[13:2] + {10'h0, burst_beat_probe};
+    wire [31:0] rd_word = (beat_word_addr < MEM_WORDS) ? rom[beat_word_addr] : 32'hDEAD_DEAD;
     logic       ds_active_r;
     wire        dsack0_n = ~ds_active_r;
     wire        dsack1_n = ~ds_active_r;
@@ -69,16 +85,16 @@ module mmu_xlate_tb;
 
     always_ff @(posedge clk_4x) begin
         if (ds_active_r && !ext_ds_n && !ext_as_n && !ext_rw && ext_d_oe) begin
-            if (ext_a[13:2] < MEM_WORDS) begin
+            if (beat_word_addr < MEM_WORDS) begin
                 case ({ext_siz, ext_a[1:0]})
-                    4'b00_00: rom[ext_a[13:2]]        <= ext_d_out;
-                    4'b10_00: rom[ext_a[13:2]][31:16] <= ext_d_out[31:16];
-                    4'b10_10: rom[ext_a[13:2]][15:0]  <= ext_d_out[15:0];
-                    4'b01_00: rom[ext_a[13:2]][31:24] <= ext_d_out[31:24];
-                    4'b01_01: rom[ext_a[13:2]][23:16] <= ext_d_out[23:16];
-                    4'b01_10: rom[ext_a[13:2]][15:8]  <= ext_d_out[15:8];
-                    4'b01_11: rom[ext_a[13:2]][7:0]   <= ext_d_out[7:0];
-                    default:  rom[ext_a[13:2]]        <= ext_d_out;
+                    4'b00_00: rom[beat_word_addr]        <= ext_d_out;
+                    4'b10_00: rom[beat_word_addr][31:16] <= ext_d_out[31:16];
+                    4'b10_10: rom[beat_word_addr][15:0]  <= ext_d_out[15:0];
+                    4'b01_00: rom[beat_word_addr][31:24] <= ext_d_out[31:24];
+                    4'b01_01: rom[beat_word_addr][23:16] <= ext_d_out[23:16];
+                    4'b01_10: rom[beat_word_addr][15:8]  <= ext_d_out[15:8];
+                    4'b01_11: rom[beat_word_addr][7:0]   <= ext_d_out[7:0];
+                    default:  rom[beat_word_addr]        <= ext_d_out;
                 endcase
             end
         end
@@ -189,6 +205,9 @@ module mmu_xlate_tb;
     localparam RTE_OP         = 16'h4E73;
     localparam BRA_SELF       = 16'h60FE;  // BRA.B -2: tight self-loop (parks decode)
     localparam JMP_ABS_L_OP   = 16'h4EF9;  // JMP (xxx).L
+    localparam MOVEQ_11_D7    = 16'h7E11;  // MOVEQ #$11,D7 (EI+IBE for CACR)
+    localparam MOVEC_D7_CACR  = 16'h4E7B;  // MOVEC D7,CACR (backlog Stage 4, plan.md)
+    localparam MOVEC_D7_CACR_EXT = 16'h7002;
 
     int fail_count = 0;
     task automatic check(input string name, input logic cond);
@@ -473,7 +492,37 @@ module mmu_xlate_tb;
         rom[16'h0728/4] = {PTEST_EXT, CLR_L_D5};          // PTEST ext @0x0728 ; CLR.L D5 @0x072A (still line 0x0720-0x072F)
         rom[16'h072C/4] = {ADDI_L_D5, 16'h0000};          // ADDI opcode @0x072C (offset 12) -- own imm crosses into 0x0730
         rom[16'h0730/4] = {16'd999, JMP_ABS_L_OP};        // marker D5=999 (PTEST + crossing ADDI fetch survived)
-        rom[16'h0734/4] = {16'h0000, 16'h0800};           // JMP 0x00000800 (Stage 11 investigation)
+        rom[16'h0734/4] = {16'h0000, 16'h0900};           // JMP 0x00000900 (Phase 8, below)
+
+        // -------------------------------------------------------------
+        // Phase 8 (backlog plan Stage 4, plan.md, 3rd PTEST-hang
+        // investigation attempt): Phase 218's own "clean repro" (Phase 6
+        // above) never actually enabled the I-cache -- this whole file
+        // never touches CACR, confirmed via grep before writing this --
+        // so it never exercised real I-cache burst-linefill/caching at
+        // all, unlike Phase 236's own original failing context (deep
+        // inside stall_fsm_tb.sv, with the I-cache genuinely enabled by
+        // many earlier tests). This phase re-runs the identical
+        // PTEST + crossing-ADDI shape as Phase 6, but with CACR's
+        // EI+IBE bits (0x11) genuinely set first via a real MOVEC, to
+        // test whether enabling the I-cache -- not just eviction, the
+        // plan's own original hypothesis -- is what Phase 218's repro
+        // was missing. Reuses Phase 6's own already-live TC/TT0 (nothing
+        // between Phase 6's own tail and here disturbs them). New marker
+        // value (888, vs Phase 6's 999) keeps the two phases' own
+        // completion checks unambiguous.
+        // -------------------------------------------------------------
+        rom[16'h0900/4] = {MOVEQ_11_D7, MOVEC_D7_CACR};
+        rom[16'h0904/4] = {MOVEC_D7_CACR_EXT, NOP_OP};
+        rom[16'h0908/4] = {NOP_OP, NOP_OP};
+        rom[16'h090C/4] = {NOP_OP, NOP_OP};
+
+        rom[16'h0910/4] = {MOVEA_L_IMM_A0, 16'h2000};
+        rom[16'h0914/4] = {16'h5000, PTEST_A0_OP};        // A0 = VA 0x20005000 ; PTEST opcode @0x0916 (offset 6, same as Phase 6)
+        rom[16'h0918/4] = {PTEST_EXT, CLR_L_D5};          // PTEST ext @0x0918 ; CLR.L D5 @0x091A (still line 0x0910-0x091F)
+        rom[16'h091C/4] = {ADDI_L_D5, 16'h0000};          // ADDI opcode @0x091C (offset 12) -- own imm crosses into 0x0920
+        rom[16'h0920/4] = {16'd888, JMP_ABS_L_OP};        // marker D5=888 (PTEST + crossing ADDI fetch survived WITH I-cache enabled)
+        rom[16'h0924/4] = {16'h0000, 16'h0800};           // JMP 0x00000800 (back into Phase 7's own original start)
 
         // -------------------------------------------------------------
         // Phase 7 (deferred-items closure plan Stage 11, plan.md):
@@ -739,6 +788,30 @@ module mmu_xlate_tb;
                     u_top.eu_berr, u_top.u_eu.u_rf.d_reg[5]);
             end
             check("Phase 6: ADDI's own immediate-operand fetch straddling the line right after PTEST survives (D5=999)", saw_d5_999);
+        end
+
+        // -------------------------------------------------------------
+        // Phase 8 (backlog plan Stage 4, plan.md): the same shape as
+        // Phase 6, but with the I-cache genuinely enabled first. Root-
+        // caused (via a temporary trace, since removed) a genuine hang
+        // here on the first attempt, then fixed it -- see the burst_beat
+        // _probe comment on this file's own memory model above for the
+        // full mechanism. Left as permanent regression coverage.
+        // -------------------------------------------------------------
+        begin
+            int t;
+            logic saw_d5_888;
+            saw_d5_888 = 1'b0;
+            for (t = 0; t < 50000; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_eu.u_rf.d_reg[5] === 32'd888) begin saw_d5_888 = 1'b1; break; end
+            end
+            if (!saw_d5_888) begin
+                $display("Phase8-DIAG t=%0t decode_pc=%h ifu_bus_err=%b exc_active=%b eu_berr=%b D5=%h",
+                    $time, u_top.ifu_decode_pc, u_top.ifu_bus_err, u_top.u_exc.exc_active,
+                    u_top.eu_berr, u_top.u_eu.u_rf.d_reg[5]);
+            end
+            check("Phase 8: same shape as Phase 6, but with I-cache (CACR EI+IBE) genuinely enabled first (D5=888)", saw_d5_888);
         end
 
         // -------------------------------------------------------------
