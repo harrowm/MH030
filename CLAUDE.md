@@ -421,16 +421,38 @@ real), finding and fixing two testbench-only bugs along the way (a registered-si
 sampled-too-early timing issue; a cache-line address collision with a later,
 pre-existing test). Full Harte sweep bit-identical to baseline. **Closed cleanly** —
 the plan's own explicit permission to defer this stage wasn't needed. See `plan.md
-§Phase 232` for the full writeup. Stage 7 (CAS's own genuine bus-level lock) is next
-— also flagged high-risk, RTL surgery on `biu_cycle_gen.sv`'s shared per-state AS pin
-logic used by every bus access in the project.
+§Phase 232` for the full writeup. **Stage 7 (Phase 233)**: CAS's own genuine
+bus-level lock — investigated a third time (prior attempts: Phase 194 investigated,
+Phase 213/242 attempted+reverted), re-deferred with a MORE PRECISE proposal than
+before. Key new finding: `cas2_as_hold` (CAS2's own working fix) works only because
+CAS2's 4 sub-cycles are a single self-contained state sequence `biu_cycle_gen.sv`
+owns end to end, letting it reuse `state_nxt`'s own already-computed "staying inside
+the sequence" decision directly. Single-address CAS has no such self-contained
+sequence — its read and its conditional write are two independent dispatches through
+the SAME generic `ST_READ_*`/`ST_WRITE_*` machinery every other access in the chip
+shares, so there's no existing transition-table decision to reuse; any fix needs new
+signal plumbing into that *shared* logic instead. Confirmed the timing IS feasible
+though (traced `eu_seq_execute.svh`: `cas_z_r <= ex_z` is captured the same cycle
+`mem_ack` fires, meaning the compare result is combinationally available before the
+read's own AS-negate point, S5) — so the blocker is risk/blast-radius, not physics.
+Updated proposal: a new combinational `eu_cas_write_pending` output from `eu_seq.sv`
+(mirroring `cas_read_ack`'s own exact gating), threaded into a new `biu_cycle_gen.sv`
+input, gating a new hold condition on the shared ordinary-read S5 AS-negate logic.
+Deferred rather than implemented — this touches the single highest-blast-radius
+shared pin logic in the project, a prior attempt in adjacent territory already
+produced a hard-to-diagnose hang, and the project's own verification has no
+multi-bus-master test that could even demonstrate today's gap being violated (CAS's
+own single-CPU value semantics are unaffected and already fully verified). No RTL or
+testbench changed. See `plan.md §Phase 233` for the full writeup. Stage 8 (MOVEM's
+own genuine memory-indirect EA) is next.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
 10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-6 of 10 done
-(Phase 227-232); Stage 7 (CAS's own genuine bus-level lock) is next.**
+(Phase 227-232); Stage 7 investigated and re-deferred (Phase 233); Stage 8 (MOVEM's
+own genuine memory-indirect EA) is next.**
 
 ## Verification Commands
 

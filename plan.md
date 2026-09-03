@@ -6704,3 +6704,77 @@ See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. 
 7 (CAS's own genuine bus-level lock) is next -- also explicitly flagged as high-risk,
 this time RTL surgery on `biu_cycle_gen.sv`'s own shared per-state AS pin-driving
 logic, used by every single bus access in the project.
+
+## Phase 233 (10-item backlog, Stage 7 of 10 -- investigated, re-deferred with an
+updated, more precise proposal): CAS's own genuine bus-level lock
+
+Re-investigated from scratch, reading the two prior attempts' own full history first
+(CLAUDE.md.old entries 223/Phase 194 and 242/Phase 213) before writing any RTL, per
+the plan's own explicit caution for this stage. Confirmed the starting facts still
+hold: `bus_lock` (the DMA-suppression signal) covers `ST_RMW_READ_*`/`is_rmw_write`
+(TAS)/`is_cas2`/`is_burst` but nothing CAS-specific; `mem_rmw` (the signal that routes
+a request through the locked path) is asserted only for `ex_is_tas`; CAS's own
+read+conditional-write genuinely dispatches through the ordinary, unlocked
+`biu_cache_if.sv` path today, returning to `ST_IDLE`/`CI_IDLE` between the two.
+
+**The key structural finding this pass adds**: `cas2_as_hold` (the mechanism that
+already solved this exact problem for CAS2) works by reusing `state_nxt`'s own
+already-computed "are we staying inside the CAS2 sequence" decision directly --
+possible ONLY because CAS2's 4 sub-cycles are a single, self-contained state sequence
+`biu_cycle_gen.sv` owns start to finish, with `state_nxt` itself already encoding
+every conditional exit point (BERR-abort from any phase, R2's own early exit when no
+write2 is needed). Single-address CAS has no equivalent self-contained sequence to
+reuse: its read and its (conditional) write are two independent dispatches through
+the SAME generic `ST_READ_S0-S5`/`ST_WRITE_S0-S5` machinery every other read/write in
+the chip shares, arbitrated and dispatched by `biu_cache_if.sv`/`eu_seq.sv` one layer
+above `biu_cycle_gen.sv` -- by the time `ST_READ_S5` would normally negate AS,
+`biu_cycle_gen.sv` has no notion of "this specific read belongs to a CAS instruction
+that's about to issue its own write" at all. `cas2_as_hold`'s own reuse trick simply
+isn't available here; a correct fix needs new signal plumbing into the *shared*
+ordinary-cycle logic itself, not a self-contained-sequence adaptation -- exactly the
+"substantially larger blast radius" the prior deferral (Phase 213/242) already
+anticipated, now confirmed with the specific mechanism named.
+
+**Timing feasibility, checked directly against the RTL** (the part that would have
+made or broken this): CAS's own compare result needs to be known before the read
+cycle's own AS-negate point (S5) for any hold decision to be possible at all. Traced
+`eu_seq_execute.svh`'s own CAS FSM: `cas_read_ack` (gated on `mem_ack`, the read's own
+data-arrived pulse) captures `cas_z_r <= ex_z` on that exact same edge -- proving
+`ex_z` (the compare result) is already valid combinationally the SAME cycle `mem_ack`
+fires, not one or more cycles later. Since `mem_ack` corresponds to data arriving
+(around real S3/S4 per this file's own read-timing table) and AS doesn't negate until
+S5, there is genuinely enough headroom for a new, purely combinational "this read is
+CAS's own and a write will follow" signal to reach `biu_cycle_gen.sv` in time -- the
+timing objection that would have killed this proposal outright does not apply.
+
+**Updated correct-shape proposal** (more precise than Phase 213/242's own version,
+which only named the general direction): (1) a new combinational output from
+`eu_seq.sv`, e.g. `eu_cas_write_pending = ex_valid && ex_is_cas && ex_is_mem_rd &&
+mem_ack && ex_z` (mirroring `cas_read_ack`'s own exact gating, unregistered); (2)
+threaded through `m68030_eu.sv`/`m68030_biu.sv` into a new `biu_cycle_gen.sv` input;
+(3) `biu_cycle_gen.sv` also needs to know the CURRENT ordinary read in flight IS
+CAS's own (e.g. `grant_eu && ex_is_cas`-derived, mirroring how `eu_rmw`/`eu_cas2_req`
+already identify their own requester today) since the shared read-cycle states have
+no other way to distinguish an ordinary EU read from a CAS one; (4) the shared
+ordinary-read S5 AS-negate logic (used by literally every read in the chip) gains a
+new hold condition gated on both (2) and (3); (5) confirm the subsequent write's own
+S1 AS-assert doesn't conflict when AS is already held low from the read (electrically
+a no-op re-assert to the same value, but needs confirming against the real transition
+table, not assumed).
+
+**Decision: deferred again, not implemented.** Genuinely higher risk than Stage 6's
+own retry mechanism (which turned out tractable) specifically because it requires new
+conditional logic inside the shared, universal ordinary-read/write pin-driving path
+rather than a self-contained state machine's own transition table -- the exact
+"substantially larger blast radius" class of change Phase 213/242's own attempt in
+adjacent territory already turned into "a subtle, hard-to-diagnose hang" once. Also
+weighed real-world stakes: this project's own verification infrastructure has no
+multi-bus-master (DMA-during-CAS) test that could even demonstrate the gap being
+violated -- CAS's own single-CPU correctness (compare/write VALUE semantics, already
+fully Harte/atomic_tb.sv-verified) is entirely unaffected by this gap; it only matters
+for a genuine concurrent second bus master, a scenario this project has never built
+verification for. No RTL or testbench changed -- `git status` clean for this stage.
+**Closes Stage 7 as an investigation**, per this project's own repeated, established
+precedent for exactly this outcome (Phase 158 Stage 8; Phase 213/242 itself). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 8
+(MOVEM's own genuine memory-indirect EA) is next.
