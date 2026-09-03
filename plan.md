@@ -6860,3 +6860,51 @@ precise proposal, matching this project's own "investigated, found larger than
 expected, deferred with a proposal" precedent). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 9
 (memory-indirect EA beyond MOVE, the plan's own largest item) is next.
+
+## Phase 235 (10-item backlog, Stage 9 of 10 -- survey only, per the plan's own
+explicit instruction): memory-indirect EA beyond MOVE, scope confirmed larger than a
+mechanical bolt-on
+
+Read-only investigation (no code changes), matching the plan's own "starts with a
+survey... report the real scope back before implementing" instruction for this stage.
+
+**Only 2 decode sites implement genuine indirect (`fi_iis != 000`) today**: MOVE
+`<ea>,dst`'s own src and MOVEA `<ea>,An`'s own src, both routing through the shared
+`ex_is_memind` 3-phase FSM (`memind_start_r`/`memind_inner_r`/`memind_outer_r`,
+`eu_seq_execute.svh`). **Critical finding that reframes the whole stage**: this shared
+FSM is not a generic "resolve address, hand it back" primitive other families could
+drop into their own existing EA-consumption pipelines -- its completion is hardwired
+(`memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r`, writing `mem_rdata`
+straight into a register), i.e. it IS MOVE's own specific "read a value into a
+register" semantics, not a reusable building block. Reusing it for anything else needs
+either generalizing the outer stage (write-back/RMW/compare-only/address-only
+consumers) or having each family reuse only the inner pointer-resolution phase and
+feed the result into its own existing normal-EA path.
+
+**Every other family surveyed has the identical shallow gap**: the INDEXED
+`(bd,An,Xn)` full-format already works, but `fi_iis` (and `fi_is_s`, index-suppress)
+is never checked at all -- a genuine indirect encoding silently computes the WRONG
+(indexed) address instead of erroring or falling back. Confirmed directly in LEA,
+CHK memory-source, and JSR (JMP shares JSR's own decode shape). TAS is explicitly
+flagged in its own existing code comment (written during the original rollout) as
+needing a dedicated RMW FSM extension of its own -- NOT reusable via the shared
+memind FSM at all, and already deliberately not attempted once before (Phase 116).
+CMP2/CHK2 reuses MOVEM-style ext-count helpers, likely in the same boat as MOVEM
+(word-count sizing correct, EA-value extraction not built) but not directly
+inspected this pass. General ALU-with-EA-source ops (ADD/AND/OR/EOR/CMP `<ea>,Dn`)
+don't have one canonical shared decode site -- scattered across multiple dedicated
+arms, needing per-instruction review rather than an assumed-uniform fix.
+
+**Risk-tiered scope assessment** (not "a few mechanical bolt-ons" -- the blocker is
+architectural, not per-family): LEA and PEA are genuinely bolt-on-able (no outer
+memory access needed at all, so exposing just the inner-resolution phase would
+suffice) and safe to batch together. JMP/JSR (address-only target), general
+ALU-with-EA-source, and CMP2/CHK2 (read-then-combine, not just copy) need real
+outer-stage generalization -- medium risk. TAS (and likely Scc, same RMW-without-
+shared-FSM shape) needs a second bespoke FSM extension -- hardest, already flagged
+once by this project as deliberately deferred.
+
+**Decision, per the plan's own explicit instruction to confirm with the user before
+implementing**: reported scope back rather than proceeding. See conversation for the
+user's own chosen direction for this stage. No RTL or testbench changed this pass.
+See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan.
