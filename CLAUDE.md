@@ -536,14 +536,41 @@ guessed at. No RTL/testbench changed this phase. **Closes Stage 9b in full** (LE
 Phase 236, JMP+JSR Phase 237, ALU-EA+CMP2/CHK2 deferred Phase 238). Stage 9c (TAS/Scc,
 the plan's own hardest tier, deliberately deferred once before at Phase 116) is next.
 
+**Stage 9c (Phase 239), final part of Stage 9 — investigated fresh, re-confirmed
+deferred**: TAS/Scc's own genuine memory-indirect EA. Re-investigated from scratch
+rather than just citing Phase 116's own prior conclusion. TAS's own mode=110 arm
+already carries an in-code comment stating the gap directly: needs `tas_run_r` taught
+an extra pointer-read phase ahead of its existing read+write sequence. Confirmed why:
+TAS dispatches through the RMW-LOCKED bus protocol (`mem_rmw = ex_valid && ex_is_tas
+&& ex_is_mem_rd && !tas_run_r && !tas_after_write_r`, driving `biu_cycle_gen.sv`'s own
+`ST_RMW_READ_*`/`ST_RMW_WRITE_*` sequence) — the single most hardened, delicately-
+tuned mechanism in the project (AS held continuously across the whole indivisible
+read+write). Genuine indirect support needs the memind FSM's inner phase to complete
+BEFORE `mem_rmw` ever asserts — a structural change to the RMW-lock's own dispatch
+trigger, not an additive extension. Confirmed Scc shares the identical shape
+(`dec_is_mem_rmw=1'b1`, same RMW path, same missing `fi_iis` check, no in-code
+comment but same underlying gap). **Deferred, matching Phase 116's own original
+call, now independently re-confirmed**: restructuring `mem_rmw`'s own dispatch
+condition carries real risk of reintroducing exactly the class of AS-continuity bug
+this project's own RMW/CAS2 hardening work (Phases 108-114, the RMW/CAS2 timing
+redesign, this very backlog's own Stage 6) already fixed, for a narrow 68020+-only
+addressing-mode combination with no dedicated verification coverage and no Harte
+corpus presence — the same "no existing test could even prove a fix" consideration
+that weighed into Stage 7's own CAS deferral. Documented a precise updated proposal
+in `plan.md §Phase 239`. No RTL/testbench changed. **Closes Stage 9c, and Stage 9 in
+full** — 4 genuinely new, fully-verified families added (LEA, PEA, JMP, JSR); 3
+investigated fresh and deferred with precise proposals (ALU-EA, CMP2/CHK2, TAS/Scc).
+Stage 10 (more back-to-back FSM composition pairs, the plan's own last item) is next.
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
-10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-7 of 10 done
-(Phase 227-233); Stage 8 partially done (Phase 234); Stage 9 survey done (Phase 235),
-Stage 9a done (Phase 236, LEA+PEA); Stage 9b done (Phase 237 JMP+JSR, Phase 238
-ALU-EA/CMP2/CHK2 deferred); Stage 9c (TAS/Scc) is next.**
+10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-9 of 10 done
+(Phase 227-239, Stage 9's own three sub-stages all closed — 9a fully implemented
+(LEA+PEA); 9b partially implemented (JMP+JSR done, ALU-EA/CMP2-CHK2 deferred); 9c
+investigated and deferred, all with precise proposals); Stage 10 (more back-to-back
+FSM composition pairs) is next.**
 
 ## Verification Commands
 

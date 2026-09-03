@@ -7117,3 +7117,67 @@ ALU-EA+CMP2/CHK2 investigated and deferred, this phase). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 9c
 (TAS/Scc's own bespoke RMW FSM extension, the plan's own explicitly-flagged hardest
 tier, already deliberately deferred once before at Phase 116) is next.
+
+## Phase 239 (10-item backlog, Stage 9c of 10, final part of Stage 9 -- TAS/Scc:
+investigated fresh, re-confirmed as deferred): closes Stage 9 in full
+
+Re-investigated TAS and Scc's own current genuine-indirect gap from scratch (not just
+citing Phase 116's own prior conclusion) before deciding, per this project's own
+established discipline for the plan's own explicitly-flagged hardest tier.
+
+**TAS.B `<ea>`** (`eu_seq_decode.svh` ~line 3410-3464): its own mode=110 arm already
+carries an in-code comment stating the exact gap directly ("genuine memory-indirect
+... needs `tas_run_r` itself taught an extra pointer-read phase ahead of its existing
+read+write sequence -- deliberately not attempted this pass, Phase 116"). Confirmed
+this is still accurate: TAS dispatches its own read via the ordinary `dec_is_mem_rd`
+path, gated into the RMW-LOCKED bus protocol via `mem_rmw = ex_valid && ex_is_tas &&
+ex_is_mem_rd && !tas_run_r && !tas_after_write_r` (`eu_seq_execute.svh`) -- this
+signal drives `biu_cycle_gen.sv`'s own dedicated `ST_RMW_READ_*`/`ST_RMW_WRITE_*`
+locked bus-cycle sequence, the single most hardened, delicately-tuned mechanism in
+the entire project (AS held continuously across the whole indivisible read+write,
+per MC68030UM.pdf 7.3.3 -- see this file's own S-State Signal Timing section). Genuine
+indirect support needs the memind FSM's own inner (pointer-resolution) phase
+completed BEFORE `mem_rmw` ever asserts, using the resolved address in place of
+`ex_ea` for both the RMW read and its own paired write -- a structural change to how
+the RMW-lock's own dispatch trigger works, not an additive extension alongside it.
+
+**Scc `<ea>`** (`eu_seq_decode.svh` ~line 3831-3881): confirmed to share the
+IDENTICAL shape and gap -- `dec_is_mem_rd=1'b1; dec_is_mem_rmw=1'b1;` (the same
+RMW-locked path TAS uses), its own mode=110 arm already extracts `fi_bd` for the
+full-format case but never checks `fi_iis`, with no in-code comment documenting the
+gap (unlike TAS's own already-explicit one) -- but the underlying mechanism and
+required fix are the same.
+
+**Decision: deferred, not implemented this stage**, matching Phase 116's own original
+call, now independently re-confirmed rather than merely re-cited. The RMW-locked bus
+protocol is qualitatively higher-stakes than every other Stage 9 sub-family touched
+so far: TAS/CAS-class atomic instructions exist specifically to guarantee an
+indivisible read-modify-write, and the AS-continuity guarantee `mem_rmw`'s own
+dispatch trigger protects was itself the subject of extensive, dedicated hardening
+work in this project's own history (the RMW/CAS2 timing redesign, Phase 108-114's own
+BERR-during-RMW hardening, Stage 6 of this very backlog). Restructuring `mem_rmw`'s
+own dispatch condition to depend on a NEW, separate multi-cycle FSM completing first
+carries real risk of reintroducing exactly the class of bug those phases fixed, for a
+narrow addressing-mode combination (genuine memory-indirect EA on TAS/Scc
+specifically) that has no dedicated verification coverage today and, being a
+68020+-only full-format encoding, sits entirely outside Harte's own 68000-captured
+corpus -- the same "no existing test could even prove a fix" consideration that
+weighed into Stage 7's own CAS deferral. **Correct-shape proposal for a future
+dedicated stage**: gate `mem_rmw`'s own assertion on a new `!dec_is_memind ||
+memind_inner_r_done` condition (a single-cycle latch of the inner phase's own
+completion, since `mem_rmw` itself must stay combinationally live for the RMW
+protocol's own S-state timing), with `ex_ea` replaced by `memind_outer_addr_w`
+wherever the RMW read/write's own address is driven for this case -- verified with a
+NEW, dedicated `tb/atomic_tb.sv`-style test proving AS-continuity is preserved
+end-to-end (the read, the inner pointer fetch it now depends on, and the paired
+write) before attempting a real cosim comparison.
+
+Results: no RTL or testbench changed this stage -- `git status` clean beyond
+documentation. **Closes Stage 9c, and Stage 9 in full** (survey Phase 235; LEA+PEA
+Phase 236; JMP+JSR Phase 237; ALU-EA+CMP2/CHK2 deferred Phase 238; TAS/Scc deferred
+this phase) -- four genuinely new, fully-verified memory-indirect-capable families
+(LEA, PEA, JMP, JSR) added this stage, with the remaining three (ALU-EA, CMP2/CHK2,
+TAS/Scc) each investigated fresh and deferred with a precise, updated proposal rather
+than rushed, matching this project's own established discipline throughout. See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 10
+(more back-to-back FSM composition pairs) is next -- the plan's own last item.
