@@ -7181,3 +7181,82 @@ TAS/Scc) each investigated fresh and deferred with a precise, updated proposal r
 than rushed, matching this project's own established discipline throughout. See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 10
 (more back-to-back FSM composition pairs) is next -- the plan's own last item.
+
+## Phase 240 (10-item backlog, Stage 10 of 10, final stage of the plan --
+more back-to-back FSM composition pairs): closes the entire elegant-gliding-fog.md
+plan
+
+`tb/stall_fsm_tb.sv` had 7 existing Category D->D back-to-back FSM composition pairs
+(T4a/c/d/e from the pipeline-stall breadth extension plan, plus T4f/g/h added by
+Phase 208 of that same earlier, already-closed plan -- confirmed via `git log
+--follow` that Phase 208's own commit, "closes the plan in full", is where T4f/g/h
+actually came from; the in-file comment labeling them "Stage 8 (elegant-gliding-
+fog.md, the last stage of this plan)" is a stale artifact of that earlier plan having
+reused this same filename, not a reference to the current 10-item backlog plan --
+resolved as a documentation-staleness non-issue, not a contradiction).
+
+Added 2 new pairs (T4i, T4j), each with a genuine cross-boundary data-flow check
+(consumer reads a value only correct if it saw the producer's own FRESH write, not a
+stale pre-load -- same rigor as all 7 existing pairs), picked to cover FSM-shape
+combinations not yet tried:
+
+- **T4i: MOVEM.L (store) -> CAS**. MOVEM had only ever appeared as a *load*/consumer
+  before (T4a: TAS->MOVEM); this is its own STORE/producer direction, a materially
+  different bus pattern (a run of sequential writes vs. reads). `MOVEM.L D0/D1,-(A0)`
+  writes D0's own fresh value (0x5A5A5A5A) to a location pre-loaded with garbage
+  (0xDEAD_DEAD); `CAS.L D2,D3,(A1)` (A1 aimed at that same address) only succeeds its
+  compare (D2=0x5A5A5A5A) and writes D3's value (0x9999_9999) if it saw the fresh
+  MOVEM write -- a stale read would leave the compare failing and memory unchanged,
+  making the check genuinely non-vacuous. New localparams: `MOVE_L_IMM_D0`,
+  `CAS_L_D2D3_A1`, `CAS_EXT_D2D3` (derived from `CAS_L_D1D2_A0`/`CAS_EXT`'s own
+  already-documented `[8:6]=Dc,[2:0]=Du` ext-word format).
+- **T4j: ABCD -> SBCD**. Both are byte-granularity predecrement-memory BCD FSMs
+  (`-(Ay),-(Ax)`), previously each only exercised standalone (B-9/B-10's own
+  siblings) and never chained together. `ABCD -(A1),-(A0)` computes 0x01+0x02=0x03
+  (X=0 entering the block, confirmed via the preceding ADDI.L #7102,D5 adding into a
+  freshly-CLR'd D5 with no carry out) and writes it to A0's own target address;
+  `SBCD -(A3),-(A2)` then reads that exact address as ITS OWN source (A3's initial
+  value is deliberately set equal to A0's own initial value -- the same "adjacent
+  register reuse" cross-check shape T4c/T4d/T4f already established), computing
+  0x05-0x03-0=0x02. New localparams: `MOVEA_L_IMM_A2`, `MOVEA_L_IMM_A3`,
+  `SBCD_A3_A2` (derived from `SBCD_A1_A0`'s own `Rx(dest)<<9 | R(bit3) | Ry(src)`
+  embedding, confirmed against `ABCD_A1_A0`'s identical encoding shape).
+
+Both pairs are reached via a redirect at the end of the existing T4h chain
+(`rom[0x3DB4]`, previously a permanent `BRA_SELF` park, now a `JMP_ABS_L_OP` into a
+freshly-confirmed-clear ROM gap at 0x3BA0-0x3C58) rather than the old park address
+directly, following the same address-collision-script discipline used throughout this
+plan (`0x3ba0-0x3cff`, 352 bytes, confirmed clear of the Memind pointer-chain's own
+dynamic targets at 0x3900/0x3910/0x3b00/0x3b44-0x3b9c and of T4f/g/h's own
+0x3920-0x3984 data). A new permanent `BRA_SELF` park closes the chain at `0x3C58`.
+
+**Bug found and fixed while writing the new tests** (testbench-only, not RTL): the
+first attempt at the `JMP_ABS_L_OP` redirect mis-packed its own 32-bit target address
+across the two `rom[]` slots -- `rom[0x3DB8/4] = {16'h0000, 16'h3C00}` put the
+address's own *high* word (0x0000, already correct at 0x3DB6 from the prior slot)
+redundantly into the low-word position too, leaving the real low word (0x3C00) one
+half-word off target. Net effect: the JMP's own actual target computed to
+0x00000000 instead of 0x00003C00, jumping into the reset vector table instead of the
+new test code -- both T4i and T4j failed with huge, timeout-driven cycle-count deltas
+(281/286 elapsed vs. expected 4/6) on the first `make test` run. Root-caused
+immediately by comparing against the file's own already-proven identical-shape
+precedent two pairs earlier (`rom[0x3E5C/4] = {JMP_ABS_L_OP, 16'h0000}; rom[0x3E60/4]
+= {16'h3D28, NOP_OP};`, the T4f/g/h chain's own entry redirect) -- fixed by matching
+that exact pattern (`rom[0x3DB8/4] = {16'h3C00, NOP_OP};`). Second `make test` run:
+clean pass.
+
+Results: `make test` 37/37 (was 37/37 before too -- Stage 10 adds coverage within the
+existing `stall_fsm` suite, not a new suite). `git diff --stat rtl/` empty --
+testbench-only, so per this plan's own text no Harte re-run was needed (skipped, as
+specified). **This closes Stage 10 and the entire 10-item `elegant-gliding-fog.md`
+backlog plan.** Final tally across all 10 stages: 4 real, previously-undiscovered
+bugs found and fixed (Stage 4's `mmu_xlate_tb.sv` burst-aliasing bug; Stage 8's
+self-introduced-then-self-fixed ambient-readahead regression; Stage 9b's JSR
+`dec_return_pc` formula bug and its missing `dec_is_mem_wr` suppression bug); 2 new
+genuinely-shipped features beyond what was originally scoped as "just investigate"
+(Stage 8's MOVEM genuine memory-indirect EA via a new 7th IFU prefetch-queue word;
+Stage 9's LEA/PEA/JMP/JSR genuine memory-indirect EA); 3 items investigated fresh and
+deliberately re-deferred with precise, updated correct-shape proposals for a future
+stage (Stage 7's CAS bus-level lock; Stage 9's ALU-EA/CMP2/CHK2 and TAS/Scc genuine
+indirect EA); and this stage's own 2 new back-to-back FSM composition pairs. No open
+RTL correctness gap of any kind is known to remain in this project.

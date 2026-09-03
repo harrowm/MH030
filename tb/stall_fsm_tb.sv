@@ -210,6 +210,16 @@ module stall_fsm_tb;
     // [8:6]=Dc(compared, ->D1=001), [2:0]=Du(written on match, ->D2=010).
     localparam CAS_L_D1D2_A0  = 16'h0ED0;
     localparam CAS_EXT        = 16'h0042;
+    // Stage 10 (elegant-gliding-fog.md, current 10-item backlog plan --
+    // distinct from the earlier, already-closed plan that once reused this
+    // same filename for Phase 208's own T4f/T4g/T4h): new back-to-back FSM
+    // pairs T4i/T4j need a few opcode forms not already covered above.
+    localparam MOVE_L_IMM_D0  = 16'h203C;  // MOVE.L #imm,D0 (same formula as D1-D7 above)
+    localparam MOVEA_L_IMM_A2 = 16'h247C;  // MOVEA.L #imm,A2 (same formula as A0/A1/A7 above)
+    localparam MOVEA_L_IMM_A3 = 16'h267C;  // MOVEA.L #imm,A3
+    localparam CAS_L_D2D3_A1  = 16'h0ED1;  // CAS.L Dc,Du,(A1); f_mode=010,reg=001
+    localparam CAS_EXT_D2D3   = 16'h0083;  // [8:6]=Dc(D2=010<<6=0x80), [2:0]=Du(D3=011)
+    localparam SBCD_A3_A2     = 16'h850B;  // SBCD -(A3),-(A2): Rx(dest)=A2=010, Ry(src)=A3=011 (same embedding as ABCD_A1_A0)
     // CAS2.L: opcode 0x0EFC (f_dn=111, f_mode/f_reg=111/100), per the exact
     // ext-word bit layout documented at eu_seq.sv's dec_is_cas2 block:
     //   ext1 (ext_data[31:16]): [14:12]=Dc2, [10:8]=Du2, [3]=Rn2_an, [2:0]=Rn2
@@ -3344,9 +3354,64 @@ module stall_fsm_tb;
         rom[16'h3DA8/4] = {TAS_A0, CLR_L_D5};
         rom[16'h3DAC/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h3DB0/4] = {16'd7102, NOP_OP};
-        // Permanent park -- Stage 8 is the last stage of this plan, no
+        // Redirect into Stage 10's own 2 new pairs (T4i/T4j), placed in a
+        // genuinely free gap (0x3ba0-0x3cff, confirmed via the same
+        // address-collision script used throughout this plan -- clear of
+        // both the Memind pointer-chain's own dynamic targets around
+        // 0x3900-0x3b7b and WS-PMOVE64/T4f-h's own data at 0x3e00+).
+        rom[16'h3DB4/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h3DB8/4] = {16'h3C00, NOP_OP};
+
+        // Pair #7 (T4i): MOVEM.L store -> CAS, a genuinely new ROLE for
+        // MOVEM (T4a already used it as a load/consumer; this is its own
+        // STORE/producer direction, a different bus pattern entirely --
+        // multiple sequential writes instead of reads). mem[0x3BE0] starts
+        // as garbage; only MOVEM's own fresh D0 write (0x5A5A5A5A) makes
+        // CAS's compare (D2=0x5A5A5A5A) succeed and write D3's own value --
+        // if CAS instead saw the stale garbage preload, the compare would
+        // fail and mem[0x3BE0] would stay unchanged, making this check a
+        // real, non-vacuous proof of fresh-write visibility.
+        rom[16'h3BE0/4] = 32'hDEAD_DEAD;  // garbage until MOVEM overwrites it
+        rom[16'h3C00/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3C04/4] = {16'h3BE8, MOVE_L_IMM_D0};
+        rom[16'h3C08/4] = {16'h5A5A, 16'h5A5A};
+        rom[16'h3C0C/4] = {MOVE_L_IMM_D1, 16'h6B6B};
+        rom[16'h3C10/4] = {16'h6B6B, MOVEM_L_PREDEC_A0};
+        rom[16'h3C14/4] = {16'hC000, MOVEA_L_IMM_A1};
+        rom[16'h3C18/4] = {16'h0000, 16'h3BE0};
+        rom[16'h3C1C/4] = {MOVE_L_IMM_D2, 16'h5A5A};
+        rom[16'h3C20/4] = {16'h5A5A, MOVE_L_IMM_D3};
+        rom[16'h3C24/4] = {16'h9999, 16'h9999};
+        rom[16'h3C28/4] = {CAS_L_D2D3_A1, CAS_EXT_D2D3};
+        rom[16'h3C2C/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h3C30/4] = {16'h0000, 16'd7200};
+
+        // Pair #8 (T4j): ABCD -> SBCD, two byte-granularity BCD
+        // predecrement FSMs chained directly (neither has been paired with
+        // anything before -- both only had single-instruction decode-
+        // resumes-correctly coverage, B-10/B-9's own siblings). A3's own
+        // initial value (0x3BA5) deliberately equals A0's own initial
+        // value from the ABCD phase -- the same "adjacent register reuse"
+        // cross-check shape T4c/T4d/T4f already established -- so SBCD's
+        // own source byte is exactly the address ABCD just wrote, not a
+        // stale pre-load. No decimal-carry: 0x01+0x02=0x03 (X=0 entering
+        // this block, since ADDI.L #7102,D5 above added into a CLR'd D5,
+        // no carry out); SBCD then computes 0x05-0x03-0=0x02.
+        rom[16'h3BA0/4] = 32'h0200_0000;  // ABCD src byte (-(A1) -> 0x3BA0) = 0x02
+        rom[16'h3BA4/4] = 32'h0100_0000;  // ABCD dest byte (-(A0) -> 0x3BA4) = 0x01 pre-op
+        rom[16'h3BB0/4] = 32'h0500_0000;  // SBCD dest byte (-(A2) -> 0x3BB0) = 0x05 pre-op
+        rom[16'h3C34/4] = {MOVEA_L_IMM_A1, 16'h0000};
+        rom[16'h3C38/4] = {16'h3BA1, MOVEA_L_IMM_A0};
+        rom[16'h3C3C/4] = {16'h0000, 16'h3BA5};
+        rom[16'h3C40/4] = {ABCD_A1_A0, MOVEA_L_IMM_A3};
+        rom[16'h3C44/4] = {16'h0000, 16'h3BA5};
+        rom[16'h3C48/4] = {MOVEA_L_IMM_A2, 16'h0000};
+        rom[16'h3C4C/4] = {16'h3BB1, SBCD_A3_A2};
+        rom[16'h3C50/4] = {CLR_L_D5, ADDI_L_D5};
+        rom[16'h3C54/4] = {16'h0000, 16'd7201};
+        // Permanent park -- Stage 10 is the last stage of this plan, no
         // further redirect needed.
-        rom[16'h3DB4/4] = {BRA_SELF, NOP_OP};
+        rom[16'h3C58/4] = {BRA_SELF, NOP_OP};
 
         rom[16'h3EA0/4] = 32'h1111_2222;
         rom[16'h3EA4/4] = 32'h3333_4444;
@@ -3592,6 +3657,37 @@ module stall_fsm_tb;
             check32("T4h: RTE(2)+TAS(2)=4 data-space bus cycles", c1 - c0, 32'd4);
             check8("T4h: TAS set bit7 on RTE's own restored-PC target byte (0x80, not stale 0x00)",
                    rom[16'h3980/4][31:24], 8'h80);
+        end
+
+        // T4i: back-to-back FSM composition, pair #7 -- MOVEM(store) -> CAS.
+        // MOVEM's own STORE direction (a run of sequential writes) paired
+        // with CAS's own read-then-conditional-write, neither combination
+        // tried before.
+        begin
+            int c0, c1, t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3C00; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4i: back-to-back MOVEM(store)->CAS dependent instr ran (D5=7200)", 5, 32'd7200, 4000);
+            c1 = data_ds_count;
+            check32("T4i: MOVEM(2)+CAS(2)=4 data-space bus cycles", c1 - c0, 32'd4);
+            check32("T4i: CAS matched based on MOVEM's own fresh D0 write, not the stale garbage pre-load",
+                    rom[16'h3BE0/4], 32'h9999_9999);
+        end
+
+        // T4j: back-to-back FSM composition, pair #8 -- ABCD -> SBCD, both
+        // byte-granularity predecrement BCD FSMs, chained for the first
+        // time.
+        begin
+            int c0, c1, t;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3C34; t++)
+                @(posedge clk_4x);
+            c0 = data_ds_count;
+            run_and_check("T4j: back-to-back ABCD->SBCD dependent instr ran (D5=7201)", 5, 32'd7201, 4000);
+            c1 = data_ds_count;
+            check32("T4j: ABCD(3)+SBCD(3)=6 data-space bus cycles", c1 - c0, 32'd6);
+            check8("T4j: SBCD read ABCD's own fresh result byte (0x02 = 0x05-0x03), not the stale 0x05 pre-load",
+                   rom[16'h3BB0/4][31:24], 8'h02);
         end
 
         // WS-PTEST: checked directly, not assumed excludable -- and this

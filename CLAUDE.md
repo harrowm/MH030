@@ -562,15 +562,37 @@ full** — 4 genuinely new, fully-verified families added (LEA, PEA, JMP, JSR); 
 investigated fresh and deferred with precise proposals (ALU-EA, CMP2/CHK2, TAS/Scc).
 Stage 10 (more back-to-back FSM composition pairs, the plan's own last item) is next.
 
+**Stage 10 (Phase 240), final stage — closes the entire 10-item backlog plan**: added
+2 new back-to-back FSM composition pairs to `tb/stall_fsm_tb.sv`, beyond the 7
+already there (4 from the earlier, already-closed pipeline-stall breadth extension
+plan, plus 3 — T4f/g/h — added by that same plan's own Phase 208; an in-file comment
+labeling those "the last stage of this plan" is a stale artifact of that earlier plan
+having once reused this same `elegant-gliding-fog.md` filename, confirmed via `git
+log --follow` — not a reference to the current plan). New pairs: **T4i, MOVEM.L
+(store) → CAS** — MOVEM's first appearance as a producer/store (previously only
+tested as a load/consumer), feeding CAS's own compare with its fresh write; **T4j,
+ABCD → SBCD** — two byte-granularity predecrement BCD FSMs chained for the first
+time, SBCD's own source address deliberately equal to ABCD's own destination address
+(the same "adjacent register reuse" cross-check shape T4c/T4d/T4f already
+established). Both reached via a redirect from T4h's old permanent park into a
+freshly-confirmed-clear ROM gap (0x3ba0-0x3c58). **Found and fixed one real
+testbench-only bug** while writing the redirect: a first attempt mis-packed the
+`JMP_ABS_L_OP`'s own 32-bit target across two `rom[]` slots (duplicated the address's
+high word into the low-word position instead of the real low word), sending the jump
+to address 0 instead of 0x3C00 — both new pairs failed with huge timeout-driven cycle
+deltas on the first run; fixed by matching the file's own already-proven identical-
+shape precedent two pairs earlier. `make test` 37/37; `git diff --stat rtl/` empty,
+so no Harte re-run needed (testbench-only, per this stage's own plan text). See
+`plan.md §Phase 240` for the full writeup, including the plan's own final tally across
+all 10 stages.
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
-split has shifted slightly across later phases as harness gaps closed). **In progress:
-10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-9 of 10 done
-(Phase 227-239, Stage 9's own three sub-stages all closed — 9a fully implemented
-(LEA+PEA); 9b partially implemented (JMP+JSR done, ALU-EA/CMP2-CHK2 deferred); 9c
-investigated and deferred, all with precise proposals); Stage 10 (more back-to-back
-FSM composition pairs) is next.**
+split has shifted slightly across later phases as harness gaps closed). **The 10-item
+backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) is now CLOSED IN FULL** (all
+10 stages done, Phases 227-240). No open plan remains in this project — ask the user
+for new work.
 
 ## Verification Commands
 
