@@ -6305,3 +6305,54 @@ remains optional, not pursued -- this 2-way split already reduces the largest si
 file from 11,001 to 5,709 lines and, more importantly, makes every resulting file
 thematically coherent (pure decode vs. pure execute/WB/FSM) rather than mixing every
 concern in one file.
+
+## Phase 227 (10-item backlog, Stage 1 of 10): remove dead EU-side I-cache array in `biu_cache_if.sv`
+
+First of a new 10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) working
+sequentially through everything `docs/stalls.md`/`docs/cache.md`/CLAUDE.md's own
+condensed summary flagged as previously investigated, documented, and deliberately
+deferred. A grounding Explore pass confirmed `eu_is_icache` (`biu_cache_if.sv:22`) has
+exactly one driver in the real design (`m68030_top.sv:718`, hardwired `1'b0`) and
+gates a full parallel I-cache array (`valid_i`/`tag_i`/`data_i`, `ihit`, a 4-state
+`CI_FILL_0..3` linefill FSM, and the `CI_HIT` read-mux's I-cache branch) fully
+superseded since Phase 127 wired the real I-cache through `biu_icache_if.sv` instead.
+
+**Bigger than the plan's own initial estimate**: the plan's own grounding pass had
+flagged "a couple of dedicated tests" in `tb/biu_tb.sv` as the only reachability
+concern, but closer investigation during execution found `eu_is_icache_tb` defaults
+to `1'b1` at that file's own top-level declaration — meaning most of the file's
+generic tests were incidentally exercising I-cache mode by default (though
+`use_cache` itself defaults to `1'b0`, so this only actually mattered within the two
+windows where `use_cache=1'b1`). Traced both windows precisely: only P6-1 ("I-cache
+miss → linefill") and P6-2 ("I-cache hit → word 1 of same line") genuinely test the
+dead array's own behavior; P6-5 ("cache disabled") also sets `eu_is_icache_tb=1` but
+with both caches disabled the value is provably inert (traced: `ihit`/`CI_FILL_0`'s
+own dispatch conditions are false regardless once `icache_en=0`), so it required no
+special handling beyond deleting the now-nonexistent variable reference. Removed
+P6-1/P6-2 entirely (their own functional coverage — I-cache linefill/hit — is already
+extensively covered by `tb/cache_tb.sv`'s I-1 through I-6, testing the REAL I-cache),
+preserving the `use_cache=1'b1` setup P6-3/4/5 still depend on.
+
+**Full removal footprint, once traced end-to-end** (bigger than "delete 3 array
+declarations" — the array removal cascades into a dead 4-state FSM and its own
+dispatch/output-block wiring): `rtl/biu_cache_if.sv` (arrays, `ihit`, `is_icache_r`,
+`icache_en`/`iburst_en` [confirmed unused anywhere else in the file once `ihit`/the
+dispatch branches are gone], the whole `CI_FILL_0..3` always_ff block, the matching
+output-block case arms, the `CI_HIT` read-mux's I-cache branch, both dispatch
+branches in `CI_IDLE`/`CI_XLATE`, plus 5 now-dangling comment references to the
+deleted states/signals fixed in place rather than left stale); `rtl/m68030_biu.sv`
+(pure pass-through port + its own instantiation connection); `rtl/m68030_top.sv` (the
+tie-off); `tb/biu_int_tb.sv` (constant-tied local variable + port, trivial);
+`tb/biu_tb.sv` (as above); `tb/cache_tb.sv` (one stale historical comment, fixed
+in place, that had cited the now-removed port as the reason the D-cache needed no
+new module in Phase 127).
+
+Results: standalone `iverilog -t null` syntax check of `biu_cache_if.sv` alone clean
+before touching anything else; `make test` 37/37 (clean on the first full attempt);
+`make cosim_grp` 8/8; `make cosim_memind` 14/14; full 124-suite Harte sweep (mandatory
+— touches `biu_cache_if.sv`, the D-cache's own central module, even though only
+removing genuinely-unreachable branches) — PASS 702142, FAIL 2 (same documented
+ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes Stage 1.**
+See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage
+2 (`ciout_n` should use the live per-access CI result, not the stale-prone broadcast
+one) is next.

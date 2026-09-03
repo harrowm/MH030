@@ -324,6 +324,20 @@ done") — fixed with a `@touch $@` recipe, the standard idiom for this case.
 Full 124-suite Harte sweep bit-identical to baseline, as expected for a pure
 text-relocation change. See `plan.md §Phase 226` for the full writeup.
 
+**10-item backlog plan (Phase 227+, `~/.claude/plans/elegant-gliding-fog.md`)**:
+after the efficiency/clarity survey closed, the user asked what else remains open —
+got a 10-item list of everything previously investigated, documented, and
+deliberately deferred (`docs/stalls.md`/`docs/cache.md`'s own "What's left"
+sections). Working through it sequentially, smallest/safest first. **Stage 1
+(Phase 227)**: removed a fully dead EU-side I-cache array in `biu_cache_if.sv`
+(`eu_is_icache`, hardwired `1'b0` since Phase 127 moved the real I-cache to
+`biu_icache_if.sv`) — a full parallel array + 4-state linefill FSM + dispatch/
+output-block wiring across `biu_cache_if.sv`/`m68030_biu.sv`/`m68030_top.sv`, plus
+2 now-meaningless dedicated tests in `tb/biu_tb.sv` (their own coverage is already
+extensive elsewhere, `tb/cache_tb.sv`'s I-1..I-6). Full Harte sweep bit-identical to
+baseline. See `plan.md §Phase 227` for the full writeup. Stage 2 (`ciout_n` should
+use the live per-access CI result, not the stale-prone broadcast one) is next.
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

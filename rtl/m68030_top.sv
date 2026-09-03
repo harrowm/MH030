@@ -715,7 +715,6 @@ module m68030_top #(
         .eu_rw           (biu_eu_rw),
         .eu_siz          (biu_eu_siz),
         .eu_is_operand   (exc_active),
-        .eu_is_icache    (1'b0),
         .eu_req          (biu_eu_req),
         .eu_ack          (eu_ack),
         .eu_berr         (eu_berr),

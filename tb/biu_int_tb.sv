@@ -61,7 +61,6 @@ module biu_int_tb;
     logic        eu_rw       = 1'b1;
     logic [1:0]  eu_siz      = 2'b00;  // longword
     logic        eu_is_operand = 1'b1;
-    logic        eu_is_icache  = 1'b0;
     logic        eu_req      = 1'b0;
     logic        eu_ack, eu_berr, eu_retry;
 
@@ -139,7 +138,6 @@ module biu_int_tb;
         .eu_rw           (eu_rw),
         .eu_siz          (eu_siz),
         .eu_is_operand   (eu_is_operand),
-        .eu_is_icache    (eu_is_icache),
         .eu_req          (eu_req),
         .eu_ack          (eu_ack),
         .eu_berr         (eu_berr),

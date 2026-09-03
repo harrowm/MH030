@@ -84,7 +84,6 @@ module m68030_biu #(
     input  logic        eu_rw,
     input  logic [1:0]  eu_siz,
     input  logic        eu_is_operand,
-    input  logic        eu_is_icache,   // 1 = use I-cache, 0 = use D-cache
     input  logic        eu_req,
     output logic        eu_ack,
     output logic        eu_berr,
@@ -690,7 +689,6 @@ module m68030_biu #(
         .eu_siz      (eu_siz),
         .eu_wdata    (eu_wdata),
         .eu_req      (eu_req & !eu_mo_req),  // gate when multiop active
-        .eu_is_icache(eu_is_icache),
         .mem_rmw_lookup(mem_rmw_lookup),  // Phase 158 Stage 3
         .eu_rdata    (ca_eu_rdata),
         .eu_ack      (ca_eu_ack),

@@ -2,8 +2,12 @@
 `default_nettype none
 
 // MC68030 BIU — Cache Interface
-// Implements I-cache + D-cache hit/miss detection and linefill sequencing.
-// On I-cache miss (EI+IBE): issues 4 sequential longword reads (linefill).
+// Implements D-cache hit/miss detection and linefill sequencing for the
+// EU's own data accesses. (An earlier revision also carried a parallel,
+// EU-side I-cache array, gated by an `eu_is_icache` port m68030_top.sv
+// always tied to 1'b0 -- fully dead code, since Phase 127 wired the real
+// I-cache through the IFU's own dedicated biu_icache_if.sv instead. Removed
+// in the efficiency/clarity backlog's own Stage 1 -- see plan.md.)
 // On D-cache read miss (ED): issues 1 longword read, stores one word.
 // On any write (ED): write-through — always issues write to bus; updates cache on hit.
 // Cache inhibit (mmu_ci): bypasses cache allocation even if enabled.
@@ -19,7 +23,6 @@ module biu_cache_if (
     input  logic [1:0]  eu_siz,
     input  logic [31:0] eu_wdata,
     input  logic        eu_req,
-    input  logic        eu_is_icache,  // 1=use I-cache, 0=use D-cache
     output logic [31:0] eu_rdata,
     output logic        eu_ack,
     output logic        eu_berr,
@@ -143,8 +146,6 @@ module biu_cache_if (
     // of cacr[8] (ED, enable) -- a real, previously-undiscovered bug meaning
     // software that set ED the textbook-correct way got a D-cache that never
     // activated. See plan.md Phase 158 Stage 1 for the full derivation.
-    wire icache_en = cacr[0];
-    wire iburst_en = cacr[4];
     wire dcache_en = cacr[8];
     wire wa_en     = cacr[13];
     wire dburst_en = cacr[12];
@@ -167,16 +168,9 @@ module biu_cache_if (
     // supervisor and user access to the same logical address alias onto
     // the same cache line and can hit each other's data -- a real
     // correctness bug, confirmed against the manual before fixing (not
-    // guessed at). tag_i/valid_i (this module's own vestigial I-cache-shaped
-    // arrays) are permanently dead -- m68030_top.sv hardwires
-    // eu_is_icache=1'b0 -- widened only for type-compatibility with the
-    // shared vtag/vtag_r below, zero behavioral effect on dead code. The
-    // REAL I-cache is rtl/biu_icache_if.sv, fixed separately this stage.
-    logic        valid_i [0:15];
-    logic [26:0] tag_i   [0:15];
-    logic [31:0] data_i  [0:15][0:3];
+    // guessed at).
 
-    // valid_d is per-WORD, not per-line, unlike valid_i -- a D-cache miss
+    // valid_d is per-WORD, not per-line -- a D-cache miss
     // (CI_D_MISS, below) only ever fetches and fills the ONE word offset
     // actually requested (matching real 68030 hardware's own documented
     // single-longword D-cache fill, unlike the I-cache's 4-word burst
@@ -262,10 +256,8 @@ module biu_cache_if (
     typedef enum logic [3:0] {
         CI_IDLE   = 4'd0,
         CI_HIT    = 4'd1,
-        CI_FILL_0 = 4'd2,
-        CI_FILL_1 = 4'd3,
-        CI_FILL_2 = 4'd4,
-        CI_FILL_3 = 4'd5,
+        // 4'd2-4'd5 previously CI_FILL_0..3, the dead EU-side I-cache
+        // linefill sequence -- removed (see this file's own header).
         CI_D_MISS = 4'd6,
         CI_WRITE  = 4'd7,
         CI_DONE   = 4'd8,
@@ -291,7 +283,6 @@ module biu_cache_if (
     logic [2:0]  fc_r;
     logic        rw_r;
     logic [1:0]  siz_r;
-    logic        is_icache_r;
     logic [3:0]  idx_r;
     logic [1:0]  woff_r;
     logic [26:0] vtag_r;
@@ -315,7 +306,6 @@ module biu_cache_if (
     wire [3:0]  idx  = eu_addr[7:4];
     wire [1:0]  woff = eu_addr[3:2];
     wire [26:0] vtag = {eu_fc, eu_addr[31:8]};
-    wire ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag) && !mmu_ci;
 
     // d_size_ok: this single-slot cache model (one valid_d/data_d entry per
     // 4-byte-aligned word) can only ever represent an access that fits
@@ -365,16 +355,13 @@ module biu_cache_if (
             dc_burst_req_r  <= 1'b0;
             dc_burst_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) begin
-                valid_i[k] <= 1'b0;
                 for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0;
             end
         end else begin
             // CACR cache-clear operations (level-sensitive while bit asserted)
             // Phase 158 Stage 1: CD/CED were off by one bit (cacr[12]/cacr[11]
             // are really DBE/CD, not CD/CED) — fixed to cacr[11]/cacr[10].
-            if (cacr[3])  for (k = 0; k < 16; k++) valid_i[k] <= 1'b0; // CI
             if (cacr[11]) for (k = 0; k < 16; k++) for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0; // CD
-            if (cacr[2])  valid_i[caar[7:4]] <= 1'b0;  // CEI
             if (cacr[10]) for (m = 0; m < 4; m++) valid_d[caar[7:4]][m] <= 1'b0;  // CED
 
             case (state)
@@ -385,13 +372,12 @@ module biu_cache_if (
                         fc_r        <= eu_fc;
                         rw_r        <= eu_rw;
                         siz_r       <= eu_siz;
-                        is_icache_r <= eu_is_icache;
                         idx_r       <= idx;
                         woff_r      <= woff;
                         vtag_r      <= vtag;
                         fill_base_r <= {eu_addr[31:4], 4'h0};
 
-                        if (eu_rw && (eu_is_icache ? ihit : dhit)) begin
+                        if (eu_rw && dhit) begin
                             // Cache hit — serve from cache array (idx_r/woff_r
                             // latched above). No bus cycle at all, so no
                             // translation needed either way (Phase 150,
@@ -407,9 +393,7 @@ module biu_cache_if (
                             state <= CI_XLATE;
                         end else if (!eu_rw) begin
                             state <= CI_WRITE;
-                        end else if (eu_is_icache && icache_en && iburst_en) begin
-                            state <= CI_FILL_0;
-                        end else if (!eu_is_icache && dcache_en && dburst_en && !mmu_ci && d_size_ok && !dfreeze_en) begin
+                        end else if (dcache_en && dburst_en && !mmu_ci && d_size_ok && !dfreeze_en) begin
                             // Phase 158 Stage 4c: DBE=1 -- genuine burst
                             // linefill instead of CI_D_MISS's own
                             // single-longword fill. Gated on d_size_ok (not
@@ -463,9 +447,7 @@ module biu_cache_if (
                         addr_r <= xl_pa;
                         if (!rw_r) begin
                             state <= CI_WRITE;
-                        end else if (is_icache_r && icache_en && iburst_en) begin
-                            state <= CI_FILL_0;
-                        end else if (!is_icache_r && dcache_en && dburst_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
+                        end else if (dcache_en && dburst_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
                             // Phase 158 Stage 4c: same DBE-gated burst
                             // dispatch as CI_IDLE's own branch above, for
                             // the post-translation case.
@@ -475,57 +457,6 @@ module biu_cache_if (
                         end else begin
                             state <= CI_D_MISS;
                         end
-                    end
-                end
-
-                CI_FILL_0: begin
-                    if (sf_ack_rise) begin
-                        data_i[idx_r][0] <= sf_rdata;
-                        if (woff_r == 2'd0) fill_rdata_r <= sf_rdata;
-                        state <= CI_FILL_1;
-                    end else if (sf_berr) begin
-                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
-                        state <= CI_BERR;
-                    end
-                end
-                CI_FILL_1: begin
-                    if (sf_ack_rise) begin
-                        data_i[idx_r][1] <= sf_rdata;
-                        if (woff_r == 2'd1) fill_rdata_r <= sf_rdata;
-                        state <= CI_FILL_2;
-                    end else if (sf_berr) begin
-                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
-                        state <= CI_BERR;
-                    end
-                end
-                CI_FILL_2: begin
-                    if (sf_ack_rise) begin
-                        data_i[idx_r][2] <= sf_rdata;
-                        if (woff_r == 2'd2) fill_rdata_r <= sf_rdata;
-                        state <= CI_FILL_3;
-                    end else if (sf_berr) begin
-                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
-                        state <= CI_BERR;
-                    end
-                end
-                CI_FILL_3: begin
-                    if (sf_ack_rise) begin
-                        data_i[idx_r][3] <= sf_rdata;
-                        if (woff_r == 2'd3) fill_rdata_r <= sf_rdata;
-                        tag_i[idx_r]   <= vtag_r;
-                        valid_i[idx_r] <= 1'b1;
-                        // Bus-pipelining-overlap plan.md, Track D Stage D2:
-                        // goes straight to CI_IDLE, not CI_DONE -- same
-                        // pattern as Stage D0/D1. Array writes above and
-                        // fill_rdata_r (now redundant-but-harmless when
-                        // woff_r==3, since the output block's own new
-                        // CI_FILL_3 fast path arm computes the same value
-                        // combinationally in that case) stay on their
-                        // existing registered schedule.
-                        state <= CI_IDLE;
-                    end else if (sf_berr) begin
-                        xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
-                        state <= CI_BERR;
                     end
                 end
 
@@ -633,9 +564,9 @@ module biu_cache_if (
                         // deliberately NOT part of this split, matching the
                         // comment above: it only gates the array-population
                         // side effect, never the returned value). CI_DONE
-                        // itself is untouched and still serves the 3
+                        // itself is untouched and still serves the 2
                         // remaining entry points (CI_D_BURST0/
-                        // CI_D_FILL_3B/CI_FILL_3) -- Track D's later stages.
+                        // CI_D_FILL_3B) -- Track D's later stages.
                         state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
@@ -690,7 +621,7 @@ module biu_cache_if (
                             end
                             // Bus-pipelining-overlap plan.md, Track D Stage
                             // D2: goes straight to CI_IDLE, not CI_DONE --
-                            // same pattern as Stage D0/D1/CI_FILL_3 above.
+                            // same pattern as Stage D0/D1 above.
                             // The output block's own new CI_D_BURST0 fast-
                             // path arm below only fires eu_ack for this FULL
                             // (dc_burst_beat==3) branch -- the degraded
@@ -878,8 +809,8 @@ module biu_cache_if (
                         // (already proven by CI_BERR's own identical direct-
                         // to-CI_IDLE return). CI_DONE remains completely
                         // unchanged and still serves every OTHER entry
-                        // point (CI_D_MISS/CI_D_BURST0/CI_D_FILL_3B/
-                        // CI_FILL_3) -- Track D's later stages, not this one.
+                        // point (CI_D_MISS/CI_D_BURST0/CI_D_FILL_3B) --
+                        // Track D's later stages, not this one.
                         state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
@@ -896,9 +827,9 @@ module biu_cache_if (
                     // eu_berr fires this cycle; return to idle. Mirrors
                     // CI_DONE's structure exactly, just for the abort path —
                     // previously this state didn't exist at all, so a fault
-                    // during CI_D_MISS/CI_WRITE/CI_FILL_* left `state` stuck
-                    // forever waiting for an `sf_ack_rise` that a genuinely
-                    // faulted cycle will never produce.
+                    // during any multi-beat state left `state` stuck forever
+                    // waiting for an `sf_ack_rise` that a genuinely faulted
+                    // cycle will never produce.
                     state <= CI_IDLE;
                 end
 
@@ -952,48 +883,8 @@ module biu_cache_if (
 
             CI_HIT: begin
                 // Serve directly from cache; no sf_req
-                if (is_icache_r)
-                    eu_rdata = data_i[idx_r][woff_r]; // I-cache: full longword (IFU uses it)
-                else
-                    eu_rdata = extract_rd(data_d[idx_r][woff_r], siz_r, addr_r[1:0]);
+                eu_rdata = extract_rd(data_d[idx_r][woff_r], siz_r, addr_r[1:0]);
                 eu_ack = 1'b1;
-            end
-
-            CI_FILL_0: begin
-                sf_addr = fill_base_r;
-                sf_siz  = 2'b00;
-                sf_rw   = 1'b1;
-                sf_req  = !sf_ack;
-            end
-            CI_FILL_1: begin
-                sf_addr = fill_base_r + 32'd4;
-                sf_siz  = 2'b00;
-                sf_rw   = 1'b1;
-                sf_req  = !sf_ack;
-            end
-            CI_FILL_2: begin
-                sf_addr = fill_base_r + 32'd8;
-                sf_siz  = 2'b00;
-                sf_rw   = 1'b1;
-                sf_req  = !sf_ack;
-            end
-            CI_FILL_3: begin
-                sf_addr = fill_base_r + 32'd12;
-                sf_siz  = 2'b00;
-                sf_rw   = 1'b1;
-                sf_req  = !sf_ack;
-                // Bus-pipelining-overlap plan.md, Track D Stage D2: present
-                // eu_ack/eu_rdata the same cycle sf_ack_rise fires (I-cache
-                // linefill's own final beat), instead of waiting for the
-                // registered CI_FILL_3->CI_DONE hop (now skipped -- see the
-                // always_ff block's own comment). woff_r==3 means THIS
-                // beat's own sf_rdata is the CPU's requested word; otherwise
-                // fill_rdata_r already holds the correct value, latched by
-                // an earlier CI_FILL_0/1/2 beat and untouched since.
-                if (sf_ack_rise) begin
-                    eu_ack   = 1'b1;
-                    eu_rdata = (woff_r == 2'd3) ? sf_rdata : fill_rdata_r;
-                end
             end
 
             CI_D_MISS: begin
@@ -1082,7 +973,7 @@ module biu_cache_if (
                 // beat's own dc_burst_rdata0 is the CPU's requested word;
                 // otherwise fill_rdata_r already holds the correct value,
                 // latched by an earlier CI_D_BURST0/CI_D_FILL_1B/2B beat and
-                // untouched since (same reasoning as CI_FILL_3's own arm).
+                // untouched since.
                 if (dc_burst_ack) begin
                     eu_ack   = 1'b1;
                     eu_rdata = (woff_r == 2'd3)
@@ -1119,7 +1010,7 @@ module biu_cache_if (
 
             // Bus-pipelining-overlap plan.md, Track A: a write request
             // (eu_req && !eu_rw), with the MMU disabled (!tc_e, so no
-            // CI_XLATE detour), never needs the dhit/ihit lookup the read
+            // CI_XLATE detour), never needs the dhit lookup the read
             // side's own CI_IDLE branch makes (module header: "On any
             // write: write-through -- always issues write to bus") --
             // present sf_addr/sf_wdata/sf_fc/sf_siz/sf_rw/sf_req

@@ -1347,9 +1347,12 @@ module cache_tb;
         // ===================================================================
         // Step 5: D-cache first-ever enabled correctness + timing pass.
         // biu_cache_if.sv's D-cache side is reachable through the EU's own
-        // ordinary data-access port (m68030_top.sv hardwires eu_is_icache=0
-        // there) and never needed a new module the way Phase 127's I-cache
-        // work did -- but had literally never been exercised with CACR's
+        // ordinary data-access port and never needed a new module the way
+        // Phase 127's I-cache work did (biu_cache_if.sv also carried its own
+        // vestigial, EU-side I-cache array once, gated by an eu_is_icache
+        // port m68030_top.sv always tied to 1'b0 -- fully dead since Phase
+        // 127, removed by the efficiency/clarity backlog's own Stage 1,
+        // plan.md) -- but had literally never been exercised with CACR's
         // dcache_en (bit 9) set anywhere in this project's 131 prior
         // phases: CACR resets to 0, and grepping every existing test, the
         // only place it's ever written nonzero is a MOVEC register-plumbing

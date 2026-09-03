@@ -111,7 +111,6 @@ module biu_tb;
     // Cache interface control
     logic [31:0] cacr_tb         = 32'h0;
     logic [31:0] caar_tb         = 32'h0;
-    logic        eu_is_icache_tb = 1'b1;
     logic        use_cache       = 1'b0;
     logic [31:0] cache_eu_rdata;
     logic        cache_eu_ack, cache_eu_berr;
@@ -594,7 +593,6 @@ module biu_tb;
         .eu_siz      (eu_siz_tb),
         .eu_wdata    (eu_wdata_tb),
         .eu_req      (use_cache ? eu_req_tb : 1'b0),
-        .eu_is_icache(eu_is_icache_tb),
         // Phase 158 Stage 3: was left unconnected (pre-existing gap, found
         // and fixed while touching this same instantiation for Stage 4c) --
         // an unconnected input floats X, risking X-propagation into dhit's
@@ -1685,61 +1683,13 @@ module biu_tb;
         // ===================================================================
         $display("=== BIU: Cache and MMU interface ===");
 
-        // ----------------------------------------------------------------
-        // P6-1: I-cache miss → linefill (4 reads) → correct data returned
-        // ----------------------------------------------------------------
-        $display("--- I-cache miss → linefill ---");
-        begin
-            int t6;
-            // word index = byte_addr / 4
-            u_mem.mem[32'h100/4] = 32'hAABB_CCDD;  // addr 0x100 → word 64
-            u_mem.mem[32'h104/4] = 32'h1122_3344;  // addr 0x104 → word 65
-            u_mem.mem[32'h108/4] = 32'h5566_7788;  // addr 0x108 → word 66
-            u_mem.mem[32'h10C/4] = 32'h99AA_BBCC;  // addr 0x10C → word 67
-
-            wait_bus_idle;
-            cacr_tb         = 32'h11;  // EI=bit0=1, IBE=bit4=1
-            use_cache       = 1'b1;
-            eu_is_icache_tb = 1'b1;
-            eu_addr_tb      = 32'h0000_0100;
-            eu_fc_tb        = 3'b101;
-            eu_rw_tb        = 1'b1;
-            eu_siz_tb       = 2'b00;
-            @(posedge clk_4x);
-            eu_req_tb = 1'b1;
-            for (t6 = 0; t6 < 500; t6++) begin
-                @(posedge clk_4x);
-                if (cache_eu_ack) break;
-            end
-            eu_req_tb = 1'b0;
-            check32("linefill word0", cache_eu_rdata, 32'hAABB_CCDD);
-            repeat(4) @(posedge clk_4x);
-        end
-
-        // ----------------------------------------------------------------
-        // P6-2: I-cache hit → word 1 of same line, no bus cycle
-        // ----------------------------------------------------------------
-        $display("--- I-cache hit (word 1 of same line) ---");
-        begin
-            int t6;
-            logic was_idle;
-            wait_bus_idle;
-            eu_addr_tb = 32'h0000_0104;  // word 1 of cache line base 0x100
-            eu_req_tb  = 1'b1;
-            @(posedge clk_4x);
-            was_idle = bus_idle;  // should be idle (no bus cycle for cache hit)
-            for (t6 = 0; t6 < 100; t6++) begin
-                @(posedge clk_4x);
-                if (cache_eu_ack) break;
-            end
-            eu_req_tb = 1'b0;
-            if (!was_idle) begin
-                $display("FAIL  P6-2: bus was not idle (miss instead of hit)");
-                fail_count++;
-            end else
-                check32("I-cache hit word1", cache_eu_rdata, 32'h1122_3344);
-            repeat(4) @(posedge clk_4x);
-        end
+        // P6-1/P6-2 used to test biu_cache_if.sv's own EU-side I-cache
+        // array (I-cache linefill, then a same-line hit) directly, via
+        // eu_is_icache_tb=1 -- removed along with that dead RTL (efficiency/
+        // clarity backlog Stage 1, plan.md): m68030_top.sv always tied the
+        // real port to 1'b0 (the REAL I-cache path is biu_icache_if.sv,
+        // already covered extensively by tb/cache_tb.sv's own I-1..I-6).
+        use_cache = 1'b1;
 
         // ----------------------------------------------------------------
         // P6-3: D-cache read miss → single fetch → hit on repeat
@@ -1750,7 +1700,6 @@ module biu_tb;
             u_mem.mem[32'h200/4] = 32'hDEAD_BEEF;
             wait_bus_idle;
             cacr_tb         = 32'h200;  // ED=bit9=1
-            eu_is_icache_tb = 1'b0;
             eu_addr_tb      = 32'h0000_0200;
             eu_siz_tb       = 2'b00;
             eu_rw_tb        = 1'b1;
@@ -1785,7 +1734,6 @@ module biu_tb;
         begin
             int t6;
             wait_bus_idle;
-            eu_is_icache_tb = 1'b0;
             eu_addr_tb      = 32'h0000_0200;
             eu_rw_tb        = 1'b0;
             eu_wdata_tb     = 32'hCAFE_BABE;
@@ -1811,7 +1759,6 @@ module biu_tb;
             u_mem.mem[32'h300/4] = 32'h1234_5678;
             wait_bus_idle;
             cacr_tb         = 32'h0;  // EI=0, ED=0
-            eu_is_icache_tb = 1'b1;
             eu_addr_tb      = 32'h0000_0300;
             eu_rw_tb        = 1'b1;
             eu_siz_tb       = 2'b00;
@@ -2026,7 +1973,6 @@ module biu_tb;
             use_cache   = 1'b1;
             cacr_tb     = 32'h0000_1100;  // DBE=1 | dcache_en=1
             dc_burst_rdata0_tb = 32'hDEAD_BEEF;  // what beat 0 "arrived" with
-            eu_is_icache_tb = 1'b0;               // D-cache
             eu_addr_tb  = 32'h0000_3F00;           // fresh, aligned, woff=0
             eu_rw_tb    = 1'b1;                    // read
             eu_siz_tb   = 2'b00;                    // longword
