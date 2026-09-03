@@ -6356,3 +6356,73 @@ ASL.b anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes Stag
 See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage
 2 (`ciout_n` should use the live per-access CI result, not the stale-prone broadcast
 one) is next.
+
+## Phase 228 (10-item backlog, Stage 2 of 10): `ciout_n` should use the live per-access CI result, not the stale-prone broadcast
+
+Grounding (Explore agent, from the earlier survey) claimed `xl_ci` was "the genuinely live
+per-access value" distinct from the "stale" `mmu_ci`. Investigation before touching any RTL
+found this premise WRONG: `biu_mmu_arb.sv`'s own `ext_ci`/`d_ci`/`i_ci` outputs are all
+literally the same wire (`assign ext_ci = mmu_ci; assign d_ci = mmu_ci;` etc, unconditional
+broadcast) -- `biu_cache_if.sv`'s `mmu_ci` port and `xl_ci` port receive bit-for-bit
+identical values at every cycle. Swapping one for the other (the plan's own original
+proposal) would have been a complete no-op. The real bug: this broadcast is only
+GUARANTEED correct on the exact cycle a requester's own `xl_hit`/`xl_walk_done` fires
+(`biu_mmu_arb.sv`'s own header comment: "harmless to broadcast... valid the whole time" --
+meaning valid FOR THE OWNER, at the moment of completion, not persistently) -- reading it
+any LATER cycle risks showing a different, concurrently in-flight I-side/EXT-side
+requester's own result instead.
+
+**Fix**: new `xl_ci_r` register in `biu_cache_if.sv`, reset to 0 at every fresh dispatch
+(`CI_IDLE`'s own `if (eu_req)` block, alongside `addr_r`/`wdata_r`/etc), overwritten with
+the real `xl_ci` value at `CI_XLATE`'s own `xl_hit || xl_walk_done` transition (the one
+cycle it's guaranteed correct for this exact access) -- same pattern already proven for
+`addr_r <= xl_pa`. Every LATER-cycle consumer (`ciout`, `dhit_r` -- used in `CI_WRITE`,
+possibly many cycles after dispatch/translation --, and the `CI_D_MISS` cache-populate
+decision, both the sequential and the output-block's own mirrored comb copy, which must
+stay bit-for-bit consistent with the sequential one per their own existing comment)
+switched from `mmu_ci` to `xl_ci_r`. Two decision sites deliberately left reading the RAW
+port, each with a comment explaining why: `dhit` (the pre-translation `CI_IDLE` lookup --
+genuinely can't use a per-access value that doesn't exist yet at that point, a real,
+documented structural limitation of this cache's virtually-indexed/virtually-tagged
+design, not attempted) and the post-translation `CI_XLATE`-completion burst-dispatch
+check (already correct as a same-cycle read, per the arbiter's own contract).
+
+**A third, real, previously-undiscovered bug found and fixed along the way**: `CI_IDLE`'s
+own D-cache-burst-dispatch condition (`dcache_en && dburst_en && !mmu_ci && ...`) is
+reached ONLY when `!tc_e` (untranslated access) -- meaning MMU-derived CI is
+architecturally meaningless there, yet it was still checking the shared `mmu_ci`
+broadcast, which never resets except at chip reset. Any access after even one unrelated
+MMU-enabled translation (a PTEST, or TC.E toggled on then off) could silently and
+permanently show a stale CI=1 there, blocking D-cache bursting for every future
+untranslated access. Fixed by dropping the term entirely (this branch is provably
+`!tc_e`-only, so MMU-derived CI is never relevant here).
+
+**Verification**: a dedicated new signal-level test (`tb/biu_tb.sv`'s new "P6-CI"),
+not the originally-planned instruction-level `tb/mmu_xlate_tb.sv` extension --
+that approach was abandoned after tangling with Phase 6/7's own trace-mode/TC leftover
+state (multiple genuine-looking but ultimately unconfirmed RTL-interaction rabbit holes:
+tracing an SR-writing instruction, tracing immediately after a PMOVE-to-TC -- neither
+resolved, both reverted rather than guessed at further). `biu_tb.sv` already instantiates
+`biu_cache_if` directly with full testbench control; made `tc`/`xl_hit`/`xl_walk_done`/
+`xl_pa`/`xl_ci`/`ciout` testbench-controllable (were hardwired constants/unconnected) --
+this gives EXACT, deterministic control over the precise staleness scenario the fix
+targets, more precise than any real instruction-level walk could offer: pulse a
+translation-complete with CI=1, then change the LIVE broadcast to CI=0 while the SAME
+access is still waiting in `CI_D_MISS` for its own bus cycle, confirm `ciout` still shows
+the CAPTURED CI=1; a second, independent access with a fresh CI=0 capture confirms it
+isn't just stuck at the first access's own value either. All 6 new checks pass.
+
+**A real, separate, bigger gap found and deliberately NOT touched this stage**:
+`biu_icache_if.sv` has NO MMU-CI-awareness at all for its own linefill -- `ihit` never
+checks CI, and `valid_i[]`'s own population is never gated by it either (confirmed via
+full-file grep: zero `ci`-related conditionals beyond the unrelated `ciin` pin). This
+isn't a "stale broadcast" bug like the D-side had (Stage 2's own scope) -- it's a
+completely unimplemented feature, and the I-cache has no `ciout` pin of its own at all
+(CIOUT is D-cache-specific per the manual). Documented for a possible future item, not
+folded into this stage.
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14, full
+124-suite Harte sweep (mandatory) -- PASS 702142, FAIL 2 (same documented ASL.b
+anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes Stage 2.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 3
+(genuine per-beat CIIN checking during burst) is next.

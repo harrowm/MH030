@@ -335,8 +335,22 @@ sections). Working through it sequentially, smallest/safest first. **Stage 1
 output-block wiring across `biu_cache_if.sv`/`m68030_biu.sv`/`m68030_top.sv`, plus
 2 now-meaningless dedicated tests in `tb/biu_tb.sv` (their own coverage is already
 extensive elsewhere, `tb/cache_tb.sv`'s I-1..I-6). Full Harte sweep bit-identical to
-baseline. See `plan.md §Phase 227` for the full writeup. Stage 2 (`ciout_n` should
-use the live per-access CI result, not the stale-prone broadcast one) is next.
+baseline. See `plan.md §Phase 227` for the full writeup. **Stage 2 (Phase 228)**:
+`ciout_n` used a stale-prone broadcast (`mmu_ci`) that's only guaranteed correct on
+the exact cycle a requester's own translation completes — reading it any later cycle
+(the whole time a D-cache miss/write waits for its own bus cycle) risked showing a
+concurrently in-flight I-side/EXT-side requester's own result instead. New `xl_ci_r`
+register captures this access's own translated CI bit at the one correct cycle, used
+by every later consumer (`ciout`, `dhit_r`, the `CI_D_MISS` populate decision).
+Found and fixed a real bug along the way: an untranslated-access burst-dispatch check
+was also reading the same stale broadcast, capable of permanently blocking D-cache
+bursting after any one unrelated MMU use. Verified via a new signal-level test in
+`tb/biu_tb.sv` (made `xl_hit`/`xl_pa`/`xl_ci`/`ciout` testbench-controllable) that
+directly injects the exact staleness scenario. Found, documented, deliberately not
+fixed: `biu_icache_if.sv` has zero MMU-CI-awareness at all for its own linefill — a
+bigger, different gap than Stage 2's own "stale broadcast" scope. Full Harte sweep
+bit-identical to baseline. See `plan.md §Phase 228` for the full writeup. Stage 3
+(genuine per-beat CIIN checking during burst) is next.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

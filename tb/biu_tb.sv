@@ -114,6 +114,15 @@ module biu_tb;
     logic        use_cache       = 1'b0;
     logic [31:0] cache_eu_rdata;
     logic        cache_eu_ack, cache_eu_berr;
+    // 10-item backlog Stage 2 (plan.md): testbench-driven MMU-translation
+    // signals for u_cache's own xl_ci_r staleness-immunity test (see
+    // u_cache's own instantiation below for the full rationale).
+    logic [31:0] tc_cache_tb    = 32'h0;
+    logic [31:0] xl_pa_tb       = 32'h0;
+    logic        xl_hit_tb      = 1'b0;
+    logic        xl_walk_done_tb = 1'b0;
+    logic        xl_ci_tb       = 1'b0;
+    logic        ciout_tb;
     // Deferred-items closure plan Stage 9 (plan.md): genuine testbench-
     // driven D-cache burst response signals (were tied to dead constants
     // before this stage -- see u_cache's own instantiation below) --
@@ -609,7 +618,7 @@ module biu_tb;
         // testbench's own tests don't exercise CIIN, matching the same
         // convention every other unused input port above already uses.
         .ciin        (1'b0),
-        .ciout       (),
+        .ciout       (ciout_tb),
         // Phase 158 Stage 4c: new D-cache burst-linefill port. Every
         // pre-existing test in this file leaves DBE (CACR bit 12) unset,
         // so CI_D_BURST0 is never reached by them -- deferred-items
@@ -641,22 +650,30 @@ module biu_tb;
         .sf_ack      (eu_ack),     // sizing_fsm eu_ack output (1-tick pulse)
         .sf_berr     (eu_berr),
         // Phase 150 (plan.md): new MMU translation-request port. Tied to a
-        // constant TC.E=0 here deliberately -- this testbench's own P6-6/
-        // P6-7 tests exercise u_mmu (biu_mmu_if) directly as an independent
-        // unit via tc_tb, and were never designed to also exercise the new
-        // cache-triggers-live-translation integration; that gets its own
-        // dedicated tb/mmu_xlate_tb.sv instead, so none of the pre-existing
-        // tests here need to change behavior.
-        .tc          (32'h0),
+        // constant TC.E=0 by default -- this testbench's own P6-6/P6-7
+        // tests exercise u_mmu (biu_mmu_if) directly as an independent unit
+        // via tc_tb, and were never designed to also exercise the new
+        // cache-triggers-live-translation integration; tb/mmu_xlate_tb.sv
+        // exercises that via a real end-to-end walk. 10-item backlog Stage
+        // 2 (plan.md): xl_hit/xl_walk_done/xl_pa/xl_ci/tc_cache made
+        // testbench-controllable (were 1'b0/32'h0 constants) for a new,
+        // direct, signal-level test of xl_ci_r's own staleness immunity --
+        // full manual control over exactly when translation "completes"
+        // and what the (shared, broadcast) xl_ci value does afterward is
+        // far more precise here than trying to race a real concurrent
+        // walker via a full instruction-level MMU test. Every existing
+        // test in this file leaves these at their old default (0), so
+        // nothing here changes their own behavior.
+        .tc          (tc_cache_tb),
         .xl_va       (),
         .xl_fc       (),
         .xl_rw       (),
         .xl_req      (),
-        .xl_pa       (32'h0),
-        .xl_hit      (1'b0),
-        .xl_walk_done(1'b0),
+        .xl_pa       (xl_pa_tb),
+        .xl_hit      (xl_hit_tb),
+        .xl_walk_done(xl_walk_done_tb),
         .xl_fault    (1'b0),
-        .xl_ci       (1'b0),
+        .xl_ci       (xl_ci_tb),
         .xl_wp       (1'b0),
         .xlate_fault_pulse(),
         .xlate_fault_addr (),
@@ -1747,6 +1764,83 @@ module biu_tb;
             eu_rw_tb    = 1'b1;
             eu_wdata_tb = 32'h0;
             check32("write-through mem", u_mem.mem[32'h200/4], 32'hCAFE_BABE);
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // ----------------------------------------------------------------
+        // P6-CI (10-item backlog Stage 2, plan.md): xl_ci_r survives the
+        // shared MMU broadcast changing mid-access. Full manual control
+        // over xl_hit/xl_pa/xl_ci (no real walker/arbiter involved) lets
+        // this precisely inject the exact staleness scenario the fix
+        // targets: pulse a translation-complete with CI=1, THEN change the
+        // live xl_ci broadcast to 0 WHILE this same access is still
+        // waiting in CI_D_MISS for its own bus cycle -- ciout must still
+        // reflect the CAPTURED CI=1 (xl_ci_r), not the now-changed live
+        // value, proving it isn't just re-reading the shared port. A
+        // second, independent access with a fresh CI=0 capture then
+        // confirms it isn't stuck showing the FIRST access's own value
+        // either.
+        // ----------------------------------------------------------------
+        $display("--- xl_ci_r staleness immunity ---");
+        begin
+            int t6;
+            logic saw_ack;
+            u_mem.mem[32'h340/4] = 32'hAAAA_1111;
+            wait_bus_idle;
+            cacr_tb      = 32'h100;      // ED=bit8=1 (dcache_en), nothing else
+            tc_cache_tb  = 32'h8000_0000; // E=1 -- dispatch goes through CI_XLATE
+            eu_addr_tb   = 32'h0000_1234; // fresh idx/vtag, never touched above
+            eu_fc_tb     = 3'b101;
+            eu_rw_tb     = 1'b1;
+            eu_siz_tb    = 2'b00;
+            @(posedge clk_4x);
+            eu_req_tb = 1'b1;
+            repeat(4) @(posedge clk_4x);   // let CI_IDLE -> CI_XLATE settle
+            xl_pa_tb  = 32'h0000_0340;
+            xl_ci_tb  = 1'b1;
+            xl_hit_tb = 1'b1;
+            @(posedge clk_4x);
+            xl_hit_tb = 1'b0;
+            xl_ci_tb  = 1'b0;   // shared broadcast now shows something ELSE --
+                                 // this access's own capture must not follow it
+            saw_ack = 1'b0;
+            for (t6 = 0; t6 < 200; t6++) begin
+                @(posedge clk_4x);
+                if (cache_eu_ack) begin saw_ack = 1'b1; break; end
+            end
+            eu_req_tb = 1'b0;
+            check("xl_ci_r: bus read completed", saw_ack);
+            check32("xl_ci_r: correct data reached the translated PA (0x340)",
+                    cache_eu_rdata, 32'hAAAA_1111);
+            check("xl_ci_r: ciout still reflects the CAPTURED CI=1, not the live broadcast changed to 0 mid-access",
+                  ciout_tb);
+            repeat(4) @(posedge clk_4x);
+
+            // Second, independent access -- fresh CI=0 capture, proving
+            // ciout isn't just stuck at the first access's own CI=1.
+            u_mem.mem[32'h380/4] = 32'hBBBB_2222;
+            wait_bus_idle;
+            eu_addr_tb = 32'h0000_5678;   // different idx/vtag again
+            eu_req_tb  = 1'b1;
+            @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+            xl_pa_tb  = 32'h0000_0380;
+            xl_ci_tb  = 1'b0;
+            xl_hit_tb = 1'b1;
+            @(posedge clk_4x);
+            xl_hit_tb = 1'b0;
+            saw_ack = 1'b0;
+            for (t6 = 0; t6 < 200; t6++) begin
+                @(posedge clk_4x);
+                if (cache_eu_ack) begin saw_ack = 1'b1; break; end
+            end
+            eu_req_tb = 1'b0;
+            check("xl_ci_r: second access's own bus read completed", saw_ack);
+            check32("xl_ci_r: second access's own data reached the translated PA (0x380)",
+                    cache_eu_rdata, 32'hBBBB_2222);
+            check("xl_ci_r: ciout correctly deasserted for the second access's own CI=0 -- not stuck at the first access's own CI=1",
+                  !ciout_tb);
+            tc_cache_tb = 32'h0;
             repeat(4) @(posedge clk_4x);
         end
 

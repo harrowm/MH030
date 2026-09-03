@@ -115,7 +115,7 @@ module biu_cache_if (
                                            // it independently -- suppress
                                            // the synthetic pulse below to
                                            // avoid a stale double-capture)
-    input  logic        xl_ci,   // deferred this phase — see header note
+    input  logic        xl_ci,   // acted on since 10-item backlog Stage 2
     input  logic        xl_wp,
 
     // Synthetic fault-capture pulse for biu_exc_capture (Phase 150,
@@ -130,14 +130,15 @@ module biu_cache_if (
     output logic [1:0]   xlate_fault_siz
 );
 
-    // Phase 150 (plan.md): CI (mmu_ci input above, pre-existing) still gates
-    // hit detection using its own pre-existing, never-yet-live semantics —
-    // deliberately NOT touched by this phase. The new xl_ci result above is
-    // read but not yet acted on: real CI-driven "don't allocate this page
-    // into the cache" behavior on a fresh miss is deferred to a documented
-    // follow-up, out of Stage 0's own scope (translation + fault handling
-    // only). xl_ci is threaded through end-to-end now so that follow-up is
-    // a pure behavioral addition, not new plumbing.
+    // Phase 150 (plan.md): mmu_ci (input above) still gates the
+    // pre-translation dhit lookup in CI_IDLE, unavoidably (see dhit's own
+    // declaration comment). 10-item backlog Stage 2 (plan.md): every LATER
+    // use (ciout, dhit_r, the CI_D_MISS populate decision) now uses xl_ci_r
+    // instead -- this access's own genuinely-translated CI bit, captured
+    // once from xl_ci at the exact cycle CI_XLATE completes (see xl_ci_r's
+    // own declaration comment for why the raw mmu_ci/xl_ci ports, both
+    // literally the same shared arbiter broadcast, aren't safe to re-read
+    // in a later cycle).
     wire tc_e = tc[31];
 
     // CACR bit aliases (Figure 6-14: 13=WA,12=DBE,11=CD,10=CED,9=FD,8=ED,
@@ -291,6 +292,21 @@ module biu_cache_if (
                                  // from CI_XLATE (pure translation/WP fault,
                                  // no real bus error) from one entered via a
                                  // genuine sf_berr elsewhere
+    // 10-item backlog Stage 2 (plan.md): this access's own genuinely
+    // translated CI bit, captured exactly once (CI_XLATE's own
+    // xl_hit/xl_walk_done transition, below) -- unlike the raw mmu_ci/
+    // xl_ci PORTS (both literally the same shared arbiter broadcast,
+    // biu_mmu_arb.sv's own "harmless to broadcast... valid the whole
+    // time" contract only guarantees correctness on the EXACT cycle this
+    // requester's own hit/walk_done/fault pulses fire -- reading it any
+    // LATER cycle risks showing a completely different, concurrently
+    // in-flight I-side/EXT-side walk's result instead), xl_ci_r stays
+    // correct for this access's own entire remaining lifetime regardless
+    // of what the shared MMU resource does afterward. Reset to 0 at every
+    // fresh dispatch (CI_IDLE, below) -- correctly represents "no CI info"
+    // for an untranslated (tc_e=0) access without needing a separate
+    // was-this-access-translated flag.
+    logic        xl_ci_r;
 
     // Phase 158 Stage 4c: dc_burst_req/addr must come from registers, not a
     // combinational case(state) computation -- the exact Phase 128 hazard
@@ -340,10 +356,26 @@ module biu_cache_if (
     // deliberately untouched, since by the write phase mem_rmw_lookup has
     // already gone low and the write should update the cache normally on
     // a genuine hit, same as any other write.
+    //
+    // 10-item backlog Stage 2 (plan.md): dhit deliberately still reads the
+    // live mmu_ci broadcast, NOT xl_ci_r -- this check happens in CI_IDLE,
+    // before this access's own translation (if any) has even started, so
+    // no per-access CI value exists yet to use. This is a genuine, real
+    // structural limitation of the virtually-indexed/virtually-tagged
+    // lookup this cache uses (the hit/miss decision is made before the
+    // physical address, and therefore the real page attributes, are known)
+    // -- fixing it would need a fast pre-translation CI-check mechanism
+    // (e.g. a combinational TT0/TT1 transparent-window check) this
+    // simplified model doesn't have. Documented, not attempted this stage.
     wire dhit = dcache_en && d_size_ok && valid_d[idx][woff] && (tag_d[idx] == vtag) && !mmu_ci && !mem_rmw_lookup;
 
-    // Also need dhit based on latched idx_r/vtag_r for write update in CI_WRITE
-    wire dhit_r = dcache_en && d_size_ok_r && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !mmu_ci;
+    // Also need dhit based on latched idx_r/vtag_r for write update in
+    // CI_WRITE -- unlike dhit above, this is evaluated well after dispatch
+    // (CI_WRITE's own sf_ack_rise, possibly many cycles later), so it uses
+    // xl_ci_r (this access's own captured value), not the live mmu_ci
+    // broadcast, which could show a different, concurrently in-flight
+    // requester's result by then.
+    wire dhit_r = dcache_en && d_size_ok_r && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !xl_ci_r;
 
     integer k, m;
 
@@ -376,6 +408,10 @@ module biu_cache_if (
                         woff_r      <= woff;
                         vtag_r      <= vtag;
                         fill_base_r <= {eu_addr[31:4], 4'h0};
+                        xl_ci_r     <= 1'b0;  // default "no CI"; CI_XLATE
+                                               // overwrites with the real
+                                               // value if this access is
+                                               // actually translated below
 
                         if (eu_rw && dhit) begin
                             // Cache hit — serve from cache array (idx_r/woff_r
@@ -393,7 +429,7 @@ module biu_cache_if (
                             state <= CI_XLATE;
                         end else if (!eu_rw) begin
                             state <= CI_WRITE;
-                        end else if (dcache_en && dburst_en && !mmu_ci && d_size_ok && !dfreeze_en) begin
+                        end else if (dcache_en && dburst_en && d_size_ok && !dfreeze_en) begin
                             // Phase 158 Stage 4c: DBE=1 -- genuine burst
                             // linefill instead of CI_D_MISS's own
                             // single-longword fill. Gated on d_size_ok (not
@@ -404,6 +440,19 @@ module biu_cache_if (
                             // the D-cache entirely (Phase 134's own
                             // single-slot-model boundary), so it must not
                             // start a burst either.
+                            //
+                            // 10-item backlog Stage 2 (plan.md): no mmu_ci
+                            // check here -- this branch is reached only when
+                            // !tc_e (the `tc_e` branch above already claimed
+                            // that case), so this access is never MMU-
+                            // translated at all. MMU-derived CI is
+                            // architecturally meaningless without a
+                            // translation; the shared mmu_ci broadcast could
+                            // still show a stale 1 left over from an earlier,
+                            // unrelated translated/PTESTed access (it only
+                            // ever resets on chip reset), which would have
+                            // wrongly blocked D-cache bursting here forever
+                            // after any one-time MMU use, however unrelated.
                             state           <= CI_D_BURST0;
                             dc_burst_req_r  <= 1'b1;
                             dc_burst_addr_r <= {eu_addr[31:4], 4'h0};
@@ -444,7 +493,21 @@ module biu_cache_if (
                         // addr_r[1:0], which CI_WRITE's merge_wr() depends
                         // on) pass through translation unchanged — only the
                         // page-frame bits above the page boundary differ.
-                        addr_r <= xl_pa;
+                        addr_r  <= xl_pa;
+                        // 10-item backlog Stage 2 (plan.md): capture THIS
+                        // access's own just-completed translation result for
+                        // every later cycle to use instead of re-reading the
+                        // shared (and by then possibly reused-by-someone-
+                        // else) mmu_ci broadcast -- see xl_ci_r's own
+                        // declaration comment. The `!mmu_ci` check
+                        // immediately below is deliberately left reading the
+                        // live port, not xl_ci_r, since it's evaluated the
+                        // SAME cycle xl_ci_r is being written here
+                        // (non-blocking assignment -- xl_ci_r's new value
+                        // isn't visible until next cycle) and the arbiter's
+                        // own contract guarantees mmu_ci is already correct
+                        // for this exact requester on this exact cycle.
+                        xl_ci_r <= xl_ci;
                         if (!rw_r) begin
                             state <= CI_WRITE;
                         end else if (dcache_en && dburst_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
@@ -488,7 +551,13 @@ module biu_cache_if (
                         // a CIIN-blocked would-have-cached fetch still needs
                         // extract_rd() for its own return value, just
                         // without the array-population side effects.
-                        if (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
+                        // 10-item backlog Stage 2 (plan.md): xl_ci_r, not
+                        // mmu_ci -- sf_ack_rise can land many cycles after
+                        // this access's own dispatch/translation, by which
+                        // point the shared mmu_ci broadcast may already
+                        // reflect an unrelated, concurrently in-flight
+                        // I-side/EXT-side walk.
+                        if (dcache_en && !xl_ci_r && d_size_ok_r && !dfreeze_en) begin
                             // Cache-enabled miss: the combinational output
                             // block below forces sf_siz=2'b00 (longword) and
                             // sf_addr to the 4-byte-aligned slot address for
@@ -852,10 +921,14 @@ module biu_cache_if (
         sf_req   = 1'b0;
 
         // Phase 158 Stage 7: CIOUT, reflecting the latched (dispatched)
-        // transaction's own FC alongside the live mmu_ci/mem_rmw_lookup/
-        // dcache_en inputs, same convention dhit_r's own use of live
-        // mmu_ci already established.
-        ciout = mmu_ci || mem_rmw_lookup || (fc_r == 3'b111) || !dcache_en;
+        // transaction's own FC alongside mem_rmw_lookup/dcache_en. 10-item
+        // backlog Stage 2 (plan.md): xl_ci_r, not the live mmu_ci broadcast
+        // -- ciout is evaluated continuously, including while this access
+        // sits in CI_D_MISS/CI_WRITE/etc waiting for its own bus cycle,
+        // long after this access's own translation (if any) completed and
+        // the shared MMU resource has potentially moved on to servicing a
+        // different requester.
+        ciout = xl_ci_r || mem_rmw_lookup || (fc_r == 3'b111) || !dcache_en;
 
         // Phase 158 Stage 4c: driven unconditionally from the registered
         // dc_burst_req_r/addr_r (see their own declaration comment for why
@@ -888,7 +961,12 @@ module biu_cache_if (
             end
 
             CI_D_MISS: begin
-                if (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en) begin
+                // 10-item backlog Stage 2 (plan.md): xl_ci_r here too -- must
+                // stay bit-for-bit consistent with the sequential block's own
+                // identical condition (both else branches determine sf_addr/
+                // sf_siz for the SAME bus request the sequential block
+                // decides whether to cache).
+                if (dcache_en && !xl_ci_r && d_size_ok_r && !dfreeze_en) begin
                     // Cache-enabled miss: always fill at longword
                     // granularity from the bus (the D-cache's own per-word
                     // valid_d tracking unit), regardless of the CPU's own
@@ -917,7 +995,7 @@ module biu_cache_if (
                 // existing registered schedule), never the returned value.
                 if (sf_ack_rise) begin
                     eu_ack   = 1'b1;
-                    eu_rdata = (dcache_en && !mmu_ci && d_size_ok_r && !dfreeze_en)
+                    eu_rdata = (dcache_en && !xl_ci_r && d_size_ok_r && !dfreeze_en)
                              ? extract_rd(sf_rdata, siz_r, addr_r[1:0])
                              : sf_rdata;
                 end
