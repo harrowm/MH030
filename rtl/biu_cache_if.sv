@@ -86,6 +86,15 @@ module biu_cache_if (
     // burst_beat_at_berr port comment. Only meaningful the same cycle
     // dc_burst_berr pulses.
     input  logic [1:0]   dc_burst_beat_at_berr,
+    // 10-item backlog Stage 3 (plan.md): per-beat CIIN, captured by
+    // biu_burst_ctrl.sv at the same cadence as dc_burst_rdataN above --
+    // used to gate valid_d PER WORD on a completed burst fill, instead of
+    // the old whole-line all-or-nothing decision (see the CI_D_BURST0/
+    // CI_D_FILL_3B bodies below).
+    input  logic         dc_burst_ciin0,
+    input  logic         dc_burst_ciin1,
+    input  logic         dc_burst_ciin2,
+    input  logic         dc_burst_ciin3,
     input  logic         dc_burst_ack,
     input  logic         dc_burst_berr,
 
@@ -288,6 +297,17 @@ module biu_cache_if (
     logic [1:0]  woff_r;
     logic [26:0] vtag_r;
     logic [31:0] fill_rdata_r;  // captured rdata for CI_DONE return
+    // 10-item backlog Stage 3 (plan.md): degraded-burst-fallback per-beat
+    // CIIN capture. dc_burst_ciin0 is reused for every individual degraded
+    // request (mirroring dc_burst_rdata0's own reuse), so by the time
+    // CI_D_FILL_3B's own completion is reached it only reflects beat 3's
+    // own value -- each earlier beat's own CIIN must be stashed here as it
+    // arrives (same reasoning data_d[]'s own progressive-population-then-
+    // atomic-valid_d/tag_d-commit pattern already established: committing
+    // valid_d/tag_d piecemeal, before the whole line's own tag is settled,
+    // would open a transient window where a concurrent access could hit
+    // with a stale tag).
+    logic        degraded_ciin_r [0:3];
     logic        xlate_fault_r; // Phase 150: distinguishes a CI_BERR entered
                                  // from CI_XLATE (pure translation/WP fault,
                                  // no real bus error) from one entered via a
@@ -668,26 +688,27 @@ module biu_cache_if (
                                 2'd2: fill_rdata_r <= extract_rd(dc_burst_rdata2, siz_r, addr_r[1:0]);
                                 2'd3: fill_rdata_r <= extract_rd(dc_burst_rdata3, siz_r, addr_r[1:0]);
                             endcase
-                            // Phase 158 Stage 7: ciin checked once, for the
-                            // whole line, at this final completion point --
-                            // the manual's own CIIN-during-burst text
-                            // describes a per-beat granularity ("assert
-                            // CIIN when the data in a long word is not
-                            // cachable"), but this project's own burst
-                            // mechanism captures all four words via one
-                            // combined ack (biu_burst_ctrl.sv), not
-                            // separate per-beat acks -- replicating true
-                            // per-beat CIIN would need reworking that beat-
-                            // tracking mechanism, out of scope for this
-                            // stage; documented, not a silent gap.
-                            // data_d above is written unconditionally
-                            // (harmless -- invalid entries are never read)
-                            // so only the validating tag_d/valid_d writes
-                            // need gating.
-                            if (!ciin) begin
-                                tag_d[idx_r] <= vtag_r;
-                                for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
-                            end
+                            // 10-item backlog Stage 3 (plan.md): per-beat
+                            // CIIN gating -- was "ciin checked once, for the
+                            // whole line" (Phase 158 Stage 7); the manual's
+                            // own CIIN-during-burst text describes real
+                            // per-beat granularity ("assert CIIN when the
+                            // data in a long word is not cachable"), and
+                            // biu_burst_ctrl.sv now captures it per-beat
+                            // (dc_burst_ciinN) even though all four words
+                            // still arrive via one combined ack. data_d
+                            // above is written unconditionally (harmless --
+                            // invalid entries are never read); tag_d is
+                            // always replaced too (harmless if every word
+                            // ends up invalid -- valid_d already gates hit
+                            // detection). Only the per-word valid_d bits are
+                            // gated, individually, by that word's own
+                            // captured CIIN.
+                            tag_d[idx_r]      <= vtag_r;
+                            valid_d[idx_r][0] <= !dc_burst_ciin0;
+                            valid_d[idx_r][1] <= !dc_burst_ciin1;
+                            valid_d[idx_r][2] <= !dc_burst_ciin2;
+                            valid_d[idx_r][3] <= !dc_burst_ciin3;
                             // Bus-pipelining-overlap plan.md, Track D Stage
                             // D2: goes straight to CI_IDLE, not CI_DONE --
                             // same pattern as Stage D0/D1 above.
@@ -705,6 +726,7 @@ module biu_cache_if (
                             // remaining three words.
                             data_d[idx_r][0] <= dc_burst_rdata0;
                             if (woff_r == 2'd0) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                            degraded_ciin_r[0] <= dc_burst_ciin0;
                             state           <= CI_D_FILL_1B;
                             dc_burst_addr_r <= fill_base_r + 32'd4;
                             // dc_burst_req_r stays asserted for the next request.
@@ -747,11 +769,16 @@ module biu_cache_if (
                                 // can be strictly "before" beat 3), kept
                                 // only for case exhaustiveness.
                             endcase
-                            if (!ciin) begin
-                                tag_d[idx_r] <= vtag_r;
-                                for (m = 0; m < 4; m++)
-                                    valid_d[idx_r][m] <= (m < dc_burst_beat_at_berr);
-                            end
+                            // 10-item backlog Stage 3 (plan.md): per-beat
+                            // CIIN, same reasoning as the full-success
+                            // branch above -- a word only ends up valid if
+                            // it BOTH actually arrived (m < beat-at-berr)
+                            // AND wasn't itself CIIN-inhibited.
+                            tag_d[idx_r] <= vtag_r;
+                            valid_d[idx_r][0] <= (2'd0 < dc_burst_beat_at_berr) && !dc_burst_ciin0;
+                            valid_d[idx_r][1] <= (2'd1 < dc_burst_beat_at_berr) && !dc_burst_ciin1;
+                            valid_d[idx_r][2] <= (2'd2 < dc_burst_beat_at_berr) && !dc_burst_ciin2;
+                            valid_d[idx_r][3] <= (2'd3 < dc_burst_beat_at_berr) && !dc_burst_ciin3;
                             state          <= CI_IDLE;
                             dc_burst_req_r <= 1'b0;
                         end else begin
@@ -766,6 +793,7 @@ module biu_cache_if (
                     if (dc_burst_ack) begin
                         data_d[idx_r][1] <= dc_burst_rdata0;
                         if (woff_r == 2'd1) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        degraded_ciin_r[1] <= dc_burst_ciin0;
                         state           <= CI_D_FILL_2B;
                         dc_burst_addr_r <= fill_base_r + 32'd8;
                     end else if (dc_burst_berr) begin
@@ -778,6 +806,7 @@ module biu_cache_if (
                     if (dc_burst_ack) begin
                         data_d[idx_r][2] <= dc_burst_rdata0;
                         if (woff_r == 2'd2) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
+                        degraded_ciin_r[2] <= dc_burst_ciin0;
                         state           <= CI_D_FILL_3B;
                         dc_burst_addr_r <= fill_base_r + 32'd12;
                     end else if (dc_burst_berr) begin
@@ -790,13 +819,19 @@ module biu_cache_if (
                     if (dc_burst_ack) begin
                         data_d[idx_r][3] <= dc_burst_rdata0;
                         if (woff_r == 2'd3) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
-                        // Phase 158 Stage 7: same "checked once, at final
-                        // completion" ciin gate as CI_D_BURST0's own full-
-                        // burst branch above.
-                        if (!ciin) begin
-                            tag_d[idx_r] <= vtag_r;
-                            for (m = 0; m < 4; m++) valid_d[idx_r][m] <= 1'b1;
-                        end
+                        // 10-item backlog Stage 3 (plan.md): per-beat CIIN,
+                        // same reasoning as CI_D_BURST0's own full-success
+                        // branch -- beats 0-2's own captured values (this
+                        // degraded path's own last real request always
+                        // reuses dc_burst_ciin0, so each earlier beat's own
+                        // value had to be stashed as it arrived, see
+                        // degraded_ciin_r's own declaration comment); beat
+                        // 3's own value is live right now.
+                        tag_d[idx_r]      <= vtag_r;
+                        valid_d[idx_r][0] <= !degraded_ciin_r[0];
+                        valid_d[idx_r][1] <= !degraded_ciin_r[1];
+                        valid_d[idx_r][2] <= !degraded_ciin_r[2];
+                        valid_d[idx_r][3] <= !dc_burst_ciin0;
                         // Bus-pipelining-overlap plan.md, Track D Stage D2:
                         // goes straight to CI_IDLE, not CI_DONE -- same
                         // pattern as every other Track D site.

@@ -349,8 +349,17 @@ bursting after any one unrelated MMU use. Verified via a new signal-level test i
 directly injects the exact staleness scenario. Found, documented, deliberately not
 fixed: `biu_icache_if.sv` has zero MMU-CI-awareness at all for its own linefill — a
 bigger, different gap than Stage 2's own "stale broadcast" scope. Full Harte sweep
-bit-identical to baseline. See `plan.md §Phase 228` for the full writeup. Stage 3
-(genuine per-beat CIIN checking during burst) is next.
+bit-identical to baseline. See `plan.md §Phase 228` for the full writeup. **Stage 3
+(Phase 229)**: CIIN was checked once for a whole burst-filled line, not per-beat as
+the manual describes. Fixed with a D-cache-only scope refinement (the I-cache's own
+per-LINE `valid_i` makes true per-word CIIN gating architecturally impossible there,
+unlike the D-cache's per-WORD `valid_d`) — new per-beat CIIN capture threaded through
+`biu_burst_ctrl.sv`/`biu_cycle_gen.sv`/`m68030_biu.sv` into `biu_cache_if.sv`, gating
+each of the 4 `valid_d` bits individually instead of the whole line at once. Verified
+via a new `tb/biu_tb.sv` test with a deliberately mixed per-beat CIIN pattern (beats
+0/3 inhibited, 1/2 not), proving genuine per-word discrimination. Full Harte sweep
+bit-identical to baseline. See `plan.md §Phase 229` for the full writeup. Stage 4
+(PTEST translation-fault hang, third investigation attempt) is next.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

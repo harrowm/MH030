@@ -142,10 +142,18 @@ module biu_cycle_gen #(
     input  logic        eu_burst_req,
     input  logic [31:0] eu_burst_addr,
     input  logic [2:0]  eu_burst_fc,
+    // 10-item backlog Stage 3 (plan.md): synchronized CIIN#, passed through
+    // to u_bc (biu_burst_ctrl) for per-beat capture; see that module's own
+    // header for why.
+    input  logic         ciin,
     output logic [31:0] eu_burst_rdata0,
     output logic [31:0] eu_burst_rdata1,
     output logic [31:0] eu_burst_rdata2,
     output logic [31:0] eu_burst_rdata3,
+    output logic         eu_burst_ciin0,
+    output logic         eu_burst_ciin1,
+    output logic         eu_burst_ciin2,
+    output logic         eu_burst_ciin3,
     output logic        eu_burst_ack,
     output logic        eu_burst_berr,
     // Beat reached when eu_burst_ack fires: 3 = all 4 beats completed (a
@@ -660,6 +668,8 @@ module biu_cycle_gen #(
     logic [31:0] bc_m16_wdata_mux;
     logic [31:0] bc_burst_rdata0, bc_burst_rdata1;
     logic [31:0] bc_burst_rdata2, bc_burst_rdata3;
+    logic        bc_burst_ciin0, bc_burst_ciin1;
+    logic        bc_burst_ciin2, bc_burst_ciin3;
     logic        bc_cbreq_assert;
     logic        bc_eu_burst_ack, bc_eu_burst_berr;
     logic        bc_eu_m16_ack,   bc_eu_m16_berr;
@@ -677,6 +687,7 @@ module biu_cycle_gen #(
         .berr_abort_r    (berr_abort_r),
         .cback_s         (cback_s),
         .ext_d_in        (ext_d_in),
+        .ciin            (ciin),
         .eu_burst_req    (eu_burst_req),
         .eu_burst_addr   (eu_burst_addr),
         .eu_burst_fc     (eu_burst_fc),
@@ -697,6 +708,10 @@ module biu_cycle_gen #(
         .burst_rdata1    (bc_burst_rdata1),
         .burst_rdata2    (bc_burst_rdata2),
         .burst_rdata3    (bc_burst_rdata3),
+        .burst_ciin0     (bc_burst_ciin0),
+        .burst_ciin1     (bc_burst_ciin1),
+        .burst_ciin2     (bc_burst_ciin2),
+        .burst_ciin3     (bc_burst_ciin3),
         .cbreq_assert    (bc_cbreq_assert),
         .eu_burst_ack    (bc_eu_burst_ack),
         .eu_burst_berr   (bc_eu_burst_berr),
@@ -1417,6 +1432,8 @@ module biu_cycle_gen #(
         eu_cas2_ack    = 1'b0;
         eu_burst_rdata0 = bc_burst_rdata0; eu_burst_rdata1 = bc_burst_rdata1;
         eu_burst_rdata2 = bc_burst_rdata2; eu_burst_rdata3 = bc_burst_rdata3;
+        eu_burst_ciin0 = bc_burst_ciin0; eu_burst_ciin1 = bc_burst_ciin1;
+        eu_burst_ciin2 = bc_burst_ciin2; eu_burst_ciin3 = bc_burst_ciin3;
         eu_burst_ack = bc_eu_burst_ack; eu_burst_berr = bc_eu_burst_berr;
         eu_burst_beat = bc_burst_beat;
         eu_burst_beat_at_berr = bc_burst_beat_at_berr;

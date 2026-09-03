@@ -6426,3 +6426,58 @@ Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14, ful
 anomaly), SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes Stage 2.** See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 3
 (genuine per-beat CIIN checking during burst) is next.
+
+## Phase 229 (10-item backlog, Stage 3 of 10): genuine per-beat CIIN checking during burst
+
+Per MC68030UM.pdf, CIIN can be asserted per-beat during a burst; this RTL previously
+checked it once, for the whole line, at final completion (`biu_cache_if.sv:671`'s own
+Phase 158 Stage 7 comment already documented this as a known simplification). Fixed by
+threading genuine per-beat CIIN capture through the shared burst mechanism, following the
+exact precedent Phase 217 already established for the analogous per-beat-BERR problem
+(`burst_beat_at_berr`).
+
+**Scope refinement found during design, before writing any RTL**: the I-cache side's own
+`valid_i[]` is per-LINE (one bit for the whole 4-word line), not per-word like the
+D-cache's `valid_d[]` (Phase 133's own fix) -- so a true per-word "skip caching just this
+beat" decision is architecturally impossible for the I-cache; its existing whole-line
+check is already the best possible outcome given that design. This stage is therefore
+D-cache-only (`biu_cache_if.sv`) -- `biu_icache_if.sv` is untouched, documented as such.
+
+**Plumbing**: `biu_burst_ctrl.sv` gained a new `ciin` input and `burst_ciin_r[0:3]`
+capture array (same site/cadence as the existing `burst_rdata_r[]` capture -- `at_burst_data
+&& is_burst_read && data_capture_ok`), exposed via 4 new `burst_ciin0..3` outputs.
+Threaded through `biu_cycle_gen.sv` (new `ciin` input, `eu_burst_ciin0..3` outputs, mirroring
+`eu_burst_rdata0..3`'s own mux) and `m68030_biu.sv` (only to `biu_cache_if.sv`'s own new
+`dc_burst_ciin0..3` inputs, deliberately not to `biu_icache_if.sv`, per the scope
+refinement above).
+
+**Consumption** (`biu_cache_if.sv`, all 3 sites that used to check the whole-line `ciin`):
+`CI_D_BURST0`'s full-success branch now gates each of the 4 `valid_d[idx_r][m]` bits
+individually by that word's own `!dc_burst_ciinM` (tag_d always updated -- harmless even
+if every word ends up invalid, since valid_d already gates hit detection); the BERR-abort
+branch's own per-beat-arrived gating (`m < dc_burst_beat_at_berr`) is now ANDed with
+`!dc_burst_ciinM` too; the degraded-fallback path (`CI_D_FILL_1B/2B/3B`, CBACK# never
+asserted) needed new per-beat capture registers (`degraded_ciin_r[0:3]`) since
+`dc_burst_ciin0` is reused for every individual single-beat request in that path (mirroring
+how `dc_burst_rdata0` is already reused the same way) -- each beat's own value is stashed
+as it arrives, then applied atomically alongside `tag_d`/`valid_d` at `CI_D_FILL_3B`'s own
+final completion (deliberately not committed incrementally as each beat arrives, to avoid a
+transient window where `valid_d` could show 1 while `tag_d` still reflects a different,
+stale line).
+
+**Verification**: new "CIIN-burst" test in `tb/biu_tb.sv` (mirroring the file's own
+existing per-beat-BERR test's technique -- driving `dc_burst_beat_tb`/`dc_burst_ack_tb`
+directly, no real S-state burst-timing navigation needed) with a deliberately MIXED
+per-beat CIIN pattern (beats 0 and 3 inhibited, 1 and 2 not) -- proves the fix is
+genuinely per-word, not just "some vs none." All 7 checks passed after one test-only fix
+(sampled `cache_eu_rdata` after a full `@(posedge clk_4x)`, past the point `state` had
+already left `CI_D_BURST0`, where the combinational output had reverted to its default;
+fixed by sampling combinationally right after the ack, matching the file's own existing
+Track D Stage D1 convention for this exact site).
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14, full
+124-suite Harte sweep (mandatory -- touches `biu_burst_ctrl.sv`, shared by both cache-if
+modules) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221, TIMEOUT 0,
+bit-identical to baseline. **Closes Stage 3.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 4
+(PTEST translation-fault hang, third investigation attempt) is next.

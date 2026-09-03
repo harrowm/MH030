@@ -26,6 +26,16 @@ module biu_burst_ctrl (
     input  logic        berr_abort_r,    // BERR abort captured by cycle_gen
     input  logic        cback_s,         // synchronized CBACK# (0=asserted = burst ok)
     input  logic [31:0] ext_d_in,        // read data bus
+    // 10-item backlog Stage 3 (plan.md): synchronized CIIN# (peripheral
+    // input, active-high internally like biu_cache_if.sv's own `ciin` --
+    // see m68030_biu.sv's own ciin_s). Captured per-beat below (same site
+    // as burst_rdata_r), exposed via burst_ciin0..3 for biu_cache_if.sv's
+    // own new per-word (not whole-line) caching decision. Real per-beat
+    // CIIN only matters for D-cache reads -- the I-cache side's own
+    // valid_i is per-LINE, not per-word, so a per-beat CIIN value has no
+    // meaningful "skip just this word" action there; not threaded to
+    // biu_icache_if.sv at all, deliberately.
+    input  logic        ciin,
 
     // EU burst linefill read request
     input  logic        eu_burst_req,
@@ -64,6 +74,12 @@ module biu_burst_ctrl (
     output logic [31:0] burst_rdata1,
     output logic [31:0] burst_rdata2,
     output logic [31:0] burst_rdata3,
+    // 10-item backlog Stage 3 (plan.md): captured CIIN, one bit per beat --
+    // same capture site/cadence as burst_rdataN above.
+    output logic         burst_ciin0,
+    output logic         burst_ciin1,
+    output logic         burst_ciin2,
+    output logic         burst_ciin3,
 
     // CBREQ# control: assert at beat-0 S0/S1 of any burst
     output logic        cbreq_assert,
@@ -79,6 +95,7 @@ module biu_burst_ctrl (
     logic [31:0] burst_addr_r;
     logic [2:0]  burst_fc_r;
     logic [31:0] burst_rdata_r [0:3];
+    logic        burst_ciin_r [0:3];
     logic        cback_ok_r;
     logic [31:0] m16_wdata_r   [0:3];
 
@@ -107,6 +124,8 @@ module biu_burst_ctrl (
             cback_ok_r       <= 1'b0;
             burst_rdata_r[0] <= 32'h0; burst_rdata_r[1] <= 32'h0;
             burst_rdata_r[2] <= 32'h0; burst_rdata_r[3] <= 32'h0;
+            burst_ciin_r[0]  <= 1'b0;  burst_ciin_r[1]  <= 1'b0;
+            burst_ciin_r[2]  <= 1'b0;  burst_ciin_r[3]  <= 1'b0;
             m16_wdata_r[0]   <= 32'h0; m16_wdata_r[1]   <= 32'h0;
             m16_wdata_r[2]   <= 32'h0; m16_wdata_r[3]   <= 32'h0;
         end else if (state_adv) begin
@@ -143,10 +162,10 @@ module biu_burst_ctrl (
             // Capture read data at S4/S5 of burst read sub-cycles (when DSACK valid)
             if (at_burst_data && is_burst_read && data_capture_ok) begin
                 case (burst_beat_r)
-                    2'd0: burst_rdata_r[0] <= ext_d_in;
-                    2'd1: burst_rdata_r[1] <= ext_d_in;
-                    2'd2: burst_rdata_r[2] <= ext_d_in;
-                    2'd3: burst_rdata_r[3] <= ext_d_in;
+                    2'd0: begin burst_rdata_r[0] <= ext_d_in; burst_ciin_r[0] <= ciin; end
+                    2'd1: begin burst_rdata_r[1] <= ext_d_in; burst_ciin_r[1] <= ciin; end
+                    2'd2: begin burst_rdata_r[2] <= ext_d_in; burst_ciin_r[2] <= ciin; end
+                    2'd3: begin burst_rdata_r[3] <= ext_d_in; burst_ciin_r[3] <= ciin; end
                 endcase
             end
             // Advance beat counter at S7 of each sub-cycle. burst_beat_r is
@@ -190,6 +209,10 @@ module biu_burst_ctrl (
     assign burst_rdata1 = burst_rdata_r[1];
     assign burst_rdata2 = burst_rdata_r[2];
     assign burst_rdata3 = burst_rdata_r[3];
+    assign burst_ciin0  = burst_ciin_r[0];
+    assign burst_ciin1  = burst_ciin_r[1];
+    assign burst_ciin2  = burst_ciin_r[2];
+    assign burst_ciin3  = burst_ciin_r[3];
 
     // MOVE16 write data mux: select word for current beat
     always_comb begin

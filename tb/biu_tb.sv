@@ -133,6 +133,10 @@ module biu_tb;
     // unconnected, same as before).
     logic [31:0] dc_burst_rdata0_tb = 32'h0, dc_burst_rdata1_tb = 32'h0;
     logic [31:0] dc_burst_rdata2_tb = 32'h0, dc_burst_rdata3_tb = 32'h0;
+    // 10-item backlog Stage 3 (plan.md): genuine testbench-driven per-beat
+    // CIIN, same convention as dc_burst_rdataN above.
+    logic        dc_burst_ciin0_tb = 1'b0, dc_burst_ciin1_tb = 1'b0;
+    logic        dc_burst_ciin2_tb = 1'b0, dc_burst_ciin3_tb = 1'b0;
     logic [1:0]  dc_burst_beat_tb = 2'b00;
     logic [1:0]  dc_burst_beat_at_berr_tb = 2'b00;
     logic        dc_burst_ack_tb = 1'b0, dc_burst_berr_tb = 1'b0;
@@ -514,10 +518,20 @@ module biu_tb;
         .eu_burst_req       (eu_burst_req_tb),
         .eu_burst_addr      (eu_burst_addr_tb),
         .eu_burst_fc        (eu_burst_fc_tb),
+        // 10-item backlog Stage 3 (plan.md): this testbench's own tests
+        // don't exercise real burst CIIN, matching the convention every
+        // other unused input above already uses; outputs left unconnected
+        // (safe to observe via hierarchy if ever needed, same as other
+        // unconnected burst outputs in this file).
+        .ciin               (1'b0),
         .eu_burst_rdata0    (eu_burst_rdata0_tb),
         .eu_burst_rdata1    (eu_burst_rdata1_tb),
         .eu_burst_rdata2    (eu_burst_rdata2_tb),
         .eu_burst_rdata3    (eu_burst_rdata3_tb),
+        .eu_burst_ciin0     (),
+        .eu_burst_ciin1     (),
+        .eu_burst_ciin2     (),
+        .eu_burst_ciin3     (),
         .eu_burst_ack       (eu_burst_ack_tb),
         .eu_burst_berr      (eu_burst_berr_tb),
         // MOVE16 burst write ports
@@ -635,6 +649,14 @@ module biu_tb;
         .dc_burst_rdata1 (dc_burst_rdata1_tb),
         .dc_burst_rdata2 (dc_burst_rdata2_tb),
         .dc_burst_rdata3 (dc_burst_rdata3_tb),
+        // 10-item backlog Stage 3 (plan.md): genuine testbench-driven
+        // per-beat CIIN, same convention as dc_burst_rdataN above -- lets
+        // a dedicated new test drive real per-word CIIN discrimination
+        // during a burst directly.
+        .dc_burst_ciin0  (dc_burst_ciin0_tb),
+        .dc_burst_ciin1  (dc_burst_ciin1_tb),
+        .dc_burst_ciin2  (dc_burst_ciin2_tb),
+        .dc_burst_ciin3  (dc_burst_ciin3_tb),
         .dc_burst_beat   (dc_burst_beat_tb),
         .dc_burst_beat_at_berr (dc_burst_beat_at_berr_tb),
         .dc_burst_ack    (dc_burst_ack_tb),
@@ -2119,6 +2141,74 @@ module biu_tb;
 
             eu_req_tb = 1'b0;
             cacr_tb   = 32'h0;
+            use_cache = 1'b0;
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // ===================================================================
+        // D-cache burst: genuine per-beat CIIN discrimination (10-item
+        // backlog Stage 3, plan.md). Full-success (dc_burst_beat=3) burst
+        // with a deliberately MIXED per-beat CIIN pattern (beats 0 and 3
+        // inhibited, 1 and 2 not) -- proves the fix is genuinely per-word,
+        // not just "some words vs none" (a bug that only flipped all-or-
+        // nothing to all-or-nothing-differently could still pass a
+        // uniform-pattern test). Data must still return correctly for the
+        // requested word regardless of its own CIIN status -- CIIN only
+        // gates caching, never the returned value.
+        // ===================================================================
+        begin
+            int t;
+            $display("--- D-cache burst: genuine per-beat CIIN discrimination ---");
+            use_cache   = 1'b1;
+            cacr_tb     = 32'h0000_1100;  // DBE=1 | dcache_en=1
+            dc_burst_rdata0_tb = 32'hAAAA_0000;
+            dc_burst_rdata1_tb = 32'hAAAA_1111;
+            dc_burst_rdata2_tb = 32'hAAAA_2222;
+            dc_burst_rdata3_tb = 32'hAAAA_3333;
+            dc_burst_ciin0_tb  = 1'b1;  // beat 0: CIIN asserted
+            dc_burst_ciin1_tb  = 1'b0;  // beat 1: not
+            dc_burst_ciin2_tb  = 1'b0;  // beat 2: not
+            dc_burst_ciin3_tb  = 1'b1;  // beat 3: CIIN asserted
+            eu_addr_tb  = 32'h0000_3E00;  // fresh, aligned, woff=0
+            eu_rw_tb    = 1'b1;
+            eu_siz_tb   = 2'b00;
+            eu_req_tb   = 1'b1;
+
+            for (t = 0; t < 20 && u_cache.state !== u_cache.CI_D_BURST0; t++)
+                @(posedge clk_4x);
+            check("CIIN-burst: reached CI_D_BURST0", u_cache.state === u_cache.CI_D_BURST0);
+            // Same same-edge race as Stage 9's own test above -- settle
+            // before driving the full-success ack.
+            #1;
+            dc_burst_beat_tb = 2'd3;  // full 4-beat burst, CBACK# ok
+            dc_burst_ack_tb  = 1'b1;
+            // Same combinational-fast-path sampling as Stage 9's own test
+            // above (Track D Stage D1: eu_ack/eu_rdata are valid the
+            // instant dc_burst_ack+state==CI_D_BURST0 are both true, no
+            // clock edge needed) -- sampling after a full @(posedge clk_4x)
+            // instead (a first attempt did exactly this) reads AFTER
+            // state has already advanced to CI_IDLE, where the
+            // combinational output has reverted to its default (0).
+            #1;
+            check32("CIIN-burst: requested word (beat 0, itself CIIN-inhibited) still returned correctly",
+                    cache_eu_rdata, 32'hAAAA_0000);
+            @(posedge clk_4x); #1;
+            dc_burst_ack_tb = 1'b0;
+            check("CIIN-burst: word 0 (CIIN=1) NOT cached",
+                  u_cache.valid_d[u_cache.idx_r][0] === 1'b0);
+            check("CIIN-burst: word 1 (CIIN=0) IS cached",
+                  u_cache.valid_d[u_cache.idx_r][1] === 1'b1);
+            check("CIIN-burst: word 2 (CIIN=0) IS cached",
+                  u_cache.valid_d[u_cache.idx_r][2] === 1'b1);
+            check("CIIN-burst: word 3 (CIIN=1) NOT cached",
+                  u_cache.valid_d[u_cache.idx_r][3] === 1'b0);
+            check32("CIIN-burst: word 1's own data landed correctly despite word 0/3's own CIIN",
+                    u_cache.data_d[u_cache.idx_r][1], 32'hAAAA_1111);
+
+            eu_req_tb = 1'b0;
+            cacr_tb   = 32'h0;
+            dc_burst_ciin0_tb = 1'b0; dc_burst_ciin1_tb = 1'b0;
+            dc_burst_ciin2_tb = 1'b0; dc_burst_ciin3_tb = 1'b0;
             use_cache = 1'b0;
             repeat(4) @(posedge clk_4x);
         end

@@ -680,6 +680,13 @@ module m68030_biu #(
     // Drives the sizing_fsm EU port when no multiop is active.
     // -----------------------------------------------------------------------
 
+    // 10-item backlog Stage 3 (plan.md): per-beat CIIN from u_cg's own
+    // biu_burst_ctrl instance, threaded only to biu_cache_if.sv (D-side).
+    // Declared here (before u_cache's own instantiation below, which reads
+    // them) rather than near u_cg's own instantiation further down --
+    // Icarus requires declaration-before-use in file order.
+    logic cg_burst_ciin0, cg_burst_ciin1, cg_burst_ciin2, cg_burst_ciin3;
+
     biu_cache_if u_cache (
         .clk_4x      (clk_4x),
         .rst_n       (rst_n),
@@ -721,6 +728,10 @@ module m68030_biu #(
         .dc_burst_rdata3(eu_burst_rdata3),
         .dc_burst_beat  (cg_eu_burst_beat),
         .dc_burst_beat_at_berr (cg_eu_burst_beat_at_berr),
+        .dc_burst_ciin0 (cg_burst_ciin0),
+        .dc_burst_ciin1 (cg_burst_ciin1),
+        .dc_burst_ciin2 (cg_burst_ciin2),
+        .dc_burst_ciin3 (cg_burst_ciin3),
         .dc_burst_ack   (eu_burst_ack),
         .dc_burst_berr  (eu_burst_berr),
         .cacr        (cacr),
@@ -1043,10 +1054,20 @@ module m68030_biu #(
         .eu_burst_req    (cg_burst_req_mux),
         .eu_burst_addr   (cg_burst_addr_mux),
         .eu_burst_fc     (cg_burst_fc_mux),
+        // 10-item backlog Stage 3 (plan.md): only threaded to
+        // biu_cache_if.sv's own dc_burst_ciinN inputs below, not exposed
+        // as a new top-level port and not threaded to biu_icache_if.sv --
+        // see biu_burst_ctrl.sv's own header for why the I-cache side
+        // doesn't need this.
+        .ciin            (ciin_s),
         .eu_burst_rdata0 (eu_burst_rdata0),
         .eu_burst_rdata1 (eu_burst_rdata1),
         .eu_burst_rdata2 (eu_burst_rdata2),
         .eu_burst_rdata3 (eu_burst_rdata3),
+        .eu_burst_ciin0  (cg_burst_ciin0),
+        .eu_burst_ciin1  (cg_burst_ciin1),
+        .eu_burst_ciin2  (cg_burst_ciin2),
+        .eu_burst_ciin3  (cg_burst_ciin3),
         .eu_burst_ack    (eu_burst_ack),
         .eu_burst_berr   (eu_burst_berr),
         .eu_burst_beat   (cg_eu_burst_beat),
