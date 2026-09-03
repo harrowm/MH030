@@ -495,18 +495,34 @@ generic `mode110_ea_src`/`memind_ext_count` mechanism (already proven for Stage 
 own MOVEM work) already handles them all. Two new cosim tests (`tests/memind28.s`,
 `tests/memind29.s`) matched Musashi's own bus trace exactly on the first real attempt.
 Full Harte sweep bit-identical to baseline. See `plan.md §Phase 236` for the full
-writeup. Stage 9b (JMP/JSR, general ALU-with-EA-source, CMP2/CHK2 — needs the shared
-FSM's outer stage generalized for address-only and read-then-combine consumers) is
-next.
+writeup. **Stage 9b (Phase 237), part 1 (JMP+JSR)**: JMP turned out to be a genuine
+bolt-on, sharing LEA's own `memind_addr_only_r` shape directly. JSR needed PEA's own
+outer-write shape but pushes the return PC (not the resolved EA) and jumps to the
+resolved address once that completes. **Found and fixed two real bugs**: `dec_return_
+pc` was hardcoded `decode_pc+4` in JSR's own mode=110 arm — wrong for ANY full-format
+encoding (indirect or not), a genuine pre-existing bug never caught before since
+full-format JSR is 68020+-only, outside Harte's 68000-captured corpus; fixed by
+sizing it from the instruction's own actual word count. A first JSR attempt also
+forgot to suppress `dec_is_mem_wr` for the memind branch (unlike PEA's own arm),
+tripping `ex_an_base`'s own `(ex_is_mem_wr && !ex_is_idx) ? rd_b_data : rd_a_data`
+special case (built for JSR/PEA's simple non-indexed forms) and substituting Xn for
+An in the memind FSM's own inner-address capture — caught directly via a `buscmp.py`
+mismatch against Musashi's own reference before fixing. Two new cosim tests
+(`tests/memind30.s`, `tests/memind31.s`), both deliberately kept within `tools/
+m68ksim`'s own 4KB reference window after discovering a jump target landing outside
+it silently aliases onto whatever else lives at the wrapped address. Full Harte
+sweep bit-identical to baseline (mandatory — the `dec_return_pc` fix touches the
+ordinary, Harte-covered JSR path too). See `plan.md §Phase 237` for the full
+writeup. Stage 9b continues with general ALU-with-EA-source and CMP2/CHK2 next.
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 16/16,
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
 10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-7 of 10 done
 (Phase 227-233); Stage 8 partially done (Phase 234); Stage 9 survey done (Phase 235),
-Stage 9a done (Phase 236, LEA+PEA genuine memory-indirect EA); Stage 9b (JMP/JSR,
-ALU-EA, CMP2/CHK2) is next.**
+Stage 9a done (Phase 236, LEA+PEA); Stage 9b part 1 done (Phase 237, JMP+JSR); Stage 9b
+continues with ALU-EA/CMP2/CHK2 next.**
 
 ## Verification Commands
 

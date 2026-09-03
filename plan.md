@@ -6977,3 +6977,71 @@ Stage 9a.** See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item ba
 plan. Stage 9b (JMP/JSR, general ALU-with-EA-source, CMP2/CHK2 -- the survey's own
 medium-risk tier, needing the shared FSM's outer stage generalized for address-only
 and read-then-combine consumers) is next.
+
+## Phase 237 (10-item backlog, Stage 9b of 10, part 1 -- JMP + JSR): genuine
+memory-indirect EA for the flow-control family
+
+**JMP** turned out to be a genuine bolt-on after all -- it shares LEA's own
+address-only shape exactly (never dereferences its own final EA; `ex_jmp_taken`
+already fires unconditionally the instant JMP enters EX for the ordinary case, with
+no bus dependency at all). Reused `memind_addr_only_r` directly (`<= dec_is_lea ||
+dec_is_jmp`), and extended `ex_jmp_taken`/`branch_target` with an `ex_is_memind`
+branch: fires on `memind_inner_r && mem_ack && memind_addr_only_r` (the inner
+pointer read's own ack) instead of immediately, with the target computed the same
+way `memind_addr_wr_data` already is for LEA (`mem_rdata + memind_post_xn_r +
+memind_od_r`).
+
+**JSR** needed the real outer-write shape (like PEA), but pushes the RETURN PC (not
+the resolved EA) and then jumps to the resolved address once that push completes --
+a new three-way combination the shared FSM hadn't needed before. Added `memind_is_
+jsr_r`, reused PEA's own `memind_pea_wr_addr_r` capture (the push address formula,
+`ex_cur_sp-4`, is identical for both), and found the existing generic `(ex_is_jsr ||
+ex_is_bsr) ? ex_return_pc` `mem_wdata` case ALREADY supplies the right value with
+zero changes (it doesn't care which phase is active, just that `ex_is_jsr` is true).
+Extended `ex_jsr_taken`/`branch_target`: for the memind case, gated on `memind_outer_
+r && mem_ack` (the outer write's own completion, not the inner read's), with the
+target `memind_outer_addr_w` (by then `memind_ptr_r` is already latched, unlike
+JMP's own case which fires during the inner read itself and must use the
+combinational `mem_rdata` directly).
+
+**Found and fixed two real bugs while building JSR's own cosim test** (`tests/
+memind31.s`), both confirmed directly against Musashi's own reference bus trace
+before touching any RTL:
+
+1. `dec_return_pc` was hardcoded `decode_pc + 32'd4` unconditionally in JSR's own
+   mode=110 arm -- correct for brief (2 words) but silently wrong for ANY full-format
+   encoding, indirect or not (a genuine, previously-undiscovered PRE-EXISTING bug,
+   not something this stage introduced -- full-format JSR (d8,An,Xn) is a 68020+-only
+   encoding outside Harte's own 68000-captured corpus, so it was never caught before).
+   Fixed by sizing it from the instruction's own actual word count (`eaf_disp_words`
+   applied to `fi_bdsz` and, for the indirect case, `fi_iis[1:0]` too), matching
+   `memind_ext_count`'s own already-proven formula shape.
+2. A first attempt forgot to suppress `dec_is_mem_wr` for JSR's own memind branch
+   (unlike PEA's own arm, which correctly does this) -- left at its shared-setup
+   default of 1, it tripped `ex_an_base`'s own `(ex_is_mem_wr && !ex_is_idx) ?
+   rd_b_data : rd_a_data` special case (built for JSR/PEA's own SIMPLE, non-indexed
+   push-address forms, where `rd_b` genuinely holds the relevant base), substituting
+   Xn (rd_b) for An (rd_a) in the memind FSM's own inner-address capture. Confirmed
+   via a direct cosim mismatch (`buscmp.py` caught the DUT's own inner read landing
+   at Xn+bd instead of An+bd) before fixing by explicitly setting `dec_is_mem_wr =
+   1'b0` in the memind branch, mirroring PEA's own already-correct pattern.
+
+**Verification**: two new cosim tests, `tests/memind30.s` (JMP) and `tests/
+memind31.s` (JSR), both post-indexed word-bd/null-od forms. Both deliberately kept
+entirely within `tools/m68ksim`'s own 4KB (1024-word) reference-memory window --
+discovered mid-investigation that a JMP/JSR target landing OUTSIDE that window
+aliases (via `& (MEM_WORDS-1)`) onto whatever else already lives at the wrapped
+address, corrupting the landing code the reference tool would execute; unlike
+memind13/16/17/21's own large-magnitude-displacement technique (which deliberately
+relies on that same aliasing while keeping every REAL operand address consistent
+between DUT and reference), a genuine jump TARGET has to land somewhere real. Both
+matched Musashi's own bus trace exactly once the two bugs above were fixed. Wired
+into `make cosim_memind` (18/18 total now, was 16).
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18, full
+124-suite Harte sweep (mandatory -- `dec_return_pc`'s own fix touches the ordinary,
+Harte-covered JSR path too) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly),
+SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes the JMP+JSR portion of
+Stage 9b.** See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog
+plan. Stage 9b continues with general ALU-with-EA-source and CMP2/CHK2 (the
+read-then-combine consumers) next.

@@ -654,6 +654,12 @@
     // in the sequence (the predecrement's own an_wr_en, wired independently
     // via dec_an_upd_en, can retire before the outer write phase runs).
     logic [31:0] memind_pea_wr_addr_r;
+    // 10-item backlog Stage 9b (plan.md): JSR ([bd,An],Xn,od) -- same
+    // outer-write shape as PEA (reuses memind_pea_wr_addr_r, the push
+    // address is identical: ex_cur_sp-4), but the VALUE pushed is the
+    // return PC, not the resolved EA -- the resolved EA becomes the jump
+    // target instead, once the outer write itself completes.
+    logic        memind_is_jsr_r;
     always_comb begin
         case (move16_beat_r)
             2'd0: move16_wdata_w = move16_data_r[0];
@@ -2238,13 +2244,14 @@
 
     logic [31:0] ex_an_new;   // updated An value for (An)+ / -(An)
     // for JSR/PEA indexed, A7 update uses ex_cur_sp (rd_b holds Xn, not A7).
-    // 10-item backlog Stage 9a (plan.md): PEA's own memind case is NOT
-    // marked ex_is_pea_idx (rd_a holds An, needed as ex_ea's own base for
-    // the memind FSM's inner-address capture -- ex_is_pea_idx would
-    // instead force ex_ea to ex_cur_sp-4, wrong for that purpose), but
-    // still needs the SAME ex_cur_sp-relative A7 update every other PEA
-    // form gets, so it's added here independently.
-    assign ex_an_new = (ex_is_jsr_idx || ex_is_pea_idx || (ex_is_pea && ex_is_memind))
+    // 10-item backlog Stage 9a/9b (plan.md): PEA/JSR's own memind case is
+    // NOT marked ex_is_pea_idx/ex_is_jsr_idx (rd_a holds An, needed as
+    // ex_ea's own base for the memind FSM's inner-address capture -- those
+    // flags would instead force ex_ea to ex_cur_sp-4, wrong for that
+    // purpose), but both still need the SAME ex_cur_sp-relative A7 update
+    // every other PEA/JSR form gets, so they're added here independently.
+    assign ex_an_new = (ex_is_jsr_idx || ex_is_pea_idx ||
+                        ((ex_is_pea || ex_is_jsr) && ex_is_memind))
                       ? (ex_cur_sp + ex_an_delta)
                       : (ex_an_base + ex_an_delta);
 
@@ -3081,17 +3088,22 @@
             memind_addr_only_r <= 1'b0;
             memind_is_pea_r    <= 1'b0;
             memind_pea_wr_addr_r <= 32'h0;
+            memind_is_jsr_r    <= 1'b0;
         end else if (!memind_start_r && !memind_inner_r && !memind_outer_r
                      && instr_ack && dec_is_memind) begin
             memind_start_r     <= 1'b1;
-            // memind only supports load ops, except PEA's own outer phase,
-            // which is a write of the resolved EA to the stack.
-            memind_is_rd_r     <= !dec_is_pea;
+            // memind only supports load ops, except PEA/JSR's own outer
+            // phase, which is a write (PEA: resolved EA; JSR: return PC).
+            memind_is_rd_r     <= !dec_is_pea && !dec_is_jsr;
             memind_siz_r       <= dec_siz;
             memind_dest_r      <= dec_dest_reg;
             memind_od_r        <= dec_memind_od;
-            memind_addr_only_r <= dec_is_lea;
+            // 10-item backlog Stage 9b (plan.md): JMP shares LEA's own
+            // address-only shape exactly -- it never dereferences its own
+            // final EA either, just becomes the new PC directly.
+            memind_addr_only_r <= dec_is_lea || dec_is_jmp;
             memind_is_pea_r    <= dec_is_pea;
+            memind_is_jsr_r    <= dec_is_jsr;
         end else if (memind_start_r) begin
             // EX holds: rd_a=An (ex_ea = inner addr), rd_b=Xn (for post-indexed outer)
             memind_start_r      <= 1'b0;
@@ -4442,8 +4454,19 @@
     // RTS: fires when stack-read completes (mem_ack=1).
     // RTR: fires after BOTH reads complete (rtr_phase_r=1 and mem_ack=1).
     // -----------------------------------------------------------------------
-    assign ex_jmp_taken = ex_valid && ex_is_jmp;
-    assign ex_jsr_taken = ex_valid && ex_is_jsr && mem_ack;
+    // 10-item backlog Stage 9b (plan.md): JMP's own genuine memory-indirect
+    // case shares LEA's own memind_addr_only_r shape (no outer bus access,
+    // completes the instant the inner pointer read's own ack arrives) --
+    // the ordinary (non-memind) case is unchanged, still firing the
+    // instant JMP enters EX.
+    assign ex_jmp_taken = ex_is_memind ? (ex_valid && ex_is_jmp && memind_inner_r && mem_ack && memind_addr_only_r)
+                                        : (ex_valid && ex_is_jmp);
+    // 10-item backlog Stage 9b (plan.md): JSR's own genuine memory-indirect
+    // case needs the OUTER write (the return-PC push) to complete before
+    // jumping, not the inner pointer read's own ack -- otherwise this
+    // would fire a whole bus cycle too early.
+    assign ex_jsr_taken = ex_is_memind ? (ex_valid && ex_is_jsr && memind_outer_r && mem_ack)
+                                        : (ex_valid && ex_is_jsr && mem_ack);
     assign ex_bsr_taken = ex_valid && ex_is_bsr && mem_ack;
     assign ex_rts_taken = ex_valid && ex_is_rts && mem_ack;
     assign ex_rtr_taken = ex_valid && ex_is_rtr && rtr_phase_r && mem_ack;
@@ -4457,6 +4480,17 @@
                          : ex_dbcc_taken                            ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
                          : ex_bsr_taken                             ? ex_bsr_target
                          : (ex_rts_taken || ex_rtr_taken || ex_rte_taken) ? mem_rdata
+                         // 10-item backlog Stage 9b (plan.md): JMP's own
+                         // genuine memory-indirect target -- same resolved-
+                         // address formula as LEA's own memind_addr_wr_data.
+                         : (ex_is_jmp && ex_is_memind)               ? (mem_rdata + memind_post_xn_r + memind_od_r)
+                         // JSR's own memind target -- fires later, once the
+                         // outer (return-PC push) write completes, so
+                         // memind_ptr_r is already latched (unlike JMP's
+                         // own case above, which fires during the inner
+                         // read's own ack and must use the combinational
+                         // mem_rdata directly).
+                         : (ex_is_jsr && ex_is_memind)               ? memind_outer_addr_w
                          :                                             ex_jmp_target;  // JMP or JSR
 
     // -----------------------------------------------------------------------
@@ -4589,7 +4623,7 @@
                        movep_run_r    ? movep_addr_r :
                        move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
                        memind_inner_r ? memind_inner_addr_r :
-                       memind_outer_r ? (memind_is_pea_r ? memind_pea_wr_addr_r : memind_outer_addr_w) :
+                       memind_outer_r ? ((memind_is_pea_r || memind_is_jsr_r) ? memind_pea_wr_addr_r : memind_outer_addr_w) :
                        mem_rmw_run_r  ? mem_rmw_addr_r :
                        move_mm_run_r  ? move_mm_dst_addr_r :
                        addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :

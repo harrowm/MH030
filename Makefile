@@ -590,11 +590,39 @@ buscmp-memind29: $(SIM)/cosim_grp winuae/tests/memind29_ref.log tests/memind29.h
 	    | grep "^BUS" > /tmp/_dut_memind29.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind29.log winuae/tests/memind29_ref.log \
 	    --dut-may-continue
+# memind30 (10-item backlog Stage 9b, plan.md): JMP's own genuine
+# memory-indirect EA -- shares LEA's own address-only shape (no outer bus
+# cycle, becomes the new PC directly once the inner pointer read lands).
+# Deliberately kept entirely within tools/m68ksim's own 4KB reference
+# window (see the test's own header comment) -- a JMP target landing on
+# an aliased address would be unsafe there, unlike memind13/16/17/21's
+# own large-magnitude-displacement technique.
+buscmp-memind30: $(SIM)/cosim_grp winuae/tests/memind30_ref.log tests/memind30.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind30.hex +grp=memind30 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind30.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind30.log winuae/tests/memind30_ref.log \
+	    --dut-may-continue
+# memind31 (10-item backlog Stage 9b, plan.md): JSR's own genuine
+# memory-indirect EA -- same outer-write shape as PEA's own memind arm,
+# but pushes the return PC (not the resolved EA) and jumps to the
+# resolved address instead. Found and fixed two real bugs while building
+# this: dec_return_pc was hardcoded decode_pc+4 (wrong for any full-format
+# JSR, indirect or not -- a pre-existing bug, not introduced this stage);
+# and a first attempt forgot to suppress dec_is_mem_wr for the memind
+# branch (mirroring PEA's own arm), which tripped ex_an_base's own
+# "(ex_is_mem_wr && !ex_is_idx) ? rd_b_data : rd_a_data" special case
+# (meant for JSR/PEA's own simple, non-indexed push forms), substituting
+# Xn for An in the memind FSM's own inner-address capture.
+buscmp-memind31: $(SIM)/cosim_grp winuae/tests/memind31_ref.log tests/memind31.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind31.hex +grp=memind31 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind31.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind31.log winuae/tests/memind31_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
-              buscmp-memind28 buscmp-memind29
+              buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

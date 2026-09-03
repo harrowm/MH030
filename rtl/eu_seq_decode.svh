@@ -2864,7 +2864,6 @@
                             // Push address uses ex_cur_sp (not rd_b) via ex_is_jsr_idx path.
                             dec_valid       = 1'b1;
                             dec_is_jsr      = 1'b1;
-                            dec_is_jsr_idx  = 1'b1;
                             dec_is_mem_wr   = 1'b1;
                             dec_src_reg     = {1'b1, f_reg};                    // An → rd_a
                             dec_dst_reg     = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
@@ -2874,14 +2873,59 @@
                             dec_is_idx      = 1'b1;
                             dec_xn_wl       = ext_data[11];
                             dec_xn_scale    = ext_data[10:9];
-                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
-                            dec_jump_offset = fi_is_full ? fi_bd
-                                            : {{24{ext_data[7]}}, ext_data[7:0]};
-                            dec_return_pc   = decode_pc + 32'd4;
                             dec_an_upd_en   = 1'b1;
                             dec_an_upd_reg  = 3'b111;
                             dec_an_delta    = 32'hFFFF_FFFC;
                             dec_needs_ext   = 1'b1;
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd. 10-item
+                            // backlog Stage 9b (plan.md): genuine memory-indirect
+                            // (fi_iis!=000) -- same outer-write-then-jump shape as
+                            // PEA's own memind arm, but the value pushed is the
+                            // return PC (already handled generically by the shared
+                            // ex_is_jsr||ex_is_bsr mem_wdata case) and the resolved
+                            // EA becomes the jump target instead of a pushed value.
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                // dec_is_mem_wr must be suppressed here too
+                                // (mirroring PEA's own memind arm) -- left
+                                // at 1 (its shared-setup default above), it
+                                // trips ex_an_base's own "(ex_is_mem_wr &&
+                                // !ex_is_idx) ? rd_b_data : rd_a_data" special
+                                // case (meant for JSR/PEA's own SIMPLE,
+                                // non-indexed push-address forms), which
+                                // would substitute Xn for An in the memind
+                                // FSM's own inner-address capture -- found
+                                // via a direct cosim mismatch (the inner
+                                // read landed at An_value's own coincidental
+                                // stand-in, Xn+bd, not An+bd) before this
+                                // fix.
+                                dec_is_mem_wr       = 1'b0;
+                                dec_is_memind       = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = fi_bd;
+                            end else begin
+                                dec_is_jsr_idx  = 1'b1;
+                                dec_jump_offset = fi_is_full ? fi_bd
+                                                : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
+                            // 10-item backlog Stage 9b (plan.md): dec_return_pc was
+                            // hardcoded decode_pc+4 unconditionally here -- correct
+                            // for brief (2 words) but silently WRONG for the
+                            // full-format non-indirect case too (found while adding
+                            // memind support and confirmed directly against
+                            // Musashi's own reference: a genuine, previously-
+                            // undiscovered pre-existing bug, not something this
+                            // stage introduced -- likely never exercised since full-
+                            // format JSR (d8,An,Xn) is a 68020+-only encoding outside
+                            // Harte's own 68000-captured corpus). Now sized from the
+                            // instruction's own actual word count: opcode+ext(2) +
+                            // base displacement (0/1/2 words) + outer displacement
+                            // (0/1/2 words, indirect only).
+                            dec_return_pc   = decode_pc + 32'd4
+                                            + (fi_is_full ? {29'd0, eaf_disp_words(fi_bdsz)} : 32'd0) * 32'd2
+                                            + ((fi_is_full && fi_iis != 3'b000)
+                                               ? {29'd0, eaf_disp_words(fi_iis[1:0])} : 32'd0) * 32'd2;
                         end
                     end else if (!f_dir && f_dn == 3'b111 && f_ss == 2'b11) begin
                         // JMP ea: 0100 1110 11 mmm rrr — PC ← ea (no stack change)
@@ -2930,10 +2974,23 @@
                             dec_is_idx      = 1'b1;
                             dec_xn_wl       = ext_data[11];
                             dec_xn_scale    = ext_data[10:9];
-                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
-                            dec_jump_offset = fi_is_full ? fi_bd
-                                            : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_needs_ext   = 1'b1;
+                            // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd. 10-item
+                            // backlog Stage 9b (plan.md): genuine memory-indirect
+                            // (fi_iis!=000) -- JMP shares LEA's own address-only
+                            // memind shape exactly (never dereferences its own final
+                            // EA, becomes the new PC directly once the inner pointer
+                            // read lands -- see eu_seq_execute.svh's ex_jmp_taken).
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                dec_is_memind       = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = fi_bd;
+                            end else begin
+                                dec_jump_offset = fi_is_full ? fi_bd
+                                                : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                         end
                     // ── MOVE.W EA, SR/CCR (memory src) and MOVE.W SR/CCR, (EA) ──
                     end else if (!f_dir && f_ss == 2'b11 &&
