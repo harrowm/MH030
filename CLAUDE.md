@@ -513,7 +513,28 @@ m68ksim`'s own 4KB reference window after discovering a jump target landing outs
 it silently aliases onto whatever else lives at the wrapped address. Full Harte
 sweep bit-identical to baseline (mandatory — the `dec_return_pc` fix touches the
 ordinary, Harte-covered JSR path too). See `plan.md §Phase 237` for the full
-writeup. Stage 9b continues with general ALU-with-EA-source and CMP2/CHK2 next.
+writeup. **Stage 9b (Phase 238), part 2 -- closes Stage 9b, investigated and
+deferred**: general ALU-with-EA-source (ADD/SUB/AND/OR/CMP/DIVU/DIVS/MULU/MULS/ADDA/
+CMPA `<ea>,Dn`) and CMP2/CHK2. A fork survey found ALU-EA's own decode side is
+genuinely tractable (10+ separate `f_mode==110` arms, but all structurally identical
+to LEA/PEA/JMP/JSR's own pattern — "same small edit, repeated ~10 times"). The real
+risk is entirely on the execute side: all ~10 families (plus CHK, dynamic bit-ops,
+MOVE mem-to-mem indexed-dst) share ONE deferred-register-swap gate, `dyn_bit_get_Dn`
+(`eu_seq_execute.svh`) — already delicately tuned across 5 existing consumer
+families (its own code comments document a hand-tuned CMP2/CHK2 exclusion).
+Extending it to also fire on the memind FSM's own outer-read completion risks a
+regression across all five existing families at once, a fundamentally different risk
+shape than LEA/PEA/JMP/JSR's own additions (none of which touched shared,
+multi-consumer execute machinery). CMP2/CHK2 independently confirmed as its own hard
+case: it already has a dedicated two-read FSM (`cmp2_run_r`) that would need the
+memind FSM's own inner phase prepended before its existing sequence starts — the
+same class of two-FSM merge Stage 8 deferred for MOVEM. **Deferred both, with a
+precise proposal documented in `plan.md §Phase 238`**, matching this project's own
+established precedent (Phase 158 Stage 8; Phase 213/242's CAS attempt; Stage 8's own
+MOVEM half) for genuinely-harder-than-expected work found via real investigation, not
+guessed at. No RTL/testbench changed this phase. **Closes Stage 9b in full** (LEA+PEA
+Phase 236, JMP+JSR Phase 237, ALU-EA+CMP2/CHK2 deferred Phase 238). Stage 9c (TAS/Scc,
+the plan's own hardest tier, deliberately deferred once before at Phase 116) is next.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
@@ -521,8 +542,8 @@ ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only th
 split has shifted slightly across later phases as harness gaps closed). **In progress:
 10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-7 of 10 done
 (Phase 227-233); Stage 8 partially done (Phase 234); Stage 9 survey done (Phase 235),
-Stage 9a done (Phase 236, LEA+PEA); Stage 9b part 1 done (Phase 237, JMP+JSR); Stage 9b
-continues with ALU-EA/CMP2/CHK2 next.**
+Stage 9a done (Phase 236, LEA+PEA); Stage 9b done (Phase 237 JMP+JSR, Phase 238
+ALU-EA/CMP2/CHK2 deferred); Stage 9c (TAS/Scc) is next.**
 
 ## Verification Commands
 

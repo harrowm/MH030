@@ -7045,3 +7045,75 @@ SKIP 281221, TIMEOUT 0, bit-identical to baseline. **Closes the JMP+JSR portion 
 Stage 9b.** See `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog
 plan. Stage 9b continues with general ALU-with-EA-source and CMP2/CHK2 (the
 read-then-combine consumers) next.
+
+## Phase 238 (10-item backlog, Stage 9b of 10, part 2 -- general ALU-with-EA-source
+and CMP2/CHK2: investigated, deferred with a precise proposal): closing Stage 9b
+
+Investigated both remaining Stage 9b families before implementing, per this project's
+own established discipline for exactly this situation (matching Stage 7's own CAS
+deferral and Stage 8's own MOVEM half).
+
+**General ALU-with-EA-source (ADD/SUB/AND/OR/CMP/DIVU/DIVS/MULU/MULS/ADDA/CMPA
+`<ea>,Dn`)**: a fork survey found this is genuinely **not one shared decode site** --
+at least 10 separate `f_mode==110` arms across `eu_seq_decode.svh` (OR, DIVU/DIVS,
+SUB, ADDA/CMPA An,Xn and PC,Xn variants, CMP, AND, MULU/MULS, etc.), one per
+instruction/group. Each, however, follows the EXACT SAME structural template LEA/
+PEA/JMP/JSR's own arms already use (`dec_src_reg={1,f_reg}`→rd_a, `dec_dst_reg=Xn`
+→rd_b, `dec_is_idx`, `dec_ea_offset=fi_bd`) and none check `fi_iis` today -- the
+decode-side work is genuinely "the same small edit, repeated ~10 times," moderate but
+mechanical risk, not structurally hard.
+
+**The real risk is concentrated entirely on the execute side.** All ~10 of these
+families (plus CHK, dynamic bit-ops, and MOVE mem-to-mem indexed-dst) already share
+ONE deferred-register-swap mechanism, `dyn_bit_get_Dn` (`eu_seq_execute.svh`): the EA
+read dispatches normally with Xn on `rd_b` (needed for the EA computation itself),
+then the instant that read's own `mem_ack` fires, `dyn_bit_get_Dn` swaps `rd_b_sel`
+to Dn so the ALU op can consume the read value combinationally that same cycle. This
+is ALREADY a delicately-tuned, multi-family shared gate -- its own existing code
+comments document a hand-tuned exclusion for CMP2/CHK2's own second-read timing, a
+sign of how carefully its trigger condition has already had to be threaded through
+multiple consumers' own differing needs. Genuine indirect support needs this SAME
+gate to ALSO fire on the memind FSM's own OUTER-read completion (a structurally
+different bus event than the normal single-read `mem_ack` it's tuned for today) --
+extending it risks a regression across ALL five of its EXISTING, Harte/cosim-verified
+consumer families at once, not just adding a sixth. This is a fundamentally different
+risk shape than LEA/PEA/JMP/JSR's own additions, none of which touched any
+already-shared, already-multi-consumer execute-side mechanism.
+
+**CMP2/CHK2** independently confirmed as its own separate hard case: it already has a
+dedicated two-read FSM (`cmp2_run_r` in `eu_seq_execute.svh`) that reads a lower bound
+via the ordinary dispatch path, then automatically issues a second read at `EA+size`
+for the upper bound. Genuine indirect support would need the memind FSM's own inner
+(pointer-resolution) phase PREPENDED before this existing two-read sequence even
+starts, using the resolved address as `cmp2_run_r`'s own starting EA -- a genuine
+merge of two independently-complex, already-proven multi-cycle FSMs. This is the same
+class of integration Stage 8 found and deferred for MOVEM's own `ex_is_memind` merge,
+not a bolt-on.
+
+**Decision: both deferred, not implemented this stage.** The four families actually
+completed this stage (LEA, PEA, JMP, JSR, Phases 236-237) share a genuine common
+property none of the remaining two do: each is either address-only (no dereference at
+all) or a single self-contained read/write the memind FSM's own existing inner/outer
+phases already shape-match exactly, with zero interaction with any OTHER family's own
+shared mechanism. ALU-EA and CMP2/CHK2 both require touching machinery that 5+ other,
+already-working, already-verified instruction families also depend on -- the
+"investigated, found genuinely more complex than expected, deferred with a precise
+proposal" outcome (rather than a rushed attempt) matches this project's own repeated,
+established precedent (Phase 158 Stage 8; Phase 213/242's CAS attempt; Stage 8's own
+MOVEM half) far better than pushing through under time pressure. **Correct-shape
+proposal for a future dedicated stage**: (1) for ALU-EA, extend `dyn_bit_get_Dn`'s own
+trigger with a new OR-term keyed to the memind FSM's outer-read completion specifically
+(not a generic "any mem_ack"), verified with a NEW dedicated test exercising EVERY
+existing `dyn_bit_get_Dn` consumer family (CHK, dynamic bit-ops, MOVE indexed-dst,
+CMP2/CHK2, and the new ALU-EA case) in the same session to catch any cross-family
+regression directly, not just via the existing per-family tests; (2) for CMP2/CHK2,
+thread `dec_is_memind`'s own dispatch through `cmp2_run_r`'s own start condition,
+re-deriving `cmp2_addr2_r` from the memind-resolved address instead of `ex_ea`
+directly once the inner phase completes.
+
+Results: no RTL or testbench changed this stage -- `git status` clean beyond
+documentation. **Closes Stage 9b in full** (LEA+PEA, Phase 236; JMP+JSR, Phase 237;
+ALU-EA+CMP2/CHK2 investigated and deferred, this phase). See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 9c
+(TAS/Scc's own bespoke RMW FSM extension, the plan's own explicitly-flagged hardest
+tier, already deliberately deferred once before at Phase 116) is next.
