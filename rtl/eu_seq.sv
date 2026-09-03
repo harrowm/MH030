@@ -122,6 +122,15 @@ module eu_seq (
     output logic        seq_busy,     // pipeline stall
     output logic        div_trap,     // divide-by-zero trap
     output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
+    output logic        eu_need_ext,  // 10-item backlog Stage 5 (plan.md): mirrors
+                                       // need_ext (eu_seq_execute.svh) -- decode
+                                       // wants an extension word for the CURRENT
+                                       // opcode and it isn't queued yet. Fed back
+                                       // to the IFU so a speculative-prefetch BERR
+                                       // can stay pending until decode genuinely
+                                       // needs the faulted word, instead of firing
+                                       // the instant the speculative fetch itself
+                                       // fails.
 
     // ── Interrupt dispatch-race handshake (with m68030_exc, via m68030_eu) ──
     input  logic        int_pending,  // exc's combinational int_pending
@@ -593,6 +602,11 @@ module eu_seq (
     // -----------------------------------------------------------------------
 `include "eu_seq_decode.svh"
 `include "eu_seq_execute.svh"
+
+    // 10-item backlog Stage 5 (plan.md): need_ext itself is declared inside
+    // eu_seq_execute.svh, only in scope from this point on -- assign the
+    // output port here rather than at the port declaration.
+    assign eu_need_ext = need_ext;
 
 endmodule
 

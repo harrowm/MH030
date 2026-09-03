@@ -122,6 +122,8 @@ module stall_hazard_tb;
         .pc_wr_en     (ct_pc_wr_en),
         .pc_wr_data   (ct_pc_wr_data),
         .drain        (ct_drain),
+        .need_ext     (1'b0),  // 10-item backlog Stage 5 (plan.md): ct_ifu_berr
+                                // is hardwired 0 in this file, so this is inert
         .instr_word   (ct_ifu_instr_word),
         .ext_data     (ct_ifu_ext_data),
         .q3_word      (ct_ifu_q3_word),

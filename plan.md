@@ -6558,3 +6558,69 @@ needed. **Closes Stage 4** (reproduced, root-caused, and fixed -- a stronger out
 than the plan's own "investigated, not reproduced" fallback). See
 `~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 5
 (instruction-fetch BERR pending-until-use) is next.
+
+## Phase 231 (10-item backlog, Stage 5 of 10): instruction-fetch BERR should defer
+until decode actually needs the data
+
+Fixed the gap the deferred-items closure plan's own Stage 3 (Phase 158's own
+investigation) had left open, confirmed-but-unfixed: MC68030UM p.6-19 distinguishes
+"faults immediately (data) or pending-on-use (instruction)", but `m68030_ifu.sv`'s own
+`bus_err` used to dispatch the instant a speculative prefetch failed, even while
+decode was still several words behind and might never reach that address at all. A
+prior attempt (documented in the same comment block) gated `bus_err` on
+`decode_pc_r >= bus_err_addr_r` alone -- correct for pure linear-readahead
+speculation, but it broke `tb/cache_tb.sv`'s own I-5 (BERR-mid-linefill): when the
+faulted word is needed as the CURRENT, not-yet-dispatched instruction's own extension
+word, `decode_pc_r` never advances to reach it at all, since dispatch itself (and
+therefore any `decode_pc_r` advance) requires exactly that missing data -- it sits
+pinned at the instruction's own start address forever, so the fault would never
+dispatch either.
+
+The real fix needed cross-module visibility into whether decode is genuinely
+stalled needing more prefetch data than is currently queued -- exactly what
+`eu_seq_execute.svh`'s own `need_ext = dec_needs_ext && !ext_valid` already computes
+(`dec_needs_ext`: the CURRENT opcode's own combinational decode says it needs at
+least one extension word; `ext_valid` here is `m68030_seq.sv`'s own `eu_ext_valid`
+mux, the genuinely ext_count-aware "is enough queued" signal, not the IFU's generic
+q_cnt>=3 one) -- but it was purely internal to `eu_seq.sv`, never exposed as a port.
+
+**Threaded a new `eu_need_ext` signal end to end**: `eu_seq.sv` gets a new output
+port (`assign eu_need_ext = need_ext;`, placed after the `` `include
+"eu_seq_execute.svh" `` line since `need_ext` itself is only in scope from that point
+on) → `m68030_eu.sv` passes it straight through → `m68030_top.sv` wires it into a new
+`m68030_ifu.sv` input port, `need_ext`. `m68030_ifu.sv`'s own `bus_err` assign
+changed from a plain `bus_err_r` passthrough to
+`bus_err_r && (decode_pc_r >= bus_err_addr_r || need_ext)` -- `bus_err_r`/
+`bus_err_addr_r` themselves still latch unconditionally the instant `ifu_berr`
+pulses (capturing which address faulted, unchanged), so once either condition later
+becomes true the fault pops visible combinationally with no new state machine
+needed. Since fetches always target the next sequential unfetched word, a faulted
+fetch that hasn't yet been reached by condition (a) is exactly the word `need_ext`
+would be waiting on once decode gets there, so no extra address comparison against
+`need_ext` was needed beyond the plain OR.
+
+Three testbenches instantiate `m68030_ifu`/`m68030_eu` directly outside
+`m68030_top.sv`: `tb/pipeline_tb.sv` and `tb/stall_hazard_tb.sv` both hardwire their
+own `ifu_berr`/`ct_ifu_berr` to 0 and leave `bus_err` unconnected, so `need_ext` is
+inert there -- tied to `1'b0`. `tb/ifu_tb.sv` (the file with the dedicated IFU-12
+BERR-pending test) got a real, testbench-controllable `need_ext` register instead.
+
+**Verification**: rewrote `tb/ifu_tb.sv`'s own IFU-12a to assert the FIXED behavior
+(fault now stays pending while decode is 2 words behind and doesn't need it, instead
+of the old "confirmed gap" documentation) and added a new IFU-12a2 proving the other
+half: once `need_ext` asserts (decode becoming genuinely blocked on that exact word),
+the fault dispatches immediately. IFU-12b (an early flush suppressing the fault
+entirely) was already correct and needed no change. `tb/cache_tb.sv`'s own I-5
+(the system-level case that broke the earlier attempt, where the fault IS the
+current instruction's own needed extension word) stays green, since `need_ext` is
+asserted the whole time decode sits blocked on it there.
+
+Results: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14, full
+124-suite Harte sweep (mandatory -- touches shared IFU/decode dispatch logic, high
+blast radius) -- PASS 702142, FAIL 2 (same documented ASL.b anomaly), SKIP 281221,
+TIMEOUT 0, bit-identical to baseline. **Closes Stage 5.** See
+`~/.claude/plans/elegant-gliding-fog.md` for the full 10-item backlog plan. Stage 6
+(BERR-during-fill's harder sub-case: a beat at/before the requested word fails,
+needing a genuine retry) is next -- explicitly flagged in the plan as the riskiest
+RTL stage, sitting directly on top of the heavily-hardened BERR-abort machinery from
+Phases 108-114.

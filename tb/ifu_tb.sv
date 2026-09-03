@@ -19,6 +19,7 @@
 //   IFU-9:  Bus error: bus_err asserted, fetching stops
 //   IFU-10: addr_err when decode_pc is odd
 //   IFU-11: fc_out: 3'b110 in supervisor mode, 3'b010 in user mode
+//   IFU-12: instruction-fetch BERR pending-until-use (10-item backlog Stage 5)
 
 module ifu_tb;
 
@@ -35,6 +36,7 @@ module ifu_tb;
     logic        pc_wr_en   = 0;
     logic [31:0] pc_wr_data = 0;
     logic [2:0]  drain      = 0;
+    logic        need_ext   = 0;  // 10-item backlog Stage 5 (plan.md)
 
     logic [15:0] instr_word;
     logic [31:0] ext_data;
@@ -67,6 +69,7 @@ module ifu_tb;
         .pc_wr_en    (pc_wr_en),
         .pc_wr_data  (pc_wr_data),
         .drain       (drain),
+        .need_ext    (need_ext),
         .instr_word  (instr_word),
         .ext_data    (ext_data),
         .q3_word     (q3_word),
@@ -355,53 +358,67 @@ module ifu_tb;
         supervisor = 1'b1;
 
         // ================================================================
-        // IFU-12 (deferred-items closure plan, Stage 3): investigated
-        // whether instruction-fetch BERR stays pending until the faulted
-        // word is actually about to be consumed by decode, rather than
-        // firing the instant the speculative prefetch itself fails --
-        // MC68030UM p.6-19's own distinction ("faults immediately (data)
-        // or pending-on-use (instruction)"), flagged but never
-        // independently traced end to end (Phase 158 Stage 8's own
-        // "lower-confidence... not verified this stage" note).
+        // IFU-12 (10-item backlog plan, Stage 5, elegant-gliding-fog.md;
+        // originally investigated by the deferred-items closure plan's
+        // own Stage 3): instruction-fetch BERR should stay pending until
+        // the faulted word is actually about to be consumed by decode,
+        // rather than firing the instant the speculative prefetch itself
+        // fails -- MC68030UM p.6-19's own distinction ("faults immediately
+        // (data) or pending-on-use (instruction)").
         //
-        // CONFIRMED REAL GAP, NOT FIXED THIS STAGE: a first attempt gated
-        // `bus_err` on decode_pc_r having caught up to the faulted
-        // address -- correct for pure linear-readahead speculation (IFU-12a
-        // below), but it broke tb/cache_tb.sv's own I-5: when the faulted
-        // word is needed as the CURRENT (not yet dispatched) instruction's
-        // own extension word, decode_pc_r never advances to reach it at
-        // all (dispatch, and therefore any decode_pc_r advance, requires
-        // exactly that missing data). A correct general fix needs
-        // cross-module visibility into whether decode is genuinely
-        // stalled needing more prefetch data (eu_seq.sv's own need_ext),
-        // not available locally in m68030_ifu.sv today -- out of scope for
-        // this investigation stage. Reverted to the original unconditional
-        // dispatch. IFU-12a documents the confirmed-but-unfixed gap
-        // directly (asserts today's actual behavior, matching this
-        // project's own Phase 106 precedent, so it stays visible rather
-        // than silently accepted); IFU-12b documents the separate,
-        // already-correctly-working half of the story (a flush arriving
-        // before the underlying fetch even completes fully suppresses the
-        // fault, no dispatch at all).
+        // FIXED THIS STAGE. The earlier Stage 3 attempt gated `bus_err` on
+        // decode_pc_r having caught up to the faulted address alone --
+        // correct for pure linear-readahead speculation (IFU-12a below),
+        // but broke tb/cache_tb.sv's own I-5: when the faulted word is
+        // needed as the CURRENT (not yet dispatched) instruction's own
+        // extension word, decode_pc_r never advances to reach it at all
+        // (dispatch itself requires exactly that missing data). The real
+        // fix needed cross-module visibility into whether decode is
+        // genuinely stalled needing more prefetch data than is currently
+        // queued -- threaded in this stage as a new `need_ext` input,
+        // mirroring eu_seq.sv's own combinational need_ext signal
+        // (dec_needs_ext && !ext_valid) via m68030_eu.sv/m68030_top.sv.
+        // `bus_err = bus_err_r && (decode_pc_r >= bus_err_addr_r ||
+        // need_ext)` -- IFU-12a proves the pure-speculation case now stays
+        // pending until need_ext is asserted; IFU-12b (a flush arriving
+        // before the underlying fetch even completes) is unaffected,
+        // unchanged since Stage 3; tb/cache_tb.sv's own I-5 (the case that
+        // broke the earlier attempt) is the system-level proof that the
+        // "decode already needs this word" path still dispatches
+        // immediately, since need_ext is asserted the whole time decode
+        // sits blocked on it.
         // ================================================================
-        $display("--- IFU-12: instruction-fetch BERR pending-until-use (confirmed gap, not fixed) ---");
+        $display("--- IFU-12: instruction-fetch BERR pending-until-use ---");
 
         // IFU-12a: a first fetch (0x5000) succeeds, immediately triggering
         // the IFU's own auto-refetch (q_cnt<=2) for the NEXT longword
         // (0x5004), which BERRs -- decode_pc stays at 0x5000 throughout (no
-        // drain issued), 2 whole words behind the faulted address. Real
-        // 68030 silicon would hold this pending; this RTL dispatches it
-        // immediately regardless.
+        // drain issued), 2 whole words behind the faulted address, and
+        // nothing here ever asserts need_ext (a plain, unrelated
+        // instruction at 0x5000 that doesn't need this word yet). Real
+        // 68030 silicon holds this pending; confirms this RTL now does too.
+        need_ext = 1'b0;
         stub_clear();
         stub_add(32'h0000_5000, 32'h1111_2222, 1'b0);
         stub_add(32'h0000_5004, 32'h0, 1'b1);
         write_pc(32'h0000_5000);
         repeat(2*BIU_LAT+6) @(posedge clk_4x); #1;
-        check("IFU-12a: CONFIRMED GAP -- fault dispatches even though decode is still 2 words behind",
-              bus_err);
+        check("IFU-12a: fault stays PENDING -- decode is still 2 words behind and doesn't need it yet",
+              !bus_err);
         check32("IFU-12a: decode_pc still at 0x5000 (nothing drained, not actually needed yet)",
                 decode_pc, 32'h0000_5000);
-        check32("IFU-12a: bus_err_addr=0x5004", bus_err_addr, 32'h0000_5004);
+
+        // IFU-12a2: decode later becomes genuinely blocked needing the
+        // SAME faulted word (need_ext asserts, mirroring tb/cache_tb.sv's
+        // own I-5 shape at the unit level) -- the fault must now dispatch,
+        // proving the fix's own "until needed" half, not just "never
+        // dispatches."
+        need_ext = 1'b1;
+        @(posedge clk_4x); #1;
+        check("IFU-12a2: fault DISPATCHES once decode genuinely needs the faulted word (need_ext=1)",
+              bus_err);
+        check32("IFU-12a2: bus_err_addr=0x5004", bus_err_addr, 32'h0000_5004);
+        need_ext = 1'b0;
 
         // IFU-12b: same shape, but the flush (an already-resolved branch)
         // arrives BEFORE the underlying fetch even completes -- the stub's

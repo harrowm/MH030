@@ -381,15 +381,33 @@ Fixed `tb/mmu_xlate_tb.sv`'s own model this stage (mirroring `cache_tb.sv`'s alr
 proven pattern); the other 7 files' shared exposure is flagged as a real, dormant,
 documented follow-up, not fixed here (disproportionate scope for one investigation
 stage). Testbench-only, `git diff --stat rtl/` empty, no Harte re-run needed. See
-`plan.md §Phase 230` for the full writeup. Stage 5 (instruction-fetch BERR
-pending-until-use) is next.
+`plan.md §Phase 230` for the full writeup. **Stage 5 (Phase 231)**: instruction-fetch
+BERR should defer until decode actually needs the data. The earlier deferred-items
+closure plan's own Stage 3 had confirmed this gap (MC68030UM p.6-19's "faults
+immediately (data) or pending-on-use (instruction)" distinction) but left it unfixed
+— a first attempt gating `bus_err` on `decode_pc_r >= bus_err_addr_r` alone broke
+`tb/cache_tb.sv`'s own I-5, since `decode_pc_r` never advances to reach a faulted
+word that's needed as the CURRENT instruction's own extension word (dispatch itself
+requires that missing data). Fixed by threading a new `eu_need_ext` signal
+end to end — `eu_seq.sv` (mirroring its own already-existing internal
+`need_ext = dec_needs_ext && !ext_valid`) → `m68030_eu.sv` → `m68030_top.sv` → a new
+`need_ext` input on `m68030_ifu.sv` — gating `bus_err` on
+`decode_pc_r >= bus_err_addr_r || need_ext`. `bus_err_r` itself still latches
+unconditionally at fault time; only the OUTPUT is gated, so either condition
+becoming true later pops the fault visible with no new state machine. `tb/ifu_tb.sv`'s
+own IFU-12a now asserts the fixed "stays pending" behavior directly, plus a new
+IFU-12a2 proves dispatch once `need_ext` asserts; `tb/cache_tb.sv`'s own I-5 (the case
+that broke the earlier attempt) stays green. Full Harte sweep bit-identical to
+baseline. See `plan.md §Phase 231` for the full writeup. Stage 6 (BERR-during-fill's
+harder sub-case, a genuine retry) is next — the riskiest RTL stage in the plan.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 14/14,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). **In progress:
-10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-4 of 10 done
-(Phase 227-230); Stage 5 (instruction-fetch BERR pending-until-use) is next.**
+10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), Stages 1-5 of 10 done
+(Phase 227-231); Stage 6 (BERR-during-fill's harder sub-case, a genuine retry) is
+next.**
 
 ## Verification Commands
 

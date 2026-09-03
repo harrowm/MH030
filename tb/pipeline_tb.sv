@@ -125,6 +125,8 @@ module pipeline_tb;
         .pc_wr_en     (pc_wr_en),
         .pc_wr_data   (pc_wr_data),
         .drain        (drain),
+        .need_ext     (1'b0),  // 10-item backlog Stage 5 (plan.md): ifu_berr is
+                                // hardwired 0 in this file, so this is inert
         .instr_word   (ifu_instr_word),
         .ext_data     (ifu_ext_data),
         .q3_word      (ifu_q3_word),

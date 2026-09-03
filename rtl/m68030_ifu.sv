@@ -45,6 +45,13 @@ module m68030_ifu (
     //   4 = opcode + 3 ext  5 = opcode + 4 ext  6 = opcode + 5 ext (Phase 145)
     input  logic [2:0]  drain,
 
+    // 10-item backlog Stage 5 (plan.md): decode is genuinely blocked on an
+    // extension word for the CURRENT opcode that isn't queued yet (mirrors
+    // eu_seq.sv's own need_ext) -- lets a speculative-prefetch BERR stay
+    // pending until decode actually needs the faulted word. See bus_err's
+    // own assign below for the full derivation.
+    input  logic        need_ext,
+
     // Instruction stream outputs (combinational, valid the cycle after fill)
     output logic [15:0] instr_word,   // q[0] — opcode
     output logic [31:0] ext_data,     // {q[1], q[2]} — two extension words
@@ -129,37 +136,29 @@ module m68030_ifu (
     assign ifu_addr     = fetch_addr_r;
     assign ifu_req      = fetch_pend_r;
     assign fc_out       = supervisor ? 3'b110 : 3'b010;
-    // Deferred-items closure plan Stage 3 (plan.md): MC68030UM p.6-19
-    // distinguishes "faults immediately (data) or pending-on-use
-    // (instruction)" -- confirmed, via a dedicated tb/ifu_tb.sv test
-    // (IFU-12) plus a direct trace against tb/cache_tb.sv's own I-5, that
-    // this RTL does NOT implement the instruction-fetch deferral: bus_err
-    // dispatches the instant the underlying speculative prefetch fails,
-    // even while decode is still several words behind and would never
-    // have reached that address (e.g. a branch not yet taken). A first
-    // attempt gated this output on `decode_pc_r >= bus_err_addr_r`
-    // (correct for pure linear-readahead speculation, and this DOES pass
-    // that case -- see IFU-12's own tb/ifu_tb.sv coverage) but caused a
-    // real regression in tb/cache_tb.sv's own I-5: when the faulted word
-    // is itself needed as the CURRENT (not-yet-dispatched) instruction's
-    // own extension word, decode_pc_r never advances to reach it at all
-    // -- it sits pinned at the START of that instruction indefinitely,
-    // since dispatch (and therefore decode_pc_r's own advance) requires
-    // exactly the missing data to ever happen. A correct general fix
-    // needs cross-module visibility into whether decode is genuinely
-    // stalled needing more prefetch data than is currently queued (e.g.
-    // eu_seq.sv's own need_ext), not available locally in this file today
-    // -- threading that signal back into the IFU is a real, substantial
-    // change to the queue/decode interface, out of scope for this
-    // investigation stage. Reverted to the original unconditional
-    // dispatch (confirmed correct for the "decode already needs this
-    // word" case, which is the common one) rather than ship a fix that's
-    // only correct for pure speculative readahead. See tb/ifu_tb.sv's own
-    // IFU-12 for a permanent regression-detector of the confirmed-but-
-    // unfixed gap, matching this project's own established "assert
-    // today's actual behavior so make test stays green while the gap
-    // stays visible" precedent (Phase 106).
-    assign bus_err      = bus_err_r;
+    // 10-item backlog Stage 5 (plan.md), fixing the gap the deferred-items
+    // closure plan's own Stage 3 investigated and left open: MC68030UM
+    // p.6-19 distinguishes "faults immediately (data) or pending-on-use
+    // (instruction)". bus_err_r itself still latches unconditionally the
+    // instant ifu_berr pulses (captures WHICH address faulted for later
+    // use, same as before) -- only this OUTPUT assign is gated, so once
+    // either condition below later becomes true the fault pops visible
+    // combinationally with no extra state needed. Two cases, both
+    // required (confirmed via tb/ifu_tb.sv's own IFU-12a/IFU-12b and
+    // tb/cache_tb.sv's own I-5):
+    //   (a) decode_pc_r >= bus_err_addr_r -- pure linear-readahead
+    //       speculation that decode has now caught up to (IFU-12a).
+    //   (b) need_ext -- decode is genuinely blocked on an extension word
+    //       for the CURRENT (not-yet-dispatched) opcode; decode_pc_r
+    //       never advances to reach the faulted address in this case
+    //       (dispatch itself requires the missing data), so (a) alone
+    //       can never fire -- this is tb/cache_tb.sv's own I-5 case,
+    //       where the fault genuinely needs to dispatch immediately.
+    // Since fetches always target the next sequential unfetched word,
+    // a faulted fetch that hasn't yet been reached by (a) is exactly the
+    // word need_ext would be waiting on once decode gets there, so no
+    // address comparison against need_ext is needed beyond the OR itself.
+    assign bus_err      = bus_err_r && (decode_pc_r >= bus_err_addr_r || need_ext);
     assign bus_err_addr = bus_err_addr_r;
     assign addr_err     = decode_pc_r[0];
 

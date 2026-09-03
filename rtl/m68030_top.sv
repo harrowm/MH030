@@ -172,6 +172,7 @@ module m68030_top #(
     logic [2:0]  eu_ipl_mask;
     logic        eu_div_trap;
     logic        eu_chk_trap;
+    logic        eu_need_ext_w;  // 10-item backlog Stage 5 (plan.md)
     logic        eu_trap_req_w;
     logic [3:0]  eu_trap_num_w;
     logic        eu_trapv_req_w;
@@ -374,6 +375,7 @@ module m68030_top #(
         .pc_wr_en     (pc_wr_en_common),
         .pc_wr_data   (pc_wr_data_common),
         .drain        (seq_drain),
+        .need_ext     (eu_need_ext_w),
         .instr_word   (ifu_instr_word),
         .ext_data     (ifu_ext_data),
         .q3_word      (ifu_q3_word),
@@ -524,6 +526,7 @@ module m68030_top #(
         .exc_active    (exc_active),
         .div_trap      (eu_div_trap),
         .chk_trap      (eu_chk_trap),
+        .eu_need_ext   (eu_need_ext_w),
         .eu_trap_req   (eu_trap_req_w),
         .eu_trap_num   (eu_trap_num_w),
         .eu_trapv_req  (eu_trapv_req_w),
