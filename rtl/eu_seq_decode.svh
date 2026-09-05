@@ -983,12 +983,72 @@
                                 dec_is_idx         = 1'b1;
                                 dec_xn_wl          = ext_data[11];
                                 dec_xn_scale       = ext_data[10:9];
-                                dec_ea_offset      = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
-                                                   ? {{16{q3_word[15]}}, q3_word}
-                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_is_dyn_bit_idx = 1'b1;
                                 dec_dyn_bit_reg    = cmp2_ext_w[14:12];  // Rn → rd_b after swap
                                 dec_dyn_bit_is_an  = cmp2_ext_w[15];
+                                if (fi_is_full && fi_iis != 3'b000) begin
+                                    // Genuine memory-indirect EA: CMP2/CHK2's own
+                                    // extra leading cmp2_ext_w word (Rn+flag, at
+                                    // what would normally be bd's own first slot)
+                                    // shifts every subsequent word one q-slot later
+                                    // than fi_bd/fi_od's own generic formulas assume
+                                    // -- the existing non-indirect branch just below
+                                    // (fi_iis==0) already special-cases this for bd
+                                    // alone via q3_word; this extends the same
+                                    // one-slot shift to bd AND od together for the
+                                    // genuine-indirect case, following the exact
+                                    // precedent MOVE #imm,(d8,An,Xn)'s own indexed
+                                    // arm already established for the analogous
+                                    // "extra leading word" bd shift above (see its
+                                    // own comment for the derivation) -- extended
+                                    // here to od, which no prior family needed.
+                                    dec_is_mem_rd      = 1'b0;
+                                    dec_is_memind      = 1'b1;
+                                    dec_memind_is_post = fi_iis[2];
+                                    dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                    dec_memind_rd_siz  = dec_siz;
+                                    dec_ea_offset      = (fi_bdsz == 2'b10) ? {{16{q3_word[15]}}, q3_word}
+                                                        : (fi_bdsz == 2'b11) ? {q3_word, ext34_data[15:0]}
+                                                        : 32'h0;
+                                    // fi_iis[1:0] od-size encoding verified directly
+                                    // against memind28.hex's own already-proven,
+                                    // extensively cosim-tested LEA-postindexed-
+                                    // null-od encoding (manually decoded its own
+                                    // extension word: fi_iis=3'b101, i.e.
+                                    // fi_iis[1:0]==2'b01 for null od) -- the REAL
+                                    // 68020 I/IS field is 001/010/011 (pre) and
+                                    // 101/110/111 (post) for null/word/long od,
+                                    // i.e. fi_iis[1:0]: 01=null, 10=word, 11=long
+                                    // (00 never occurs for genuine indirect at all
+                                    // -- that's fi_iis==000, "no indirect",
+                                    // excluded by this whole branch's own outer
+                                    // if-condition). fi_od's own comment in
+                                    // eu_seq.sv claims "00=null,10=word,11=long,
+                                    // 01=reserved" -- its own explicit ==2'b00
+                                    // null-check is actually dead code that never
+                                    // matches a real encoding, silently correct
+                                    // only because its own final default (0)
+                                    // happens to equal null's real value anyway;
+                                    // an early draft of THIS code trusted that
+                                    // comment literally and got a genuine cosim
+                                    // mismatch (od aliased onto the next
+                                    // instruction's own opcode word for a
+                                    // null-od test) before this was caught.
+                                    dec_memind_od      =
+                                        (fi_iis[1:0] == 2'b01) ? 32'h0 :
+                                        (fi_iis[1:0] == 2'b10) ?  // word od, shifted +1 q-slot from fi_od
+                                            ((fi_bdsz == 2'b10) ? {{16{ext34_data[15]}}, ext34_data[15:0]}  // word bd: od@q4
+                                           : (fi_bdsz == 2'b11) ? {{16{q5_word[15]}}, q5_word}              // long bd: od@q5
+                                                                : {{16{q3_word[15]}}, q3_word}) :           // null bd: od@q3
+                                            // long od (fi_iis[1:0]==2'b11), shifted +1 q-slot
+                                            ((fi_bdsz == 2'b10) ? {ext34_data[15:0], q5_word}    // word bd: od_hi@q4,od_lo@q5
+                                           : (fi_bdsz == 2'b11) ? {q5_word, q6_word}              // long bd: od_hi@q5,od_lo@q6
+                                                                : {q3_word, ext34_data[15:0]});   // null bd: od_hi@q3,od_lo@q4
+                                end else begin
+                                    dec_ea_offset  = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
+                                                   ? {{16{q3_word[15]}}, q3_word}
+                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
+                                end
                             end
                             default: ;
                         endcase

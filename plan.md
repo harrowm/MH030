@@ -7652,3 +7652,96 @@ different integration shape than the ALU-EA fix here) and TAS/Scc's own (needs
 restructuring the RMW-locked bus protocol's own dispatch trigger). Neither shares
 this stage's own `dyn_bit_get_Dn`/`ex_mem_stall` timing mechanism directly enough for
 this phase's fixes to generalize to them for free.
+
+## Phase 244 (CMP2/CHK2 genuine memory-indirect EA -- IMPLEMENTED, closes Stage
+9b's own last deferred item)
+
+Implemented the FSM merge Phase 238 proposed: the shared memind FSM (`memind_start_r
+→ memind_inner_r → memind_outer_r`) resolves CMP2/CHK2's own lower bound's address
+and value, then hands off to `cmp2_run_r` -- CMP2/CHK2's own pre-existing two-read
+FSM -- which independently dispatches and captures the upper bound exactly as it
+already did for the ordinary (non-indirect) case. No changes were needed to
+`cmp2_run_r`'s own second-read dispatch/capture logic itself; only its *start*
+condition gained a new parallel branch for memind dispatch.
+
+**Decode side** (`eu_seq_decode.svh`, CMP2/CHK2's `f_mode==110` arm): added a
+`fi_is_full && fi_iis != 3'b000` branch alongside the pre-existing brief/indexed one.
+The real complication here, unique to this family: CMP2/CHK2 has an extra leading
+extension word (`cmp2_ext_w`, the Rn+CHK2-flag word) sitting where every other
+memind family's own bd/od words start -- shifting bd AND od one q-slot later than
+`fi_bd`/`fi_od`'s generic formulas assume. The existing non-indirect branch already
+special-cased this for bd alone (via `q3_word`); this phase derived and extended the
+same one-slot shift to od as well, which no prior memind family needed (none of them
+have an extra leading word). Getting the shift right required resolving a genuine,
+previously-unexercised ambiguity in the real `fi_iis[1:0]` od-size encoding: verified
+empirically against two already-proven tests' own raw assembled bytes (this phase's
+own new `memind36.hex`, and the pre-existing `memind28.hex`) that the real encoding
+is `01=null, 10=word, 11=long` -- not the `00=null` a pre-existing (but, it turns
+out, harmlessly dead-code-safe everywhere else it's used) comment on `fi_od` in
+`eu_seq.sv` claims.
+
+**Execute side** (`eu_seq_execute.svh`): `cmp2_run_r`'s own start `always_ff` branch
+gained a second OR-arm, `!cmp2_run_r && !cmp2_after_r && ex_valid && ex_is_cmp2chk2
+&& ex_is_memind && memind_outer_done_r`, capturing `cmp2_lb_r` from
+`memind_read_val_r` (not raw `mem_rdata`, which has already reverted by this point)
+and deriving `cmp2_addr2_r` from `memind_outer_addr_w` instead of `ex_ea`. Everything
+downstream -- the second read's own dispatch, `dyn_bit_get_Dn`'s Rn swap, CCR/trap
+computation -- runs through `cmp2_run_r`'s own unmodified machinery regardless of how
+the lower bound was obtained. Two other existing signals needed a new
+`!ex_is_cmp2chk2` exclusion to keep out of CMP2/CHK2's way: `dyn_bit_get_Dn`'s own
+general-ALU-EA memind term (Phase 243), which would otherwise wrongly swap Rn in at
+the *lower* bound's completion instead of the upper bound's (CMP2/CHK2 gets its own
+third OR-term instead, keyed on `cmp2_run_r && mem_ack`); and `memind_wr_en`, which
+would otherwise wrongly commit the lower-bound's raw read value directly to a
+register instead of letting `cmp2_run_r` capture it into `cmp2_lb_r`.
+
+**Found and fixed a second real, previously-latent bug while building the cosim
+tests** (`memind36.s`, CMP2.L pre-indexed, passed cleanly first; `memind37.s`,
+CHK2.L post-indexed, initially failed with a spurious out-of-bounds trap despite
+both bounds reading correctly): a genuine one-cycle `ex_mem_stall` gap specific to
+this family's own memind dispatch. `cmp2_run_r`'s new memind-start branch keys off
+`memind_outer_done_r`, which is *already* one cycle behind `mem_ack` (Phase 243's own
+established timing) -- but `memind_outer_r` itself (one of `ex_mem_stall`'s existing
+OR-terms) clears the cycle *before* `memind_outer_done_r` even asserts, opening a
+genuine one-cycle window where none of `ex_mem_stall`'s terms hold (since
+`ex_is_mem_rd` is deliberately 0 for memind dispatch, so the generic catch-all term
+doesn't cover it either). During that window EX looked idle and accepted the next
+instruction, overwriting `ex_is_cmp2chk2`/`ex_valid` before `cmp2_run_r`'s own second
+read ever completed -- so by the time the upper-bound read actually acked,
+`dyn_bit_get_Dn`'s swap term read a stale `ex_is_cmp2chk2=0` and never fired, leaving
+`rd_b` on Xn (D1=8, this test's own index register) instead of Rn (D3=15), which
+compared as out-of-range against the bounds [10,20] and drove a genuine (from the
+RTL's own perspective, well-formed format-$2/vector-6) CHK2 trap frame push where
+none should have occurred. Root-caused via a temporary trace on `cmp2_run_r &&
+mem_ack`'s own capture cycle (`rd_b_sel`/`rd_b_data` showed 8, not 15 -- the reused
+Xn selector, not the swapped Rn one), not guessed at. Fixed with a new
+`cmp2_memind_first_ack` stall-hold term (`ex_valid && ex_is_cmp2chk2 && ex_is_memind
+&& memind_outer_done_r && !cmp2_run_r && !cmp2_after_r`), mirroring the shape
+`cmp2_first_ack` already established for the equivalent one-cycle gap in the
+ordinary (non-memind) dispatch path. Why `memind36` (pre-indexed) didn't already
+expose this: not investigated further once the general mechanism was confirmed and
+fixed -- both tests exercise the identical gap in `cmp2_run_r`'s own start
+condition, so the fix closes it regardless of indexing mode; the two tests
+deliberately cover both pre- and post-indexed forms for addressing-mode diversity,
+not because the bug was mode-specific.
+
+Two new cosim tests: `tests/memind36.s` (CMP2.L, pre-indexed, null od --
+`([$100,a0,d1.l]),d2`, verified via a conditional branch on the resulting C flag,
+since CMP2 itself sets no directly-comparable register result) and
+`tests/memind37.s` (CHK2.L, post-indexed, null od -- `([$100,a0],d1.l),d3`,
+deliberately kept to the non-trapping case since CHK2's own trap-taken exception
+frame semantics are already exhaustively Harte/cosim-covered elsewhere; this test's
+own job is proving the EA resolution and FSM merge). Both pass bit-for-bit against
+Musashi's own reference trace. Wired into `make cosim_memind` as `buscmp-memind36`/
+`37`, extending the target's own dependency list to 24 total.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind`
+24/24 (22 pre-existing + 2 new), full 124-suite Tom Harte sweep via
+`run_harte_batch.py --backend verilator -j 10 --chunk-size 300`: `TOTAL: PASS 702142
+FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline.
+
+**Closes Stage 9b's own last deferred item.** TAS/Scc's own genuine indirect EA
+(Stage 9c, `plan.md §Phase 239`) remains deferred exactly as documented -- it needs
+restructuring the RMW-locked bus protocol's own dispatch trigger, a structurally
+different and higher-risk change than either the ALU-EA (Phase 243) or CMP2/CHK2
+(this phase) integration shape.

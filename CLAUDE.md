@@ -666,15 +666,43 @@ for `dyn_bit_get_Dn`'s 5 existing consumers is structural (the new term requires
 Stage 9b/9c deferred items (CMP2/CHK2, TAS/Scc genuine indirect EA) are unaffected
 and still stand as documented (`plan.md §Phase 238/239`).
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 22/22,
+**Phase 244 (CMP2/CHK2 genuine memory-indirect EA — IMPLEMENTED AND VERIFIED, closes
+Stage 9b's own last deferred item)**: implemented the FSM merge Phase 238 proposed —
+the shared memind FSM resolves the lower bound's address/value, then hands off to
+`cmp2_run_r` (CMP2/CHK2's own pre-existing two-read FSM), which independently
+dispatches/captures the upper bound completely unchanged. Decode side needed a real,
+family-unique derivation: CMP2/CHK2's own extra leading extension word (the
+Rn+CHK2-flag word) shifts bd AND od one q-slot later than every other memind
+family's generic formulas assume (the pre-existing non-indirect branch already
+special-cased this for bd alone; this phase extended the same shift to od, which no
+prior family needed) — resolving this required empirically re-deriving the real
+`fi_iis[1:0]` od-size encoding (`01=null,10=word,11=long`) against two already-proven
+tests' own raw assembled bytes, correcting a misleading (but harmlessly dead-code-safe
+elsewhere) comment on `fi_od` in `eu_seq.sv`. Execute side: `cmp2_run_r`'s own start
+condition gained a parallel memind-dispatch branch; `dyn_bit_get_Dn` and
+`memind_wr_en` each needed a new `!ex_is_cmp2chk2` exclusion so Phase 243's general
+ALU-EA memind terms don't misfire on CMP2/CHK2's own lower-bound completion. **Found
+and fixed a second real, previously-latent bug** while building the cosim tests: a
+genuine one-cycle `ex_mem_stall` gap specific to this family's own memind dispatch
+(between `memind_outer_r` clearing and `cmp2_run_r` actually starting, since the
+latter keys off the already-one-cycle-delayed `memind_outer_done_r`) let EX
+prematurely accept the next instruction and corrupt `ex_is_cmp2chk2` before the
+second read completed — manifesting as a spurious, well-formed CHK2 trap despite the
+tested value being genuinely in range. Root-caused via direct signal tracing (not
+guessed at) and fixed with a new `cmp2_memind_first_ack` stall-hold term mirroring
+`cmp2_first_ack`'s own existing shape. Two new cosim tests (`memind36.s` CMP2
+pre-indexed, `memind37.s` CHK2 post-indexed) both match Musashi exactly; wired into
+`make cosim_memind` (24 total). Full mandatory gate clean, Harte sweep bit-identical
+to baseline.
+
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 24/24,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
 backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) and the CAS bus-lock plan
 (`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL. No open plan
-remains in this project — ask the user for new work. (CMP2/CHK2 and TAS/Scc genuine
-memory-indirect EA remain documented, deferred candidates if wanted — see
-`plan.md §Phase 238/239`.)
+remains in this project — ask the user for new work. (TAS/Scc genuine memory-indirect
+EA remains a documented, deferred candidate if wanted — see `plan.md §Phase 239`.)
 
 ## Verification Commands
 

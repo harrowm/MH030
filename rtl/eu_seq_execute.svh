@@ -678,6 +678,7 @@
     logic        cmp2_is_an_r;      // 1=Rn is An (always 32-bit compare)
     logic [1:0]  cmp2_siz_r;        // instruction size for sign extension
     logic        cmp2_first_ack;    // first read just acked — hold stall while FSM starts
+    logic        cmp2_memind_first_ack; // memind-dispatched lower bound's own equivalent (plan.md)
     logic        cmp2_sr_wr_en;     // fire CCR update when second read acks
 
     // CMP2/CHK2 sign-extended comparison values (combinational from FSM state + mem_rdata)
@@ -839,7 +840,7 @@
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
                           pload_start_r  || pload_run_r  ||
-                          cmp2_run_r || cmp2_first_ack ||
+                          cmp2_run_r || cmp2_first_ack || cmp2_memind_first_ack ||
                           mem_rmw_run_r || mem_rmw_read_ack ||
                           move_mm_run_r || move_mm_read_ack ||
                           addx_mem_stall || bf_mem_stall || pack_mem_stall ||
@@ -2213,13 +2214,42 @@
         end
     end
 
+    // CMP2/CHK2 genuine memory-indirect EA (plan.md): the memind-dispatched
+    // lower bound's own "first ack" equivalent is memind_outer_done_r, which
+    // (unlike ex_is_mem_rd&&mem_ack above) is already itself delayed one
+    // cycle behind mem_ack -- cmp2_run_r's own memind-start branch keys off
+    // this same registered pulse, so there's a full extra cycle (the one
+    // where memind_outer_r has already cleared to 0 but memind_outer_done_r/
+    // cmp2_run_r haven't yet become 1) that none of ex_mem_stall's existing
+    // OR-terms cover. Without this, ex_mem_stall drops to 0 for exactly that
+    // cycle, letting EX prematurely accept the next instruction and
+    // corrupt ex_is_cmp2chk2/ex_valid before cmp2_run_r's own second read
+    // ever completes -- found via a genuine CHK2-via-memind (post-indexed)
+    // cosim mismatch (dyn_bit_get_Dn's own swap term read a stale
+    // ex_is_cmp2chk2=0 by the time the second read acked, leaving rd_b on
+    // Xn instead of Rn, corrupting the bounds compare into a false trap).
+    assign cmp2_memind_first_ack = ex_valid && ex_is_cmp2chk2 && ex_is_memind
+                                   && memind_outer_done_r && !cmp2_run_r && !cmp2_after_r;
+
+    // CMP2/CHK2 genuine memory-indirect EA (plan.md): CMP2/CHK2's own Rn
+    // swap must NOT fire on the generic memind-outer-done term below --
+    // that term fires once, at the LOWER bound's own memind-dispatched
+    // completion, but CMP2/CHK2's own swap belongs at the UPPER bound's
+    // own completion instead (cmp2_run_r&&mem_ack, dispatched via
+    // cmp2_run_r's own independent, non-memind bus path regardless of how
+    // the lower bound was obtained -- see cmp2_run_r's own FSM comment).
+    // Excluded here and given its own dedicated third term instead,
+    // mirroring the first term's own existing cmp2_run_r&&mem_ack
+    // condition (which can't fire there directly since it also requires
+    // ex_is_mem_rd, deliberately suppressed for memind dispatch).
     logic dyn_bit_get_Dn;
     assign dyn_bit_get_Dn = (ex_is_dyn_bit_idx && ex_is_mem_rd &&
                              (ex_is_mem_rmw ? mem_rmw_read_ack
                                             : (mem_ack && !mem_rmw_run_r && !mem_rmw_after_r
                                                && !move_mm_run_r && !move_mm_after_r
                                                && !(ex_is_cmp2chk2 && !cmp2_run_r && !cmp2_after_r))))
-                          || (ex_is_dyn_bit_idx && ex_is_memind && memind_outer_done_r && memind_is_rd_r);
+                          || (ex_is_dyn_bit_idx && ex_is_memind && !ex_is_cmp2chk2 && memind_outer_done_r && memind_is_rd_r)
+                          || (ex_is_dyn_bit_idx && ex_is_cmp2chk2 && cmp2_run_r && mem_ack);
     assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel :
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
                       (dyn_bit_get_Dn && (ex_dyn_bit_swap_a || ex_dyn_bit_swap_both)) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
@@ -2599,6 +2629,22 @@
             cmp2_siz_r     <= 2'b00;
         end else begin
             cmp2_after_r <= cmp2_run_r && mem_ack;
+            // CMP2/CHK2 genuine memory-indirect EA (plan.md): the ordinary
+            // "first read" branch below requires ex_is_mem_rd, which is
+            // deliberately suppressed for memind dispatch (mirroring the
+            // general ALU-EA stage's own convention) -- so a memind-
+            // dispatched lower bound needs its own trigger here, keyed on
+            // memind_outer_done_r (NOT raw memind_outer_r&&mem_ack; see that
+            // signal's own declaration comment -- ex_mem_stall's memind term
+            // clears one cycle after mem_ack, so this is the cycle WB-style
+            // capture actually needs to happen) and memind_read_val_r (NOT
+            // live mem_rdata, which has already reverted by this point).
+            // cmp2_addr2_r derives from memind_outer_addr_w instead of ex_ea
+            // -- once the lower bound is captured, everything downstream
+            // (the second/upper-bound read, its own dispatch, CCR/trap
+            // computation) is completely unchanged: it already runs through
+            // cmp2_run_r's own independent, non-memind bus path regardless
+            // of how the lower bound was obtained.
             if (!cmp2_run_r && !cmp2_after_r &&
                 ex_valid && ex_is_cmp2chk2 && ex_is_mem_rd && mem_ack) begin
                 // First read ack: capture bounds and start second read. Rn
@@ -2616,6 +2662,18 @@
                     2'b01: cmp2_addr2_r <= ex_ea + 32'd1;
                     2'b10: cmp2_addr2_r <= ex_ea + 32'd2;
                     default: cmp2_addr2_r <= ex_ea + 32'd4;
+                endcase
+            end else if (!cmp2_run_r && !cmp2_after_r &&
+                         ex_valid && ex_is_cmp2chk2 && ex_is_memind && memind_outer_done_r) begin
+                cmp2_run_r     <= 1'b1;
+                cmp2_lb_r      <= memind_read_val_r;
+                cmp2_is_chk2_r <= ex_imm[11];
+                cmp2_is_an_r   <= ex_imm[15];
+                cmp2_siz_r     <= ex_siz;
+                case (ex_siz)
+                    2'b01: cmp2_addr2_r <= memind_outer_addr_w + 32'd1;
+                    2'b10: cmp2_addr2_r <= memind_outer_addr_w + 32'd2;
+                    default: cmp2_addr2_r <= memind_outer_addr_w + 32'd4;
                 endcase
             end else if (cmp2_run_r && mem_ack) begin
                 // Second read ack: this is where dyn_bit_get_Dn's swap
@@ -4240,8 +4298,15 @@
     // and unconditionally commit the raw, un-combined mem_rdata -- wrong
     // for ALU-EA, and for CMP/CMPA specifically would even write a
     // register that should never be written at all (flags-only).
+    // CMP2/CHK2 genuine memory-indirect EA (plan.md): same reasoning
+    // exactly -- CMP2/CHK2 doesn't set ex_is_mem_src (that flag is
+    // ALU-EA-specific), so without this separate exclusion this path
+    // would fire on CMP2/CHK2's own memind-dispatched LOWER bound read
+    // and wrongly commit that raw value directly to memind_dest_r,
+    // instead of letting cmp2_run_r's own FSM (extended above) capture it
+    // into cmp2_lb_r and proceed to the second (upper-bound) read.
     logic memind_wr_en;
-    assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r && !ex_is_mem_src;
+    assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r && !ex_is_mem_src && !ex_is_cmp2chk2;
 
     // 10-item backlog Stage 9a (plan.md): LEA's own memind case completes
     // on the INNER read's own ack instead (no outer bus cycle at all --

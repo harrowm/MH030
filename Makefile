@@ -654,11 +654,42 @@ buscmp-memind35: $(SIM)/cosim_grp winuae/tests/memind35_ref.log tests/memind35.h
 	    | grep "^BUS" > /tmp/_dut_memind35.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind35.log winuae/tests/memind35_ref.log \
 	    --dut-may-continue
+# memind36-37 (CMP2/CHK2 genuine indirect stage, plan.md): CMP2.L pre-indexed
+# null-od (verified via a conditional branch on the resulting C flag, since
+# CMP2 sets no directly-comparable register result) and CHK2.L post-indexed
+# null-od (deliberately non-trapping, proving the FSM merge + EA resolution
+# without re-verifying CHK2's own already-covered trap dispatch). Found and
+# fixed two real, previously-latent bugs while building these: (1) a genuine
+# bit-encoding bug in this session's own new dec_memind_od code -- the real
+# fi_iis[1:0] od-size encoding is 01=null/10=word/11=long, not the
+# 00=null/10=word/11=long a pre-existing (misleading, but harmlessly
+# dead-code-safe elsewhere) fi_od comment in eu_seq.sv suggested; (2) a
+# genuine one-cycle ex_mem_stall gap specific to CMP2/CHK2's own memind
+# dispatch -- cmp2_run_r's memind-start branch keys off memind_outer_done_r
+# (itself already one cycle behind mem_ack), so there's a further, distinct
+# gap cycle (after memind_outer_r clears but before cmp2_run_r turns 1) that
+# ex_mem_stall's existing terms didn't cover, letting EX prematurely accept
+# the next instruction and corrupt ex_is_cmp2chk2 before the second
+# (upper-bound) read ever completed -- manifested as a spurious CHK2 trap
+# (found via a genuine post-indexed CHK2-via-memind cosim mismatch). Fixed
+# with a new cmp2_memind_first_ack stall-hold term, mirroring cmp2_first_ack's
+# own existing shape for the ordinary (non-memind) dispatch path.
+buscmp-memind36: $(SIM)/cosim_grp winuae/tests/memind36_ref.log tests/memind36.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind36.hex +grp=memind36 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind36.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind36.log winuae/tests/memind36_ref.log \
+	    --dut-may-continue
+buscmp-memind37: $(SIM)/cosim_grp winuae/tests/memind37_ref.log tests/memind37.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind37.hex +grp=memind37 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind37.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind37.log winuae/tests/memind37_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
               buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
+              buscmp-memind36 buscmp-memind37 \
               buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
