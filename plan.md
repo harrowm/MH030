@@ -7260,3 +7260,145 @@ deliberately re-deferred with precise, updated correct-shape proposals for a fut
 stage (Stage 7's CAS bus-level lock; Stage 9's ALU-EA/CMP2/CHK2 and TAS/Scc genuine
 indirect EA); and this stage's own 2 new back-to-back FSM composition pairs. No open
 RTL correctness gap of any kind is known to remain in this project.
+
+## Phase 241 (silent-copper-latch.md, CAS bus-lock plan, attempt 4): investigated
+via direct simulation trace, found Phase 233's own timing-feasibility conclusion was
+factually wrong, plus a new, deeper arbitration-continuity risk -- deferred again
+with a substantially corrected proposal
+
+Started implementing per `~/.claude/plans/silent-copper-latch.md`'s own prescribed
+order: build the direct signal-level AS-continuity proof FIRST, before any RTL
+change. Building that proof required first nailing down the EXACT cycle-by-cycle
+relationship between AS negate and the internal ack signal for an ordinary read --
+which is exactly the thing Phase 233's own proposal depended on. Added temporary
+`$display` tracing (`tb/stall_fsm_tb.sv`, since reverted -- `git diff --stat` empty)
+watching `u_top.u_biu.u_cg.state`/`ext_as_n`/`eu_ack`/`ex_valid`/`ex_is_cas`/
+`cas_active_r`/`cas_write_r`/`cas_get_du_r`/`cas_after_r` cycle-by-cycle across both
+existing CAS tests (`tb/stall_fsm_tb.sv`'s B-5, a mismatch case, and WS-CAS-1, a
+genuine match case).
+
+**Finding 1 (corrects Phase 233): AS negates ONE STATE BEFORE `mem_ack` becomes
+visible, not with headroom to spare.** Phase 233's timing analysis assumed `mem_ack`
+"corresponds to data arriving (around real S3/S4)" with AS not negating until "S5",
+using the design doc's abstract 6-state numbering. Direct trace of the real RTL
+states shows this doesn't hold: for an ordinary read, `ext_as_n` negates at
+`ST_READ_S6` (confirmed via trace: `state=24 as_n=1` at the exact tick AS flips),
+while `eu_ack`/`mem_ack` (the ONLY signal `cas_read_ack`/`eu_cas_write_pending` can
+possibly key off) doesn't assert until `ST_READ_S7`, one full state/tick LATER
+(`state=25 eu_ack=1`). This is a real, structural one-cycle latency between when
+`captured_rdata` is valid internally and when the requester (`eu_seq.sv`) is told
+via `mem_ack` -- an internal handshake-settling cycle, not a real external-bus
+requirement (`ext_as_n`/`ext_ds_n` are already fully negated during that extra S7
+tick, so it's bus-invisible). **Consequence: any design that tries to decide "hold
+AS or not" based on the compare result (`ex_z`, only known for certain the same
+cycle `mem_ack` fires) is provably infeasible** -- by the time that decision is
+computable, AS has already negated on the real bus one full cycle in the past.
+Phase 233's entire proposed mechanism (`eu_cas_write_pending = ... && mem_ack &&
+ex_z`, gating the read's own S5/S6 negate) cannot work as designed; this isn't
+"harder than expected," it's a timing impossibility given the current RTL's ack
+latency.
+
+**Finding 2: the correct redesign avoids needing the compare result at all.**
+Re-examining the actual FSM (`eu_seq_execute.svh`'s CAS state machine) found that
+the decision "should the bus stay locked" does NOT need to wait for the compare
+result -- it only needs to know "is a CAS instruction currently occupying EX," which
+is available from the moment of dispatch (`ex_valid && ex_is_cas`, latched and
+stable for the CAS instruction's ENTIRE EX residency per `ex_mem_stall`'s own
+existing stall-holding logic, confirmed via trace: `ex_valid=1 ex_is_cas=1`
+continuously from before the read even starts through to the cycle after the write
+fully completes, dropping only once `cas_after_r` has done its job). Combined with
+`cas_active_r` (already, precisely, "1 from first read-ack until FSM fully done" --
+an existing signal, no new derivation needed) this gives a workable shape: hold AS
+at the read's own `ST_READ_S6`/`ST_READ_S7` (via `eu_is_cas`, gated with `grant_eu`
+since `state==ST_READ_S6` is a SHARED state any requester can occupy), then hold it
+continuously via `cas_active_r` through the entire post-read window -- EXCLUDING
+`ST_WRITE_S6` specifically, matching `rmw_as_hold`'s own established precedent of
+never touching the final write's own natural completion state (letting the base
+per-cycle pin logic negate AS exactly on time there, unmodified, rather than trying
+to also own that transition).
+
+**Finding 3 (new, not previously documented anywhere in this project): the
+read-to-write gap is a genuine ARBITRATION re-entry point, not just an AS-pin
+cosmetic gap.** Unlike RMW (`ST_RMW_READ_S7: state_nxt = ST_RMW_WRITE_S0`, no
+`ST_IDLE` visit at all between phases) and CAS2 (`cas2_as_hold`'s own comment: reuses
+`state_nxt`'s already-computed "staying inside the sequence" decision), single-
+address CAS's `cas_get_du_r` cycle (the one-cycle internal step between the read's
+own completion and the write's own dispatch, where `eu_seq.sv` fetches Du into a
+register before deciding whether to write) is a cycle where `biu_cycle_gen.sv`
+genuinely returns to real `ST_IDLE` AND `mem_req` genuinely drops to 0 -- confirmed
+directly in `eu_seq_execute.svh`'s own `mem_req` assignment, which explicitly
+excludes `cas_get_du_r` from its `no_special_bus_op` read-request term (line ~4563)
+and hasn't yet reached `cas_write_r` (the write's own request term) either. **This
+means the EU's own bus request genuinely drops for one real cycle mid-CAS-sequence
+-- something RMW/CAS2 structurally never do, since their own dedicated state
+sequences never pass through a state where arbitration could re-run at all.** A fix
+that only forces the AS *pin* to stay low during this gap, without ALSO ensuring the
+EU retains its arbitration grant throughout, would be actively worse than today's
+gap: it would produce an externally-observable AS signal that LOOKS continuously
+asserted (matching real 68030 CAS timing) while a DIFFERENT master (most plausibly
+the IFU, which sits at lower priority per this project's own documented MMU > EU >
+IFU order and is the most likely to have a pending prefetch request queued at any
+given moment) could in principle be granted that exact window and drive a completely
+unrelated transaction underneath it -- a corrupted, misleading bus trace that is
+harder to diagnose than the current, honestly-negated gap. This risk is real
+specifically BECAUSE `bus_lock` (the arbitration-suppression signal RMW/CAS2 already
+use) has never had a CAS-specific term either -- confirmed via `biu_arbiter.sv`:
+`bus_lock` only ever gates the EXTERNAL BR#/BG# DMA handshake (`bus_idle && !br_s &&
+!bus_lock`), a separate question from internal grant_eu/grant_ifu/grant_mmu
+round-robin, but the exact SAME missing-term gap applies to both: neither has ever
+had a "CAS's own post-read window" case.
+
+**Decision: deferred again, not implemented this session.** This is not simply "the
+same difficulty as before, still too risky" -- it is a materially MORE PRECISE
+understanding than any prior attempt, correcting a factual error in Phase 233's own
+proposal and surfacing a genuinely new risk category (arbitration continuity through
+an internal gap) that no prior investigation identified. Per `silent-copper-latch.md`'s
+own explicit "permission to re-defer" section, this qualifies as exactly the
+scenario it anticipated. No RTL or testbench changed -- the investigation's own
+temporary trace was reverted (`git diff --stat` clean) before this writeup.
+
+**Updated, corrected proposal for a future attempt** (supersedes Phase 233's own
+version in full):
+
+1. New `eu_seq.sv` outputs (both trivial, no new derivation needed):
+   - `eu_is_cas = ex_valid && ex_is_cas;` (stable throughout CAS's entire EX
+     residency, confirmed via direct trace -- NOT gated on the compare result).
+   - `eu_cas_hold = cas_active_r;` (already precisely "read-ack until FSM done").
+2. Thread both through `m68030_eu.sv` -> `m68030_biu.sv` into new `biu_cycle_gen.sv`
+   inputs.
+3. New `biu_cycle_gen.sv` combinational signal:
+   ```
+   cas_as_hold = (grant_eu && eu_is_cas && (state == ST_READ_S6 || state == ST_READ_S7)) ||
+                 (eu_cas_hold && state != ST_WRITE_S6);
+   ```
+   applied identically to `rmw_as_hold`/`cas2_as_hold` (`if (cas_as_hold) ext_as_n =
+   1'b0;`, appended after both). The `grant_eu` qualifier on the first term is
+   required (unlike `rmw_as_hold`'s own dedicated, non-shared states) because
+   `ST_READ_S6`/`ST_READ_S7` are SHARED states any requester can occupy; safe to omit
+   on the second term since `cas_active_r` can only ever be 1 during a genuine,
+   already-acked CAS read's own aftermath. The `state != ST_WRITE_S6` exclusion is
+   required so the write's own natural, already-correct AS-negate point is left
+   completely untouched, matching `rmw_as_hold`'s own established precedent exactly.
+4. **New, required step Phase 233 never identified**: `bus_lock` AND the internal
+   `grant_eu` arbitration decision both need a new term keyed on `eu_cas_hold`
+   (mirroring `is_rmw_write`/`is_cas2`'s own existing terms in `bus_lock`'s
+   assignment), so the EU's own bus ownership doesn't lapse during the `cas_get_du_r`
+   gap even though `mem_req` itself genuinely drops for that one cycle. This is
+   arbitration-side work in `biu_arbiter.sv`/`biu_cycle_gen.sv`'s own grant logic,
+   not just pin-driving logic -- a new category of change beyond anything RMW/CAS2
+   needed (their own sequences never release `mem_req` mid-sequence at all, so they
+   never needed to separately defend the arbitration decision).
+5. Verification must include a genuine "IFU has a pending request during CAS's own
+   gap" scenario, not just the AS-continuity signal check `silent-copper-latch.md`
+   already specifies -- confirming step 4 above actually prevents the handoff, not
+   just that the AS pin cosmetically looks right. This is a NEW, harder verification
+   requirement than the plan's own original text anticipated (which focused on the
+   external-DMA case only).
+
+This proposal is more implementable than Phase 233's (it doesn't depend on an
+infeasible compare-result timing), but is also now confirmed to need real,
+new arbitration-side changes beyond pure pin-driving logic -- genuinely comparable
+in scope to a fresh, small feature rather than a pin-logic patch. See
+`~/.claude/plans/silent-copper-latch.md` (updated alongside this phase) for the full
+plan; a future attempt should start from proposal step 1-5 above, not Phase 233's
+own now-superseded version.

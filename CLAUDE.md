@@ -586,13 +586,35 @@ so no Harte re-run needed (testbench-only, per this stage's own plan text). See
 `plan.md §Phase 240` for the full writeup, including the plan's own final tally across
 all 10 stages.
 
+**Phase 241 (`~/.claude/plans/silent-copper-latch.md`, CAS bus-lock plan, 4th
+attempt)**: started implementing the AS-continuity fix for single-address CAS's own
+genuine bus-level lock (a real, confirmed, previously-deferred gap — see Phase
+213/242 and Phase 233). Building the plan's own mandatory AS-continuity proof test
+required first tracing the real cycle-by-cycle relationship between AS-negate and
+`mem_ack`, which found **Phase 233's own timing-feasibility conclusion was factually
+wrong**: AS negates at `ST_READ_S6`, one full state BEFORE `mem_ack` becomes visible
+at `ST_READ_S7` — there is no headroom to gate the hold decision on the compare
+result (`ex_z`) as Phase 233 proposed; that mechanism cannot work. Found the correct
+redesign (gate on `ex_valid && ex_is_cas` + the FSM's own existing `cas_active_r`
+instead, neither of which needs the compare result) AND a third, previously
+undocumented problem: the one-cycle `cas_get_du_r` gap between CAS's read and write
+is a genuine arbitration re-entry point (`mem_req` really drops to 0 there, unlike
+RMW/CAS2 which never release the bus mid-sequence) — fixing only the AS pin without
+also defending the EU's own arbitration grant through that gap would produce a
+misleadingly-continuous AS signal while a different master (most plausibly the IFU)
+could actually run an unrelated transaction underneath it, worse than today's
+honestly-negated gap. Deferred again with a fully corrected, trace-verified
+proposal (`silent-copper-latch.md`, updated) — no RTL or testbench changed (a
+temporary investigation trace was built and reverted, `git diff --stat` clean).
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
-split has shifted slightly across later phases as harness gaps closed). **The 10-item
-backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) is now CLOSED IN FULL** (all
-10 stages done, Phases 227-240). No open plan remains in this project — ask the user
-for new work.
+split has shifted slightly across later phases as harness gaps closed). The 10-item
+backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) is CLOSED IN FULL (all 10
+stages done, Phases 227-240). The CAS bus-lock plan (`silent-copper-latch.md`) remains
+open, deferred at its 4th attempt with a corrected proposal (Phase 241) — ask the
+user before picking it up again given its own repeated risk history.
 
 ## Verification Commands
 
