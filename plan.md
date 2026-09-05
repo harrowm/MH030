@@ -7519,3 +7519,136 @@ timing), Phase 241 (investigation that found and corrected that error, plus the
 new arbitration-continuity finding), Phase 242 (this phase -- implemented and
 verified). No open RTL correctness gap of any kind is known to remain in this
 project.
+
+## Phase 243 (general ALU-with-EA-source genuine memory-indirect EA -- IMPLEMENTED
+AND VERIFIED): ADD/SUB/AND/OR/CMP/MULU/MULS/DIVU/DIVS/ADDA/CMPA's own
+`([bd,An],Xn,od)` support, closing Phase 238's own deferred item
+
+Implemented the item Phase 238 (10-item backlog Stage 9b part 2) investigated and
+deferred: genuine memory-indirect EA for the general ALU-with-EA-source families.
+Phase 238's own survey had already found the decode side tractable (8 separate
+`f_mode==110` arms, all structurally identical to LEA/PEA/JMP/JSR's own already-
+proven template) while flagging the execute side — specifically `dyn_bit_get_Dn`,
+the shared deferred-register-swap gate used by 5 other instruction families — as the
+real risk. That characterization proved directionally correct, but the actual
+execute-side scope turned out to be four distinct, interacting fixes, not the single
+`dyn_bit_get_Dn` extension originally proposed — found one at a time via direct
+cosim mismatches and a genuine simulation hang, exactly matching this project's own
+established "trust the trace, not the theory" debugging discipline.
+
+**Decode side (`eu_seq_decode.svh`)**: extended all 8 arms — OR, SUB/ADD (shared via
+`grp_aop(f_group)`), ADDA/SUBA (An-destination, `dec_dyn_bit_is_an=1`), CMP
+(flags-only, no `dec_writes_reg`), CMPA (An-destination + flags-only), AND, MULU/MULS,
+DIVU/DIVS — with the identical `if (fi_is_full && fi_iis != 3'b000) begin
+dec_is_memind=1; ... end` template LEA's own memind arm already established,
+confirmed via a fork survey before touching any code. Also added a new
+`dec_memind_rd_siz` field: `memind_siz_r` (the memind FSM's own bus-read-size
+register) had always captured `dec_siz` directly, correct for MOVE (whose `dec_siz`
+IS its own real read size) and for LEA/PEA/JMP/JSR (whose `dec_siz` is always forced
+longword, matching their own always-32-bit address handling) but WRONG for
+MULU/MULS/DIVU/DIVS, whose `dec_siz` reflects their 32-bit RESULT while the actual
+memory operand read must stay 16-bit regardless of addressing mode. Backfilled
+MOVE's own pre-existing memind arm (and MOVEA's) to explicitly set
+`dec_memind_rd_siz = dec_siz` (zero behavior change, since that's what it already
+implicitly relied on) so the new field's meaning stays universal across every
+memind-dispatching family, not just an ad-hoc special case. `m68030_seq.sv`'s own
+`is_alu_mem_src_mode110` (covering opcode groups 8/9/B/C/D) already generically
+sizes extension words for both the indexed and indirect forms of all 8 families —
+confirmed via direct read, zero changes needed there, matching Phase 236's own
+precedent for LEA/PEA/JMP/JSR.
+
+**Execute side (`eu_seq_execute.svh`), four fixes, found in this order via real
+cosim failures, not anticipated in advance**:
+
+1. **`dyn_bit_get_Dn`'s new OR-term** (Phase 238's own anticipated fix): a new,
+   independent disjunct — `ex_is_dyn_bit_idx && ex_is_memind && memind_outer_done_r
+   && memind_is_rd_r` — fires once, swapping `rd_b` from Xn to Dn/An, structurally
+   unable to overlap with the 5 existing consumers' own term (which requires
+   `ex_is_mem_rd=1`, deliberately suppressed for all memind dispatch, mirroring
+   MOVE's own convention) or to fire prematurely during memind's own INNER read
+   (gated on `ex_is_memind` alone, which the inner phase's own completion doesn't
+   trigger).
+2. **`memind_wr_en` gated on `!ex_is_mem_src`** (NOT anticipated by Phase 238): this
+   pre-existing signal (`memind_outer_r && mem_ack && memind_is_rd_r`) fires
+   unconditionally on ANY memind read's completion, writing the RAW read value
+   directly to the destination register -- correct for MOVE (a plain copy) but wrong
+   for ALU-EA, which needs the memory value COMBINED with Dn/An via the ALU first.
+   Without this gate, the raw value would race the ALU-combined WB-path write, and
+   for CMP/CMPA specifically (which write no register at all) would have corrupted
+   a register that must never be touched.
+3. **`div_trap_raw`'s divide-by-zero check excluding the inner read** (found via a
+   genuine simulation hang, the first symptom hit): `mem_ack` fires TWICE for a
+   memind-dispatched DIVU/DIVS (inner pointer read, then outer operand read); the
+   pre-existing check (`ex_is_mem_src && mem_ack && md_div_by_zero`) evaluated the
+   still-in-flight pointer value as if it were the divisor during the INNER read,
+   spuriously firing a real trap before the operand was ever read and corrupting the
+   whole instruction stream into an unbounded NOP-fetch loop (not a true RTL hang,
+   but functionally indistinguishable without a hard cycle cap -- the harness has
+   none, relying on STOP). Fixed by requiring `memind_outer_done_r` (see below)
+   specifically for the memind case.
+4. **A genuine one-cycle timing mismatch** (found via a second cosim mismatch after
+   fix 3 stopped the hang but the DIVU result was still wrong -- 0 instead of the
+   real quotient): `ex_mem_stall`'s own memind term is the raw, REGISTERED
+   `memind_outer_r` itself, not `memind_outer_r && !mem_ack` the way the ordinary
+   `ex_is_mem_rd` stall term is -- so `ex_mem_stall` (and therefore WB's own capture
+   of `ex_result`) doesn't actually clear until the CYCLE AFTER `mem_ack` fires, once
+   `memind_outer_r` has registered back to 0. `dyn_bit_get_Dn`'s own new term (fix 1)
+   originally fired directly on `memind_outer_r && mem_ack` (the same cycle as the
+   read), swapping `rd_b` to Dn one cycle too early -- by the time WB actually
+   captured `ex_result` the following cycle, the swap had already reverted. Separately,
+   `mem_rdata` itself is only valid the exact cycle `mem_ack` pulses and had already
+   reverted to 0 by the following cycle, so even with the swap correctly timed, the
+   ALU's own memory operand would still read as 0. Fixed with two new registers:
+   `memind_outer_done_r` (a plain one-cycle delay of `memind_outer_r && mem_ack`,
+   now `dyn_bit_get_Dn`'s own real trigger and `div_trap_raw`'s own outer-read
+   check) and `memind_read_val_r` (latches `mem_rdata` at the correct cycle,
+   mirroring `memind_ptr_r`'s own existing capture-at-ack pattern for the inner
+   read, now feeding `alu_src`/`md_src` via a new `alu_src_mem` wire whenever
+   `ex_is_memind`). The ordinary (non-memind) `ex_is_mem_rd` path is completely
+   unaffected by any of this -- its own `ex_mem_stall` term already clears the SAME
+   cycle as `mem_ack`, so `mem_rdata` is still live exactly when needed.
+
+**Verification**: per this project's own established process, wrote and iterated on
+new cosim tests (`tests/memind32.s`-`memind35.s`) against Musashi via `buscmp.py`,
+diagnosing each real bug directly from a mismatch or hang rather than reasoning
+in the abstract:
+- `memind32.s` (ADD.L, pre-indexed, register-write): passed on the first attempt,
+  validating the core mechanism (decode dispatch, the basic `dyn_bit_get_Dn`
+  extension) before the harder cases surfaced the remaining gaps.
+- `memind33.s` (DIVU.W, pre-indexed, word-sized operand): found and fixed all four
+  execute-side issues above, in sequence, via direct signal tracing
+  (`tb/cosim_grp_tb.sv`, temporary, removed) once each fix's own symptom was
+  reproduced.
+- `memind34.s` (CMP.L, flags-only, no register write): verifies the
+  `memind_wr_en`/`!ex_is_mem_src` gate specifically prevents any write to Dn at all —
+  proven via CONTROL FLOW (a conditional branch on the resulting CCR immediately
+  after the CMP), since CMP itself produces no register result to check directly; a
+  wrong CCR would make the DUT take the other branch, producing a completely
+  different (and therefore mismatching) bus trace.
+- `memind35.s` (ADDA.L, An-destination): verifies `dec_dyn_bit_is_an`'s own swap
+  path under the new memind timing.
+
+All four pass bit-for-bit against Musashi's own reference trace. Wired into
+`make cosim_memind` (`buscmp-memind32` through `35`, extending the target's own
+dependency list to 22 total). Cross-family regression for `dyn_bit_get_Dn`'s 5
+pre-existing consumers (CHK, dynamic bit-ops, MOVE mem-to-mem indexed-dst,
+CMP2/CHK2, non-indirect ALU-EA) is structural, not just empirical: the new OR-term
+is gated exclusively on `ex_is_memind`, which none of those 5 families ever set —
+mutually exclusive by construction, not merely by observed behavior — confirmed via
+the full `make test` 37/37 pass (unchanged), which already exercises all 5 via their
+own dedicated pre-existing suites.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind`
+22/22 (18 pre-existing + 4 new), full 124-suite Tom Harte sweep via
+`run_harte_batch.py --backend verilator -j 10 --chunk-size 300`: `TOTAL: PASS 702142
+FAIL 2 SKIP 281221 TIMEOUT 0` — bit-identical to baseline, confirming zero regression
+across every instruction family in the corpus despite this stage touching shared
+execute-side machinery used by 5 other families plus the memind FSM itself.
+
+**Remaining deferred items from Stage 9b/9c are unaffected and still stand as
+documented** (`plan.md §Phase 238/239`): CMP2/CHK2's own genuine indirect EA (needs
+the memind FSM's inner phase merged into `cmp2_run_r`'s own two-read sequence, a
+different integration shape than the ALU-EA fix here) and TAS/Scc's own (needs
+restructuring the RMW-locked bus protocol's own dispatch trigger). Neither shares
+this stage's own `dyn_bit_get_Dn`/`ex_mem_stall` timing mechanism directly enough for
+this phase's fixes to generalize to them for free.

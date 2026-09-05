@@ -131,6 +131,22 @@
     logic        dec_is_memind;       // instruction uses memory-indirect EA (full ext, fi_iis != 0)
     logic        dec_memind_is_post;  // 1=post-indexed (IS=1: Xn to outer), 0=pre-indexed
     logic [31:0] dec_memind_od;       // outer displacement
+    // ALU-EA genuine indirect EA (plan.md, general ALU-with-EA-source stage):
+    // the memind FSM's own outer-read bus size (memind_siz_r in
+    // eu_seq_execute.svh) historically just captured dec_siz directly, which
+    // is correct for MOVE (dec_siz IS its own read size) and for
+    // LEA/PEA/JMP/JSR (dec_siz is always forced longword there, matching
+    // their own always-32-bit address/PC handling) but is WRONG for
+    // MULU/MULS/DIVU/DIVS, whose dec_siz reflects the 32-bit RESULT written
+    // to Dn while the actual memory OPERAND read must stay 16-bit
+    // (dec_mem_rd_siz already captures this correctly for their own
+    // existing non-indirect indexed case). dec_memind_rd_siz decouples the
+    // two: every memind-dispatching family sets it explicitly (MOVE's own
+    // arm to dec_siz, the new ALU-EA arms to dec_mem_rd_siz, matching
+    // whichever already reflects their own real read size); LEA/PEA/JMP/JSR
+    // are untouched and rely on the default below, which already equals
+    // what their own dec_siz always is.
+    logic [1:0]  dec_memind_rd_siz;
 
     // MMU instruction decode signals
     logic        dec_is_pflush;
@@ -429,6 +445,7 @@
         dec_is_memind    = 1'b0;
         dec_memind_is_post = 1'b0;
         dec_memind_od    = 32'h0;
+        dec_memind_rd_siz = 2'b00;
 
         // ── MMU instructions ───────────────────────────────────────────────────
         dec_is_pflush    = 1'b0;
@@ -1278,6 +1295,11 @@
                                 // including it here too would double-count it.
                                 dec_is_idx         = !fi_is_s && !fi_iis[2];
                                 dec_ea_offset      = fi_bd;
+                                // dec_siz IS this MOVE's own real read size (unlike
+                                // MULU/MULS/DIVU/DIVS below, whose dec_siz reflects
+                                // their 32-bit result instead) -- see dec_memind_rd_siz's
+                                // own declaration comment for the full reasoning.
+                                dec_memind_rd_siz  = dec_siz;
                             end
                         end
 
@@ -1411,6 +1433,7 @@
                                 dec_memind_od      = fi_od;
                                 dec_is_idx         = !fi_is_s && !fi_iis[2];
                                 dec_ea_offset      = fi_bd;
+                                dec_memind_rd_siz  = dec_siz;  // see dec_memind_rd_siz's own comment
                             end
                         end
 
@@ -4232,13 +4255,27 @@
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                        // same template as Stage 1 -- see TAS's own comment in the
-                        // mode=110 unary-op family for the full reasoning.
-                        dec_ea_offset      = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning. General
+                        // ALU-EA genuine indirect stage (plan.md): same shape as
+                        // DIVU/DIVS's own memind arm -- see its comment for the full
+                        // reasoning. dec_siz IS this OR's own real read size (unlike
+                        // MULU/MULS/DIVU/DIVS), so dec_memind_rd_siz mirrors dec_siz.
+                        if (fi_is_full && fi_iis != 3'b000) begin
+                            dec_is_mem_rd      = 1'b0;
+                            dec_is_memind      = 1'b1;
+                            dec_memind_is_post = fi_iis[2];
+                            dec_memind_od      = fi_od;
+                            dec_is_idx         = !fi_is_s && !fi_iis[2];
+                            dec_ea_offset      = fi_bd;
+                            dec_memind_rd_siz  = dec_siz;
+                        end else begin
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     // ── OR #imm, Dn — immediate source (group 8 encoding) ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  f_mode == 3'b111 && f_reg == 3'b100) begin
@@ -4294,14 +4331,37 @@
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                        // same template as Stage 1 -- see TAS's own comment in the
-                        // mode=110 unary-op family for the full reasoning.
-                        dec_ea_offset      = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                         dec_md_op          = f_dir ? DIV_SW : DIV_UW;
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning. General
+                        // ALU-EA genuine indirect stage (plan.md): fi_iis!=0 dispatches
+                        // through the shared memind FSM instead -- dec_is_mem_rd is
+                        // suppressed (matching MOVE's own memind arm) since the FSM
+                        // owns the bus cycles directly; dec_writes_reg/dec_is_mem_src
+                        // stay set (UNLIKE MOVE/LEA) so the genuine ALU(mem,Dn) result
+                        // still commits through the ordinary WB path once
+                        // dyn_bit_get_Dn's own new memind-outer-completion term swaps
+                        // rd_b to Dn (see eu_seq_execute.svh) -- memind's own raw-value
+                        // wr_en path (memind_wr_en) is gated off whenever
+                        // ex_writes_reg is already true, so the two mechanisms can't
+                        // collide. dec_memind_rd_siz mirrors dec_mem_rd_siz (word),
+                        // NOT dec_siz (longword, the 32-bit quotient's own result
+                        // size) -- see dec_memind_rd_siz's own declaration comment.
+                        if (fi_is_full && fi_iis != 3'b000) begin
+                            dec_is_mem_rd      = 1'b0;
+                            dec_is_memind      = 1'b1;
+                            dec_memind_is_post = fi_iis[2];
+                            dec_memind_od      = fi_od;
+                            dec_is_idx         = !fi_is_s && !fi_iis[2];
+                            dec_ea_offset      = fi_bd;
+                            dec_memind_rd_siz  = dec_mem_rd_siz;
+                        end else begin
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     // ── DIVU/DIVS #imm, Dn — immediate source ───────────
                     end else if (f_ss == 2'b11 && f_mode == 3'b111 && f_reg == 3'b100) begin
                         dec_valid       = 1'b1;
@@ -4525,13 +4585,26 @@
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                        // same template as Stage 1 -- see TAS's own comment in the
-                        // mode=110 unary-op family for the full reasoning.
-                        dec_ea_offset      = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning. General
+                        // ALU-EA genuine indirect stage (plan.md): same shape as
+                        // OR's own memind arm above -- see its comment for the full
+                        // reasoning. Covers both SUB and ADD via grp_aop(f_group).
+                        if (fi_is_full && fi_iis != 3'b000) begin
+                            dec_is_mem_rd      = 1'b0;
+                            dec_is_memind      = 1'b1;
+                            dec_memind_is_post = fi_iis[2];
+                            dec_memind_od      = fi_od;
+                            dec_is_idx         = !fi_is_s && !fi_iis[2];
+                            dec_ea_offset      = fi_bd;
+                            dec_memind_rd_siz  = dec_siz;
+                        end else begin
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     // ── SUB (ea),Dn — memory source → register dest ────
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  (f_mode == 3'b101 ||
@@ -4625,14 +4698,26 @@
                             dec_is_idx         = 1'b1;
                             dec_xn_wl          = ext_data[11];
                             dec_xn_scale       = ext_data[10:9];
-                            // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                            // same template as Stage 1 -- see TAS's own comment in the
-                            // mode=110 unary-op family for the full reasoning.
-                            dec_ea_offset      = fi_is_full ? fi_bd
-                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;  // An_dst (addr reg) read after mem_ack
                             dec_dyn_bit_is_an  = 1'b1;
+                            // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                            // same template as Stage 1 -- see TAS's own comment in the
+                            // mode=110 unary-op family for the full reasoning. General
+                            // ALU-EA genuine indirect stage (plan.md): same shape as
+                            // CMPA's own memind arm -- see its comment.
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                dec_is_mem_rd      = 1'b0;
+                                dec_is_memind      = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = fi_bd;
+                                dec_memind_rd_siz  = dec_mem_rd_siz;
+                            end else begin
+                                dec_ea_offset      = fi_is_full ? fi_bd
+                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                         // ── ADDA/SUBA (d8,PC,Xn): PC-indexed memory source ──
                         end else if (f_mode == 3'b111 && f_reg == 3'b011) begin
                             dec_is_mem_src     = 1'b1;
@@ -4848,13 +4933,29 @@
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                        // same template as Stage 1 -- see TAS's own comment in the
-                        // mode=110 unary-op family for the full reasoning.
-                        dec_ea_offset      = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning. General
+                        // ALU-EA genuine indirect stage (plan.md): same shape as
+                        // OR's own memind arm above -- see its comment. CMP writes no
+                        // register at all (flags only) -- memind_wr_en's own raw-write
+                        // path is gated off for any ex_is_mem_src consumer (already
+                        // set above) regardless, so this needs no extra care beyond
+                        // the shared template.
+                        if (fi_is_full && fi_iis != 3'b000) begin
+                            dec_is_mem_rd      = 1'b0;
+                            dec_is_memind      = 1'b1;
+                            dec_memind_is_post = fi_iis[2];
+                            dec_memind_od      = fi_od;
+                            dec_is_idx         = !fi_is_s && !fi_iis[2];
+                            dec_ea_offset      = fi_bd;
+                            dec_memind_rd_siz  = dec_siz;
+                        end else begin
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     // ── CMP #imm, Dn — immediate source (group B encoding) ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  f_mode == 3'b111 && f_reg == 3'b100) begin
@@ -4948,14 +5049,29 @@
                             dec_is_idx         = 1'b1;
                             dec_xn_wl          = ext_data[11];
                             dec_xn_scale       = ext_data[10:9];
-                            // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                            // same template as Stage 1 -- see TAS's own comment in the
-                            // mode=110 unary-op family for the full reasoning.
-                            dec_ea_offset      = fi_is_full ? fi_bd
-                                               : {{24{ext_data[7]}}, ext_data[7:0]};
                             dec_is_dyn_bit_idx = 1'b1;
                             dec_dyn_bit_reg    = f_dn;  // An (addr reg) read after mem_ack
                             dec_dyn_bit_is_an  = 1'b1;
+                            // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                            // same template as Stage 1 -- see TAS's own comment in the
+                            // mode=110 unary-op family for the full reasoning. General
+                            // ALU-EA genuine indirect stage (plan.md): same shape as
+                            // OR's own memind arm -- see its comment. dec_memind_rd_siz
+                            // mirrors dec_mem_rd_siz (explicitly f_dir-selected word/
+                            // long above), not dec_siz (unset/unused for CMPA -- An
+                            // compares always use the operand's own real size here).
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                dec_is_mem_rd      = 1'b0;
+                                dec_is_memind      = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_memind_od      = fi_od;
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = fi_bd;
+                                dec_memind_rd_siz  = dec_mem_rd_siz;
+                            end else begin
+                                dec_ea_offset      = fi_is_full ? fi_bd
+                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                         // ── CMPA (d8,PC,Xn): PC-indexed memory source ──
                         end else if (f_mode == 3'b111 && f_reg == 3'b011) begin
                             dec_is_mem_src     = 1'b1;
@@ -5229,13 +5345,26 @@
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                        // same template as Stage 1 -- see TAS's own comment in the
-                        // mode=110 unary-op family for the full reasoning.
-                        dec_ea_offset      = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning. General
+                        // ALU-EA genuine indirect stage (plan.md): same shape as
+                        // OR's own memind arm above -- see its comment for the full
+                        // reasoning.
+                        if (fi_is_full && fi_iis != 3'b000) begin
+                            dec_is_mem_rd      = 1'b0;
+                            dec_is_memind      = 1'b1;
+                            dec_memind_is_post = fi_iis[2];
+                            dec_memind_od      = fi_od;
+                            dec_is_idx         = !fi_is_s && !fi_iis[2];
+                            dec_ea_offset      = fi_bd;
+                            dec_memind_rd_siz  = dec_siz;
+                        end else begin
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     // ── AND #imm, Dn — immediate source (group C encoding) ──
                     end else if (!f_dir && f_ss != 2'b11 &&
                                  f_mode == 3'b111 && f_reg == 3'b100) begin
@@ -5294,15 +5423,30 @@
                         dec_is_idx         = 1'b1;
                         dec_xn_wl          = ext_data[11];
                         dec_xn_scale       = ext_data[10:9];
-                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
-                        // same template as Stage 1 -- see TAS's own comment in the
-                        // mode=110 unary-op family for the full reasoning.
-                        dec_ea_offset      = fi_is_full ? fi_bd
-                                           : {{24{ext_data[7]}}, ext_data[7:0]};
                         dec_is_dyn_bit_idx = 1'b1;
                         dec_dyn_bit_reg    = f_dn;
                         dec_md_op          = f_dir ? MUL_SW : MUL_UW;
                         dec_mem_rd_siz     = 2'b10;  // word read despite longword result
+                        // Stage 2 (plan.md Phase 116/117): fi_is_full/fi_bd extension,
+                        // same template as Stage 1 -- see TAS's own comment in the
+                        // mode=110 unary-op family for the full reasoning. General
+                        // ALU-EA genuine indirect stage (plan.md): same shape as
+                        // DIVU/DIVS's own memind arm above -- see its comment for the
+                        // full reasoning (dec_is_mem_rd suppressed, dec_writes_reg/
+                        // dec_is_mem_src stay set, dec_memind_rd_siz mirrors
+                        // dec_mem_rd_siz not dec_siz).
+                        if (fi_is_full && fi_iis != 3'b000) begin
+                            dec_is_mem_rd      = 1'b0;
+                            dec_is_memind      = 1'b1;
+                            dec_memind_is_post = fi_iis[2];
+                            dec_memind_od      = fi_od;
+                            dec_is_idx         = !fi_is_s && !fi_iis[2];
+                            dec_ea_offset      = fi_bd;
+                            dec_memind_rd_siz  = dec_mem_rd_siz;
+                        end else begin
+                            dec_ea_offset      = fi_is_full ? fi_bd
+                                               : {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     // ── MULU/MULS #imm, Dn — immediate source ───────────
                     end else if (f_ss == 2'b11 && f_mode == 3'b111 && f_reg == 3'b100) begin
                         dec_valid       = 1'b1;

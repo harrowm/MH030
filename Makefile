@@ -618,11 +618,48 @@ buscmp-memind31: $(SIM)/cosim_grp winuae/tests/memind31_ref.log tests/memind31.h
 	    | grep "^BUS" > /tmp/_dut_memind31.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind31.log winuae/tests/memind31_ref.log \
 	    --dut-may-continue
+# memind32-35 (general ALU-with-EA-source genuine indirect stage, plan.md):
+# ADD.L (register write), DIVU.W (word-sized memory operand, exercises the
+# memind read-size + timing fixes), CMP.L (no register write at all, flags
+# only, verified via a conditional branch on the resulting CCR), and
+# ADDA.L (An-destination, dec_dyn_bit_is_an's own swap path). Found and
+# fixed two real, previously-latent RTL bugs while building these: (1)
+# div_trap_raw's own md_div_by_zero check fired on the memind FSM's INNER
+# read too (mem_ack fires twice for memind, once per phase), evaluating
+# the still-in-flight pointer value as a divisor and causing a real
+# simulation hang; (2) a genuine one-cycle timing mismatch -- ex_mem_stall's
+# own memind term is the raw registered memind_outer_r, which clears one
+# cycle after mem_ack (unlike the ordinary ex_is_mem_rd path, which clears
+# the same cycle) -- so both dyn_bit_get_Dn's own register swap and the
+# memory operand's own value needed re-timing to memind_outer_done_r, with
+# a new memind_read_val_r latch holding the value across that gap (mem_rdata
+# itself reverts the cycle after mem_ack).
+buscmp-memind32: $(SIM)/cosim_grp winuae/tests/memind32_ref.log tests/memind32.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind32.hex +grp=memind32 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind32.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind32.log winuae/tests/memind32_ref.log \
+	    --dut-may-continue
+buscmp-memind33: $(SIM)/cosim_grp winuae/tests/memind33_ref.log tests/memind33.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind33.hex +grp=memind33 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind33.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind33.log winuae/tests/memind33_ref.log \
+	    --dut-may-continue
+buscmp-memind34: $(SIM)/cosim_grp winuae/tests/memind34_ref.log tests/memind34.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind34.hex +grp=memind34 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind34.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind34.log winuae/tests/memind34_ref.log \
+	    --dut-may-continue
+buscmp-memind35: $(SIM)/cosim_grp winuae/tests/memind35_ref.log tests/memind35.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind35.hex +grp=memind35 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind35.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind35.log winuae/tests/memind35_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
-              buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31
+              buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
+              buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

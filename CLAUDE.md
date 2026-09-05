@@ -636,14 +636,45 @@ single highest-blast-radius shared pin/arbitration logic. **This closes
 `silent-copper-latch.md` in full** — CAS now has the same genuine bus-level lock
 guarantee RMW and CAS2 already had.
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
+**Phase 243 (general ALU-with-EA-source genuine memory-indirect EA — IMPLEMENTED
+AND VERIFIED)**: implemented Phase 238's own deferred item — ADD/SUB/AND/OR/CMP/
+MULU/MULS/DIVU/DIVS/ADDA/CMPA's own `([bd,An],Xn,od)` support. Decode side (8
+`f_mode==110` arms in `eu_seq_decode.svh`) matched Phase 238's own "same small edit"
+characterization exactly, following LEA's own template; also added a new
+`dec_memind_rd_siz` field decoupling the memind FSM's own bus-read size from
+`dec_siz` (needed since MULU/MULS/DIVU/DIVS's `dec_siz` reflects their 32-bit result,
+not their 16-bit operand read — MOVE/MOVEA's own pre-existing memind arms backfilled
+to set it explicitly, zero behavior change). Execute side needed four fixes, not the
+single `dyn_bit_get_Dn` extension Phase 238 anticipated — found one at a time via
+real cosim mismatches and a genuine simulation hang: (1) `dyn_bit_get_Dn`'s new
+OR-term for the memind outer-read (as anticipated); (2) `memind_wr_en` gated on
+`!ex_is_mem_src` (its raw-value write path fires on ANY memind read regardless of
+family — would have corrupted CMP/CMPA, which write no register at all); (3)
+`div_trap_raw`'s divide-by-zero check excluding memind's own INNER read (mem_ack
+fires twice for memind; checking the still-in-flight pointer value as a divisor
+caused a real hang); (4) a genuine one-cycle timing mismatch — `ex_mem_stall`'s own
+memind term is the raw registered `memind_outer_r`, clearing one cycle after
+`mem_ack` (unlike the ordinary path, which clears the same cycle) — both the
+register swap and the memory operand's own value needed re-timing to a new
+`memind_outer_done_r`, with a new `memind_read_val_r` latch holding the value across
+the gap (`mem_rdata` itself reverts the cycle after `mem_ack`). New cosim tests
+(`tests/memind32.s`-`35.s`: ADD.L, DIVU.W, CMP.L via branch-on-CCR, ADDA.L) all match
+Musashi exactly; wired into `make cosim_memind` (22 total). Cross-family regression
+for `dyn_bit_get_Dn`'s 5 existing consumers is structural (the new term requires
+`ex_is_memind`, which none of them ever set), confirmed via unchanged `make test`
+37/37. Full mandatory gate clean, Harte sweep bit-identical to baseline. Remaining
+Stage 9b/9c deferred items (CMP2/CHK2, TAS/Scc genuine indirect EA) are unaffected
+and still stand as documented (`plan.md §Phase 238/239`).
+
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 22/22,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
-backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) is CLOSED IN FULL (all 10
-stages done, Phases 227-240), and the CAS bus-lock plan (`~/.claude/plans/
-silent-copper-latch.md`) is now ALSO CLOSED IN FULL (Phases 194/213/233/241/242).
-No open plan remains in this project — ask the user for new work.
+backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) and the CAS bus-lock plan
+(`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL. No open plan
+remains in this project — ask the user for new work. (CMP2/CHK2 and TAS/Scc genuine
+memory-indirect EA remain documented, deferred candidates if wanted — see
+`plan.md §Phase 238/239`.)
 
 ## Verification Commands
 

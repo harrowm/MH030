@@ -2171,12 +2171,55 @@
     // on every other instruction family already using this mechanism (CHK,
     // ALU-mem-src, dynamic bit-ops, MOVE mem-to-mem indexed-dst) since none
     // of them have a second read at all.
+    // General ALU-EA genuine indirect stage (plan.md, Phase 238's own
+    // proposal): ADD/SUB/AND/OR/CMP/MULU/MULS/DIVU/DIVS/ADDA/CMPA's own
+    // genuine memory-indirect EA dispatches through the shared memind FSM
+    // with ex_is_mem_rd SUPPRESSED (eu_seq_decode.svh, mirroring MOVE's own
+    // memind convention), so the existing ex_is_mem_rd-gated term below
+    // structurally cannot fire during any part of their own memind
+    // sequence -- deliberately, since firing on the INNER read's own
+    // mem_ack (before the outer read even resolves the final address)
+    // would swap Xn away too early, the exact risk Phase 238's own
+    // investigation flagged. This new, independent term instead fires on
+    // memind_outer_done_r (below) -- NOT the raw memind_outer_r&&mem_ack
+    // (memind_wr_en's own gating, fine for ITS purpose) -- because
+    // ex_mem_stall's own memind term is the raw, REGISTERED memind_outer_r
+    // itself, not "memind_outer_r && !mem_ack" the way the ordinary
+    // ex_is_mem_rd stall term is (see ex_mem_stall's own definition) --
+    // so ex_mem_stall (and therefore WB's own capture of ex_result)
+    // doesn't actually clear until the CYCLE AFTER mem_ack fires, once
+    // memind_outer_r has registered back to 0. Firing directly on
+    // memind_outer_r&&mem_ack swapped rd_b to Dn one cycle too early --
+    // by the time WB actually captured ex_result the following cycle, the
+    // swap had already reverted, silently computing garbage (0) instead
+    // of the real ALU/MUL/DIV result. Found via a genuine DIVU-via-memind
+    // cosim mismatch (correct read, correct size, wrong result).
+    logic memind_outer_done_r;
+    // mem_rdata itself is only valid the exact cycle mem_ack pulses --
+    // by memind_outer_done_r's own cycle (one cycle later), it has already
+    // reverted (found via the same DIVU-via-memind trace: md_src read back
+    // as 0 at the cycle WB actually captures, despite reading 4 correctly
+    // one cycle earlier). memind_read_val_r holds the outer read's own
+    // value across that one-cycle gap, mirroring memind_ptr_r's own
+    // existing capture-at-ack pattern for the inner read.
+    logic [31:0] memind_read_val_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            memind_outer_done_r <= 1'b0;
+            memind_read_val_r   <= 32'h0;
+        end else begin
+            memind_outer_done_r <= memind_outer_r && mem_ack;
+            if (memind_outer_r && mem_ack) memind_read_val_r <= mem_rdata;
+        end
+    end
+
     logic dyn_bit_get_Dn;
-    assign dyn_bit_get_Dn = ex_is_dyn_bit_idx && ex_is_mem_rd &&
-                            (ex_is_mem_rmw ? mem_rmw_read_ack
-                                           : (mem_ack && !mem_rmw_run_r && !mem_rmw_after_r
-                                              && !move_mm_run_r && !move_mm_after_r
-                                              && !(ex_is_cmp2chk2 && !cmp2_run_r && !cmp2_after_r)));
+    assign dyn_bit_get_Dn = (ex_is_dyn_bit_idx && ex_is_mem_rd &&
+                             (ex_is_mem_rmw ? mem_rmw_read_ack
+                                            : (mem_ack && !mem_rmw_run_r && !mem_rmw_after_r
+                                               && !move_mm_run_r && !move_mm_after_r
+                                               && !(ex_is_cmp2chk2 && !cmp2_run_r && !cmp2_after_r))))
+                          || (ex_is_dyn_bit_idx && ex_is_memind && memind_outer_done_r && memind_is_rd_r);
     assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel :
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
                       (dyn_bit_get_Dn && (ex_dyn_bit_swap_a || ex_dyn_bit_swap_both)) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
@@ -3095,7 +3138,13 @@
             // memind only supports load ops, except PEA/JSR's own outer
             // phase, which is a write (PEA: resolved EA; JSR: return PC).
             memind_is_rd_r     <= !dec_is_pea && !dec_is_jsr;
-            memind_siz_r       <= dec_siz;
+            // dec_memind_rd_siz (not dec_siz directly) since MULU/MULS/
+            // DIVU/DIVS's own dec_siz reflects their 32-bit RESULT, not
+            // their 16-bit memory OPERAND read -- every memind-dispatching
+            // family sets dec_memind_rd_siz explicitly to whichever of its
+            // own dec_siz/dec_mem_rd_siz is actually correct here (see that
+            // signal's own declaration comment in eu_seq_decode.svh).
+            memind_siz_r       <= dec_memind_rd_siz;
             memind_dest_r      <= dec_dest_reg;
             memind_od_r        <= dec_memind_od;
             // 10-item backlog Stage 9b (plan.md): JMP shares LEA's own
@@ -3369,11 +3418,19 @@
     );
     assign bf_result_w = bf_result;  // alias for clarity
 
+    // ex_is_mem_src's own memory operand: for memind, mem_rdata has
+    // already reverted by the cycle WB actually captures (see
+    // memind_read_val_r's own declaration comment) -- use the latched
+    // value instead; the ordinary (non-memind) case is unaffected, since
+    // its own ex_mem_stall clears the SAME cycle as mem_ack, when
+    // mem_rdata is still live.
+    logic [31:0] alu_src_mem;
+    assign alu_src_mem = ex_is_memind ? memind_read_val_r : mem_rdata;
     assign alu_src   = (ex_is_cmpm && cmpm_phase_r) ? cmpm_src_r :
                        (ex_is_addx_mem && addx_mem_run_r && addx_mem_phase_r == 2'd2) ? addx_src_r :
                        (ex_is_cas2 && ex_is_mem_rd)   ? rd_b_data :  // CAS2: Dc1/Dc2 compare reg
                        (ex_is_mem_rmw && !ex_use_imm) ? rd_b_data :  // Dn in rd_b for binary RMW
-                       ex_is_mem_src                 ? (ex_sext_src ? {{16{mem_rdata[15]}}, mem_rdata[15:0]} : mem_rdata) :
+                       ex_is_mem_src                 ? (ex_sext_src ? {{16{alu_src_mem[15]}}, alu_src_mem[15:0]} : alu_src_mem) :
                        ex_sext_src ? {{16{ex_src_operand[15]}}, ex_src_operand[15:0]}
                                    : ex_src_operand;
     // When reading from memory (RMW read phase, CMPI ea, TST ea, etc.),
@@ -3397,7 +3454,7 @@
     assign shf_siz     = ex_siz;
     assign shf_x_in    = flag_x;
 
-    assign md_src = ex_is_mem_src ? mem_rdata : (ex_use_imm ? ex_imm : rd_a_data);  // mem/imm/reg provides multiplier/divisor
+    assign md_src = ex_is_mem_src ? alu_src_mem : (ex_use_imm ? ex_imm : rd_a_data);  // mem/imm/reg provides multiplier/divisor (alu_src_mem: see its own comment for the memind timing fix)
     assign md_dst = rd_b_data;
     assign md_op  = ex_md_op;
 
@@ -4169,9 +4226,22 @@
                                         : {{16{mem_rdata[15]}}, mem_rdata[15:0]};
 
     // MOVEP load writes on last byte ack (assembles bytes into Dn).
-    // memind outer-read writes directly on mem_ack (bypasses WB latch).
+    // memind outer-read writes directly on mem_ack (bypasses WB latch) --
+    // but ONLY for a plain "load the read value into a register" consumer
+    // (MOVE/MOVEA). General ALU-EA genuine indirect stage (plan.md): the
+    // new ALU-with-EA-source families (ADD/SUB/AND/OR/CMP/MULU/MULS/DIVU/
+    // DIVS/ADDA/CMPA) set ex_is_mem_src=1 and need the memory value
+    // COMBINED with Dn/An via the ALU (ex_result), not written raw -- that
+    // combined result instead flows through the ordinary WB path once
+    // dyn_bit_get_Dn's own new memind-outer-completion term (below) swaps
+    // rd_b to Dn/An at this exact cycle. Without this !ex_is_mem_src gate,
+    // this dedicated path would fire unconditionally for EVERY memind read
+    // (matching memind_outer_r && mem_ack regardless of which family)
+    // and unconditionally commit the raw, un-combined mem_rdata -- wrong
+    // for ALU-EA, and for CMP/CMPA specifically would even write a
+    // register that should never be written at all (flags-only).
     logic memind_wr_en;
-    assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r;
+    assign memind_wr_en = memind_outer_r && mem_ack && memind_is_rd_r && !ex_is_mem_src;
 
     // 10-item backlog Stage 9a (plan.md): LEA's own memind case completes
     // on the INNER read's own ack instead (no outer bus cycle at all --
@@ -4382,8 +4452,23 @@
     // comment for the full derivation of why this is now necessary (the new
     // internal stall on DIVS.L/DIVU.L Dn,Dn holds ex_valid for ~350 ticks,
     // and this condition would otherwise re-fire on every one of them).
+    // General ALU-EA genuine indirect stage (plan.md): for a memind-
+    // dispatched DIVU/DIVS, mem_ack fires TWICE (the inner pointer read,
+    // then the outer operand read) -- this check must only evaluate
+    // md_div_by_zero on the cycle md_src actually reflects the real
+    // divisor. At the inner read's own ack, mem_rdata still holds the
+    // pointer value (meaningless here, and checking it risked a spurious
+    // divide-by-zero trap firing before the operand was even read,
+    // corrupting the whole instruction stream -- found via a genuine
+    // simulation hang on the very first memind DIVU cosim test). At the
+    // OUTER read's own raw mem_ack, md_src is ALSO not yet valid for
+    // memind specifically -- alu_src_mem's own memind_read_val_r capture
+    // only registers one cycle later (see that signal's own comment); the
+    // correct moment is memind_outer_done_r, matching dyn_bit_get_Dn's
+    // own identically-corrected timing.
     assign div_trap_raw = (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src && md_div_by_zero)
-                    || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && mem_ack && md_div_by_zero);
+                    || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && !ex_is_memind && mem_ack && md_div_by_zero)
+                    || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && ex_is_memind && memind_outer_done_r && md_div_by_zero);
     assign div_trap = div_trap_raw && !div_trap_fired_r;
     // CHK: trap on reg/imm comparison, memory-source ack, or CHK2 second-read ack.
     assign chk_trap_raw = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
