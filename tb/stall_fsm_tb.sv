@@ -3409,9 +3409,47 @@ module stall_fsm_tb;
         rom[16'h3C4C/4] = {16'h3BB1, SBCD_A3_A2};
         rom[16'h3C50/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h3C54/4] = {16'h0000, 16'd7201};
-        // Permanent park -- Stage 10 is the last stage of this plan, no
-        // further redirect needed.
-        rom[16'h3C58/4] = {BRA_SELF, NOP_OP};
+        // Redirect into the CAS bus-lock AS-continuity proof (Phase 241/242,
+        // silent-copper-latch.md's own mandated first verification item) --
+        // reached via the same JMP idiom used throughout this plan, into the
+        // remainder of this same freed gap (0x3c60-0x3c7f).
+        rom[16'h3C58/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h3C5C/4] = {16'h3C60, NOP_OP};
+
+        // AS-LOCK: genuine CAS match, D1(Dc)=D2(Du) values chosen so the
+        // compare succeeds against memory's own pre-loaded value -- proves
+        // real data-flow (Harte/atomic_tb.sv already cover CAS's own
+        // arithmetic exhaustively; this test's own job is purely to give the
+        // check-side AS monitor below a genuine read-then-write sequence to
+        // observe, matching the WS-CAS/B-5 tests' own established CAS setup
+        // pattern exactly).
+        rom[16'h3C90/4] = 32'h1111_1111;
+        rom[16'h3C60/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3C64/4] = {16'h3C90, MOVE_L_IMM_D1};
+        rom[16'h3C68/4] = {16'h1111, 16'h1111};
+        rom[16'h3C6C/4] = {MOVE_L_IMM_D2, 16'h2222};
+        rom[16'h3C70/4] = {16'h2222, CAS_L_D1D2_A0};
+        rom[16'h3C74/4] = {CAS_EXT, CLR_L_D5};
+        rom[16'h3C78/4] = {ADDI_L_D5, 16'h0000};
+        // AS-LOCK-MISMATCH: same proof, mismatch case -- D1(Dc)=0xFFFFFFFF
+        // deliberately does not match memory's own 0x4444_4444, so no write
+        // bus cycle follows. Confirms the fix's own "extend the hold through
+        // the internal get_du_r decision cycle, then release promptly since
+        // no write follows" behavior doesn't regress mismatch's own already-
+        // correct "no write on mismatch" value semantics (Stage 4/Phase 212)
+        // and doesn't leave AS held any longer than that one decision cycle.
+        rom[16'h3C7C/4] = {16'd7300, JMP_ABS_L_OP};
+        rom[16'h3C80/4] = {16'h0000, 16'h3CA0};
+        rom[16'h3CE0/4] = 32'h4444_4444;
+        rom[16'h3CA0/4] = {MOVEA_L_IMM_A0, 16'h0000};
+        rom[16'h3CA4/4] = {16'h3CE0, MOVE_L_IMM_D1};
+        rom[16'h3CA8/4] = {16'hFFFF, 16'hFFFF};
+        rom[16'h3CAC/4] = {MOVE_L_IMM_D2, 16'h5555};
+        rom[16'h3CB0/4] = {16'h5555, CAS_L_D1D2_A0};
+        rom[16'h3CB4/4] = {CAS_EXT, CLR_L_D5};
+        rom[16'h3CB8/4] = {ADDI_L_D5, 16'h0000};
+        rom[16'h3CBC/4] = {16'd7301, BRA_SELF};
+        // Permanent park -- last test in this file.
 
         rom[16'h3EA0/4] = 32'h1111_2222;
         rom[16'h3EA4/4] = 32'h3333_4444;
@@ -3688,6 +3726,151 @@ module stall_fsm_tb;
             check32("T4j: ABCD(3)+SBCD(3)=6 data-space bus cycles", c1 - c0, 32'd6);
             check8("T4j: SBCD read ABCD's own fresh result byte (0x02 = 0x05-0x03), not the stale 0x05 pre-load",
                    rom[16'h3BB0/4][31:24], 8'h02);
+        end
+
+        // AS-LOCK: CAS's own genuine bus-level lock (Phase 241/242,
+        // silent-copper-latch.md) -- direct signal-level proof that AS# stays
+        // continuously asserted across CAS's own read-then-write sequence,
+        // not negate-then-reassert (the bug this fix closes: single-address
+        // CAS dispatches its read and its conditional write as two ordinary,
+        // independent bus cycles with a real one-cycle return to ST_IDLE in
+        // between, eu_seq.sv's own cas_get_du_r step). Counts how many times
+        // ext_as_n rises 0->1 (a genuine negate) during the whole CAS
+        // instruction's own execution window -- real 68030 CAS holds the bus
+        // for the entire sequence, so this must be exactly 1 (the write's
+        // own true completion), not 2 (read completes, AS negates, briefly
+        // reasserts for the write, negates again -- confirmed via this
+        // exact test to be the baseline's own behavior before this fix,
+        // Phase 241's own investigation trace).
+        begin
+            int t;
+            int negate_edges;
+            logic as_n_prev;
+            // Arbitration-continuity monitoring (Phase 241's own Finding 3,
+            // the deeper problem beyond the AS pin alone): single-address
+            // CAS's read-to-write gap genuinely returns to real bus_idle,
+            // where the arbiter's own priority logic would otherwise
+            // re-evaluate and could hand the bus to a lower-priority
+            // requester (the IFU) mid-sequence. Confirms (a) the gap is
+            // genuinely exercised (eu_req really drops, proving this isn't
+            // a vacuous check), (b) the IFU genuinely had a pending request
+            // right then (a real contender, not an absent one), and (c)
+            // despite both, grant_eu never dropped and grant_ifu never rose
+            // during CAS's own entire execution window.
+            int gap_seen;
+            int ifu_req_during_gap_seen;
+            int grant_ifu_during_cas;
+            int grant_eu_dropped_during_cas;
+            int cas_bus_started;
+            negate_edges = 0;
+            gap_seen = 0;
+            ifu_req_during_gap_seen = 0;
+            grant_ifu_during_cas = 0;
+            grant_eu_dropped_during_cas = 0;
+            cas_bus_started = 0;
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3C76; t++)
+                @(posedge clk_4x);
+            // Fresh reference point taken exactly as decode_pc first reaches
+            // CAS's own address -- NOT captured any earlier (e.g. back when
+            // decode_pc was still 0x3C60), which would risk comparing
+            // against a stale value spanning the unrelated MOVEA/MOVE.L
+            // instructions' own AS activity ahead of CAS itself.
+            as_n_prev = ext_as_n;
+            fork
+                begin : as_lock_monitor
+                    // Gated on decode_pc==0x3C76, CAS's own instruction
+                    // address as reported by ifu_decode_pc (which reflects
+                    // the PC value after word-consumption, i.e. just past
+                    // both the opcode at 0x3C72 and its own extension word
+                    // at 0x3C74 -- confirmed via direct trace, not assumed)
+                    // -- stays parked there for CAS's entire multi-cycle
+                    // execution (dispatch through full completion). NOT
+                    // gated on ext_fc (an earlier attempt was): the
+                    // mismatch case's own final AS-release lands on a
+                    // genuinely idle tick (ST_IDLE, no live dispatched
+                    // cycle) where ext_fc has already reverted to its
+                    // default, silently missing that edge -- decode_pc
+                    // alone is sufficient and correct here, since the
+                    // existing state-based arbiter rules already prevent
+                    // any OTHER requester from using the bus anywhere in
+                    // this window regardless (IFU can't preempt an active
+                    // cycle; the one idle tick between phases is exactly
+                    // what this fix's own bus_lock extension protects).
+                    forever begin
+                        @(posedge clk_4x); #1;
+                        if (u_top.ifu_decode_pc == 32'h0000_3C76) begin
+                            if (ext_as_n && !as_n_prev) negate_edges++;
+                            as_n_prev = ext_as_n;
+                            // Only start watching for a dropped EU grant
+                            // once CAS's own bus activity has genuinely
+                            // begun -- grant_eu is legitimately still 0 for
+                            // the cycle(s) before the read is first
+                            // dispatched/granted, which isn't the gap this
+                            // test cares about.
+                            if (ext_fc == 3'b101 && u_top.u_biu.u_arb.grant_eu)
+                                cas_bus_started = 1;
+                            if (cas_bus_started && !u_top.u_biu.u_arb.eu_req) begin
+                                gap_seen = 1;
+                                if (u_top.u_biu.u_arb.ifu_req) ifu_req_during_gap_seen = 1;
+                            end
+                            if (cas_bus_started && u_top.u_biu.u_arb.grant_ifu) grant_ifu_during_cas = 1;
+                            if (cas_bus_started && !u_top.u_biu.u_arb.grant_eu)  grant_eu_dropped_during_cas = 1;
+                        end
+                    end
+                end
+                begin
+                    run_and_check("AS-LOCK: CAS match dependent instr ran (D5=7300)", 5, 32'd7300, 4000);
+                    disable as_lock_monitor;
+                end
+            join
+            check32("AS-LOCK: CAS match -- AS# negates exactly once across the whole read+write sequence (genuine bus lock, not read-then-reassert)",
+                    negate_edges, 32'd1);
+            check("AS-LOCK: read-to-write gap genuinely exercised (eu_req dropped -- confirms this isn't a vacuous check)", gap_seen);
+            check("AS-LOCK: IFU had a real pending request during that gap (a genuine contender, not an absent one)", ifu_req_during_gap_seen);
+            check("AS-LOCK: IFU never granted the bus during CAS's own entire execution window", !grant_ifu_during_cas);
+            check("AS-LOCK: EU's own grant never dropped during CAS's own entire execution window", !grant_eu_dropped_during_cas);
+        end
+
+        // AS-LOCK-MISMATCH: mismatch case -- no write follows, so this is
+        // regression coverage (confirming the fix doesn't hold AS beyond
+        // the one internal decision cycle when there's nothing to bridge
+        // to) rather than an independent proof of the bug like the match
+        // case above.
+        begin
+            int t;
+            int negate_edges;
+            logic as_n_prev;
+            negate_edges = 0;
+            // 0x3CB6 is this test's own CAS instruction address as reported
+            // by ifu_decode_pc (same "opcode+ext word" offset reasoning as
+            // the match case above, confirmed via direct trace) -- NOT
+            // gated on ext_fc, since this fix's own mismatch-case release
+            // lands on a genuinely idle tick with no live dispatched cycle,
+            // where ext_fc has already reverted to its default (found via
+            // trace: an ext_fc==101 gate here silently missed the real
+            // release edge entirely, undercounting to 0).
+            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3CB6; t++)
+                @(posedge clk_4x);
+            as_n_prev = ext_as_n;
+            fork
+                begin : as_lock_mismatch_monitor
+                    forever begin
+                        @(posedge clk_4x); #1;
+                        if (u_top.ifu_decode_pc == 32'h0000_3CB6) begin
+                            if (ext_as_n && !as_n_prev) negate_edges++;
+                            as_n_prev = ext_as_n;
+                        end
+                    end
+                end
+                begin
+                    run_and_check("AS-LOCK-MISMATCH: CAS mismatch dependent instr ran (D5=7301)", 5, 32'd7301, 4000);
+                    disable as_lock_mismatch_monitor;
+                end
+            join
+            check32("AS-LOCK-MISMATCH: CAS mismatch -- AS# negates exactly once (no write follows, no regression in mismatch's own no-write semantics)",
+                    negate_edges, 32'd1);
+            check32("AS-LOCK-MISMATCH: CAS mismatch loaded Dc from memory (0x44444444), value semantics unaffected by the bus-lock fix",
+                    u_top.u_eu.u_rf.d_reg[1], 32'h4444_4444);
         end
 
         // WS-PTEST: checked directly, not assumed excludable -- and this

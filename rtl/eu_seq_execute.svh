@@ -4686,6 +4686,15 @@
     // RMW — assert during TAS (An) read phase (not during write or cooldown).
     assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
 
+    // CAS's own genuine bus-level lock (silent-copper-latch.md, Phase
+    // 241/242) -- see this signal's own port-declaration comment in
+    // eu_seq.sv for the full derivation. Deliberately NOT gated on ex_z or
+    // mem_ack (Phase 233's own original proposal, proven infeasible by
+    // direct trace in Phase 241 -- AS negates one full state before either
+    // is valid).
+    assign eu_is_cas   = ex_valid && ex_is_cas;
+    assign eu_cas_hold = cas_active_r;
+
     // Phase 158 Stage 3: mem_rmw_lookup — TAS (same condition as mem_rmw
     // above) OR CAS's own read phase (cas_read_ack's own condition, minus
     // mem_ack, so it's true for the whole in-flight read not just the ack

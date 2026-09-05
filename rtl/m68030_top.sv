@@ -240,6 +240,8 @@ module m68030_top #(
     logic [31:0] eu_mem_addr, eu_mem_wdata;
     logic        eu_mem_rmw;
     logic        eu_mem_rmw_lookup;  // Phase 158 Stage 3
+    logic        eu_mem_is_cas;      // CAS bus-lock (Phase 241/242)
+    logic        eu_mem_cas_hold;    // CAS bus-lock (Phase 241/242)
     logic        eu_an_wr_en;
     logic [2:0]  eu_an_wr_sel;
     logic [31:0] eu_an_wr_data;
@@ -472,6 +474,8 @@ module m68030_top #(
         .mem_berr      (eu_berr && !exc_active),
         .mem_rmw       (eu_mem_rmw),
         .mem_rmw_lookup (eu_mem_rmw_lookup),
+        .eu_is_cas     (eu_mem_is_cas),
+        .eu_cas_hold   (eu_mem_cas_hold),
         .eu_coproc_req   (eu_coproc_req),
         .eu_coproc_rw    (eu_coproc_rw),
         .eu_coproc_siz   (eu_coproc_siz),
@@ -742,6 +746,8 @@ module m68030_top #(
         .eu_rst_req      (1'b0),
         // RMW
         .eu_rmw          (eu_mem_rmw),
+        .eu_is_cas       (eu_mem_is_cas),
+        .eu_cas_hold     (eu_mem_cas_hold),
         .bus_lock        (bus_lock),
         // CAS2 (stub)
         .eu_cas2_req     (1'b0),

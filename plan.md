@@ -7402,3 +7402,120 @@ in scope to a fresh, small feature rather than a pin-logic patch. See
 `~/.claude/plans/silent-copper-latch.md` (updated alongside this phase) for the full
 plan; a future attempt should start from proposal step 1-5 above, not Phase 233's
 own now-superseded version.
+
+## Phase 242 (silent-copper-latch.md, CAS bus-lock plan, attempt 5 -- IMPLEMENTED
+AND VERIFIED): CAS's own genuine bus-level lock, closing the plan
+
+Implemented Phase 241's own corrected proposal in full. Starting point: Phase 241
+had found Phase 233's original proposal (gate the AS-hold decision on the CAS
+compare result) was provably infeasible (AS negates at `ST_READ_S6`, one full state
+before `mem_ack`/`ex_z` becomes visible at `ST_READ_S7`), and derived a replacement
+that doesn't need the compare result at all -- gate on `ex_valid && ex_is_cas`
+(known from dispatch) plus the FSM's own existing `cas_active_r` ("read-ack until
+FSM fully done").
+
+**Implementation (exactly Phase 241's own 5-step shape, steps unchanged from that
+writeup)**:
+
+1. `eu_seq_execute.svh`: two new combinational assigns, `eu_is_cas = ex_valid &&
+   ex_is_cas;` and `eu_cas_hold = cas_active_r;`, placed directly after `mem_rmw`'s
+   own assign for consistency. Declared as new `eu_seq.sv` output ports.
+2. Threaded `eu_is_cas`/`eu_cas_hold` through `m68030_eu.sv` -> `m68030_top.sv` ->
+   `m68030_biu.sv` -> `biu_cycle_gen.sv`, mirroring `mem_rmw`'s own existing
+   threading pattern exactly at every hop.
+3. New `biu_cycle_gen.sv` signal:
+   ```
+   cas_as_hold = (grant_eu && eu_is_cas && (state == ST_READ_S6 || state == ST_READ_S7)) ||
+                 (eu_cas_hold && state != ST_WRITE_S6);
+   ```
+   applied identically to `rmw_as_hold`/`cas2_as_hold` (`if (cas_as_hold) ext_as_n =
+   1'b0;`, appended as a third override after both).
+4. `bus_lock`'s own assign extended with `| eu_cas_hold`, AND (the step Phase 233
+   never identified) `biu_arbiter.sv`'s internal `if (bus_idle)` re-arbitration
+   block gained a new `if (bus_lock) begin grant_mmu_r<=0; grant_eu_r<=1;
+   grant_ifu_r<=0; end else if (mmu_req) ...` branch ahead of the existing
+   mmu_req/eu_req/ifu_req priority chain -- keeps the EU's own grant "sticky"
+   through CAS's one-cycle `cas_get_du_r` return to real `bus_idle`, which RMW/CAS2
+   structurally never trigger (their own dedicated state sequences never let
+   `bus_idle` become true mid-sequence, so this new branch is a provable no-op for
+   them -- confirmed, not just argued, since `bus_lock` for RMW/CAS2 is entirely
+   `state`-derived and those states never coincide with `ST_IDLE`).
+5. Verified the write's own natural AS-assert (already unconditional at its own
+   `SP_S2`) doesn't conflict with AS already being held low from the fix above --
+   confirmed via direct trace, a harmless redundant re-assert to the same value.
+
+**A genuine testbench-only regression was found and fixed immediately**: `tb/
+biu_tb.sv` instantiates `biu_cycle_gen` standalone and left the two new input ports
+unconnected, X-propagating through `bus_lock` and breaking 4 unrelated DMA/
+arbitration tests in that file (`BG# asserts after BR#`, `dma_active set after
+BGACK`, `dma_active held while AS# low`, `ARB-3`). Fixed by tying both new ports to
+`1'b0` in that file's own instantiation (this testbench never exercises a genuine
+CAS sequence directly), matching the exact "unconnected input on a directly-
+instantiated submodule" gap class this project's own 10-item backlog Stage 1
+investigation already flagged once before for a different signal.
+
+**Verification, per `silent-copper-latch.md`'s own mandated order (test built and
+proven-to-fail BEFORE any RTL change, not after)**:
+
+1. **AS-continuity proof (`tb/stall_fsm_tb.sv`, new "AS-LOCK" test)**: a genuine CAS
+   match dispatched through the real DUT, with a concurrent `fork`ed monitor
+   counting `ext_as_n` 0->1 (negate) transitions across CAS's entire execution
+   window (gated on `ifu_decode_pc==0x3C76`, CAS's own instruction address as
+   reported by that signal -- confirmed via direct trace, not assumed, along with
+   an important correction: an EARLIER attempt gated the negate-count on
+   `ext_fc==Supervisor-Data-Space` to filter out unrelated IFU instruction-fetch
+   traffic in the wider decode window; this worked for the match case but
+   undercounted the MISMATCH case to 0, because that path's own AS-release lands on
+   a genuinely idle tick with no live dispatched cycle, where `ext_fc` has already
+   reverted to its default -- fixed by gating on `decode_pc` alone instead, which
+   is sufficient since the existing state-based arbiter rules already prevent any
+   other requester from using the bus anywhere in this window regardless).
+   **Confirmed the test fails on baseline first** (`git stash` on the RTL files,
+   rebuild, rerun): `got 00000002 exp 00000001` (read completes, AS negates,
+   reasserts for the write, negates again -- exactly the bug), then confirmed it
+   passes with the fix restored (`got 00000001`).
+2. **Arbitration-continuity proof, extending the same test (Phase 241's own Finding
+   3, the deeper problem beyond the AS pin)**: the same monitor also tracks (a)
+   whether `u_arb.eu_req` genuinely dropped during CAS's own window (proving the
+   gap is real, not vacuous), (b) whether `u_arb.ifu_req` was genuinely 1 at that
+   exact moment (a real contender, not an absent one), and (c) whether `grant_ifu`
+   ever rose or `grant_eu` ever dropped during CAS's entire execution. All four
+   confirmed correct with the fix in place; (a) and (b) both confirmed true (the
+   gap and a real contender both genuinely occur), yet (c) held throughout. Ran the
+   same checks against baseline RTL too: (a)/(b) both still true there, but (c)
+   happened not to trip in this exact test's own timing (the arbiter's one-cycle
+   race isn't reliably reproducible on demand, matching `silent-copper-latch.md`'s
+   own acknowledged difficulty of proving the CURRENT gap is being violated) --
+   these two checks are valuable regression coverage for the fix rather than an
+   independent baseline-failure proof, which the AS-continuity check above already
+   provides.
+3. **Mismatch case, new "AS-LOCK-MISMATCH" test**: confirms AS still negates
+   exactly once (no write follows, so this is regression coverage for the
+   already-correct "no write on mismatch" value semantics, not an independent bug
+   proof -- baseline mismatch was never broken in this specific way, since there
+   was never a second bus cycle to reassert for) and confirms Dc is still correctly
+   loaded from memory, unaffected by the bus-lock change.
+4. Deliberately did not build a genuine external DMA-during-CAS test (item 4 of the
+   plan's own verification list) -- the plan's own text explicitly allows deferring
+   this specific sub-item with its own documented reasoning if building real DMA-
+   arbitration test infrastructure from scratch is disproportionate scope; the
+   signal-level AS-continuity and internal-arbitration proofs above are the
+   load-bearing verification and directly exercise the exact mechanism (`bus_lock`
+   feeding `biu_arbiter.sv`) any external-DMA test would also depend on.
+5. **Full mandatory gate**: `make test` 37/37 (including all 9 new AS-LOCK/
+   AS-LOCK-MISMATCH checks), `make cosim_grp` 8/8, `make cosim_memind` 18/18, full
+   124-suite Tom Harte sweep via `run_harte_batch.py --backend verilator -j 10
+   --chunk-size 300`: `TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-
+   identical to baseline, despite this stage touching the single highest-blast-
+   radius shared pin logic and internal arbitration logic in the project.
+
+**This closes `~/.claude/plans/silent-copper-latch.md` in full.** CAS now has the
+same genuine bus-level lock guarantee RMW (TAS) and CAS2 already had, closing the
+last of the three explicitly-carried-forward gaps from the original 10-item
+backlog's own Stage 7 deferral. Final tally across this plan's 5 attempts: Phase
+194 (first investigation), Phase 213/242-old (real regression found and reverted),
+Phase 233 (re-deferred with a proposal later found to be factually wrong on
+timing), Phase 241 (investigation that found and corrected that error, plus the
+new arbitration-continuity finding), Phase 242 (this phase -- implemented and
+verified). No open RTL correctness gap of any kind is known to remain in this
+project.

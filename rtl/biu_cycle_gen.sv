@@ -124,6 +124,20 @@ module biu_cycle_gen #(
     input  logic        eu_rmw,          // request RMW read→write without bus release
     output logic        bus_lock,        // high during RMW or CAS2 (suppresses DMA grant)
 
+    // CAS's own genuine bus-level lock (silent-copper-latch.md, Phase 241/242):
+    // single-address CAS dispatches its read and its conditional write as two
+    // ordinary ST_READ_*/ST_WRITE_* cycles (no dedicated state sequence like
+    // RMW/CAS2), with a real one-cycle return to ST_IDLE in between
+    // (eu_seq.sv's own cas_get_du_r step) -- unlike eu_rmw/eu_cas2_req above,
+    // this can't be identified by state alone since ST_READ_S6/S7 are shared
+    // with every other requester. eu_is_cas identifies "the read currently
+    // completing (if any) is CAS's own" (qualified with grant_eu below, since
+    // it's already true from EX-dispatch, before the bus cycle itself starts);
+    // eu_cas_hold is eu_seq.sv's own cas_active_r directly ("read-ack until
+    // FSM fully done" -- already precisely the post-read hold window needed).
+    input  logic        eu_is_cas,
+    input  logic        eu_cas_hold,
+
     // CAS2 four-cycle atomic lock (BIU-057)
     input  logic        eu_cas2_req,
     input  logic [31:0] eu_cas2_addr1,
@@ -496,12 +510,32 @@ module biu_cycle_gen #(
     logic cas2_as_hold;
     assign cas2_as_hold = is_cas2 && is_cas2_next && (state != ST_CAS2_R1_S0);
 
-    // bus_lock: suppress DMA during RMW, CAS2, and burst sequences
+    // CAS's own genuine bus-level lock (silent-copper-latch.md, Phase 241/242):
+    // holds AS across the read's own S6/S7 negate point (grant_eu-qualified,
+    // since those states are shared with every other requester, unlike RMW/
+    // CAS2's own dedicated, non-shared state names) and across the entire
+    // post-read-ack window eu_cas_hold covers -- EXCLUDING the write's own
+    // final ST_WRITE_S6, so its already-correct natural AS-negate there is
+    // left completely untouched (matching rmw_as_hold's own precedent of
+    // never touching its own final write-completion state).
+    logic cas_as_hold;
+    assign cas_as_hold = (grant_eu && eu_is_cas && (state == ST_READ_S6 || state == ST_READ_S7)) ||
+                         (eu_cas_hold && state != ST_WRITE_S6);
+
+    // bus_lock: suppress DMA during RMW, CAS2, burst, and single-address CAS
+    // sequences. eu_cas_hold's own inclusion here is the part that matters
+    // for CAS specifically: unlike RMW/CAS2 (whose dedicated state sequences
+    // never let bus_idle become true mid-sequence, so the internal arbiter's
+    // own "if (bus_idle)" re-arbitration never even runs for them), CAS's
+    // read-to-write gap genuinely returns to ST_IDLE -- bus_lock reaching
+    // biu_arbiter.sv is what keeps that gap from handing the bus to a
+    // different, lower-priority requester (see biu_arbiter.sv's own new
+    // bus_lock-gated branch).
     assign bus_lock = (state == ST_RMW_READ_S0)  | (state == ST_RMW_READ_S1)  |
                       (state == ST_RMW_READ_S2)  | (state == ST_RMW_READ_S3)  |
                       (state == ST_RMW_READ_S4)  | (state == ST_RMW_READ_S5)  |
                       (state == ST_RMW_READ_S6)  | (state == ST_RMW_READ_S7)  |
-                      is_rmw_write | is_cas2 | is_burst;
+                      is_rmw_write | is_cas2 | is_burst | eu_cas_hold;
 
     // Init-done and captured init vectors
     logic        init_done_r;
@@ -1653,6 +1687,10 @@ module biu_cycle_gen #(
             // CAS2's own 4 chained sub-cycles -- see cas2_as_hold's own
             // declaration comment for the full derivation.
             if (cas2_as_hold) ext_as_n = 1'b0;
+            // Single-address CAS's own genuine bus-level lock
+            // (silent-copper-latch.md, Phase 241/242) -- see cas_as_hold's
+            // own declaration comment for the full derivation.
+            if (cas_as_hold) ext_as_n = 1'b0;
         end
     end
 

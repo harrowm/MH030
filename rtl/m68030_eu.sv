@@ -92,6 +92,8 @@ module m68030_eu (
     input  logic        mem_berr,
     output logic        mem_rmw,      // 1=hold bus for RMW (TAS)
     output logic        mem_rmw_lookup, // Phase 158 Stage 3 — D-cache force-miss
+    output logic        eu_is_cas,      // CAS bus-lock (Phase 241/242): see eu_seq.sv
+    output logic        eu_cas_hold,    // CAS bus-lock (Phase 241/242): see eu_seq.sv
 
     // ── FPU coprocessor interface (FC=111 CPU Space) ───────────
     output logic        eu_coproc_req,
@@ -354,6 +356,8 @@ module m68030_eu (
         .mem_berr     (mem_berr),
         .mem_rmw      (mem_rmw),
         .mem_rmw_lookup (mem_rmw_lookup),
+        .eu_is_cas    (eu_is_cas),
+        .eu_cas_hold  (eu_cas_hold),
         // FPU coprocessor
         .eu_coproc_req   (eu_coproc_req),
         .eu_coproc_rw    (eu_coproc_rw),

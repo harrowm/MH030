@@ -107,6 +107,14 @@ module biu_tb;
     // RMW atomic lock signals
     logic eu_rmw_tb = 1'b0;
     logic bus_lock;
+    // CAS bus-lock (Phase 241/242): this testbench never drives a genuine
+    // CAS sequence through biu_cycle_gen directly (unlike eu_rmw_tb/
+    // eu_cas2_req_tb above, no test here exercises it), so tie both off --
+    // an unconnected input here would leave bus_lock X-propagated, breaking
+    // every DMA/arbitration test in this file (found via the regression
+    // this exact gap caused when these ports were first added).
+    logic eu_is_cas_tb   = 1'b0;
+    logic eu_cas_hold_tb = 1'b0;
 
     // Cache interface control
     logic [31:0] cacr_tb         = 32'h0;
@@ -502,6 +510,8 @@ module biu_tb;
         // RMW and CAS2 ports
         .eu_rmw             (eu_rmw_tb),
         .bus_lock           (bus_lock),
+        .eu_is_cas          (eu_is_cas_tb),
+        .eu_cas_hold        (eu_cas_hold_tb),
         .eu_cas2_req        (eu_cas2_req_tb),
         .eu_cas2_addr1      (eu_cas2_addr1_tb),
         .eu_cas2_addr2      (eu_cas2_addr2_tb),

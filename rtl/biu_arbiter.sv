@@ -97,7 +97,26 @@ module biu_arbiter (
 
                     // Internal arbitration — only reassign when bus is idle.
                     if (bus_idle) begin
-                        if (mmu_req) begin
+                        if (bus_lock) begin
+                            // A locked EU sequence needs the bus back
+                            // immediately even though bus_idle=1 for this one
+                            // cycle. RMW/CAS2's own dedicated state sequences
+                            // never actually let bus_idle become true mid-
+                            // sequence, so this branch is a structural no-op
+                            // for them; single-address CAS's own read-to-write
+                            // gap genuinely does return to real ST_IDLE for
+                            // one cycle (silent-copper-latch.md, Phase
+                            // 241/242) -- without this, that one idle tick
+                            // would fall through to ordinary mmu_req/ifu_req
+                            // priority below and could hand the bus to a
+                            // different, lower-priority requester (most
+                            // plausibly the IFU, which is essentially always
+                            // trying to prefetch) mid-CAS, exactly the gap
+                            // this lock exists to close.
+                            grant_mmu_r <= 1'b0;
+                            grant_eu_r  <= 1'b1;
+                            grant_ifu_r <= 1'b0;
+                        end else if (mmu_req) begin
                             grant_mmu_r <= 1'b1;
                             grant_eu_r  <= 1'b0;
                             grant_ifu_r <= 1'b0;

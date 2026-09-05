@@ -101,6 +101,8 @@ module m68030_biu #(
 
     input  logic        eu_rmw,
     output logic        bus_lock,
+    input  logic        eu_is_cas,      // CAS bus-lock (Phase 241/242)
+    input  logic        eu_cas_hold,    // CAS bus-lock (Phase 241/242)
 
     input  logic        eu_cas2_req,
     input  logic [31:0] eu_cas2_addr1,
@@ -1033,6 +1035,8 @@ module m68030_biu #(
         // RMW
         .eu_rmw          (eu_rmw),
         .bus_lock        (bus_lock),
+        .eu_is_cas       (eu_is_cas),
+        .eu_cas_hold     (eu_cas_hold),
         // CAS2
         .eu_cas2_req     (eu_cas2_req),
         .eu_cas2_addr1   (eu_cas2_addr1),

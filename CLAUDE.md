@@ -607,14 +607,43 @@ honestly-negated gap. Deferred again with a fully corrected, trace-verified
 proposal (`silent-copper-latch.md`, updated) — no RTL or testbench changed (a
 temporary investigation trace was built and reverted, `git diff --stat` clean).
 
+**Phase 242 (`~/.claude/plans/silent-copper-latch.md`, CAS bus-lock plan, 5th
+attempt — IMPLEMENTED AND VERIFIED, closes the plan)**: implemented Phase 241's own
+corrected proposal in full. Two new signals from `eu_seq.sv` (`eu_is_cas =
+ex_valid && ex_is_cas`; `eu_cas_hold = cas_active_r` — neither needs the compare
+result, sidestepping Phase 241's own timing-infeasibility finding) threaded through
+`m68030_eu.sv`/`m68030_top.sv`/`m68030_biu.sv` into `biu_cycle_gen.sv`, driving a
+new `cas_as_hold` override (holds AS across the read's own `ST_READ_S6`/`S7` and
+the entire post-read-ack window, excluding the write's own final `ST_WRITE_S6` so
+its already-correct natural negate is untouched) plus a `bus_lock` extension. The
+part Phase 233 never identified: `bus_lock` reaching `biu_arbiter.sv` alone isn't
+enough — its own internal `if (bus_idle)` re-arbitration needed a new `bus_lock`-
+gated branch keeping the EU's grant sticky through CAS's one-cycle return to real
+`ST_IDLE` (`eu_seq.sv`'s own `cas_get_du_r` step), something RMW/CAS2 never trigger
+since their own dedicated state sequences never let `bus_idle` become true
+mid-sequence. **Found and fixed one real testbench-only regression**: `tb/
+biu_tb.sv` instantiates `biu_cycle_gen` standalone and left the two new ports
+unconnected, X-propagating through `bus_lock` and breaking 4 unrelated DMA-
+arbitration tests — fixed by tying both to `1'b0` there (this file never exercises
+a genuine CAS sequence directly). New `tb/stall_fsm_tb.sv` tests (AS-LOCK,
+AS-LOCK-MISMATCH) built and confirmed to fail on baseline BEFORE the fix (per the
+plan's own mandated order), then confirmed passing after — including new
+arbitration-continuity checks proving `grant_ifu` never rises and `grant_eu` never
+drops during CAS's own execution window even with a genuine pending IFU request
+present. Full mandatory gate: `make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+18/18, full Harte sweep bit-identical to baseline despite touching the project's
+single highest-blast-radius shared pin/arbitration logic. **This closes
+`silent-copper-latch.md` in full** — CAS now has the same genuine bus-level lock
+guarantee RMW and CAS2 already had.
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 18/18,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
 backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) is CLOSED IN FULL (all 10
-stages done, Phases 227-240). The CAS bus-lock plan (`silent-copper-latch.md`) remains
-open, deferred at its 4th attempt with a corrected proposal (Phase 241) — ask the
-user before picking it up again given its own repeated risk history.
+stages done, Phases 227-240), and the CAS bus-lock plan (`~/.claude/plans/
+silent-copper-latch.md`) is now ALSO CLOSED IN FULL (Phases 194/213/233/241/242).
+No open plan remains in this project — ask the user for new work.
 
 ## Verification Commands
 

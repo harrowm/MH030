@@ -204,20 +204,30 @@ module eu_seq (
     // signal, true for the entire read phase of TAS, CAS, or CAS2 (both
     // reads), consumed only by biu_cache_if.sv to force dhit=0 per manual
     // §6.1.2.2: "The read portion of a read-modify-write cycle is always
-    // forced to miss in the data cache." NOTE, corrected by the open-
-    // items backlog Stage 9 investigation (plan.md): this comment used
-    // to claim "bus_lock is declared but never driven anywhere" — false;
-    // bus_lock's own assign in biu_cycle_gen.sv has included is_cas2
-    // since the initial commit, and Phase 213 gave CAS2 genuine AS
-    // continuity too (cas2_as_hold) — CAS2 already has full bus-level
-    // lock. Single-address CAS genuinely still lacks it (mem_rmw above
-    // is TAS-only) and also skips its own write bus cycle entirely on a
-    // failed compare, when real silicon performs it unconditionally
-    // (MC68030UM.pdf 3.5.1/7.3.6, confirmed directly) — both real,
-    // deferred gaps, with the exact blocking complexity (a register-port
-    // timing mismatch in CAS's own FSM vs. the shared RMW dispatch
-    // machinery) documented in plan.md §Phase 194 rather than guessed.
+    // forced to miss in the data cache." NOTE: RMW/CAS2 both have genuine
+    // bus-level AS continuity (mem_rmw above for TAS; cas2_as_hold in
+    // biu_cycle_gen.sv for CAS2); single-address CAS now does too, via
+    // eu_is_cas/eu_cas_hold below (silent-copper-latch.md, Phase 241/242)
+    // — CAS write-on-mismatch remains correctly conditional (real 68030
+    // silicon does NOT always write back on mismatch, confirmed directly
+    // against MC68030UM.pdf §7.3.3 — Phase 213's own correction of an
+    // earlier, wrong claim here; not touched by this bus-lock work).
     output logic        mem_rmw_lookup,
+
+    // CAS's own genuine bus-level lock (silent-copper-latch.md, Phase
+    // 241/242): threaded to biu_cycle_gen.sv (via m68030_eu.sv/
+    // m68030_biu.sv) since CAS's read+conditional-write dispatch as two
+    // ordinary ST_READ_*/ST_WRITE_* cycles with a real one-cycle return to
+    // ST_IDLE in between (cas_get_du_r below) — unlike mem_rmw/CAS2's own
+    // dedicated, never-idle state sequences, this can't be identified by
+    // biu_cycle_gen.sv's own state alone. eu_is_cas is stable for CAS's
+    // entire EX residency (confirmed via direct trace, from before its own
+    // read dispatches through to full completion — deliberately NOT gated
+    // on the compare result, since AS negates one full state before
+    // mem_ack/ex_z is even visible, see plan.md §Phase 241). eu_cas_hold is
+    // cas_active_r directly.
+    output logic        eu_is_cas,
+    output logic        eu_cas_hold,
 
     // ── FPU coprocessor interface (FC=111 CPU Space) ──────────────
     output logic        eu_coproc_req,
