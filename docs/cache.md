@@ -342,11 +342,20 @@ re-investigating something already fixed.
   at the one correct cycle. Found and fixed a real bug along the way: an
   untranslated-access burst-dispatch check was also reading the same stale
   broadcast, capable of permanently blocking D-cache bursting after any one
-  unrelated MMU use. **Still genuinely open, found and documented by this same
-  stage, NOT fixed**: `biu_icache_if.sv` has zero MMU-CI-awareness at all for its
-  own linefill — a bigger, different, still-undone gap than this stage's own
-  "stale broadcast" scope (the I-cache's own fill path doesn't consult CI at all,
-  whereas the D-cache's bug was merely reading a stale copy of it).
+  unrelated MMU use. **The I-cache's own bigger, different gap flagged by this same
+  stage — `biu_icache_if.sv` had zero MMU-CI-awareness at all for its own linefill —
+  is also now CLOSED (Phase 246)**, via a simpler mechanism than the D-cache's own
+  `xl_ci_r`: a CI'd translated fetch now routes through the existing `IC_FROZEN_MISS`
+  state (Phase 158 Stage 5's own `FI=1` "fetch the requested word directly, cache
+  array untouched" behavior, which turns out to be architecturally exactly right for
+  a CI page too — CI means "not cacheable," so there's nothing to gain from a
+  whole-line fetch or a burst either). Because the cache array is never touched for
+  a CI access at all with this approach, there's no later staleness question to
+  guard against, so no captured register was needed. Verified via a new, dedicated
+  `tb/biu_tb.sv` test (a new standalone `u_icache` instance — no prior testbench
+  exercised this module outside the full `m68030_top` pipeline) proving a CI=1
+  fetch neither bursts nor caches, with a CI=0 control proving the fix doesn't
+  disturb the normal path.
 - A full MOVES-based D-cache FC-aliasing test was attempted once (predating Phase 158)
   and caused an unexplained timing sensitivity elsewhere in `tb/cache_tb.sv` when
   inserted mid-sequence — **root-caused and closed** by the open-items backlog's own
@@ -367,8 +376,7 @@ re-investigating something already fixed.
 open-items backlog's own Stage 1 — no single up-to-date count is maintained here; run
 `make test` for the current pass/fail state of the `cache` suite.
 
-**The one genuinely open item remaining in either cache, as of the 10-item backlog's
-own closure (Phase 240): `biu_icache_if.sv`'s own complete lack of MMU-CI-awareness
-for I-cache linefill** (found and documented, not fixed, by Stage 2 above). Everything
-else this section used to list — BERR-during-fill's harder sub-case, per-beat CIIN,
-the D-cache's own `mmu_ci` staleness, the dead EU-side I-cache array — is closed.
+**No known correctness gap remains in either cache as of Phase 246.** Every item
+this section used to list — BERR-during-fill's harder sub-case, per-beat CIIN, the
+D-cache's own `mmu_ci` staleness, the I-cache's own complete lack of
+MMU-CI-awareness, the dead EU-side I-cache array — is closed.

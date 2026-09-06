@@ -7909,3 +7909,70 @@ verification tools used by every other cosim test in the corpus.
 PEA, JMP, JSR from Stage 9a/9b; general ALU-EA and CMP2/CHK2 from Phases 243/244;
 TAS and Scc this phase). No further genuine-memory-indirect-EA work remains
 documented or deferred anywhere in this project.
+
+## Phase 246 (`biu_icache_if.sv`'s own MMU-CI-awareness gap -- IMPLEMENTED AND
+VERIFIED, closes the last genuinely open item in `docs/cache.md`)
+
+Fixed the one item `docs/cache.md`'s own "What's left, if anything" section still
+listed as open after its own recent update: `biu_icache_if.sv` had zero
+MMU-CI-awareness at all for its own linefill, found and documented (not fixed) by
+the 10-item backlog's own Stage 2 (Phase 228) when it fixed the analogous, but
+narrower, `mmu_ci` stale-broadcast bug for the D-cache.
+
+**Design note -- this turned out simpler than the D-cache's own fix, not the same
+shape.** The initial plan was to mirror `biu_cache_if.sv`'s own `xl_ci_r` mechanism
+exactly (a captured, per-access CI bit used to gate the fill-completion's own
+populate-or-not decision, since the D-cache's populate decision happens long after
+translation, when the shared MMU broadcast may have already moved on to a
+different requester). Implemented that shape first, then reconsidered: the
+I-cache's own Phase 158 Stage 5 already has an EXISTING state,
+`IC_FROZEN_MISS` (for `FI=1`, "fetch the requested word directly, cache array
+untouched"), that turns out to be architecturally *exactly* the right behavior for
+a CI page too -- CI means "not cacheable," so there's nothing to gain from
+fetching a whole line (the IBE=0 `IC_SINGLE_0..3` fallback's own behavior) or from
+bursting (matching this file's own header comment's already-documented "the
+processor does not assert CBREQ if... burst filling for the cache is not enabled"
+principle, manual Figure 6-13 -- bursting exists purely to fill the cache,
+architecturally meaningless for a CI page regardless of IBE). Routing a CI'd
+translated fetch through `IC_FROZEN_MISS` (via `if (ifreeze_en || xl_ci) begin
+state <= IC_FROZEN_MISS; ... end`, gated on the LIVE `xl_ci` port at `IC_XLATE`'s
+own `xl_hit || xl_walk_done` transition -- correct and stale-broadcast-immune at
+that exact instant, per `biu_mmu_arb.sv`'s own same-cycle-correctness contract,
+identical reasoning to `biu_cache_if.sv`'s own `!mmu_ci` check at its analogous
+dispatch point) means the cache array is *never touched* for a CI access at all --
+eliminating the entire staleness question this file was originally going to need a
+captured register for. Implemented, tested, and reverted the `xl_ci_r`-based
+version once this was noticed; the final, shipped fix has no new register at all,
+just one new OR-term (`|| xl_ci`) on an existing dispatch condition.
+
+**New dedicated test** (`tb/biu_tb.sv`, P-ICI): no prior testbench instantiated
+`biu_icache_if.sv` standalone (`tb/cache_tb.sv`'s own I-1..I-5 exercise it only
+through the full `m68030_top` pipeline) -- added a new `u_icache` instance mirroring
+`u_cache`'s own signal-level MMU-translation test rig exactly (full manual control
+over `xl_hit`/`xl_pa`/`xl_ci` and the `ic_burst_*`/`cg_*` response signals, no real
+walker/burst-controller behind them). Part A drives a translated `xl_ci=1` fetch
+with `IE=1,IBE=1` and confirms `ic_burst_req` never asserts (falls back to
+`IC_FROZEN_MISS`'s own ordinary single-word fetch instead) and `valid_i` stays 0
+afterward. Part B is a same-shape `xl_ci=0` control, confirming the fix doesn't
+disturb the genuinely-cacheable path (bursts AND caches normally). Found and fixed
+one real testbench-only bug while building this: an initial attempt drove the
+`cg_ack`/`ic_burst_ack` response signals via `@(posedge clk_4x); signal=1;`
+(assign immediately after the edge) inside a polling loop that continuously
+toggled the signal every iteration -- this raced the DUT's own same-edge
+`always_ff` update of `cg_ack_prev_r`, reliably hanging `cg_ack_rise`'s own
+edge-detector forever (traced directly: `state` stuck at `IC_FROZEN_MISS`, `cg_ack`
+visibly oscillating every cycle in the trace, `cg_ack_rise` never firing). Fixed by
+switching to the same safe idiom `u_cache`'s own Stage 6 burst-retry test already
+uses: set the response signal, `#1` settle, `@(posedge clk_4x)`, `#1` settle again,
+then clear -- signal is fully stable heading into the one real edge that should
+observe it, no same-edge race possible.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind`
+26/26, `make dat-synth` 50/50, full 124-suite Tom Harte sweep via
+`run_harte_batch.py --backend verilator -j 10 --chunk-size 300`: `TOTAL: PASS 702142
+FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline (expected: Harte never
+sets `TC.E=1` or enables either cache, so this fix was never exercised by the
+corpus itself; `tb/biu_tb.sv`'s own new P-ICI test is the real gate here).
+
+**This closes the last genuinely open item `docs/cache.md` documented** -- no known
+correctness gap remains in either cache.

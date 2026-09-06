@@ -131,6 +131,39 @@ module biu_tb;
     logic        xl_walk_done_tb = 1'b0;
     logic        xl_ci_tb       = 1'b0;
     logic        ciout_tb;
+
+    // docs/cache.md fix (plan.md §Phase 246): a dedicated, standalone
+    // biu_icache_if instance (u_icache below), mirroring u_cache's own
+    // signal-level MMU-translation test rig exactly -- full manual control
+    // over ifu_req/xl_hit/xl_pa/xl_ci and the ic_burst_*/cg_* response
+    // signals lets a new test inject a translated CI=1 fetch directly and
+    // observe both that ic_burst_req never asserts (falls back to an
+    // ordinary single fetch instead) and that the line never gets marked
+    // valid, without needing a real concurrent MMU walker.
+    logic [31:0] icif_ifu_addr_tb = 32'h0;
+    logic [2:0]  icif_ifu_fc_tb   = 3'b110;
+    logic        icif_ifu_req_tb  = 1'b0;
+    logic [31:0] icache_ifu_rdata;
+    logic        icache_ifu_ack, icache_ifu_berr;
+    logic [31:0] icache_cg_addr;
+    logic        icache_cg_req;
+    logic [31:0] cg_rdata_tb     = 32'h0;
+    logic        cg_ack_tb       = 1'b0;
+    logic        cg_berr_tb      = 1'b0;
+    logic [31:0] icache_ic_burst_addr;
+    logic        icache_ic_burst_req;
+    logic [31:0] ic_burst_rdata0_tb = 32'h0, ic_burst_rdata1_tb = 32'h0;
+    logic [31:0] ic_burst_rdata2_tb = 32'h0, ic_burst_rdata3_tb = 32'h0;
+    logic [1:0]  ic_burst_beat_tb = 2'b00;
+    logic [1:0]  ic_burst_beat_at_berr_tb = 2'b00;
+    logic        ic_burst_ack_tb = 1'b0, ic_burst_berr_tb = 1'b0;
+    logic [31:0] cacr_icache_tb  = 32'h0;
+    logic [31:0] caar_icache_tb  = 32'h0;
+    logic [31:0] tc_icache_tb    = 32'h0;
+    logic [31:0] xl_pa_icache_tb = 32'h0;
+    logic        xl_hit_icache_tb = 1'b0;
+    logic        xl_walk_done_icache_tb = 1'b0;
+    logic        xl_ci_icache_tb = 1'b0;
     // Deferred-items closure plan Stage 9 (plan.md): genuine testbench-
     // driven D-cache burst response signals (were tied to dead constants
     // before this stage -- see u_cache's own instantiation below) --
@@ -714,6 +747,60 @@ module biu_tb;
         .xlate_fault_siz  (),
         .cacr        (cacr_tb),
         .caar        (caar_tb)
+    );
+
+    // -----------------------------------------------------------------------
+    // biu_icache_if — standalone instance for docs/cache.md's own
+    // MMU-CI-awareness fix (plan.md §Phase 246). Mirrors u_cache's own
+    // signal-level MMU-translation test rig: cg_*/ic_burst_* response
+    // signals are genuine testbench regs (not a real cycle_gen/burst_ctrl
+    // behind them), giving a dedicated test full, deterministic control
+    // with zero real-bus-timing navigation needed -- same rationale as
+    // u_cache's own dc_burst_*/xl_* signals above.
+    // -----------------------------------------------------------------------
+    biu_icache_if u_icache (
+        .clk_4x        (clk_4x),
+        .rst_n         (rst_n),
+        .ifu_addr      (icif_ifu_addr_tb),
+        .ifu_fc        (icif_ifu_fc_tb),
+        .ifu_req       (icif_ifu_req_tb),
+        .ifu_rdata     (icache_ifu_rdata),
+        .ifu_ack       (icache_ifu_ack),
+        .ifu_berr      (icache_ifu_berr),
+        .cg_addr       (icache_cg_addr),
+        .cg_req        (icache_cg_req),
+        .cg_rdata      (cg_rdata_tb),
+        .cg_ack        (cg_ack_tb),
+        .cg_berr       (cg_berr_tb),
+        .ic_burst_req  (icache_ic_burst_req),
+        .ic_burst_addr (icache_ic_burst_addr),
+        .ic_burst_rdata0 (ic_burst_rdata0_tb),
+        .ic_burst_rdata1 (ic_burst_rdata1_tb),
+        .ic_burst_rdata2 (ic_burst_rdata2_tb),
+        .ic_burst_rdata3 (ic_burst_rdata3_tb),
+        .ic_burst_beat   (ic_burst_beat_tb),
+        .ic_burst_beat_at_berr (ic_burst_beat_at_berr_tb),
+        .ic_burst_ack  (ic_burst_ack_tb),
+        .ic_burst_berr (ic_burst_berr_tb),
+        .cacr          (cacr_icache_tb),
+        .caar          (caar_icache_tb),
+        .ciin          (1'b0),
+        .tc            (tc_icache_tb),
+        .xl_va         (),
+        .xl_fc         (),
+        .xl_rw         (),
+        .xl_req        (),
+        .xl_pa         (xl_pa_icache_tb),
+        .xl_hit        (xl_hit_icache_tb),
+        .xl_walk_done  (xl_walk_done_icache_tb),
+        .xl_fault      (1'b0),
+        .xl_fault_is_berr (1'b0),
+        .xl_ci         (xl_ci_icache_tb),
+        .xlate_fault_pulse (),
+        .xlate_fault_addr  (),
+        .xlate_fault_fc    (),
+        .xlate_fault_rw    (),
+        .xlate_fault_siz   ()
     );
 
     // -----------------------------------------------------------------------
@@ -4288,6 +4375,94 @@ module biu_tb;
 
                     check("ext_d_oe=0 throughout read cycle", !saw_oe_during_read);
                 end
+            end
+
+            // ----------------------------------------------------------------
+            // P-ICI: biu_icache_if's own MMU-CI-awareness fix (docs/cache.md,
+            // plan.md §Phase 246). Full manual control over
+            // xl_hit/xl_pa/xl_ci (u_icache above, no real walker involved) --
+            // same rig shape as u_cache's own P6-CI test. Part A proves a
+            // translated CI=1 fetch neither bursts (ic_burst_req never
+            // asserts, even with IBE=1) nor caches (valid_i stays 0). Part B
+            // is a same-shape CI=0 control, proving the fix doesn't disturb
+            // the genuinely-cacheable path (bursts AND caches normally).
+            // ----------------------------------------------------------------
+            $display("--- biu_icache_if MMU-CI-awareness ---");
+            begin
+                // Part A: CI=1 -- must not burst, must not cache. Signals
+                // are set BEFORE the edge that should observe them and
+                // cleared only AFTER a following real edge has passed
+                // (settled via #1 both times), the same safe idiom u_cache's
+                // own Stage 6 burst-retry test uses -- driving a response
+                // signal via @(posedge) then an immediate blocking
+                // assignment races the DUT's own same-edge always_ff update
+                // and was tried first here, reliably hanging cg_ack_rise's
+                // own edge-detector.
+                cacr_icache_tb = 32'h0000_0011;   // IE(bit0)=1, IBE(bit4)=1
+                tc_icache_tb   = 32'h8000_0000;   // E=1 -- dispatch goes through IC_XLATE
+                icif_ifu_addr_tb = 32'h0000_2000; // fresh idx/vtag
+                icif_ifu_fc_tb   = 3'b110;
+                icif_ifu_req_tb  = 1'b1;
+                repeat(4) @(posedge clk_4x); #1;  // let IC_IDLE -> IC_XLATE settle
+                xl_pa_icache_tb  = 32'h0000_3000;
+                xl_ci_icache_tb  = 1'b1;
+                xl_hit_icache_tb = 1'b1;
+                #1;
+                @(posedge clk_4x); #1;
+                xl_hit_icache_tb = 1'b0;
+
+                repeat(2) @(posedge clk_4x); #1;  // let IC_XLATE -> IC_FROZEN_MISS settle
+                check("P-ICI-A: CI=1 fetch never asserted ic_burst_req", !icache_ic_burst_req);
+                check("P-ICI-A: CI=1 fetch dispatched an ordinary single-word fetch instead",
+                      icache_cg_req);
+                cg_rdata_tb = 32'hC1C1_0005;
+                cg_ack_tb   = 1'b1;
+                #1;
+                @(posedge clk_4x); #1;
+                cg_ack_tb = 1'b0;
+                check("P-ICI-A: CI=1 fetch completed (ifu_ack)", icache_ifu_ack);
+                check32("P-ICI-A: CI=1 fetch returned the requested word",
+                        icache_ifu_rdata, 32'hC1C1_0005);
+                check("P-ICI-A: CI=1 fetch did not populate the cache line",
+                      !u_icache.valid_i[icif_ifu_addr_tb[7:4]]);
+                icif_ifu_req_tb = 1'b0;
+                repeat(4) @(posedge clk_4x); #1;
+
+                // Part B: same shape, CI=0 -- control. Must burst AND cache,
+                // proving the fix doesn't disturb the genuinely-cacheable
+                // path. Different idx (3, vs. Part A's 0) purely for
+                // clarity when reading a waveform, not required for
+                // correctness (Part A's own line was never validated).
+                icif_ifu_addr_tb = 32'h0000_0030;
+                icif_ifu_req_tb  = 1'b1;
+                repeat(4) @(posedge clk_4x); #1;
+                xl_pa_icache_tb  = 32'h0000_5000;
+                xl_ci_icache_tb  = 1'b0;
+                xl_hit_icache_tb = 1'b1;
+                #1;
+                @(posedge clk_4x); #1;
+                xl_hit_icache_tb = 1'b0;
+
+                repeat(2) @(posedge clk_4x); #1;  // let IC_XLATE -> IC_BURST0 settle
+                check("P-ICI-B (control): CI=0 fetch did assert ic_burst_req", icache_ic_burst_req);
+                ic_burst_rdata0_tb = 32'h0B0B_0000;
+                ic_burst_rdata1_tb = 32'h0B0B_0001;
+                ic_burst_rdata2_tb = 32'h0B0B_0002;
+                ic_burst_rdata3_tb = 32'h0B0B_0003;
+                ic_burst_beat_tb   = 2'd3;   // full 4-beat burst
+                ic_burst_ack_tb    = 1'b1;
+                #1;
+                @(posedge clk_4x); #1;
+                ic_burst_ack_tb = 1'b0;
+                check("P-ICI-B (control): CI=0 fetch completed", icache_ifu_ack);
+                check32("P-ICI-B (control): CI=0 fetch returned word 0 of the burst",
+                        icache_ifu_rdata, 32'h0B0B_0000);
+                check("P-ICI-B (control): CI=0 fetch DID populate the cache line",
+                      u_icache.valid_i[icif_ifu_addr_tb[7:4]]);
+                icif_ifu_req_tb = 1'b0;
+
+                tc_icache_tb   = 32'h0;
+                cacr_icache_tb = 32'h0;
             end
 
             repeat(8) @(posedge clk_4x);

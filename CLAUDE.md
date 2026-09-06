@@ -744,15 +744,39 @@ the project's single highest-risk shared bus-protocol logic (the RMW lock).
 full** — 6 families now fully implemented and verified (LEA, PEA, JMP, JSR;
 general ALU-EA and CMP2/CHK2; TAS and Scc).
 
+**Phase 246 (`biu_icache_if.sv`'s own MMU-CI-awareness gap — IMPLEMENTED AND
+VERIFIED, closes the last open item `docs/cache.md` documented)**: fixed the one
+item Phase 228 had found-but-not-fixed while closing the D-cache's own analogous
+`mmu_ci` staleness bug — the I-cache had zero MMU-CI-awareness at all for its own
+linefill. Turned out simpler than the D-cache's own fix once investigated: rather
+than needing a captured `xl_ci_r` register (the D-cache's populate decision happens
+long after translation, when the shared MMU broadcast may have moved on), the
+I-cache already has an existing state, `IC_FROZEN_MISS` (Phase 158 Stage 5's own
+`FI=1` "fetch the requested word directly, cache array untouched"), that's
+architecturally exactly right for a CI page too — CI means "not cacheable," so
+there's nothing to gain from a whole-line fetch or a burst either. Routing a CI'd
+translated fetch through `IC_FROZEN_MISS` (one new `|| xl_ci` term, gated on the
+live port at the exact translation-complete cycle) means the cache array is never
+touched for a CI access at all, sidestepping the staleness question entirely — no
+new register needed. New `tb/biu_tb.sv` test (P-ICI, a new standalone `u_icache`
+instance — no prior testbench exercised this module outside the full pipeline)
+proves a CI=1 fetch neither bursts nor caches, with a CI=0 control proving the fix
+doesn't disturb the normal path. Found and fixed one real testbench-only bug while
+building it: driving a response signal via `@(posedge); signal=1;` inside a
+toggling poll loop raced the DUT's own same-edge register update, hanging the
+edge-detector — fixed with the same settle-before/after-edge idiom `u_cache`'s own
+Stage 6 test already established. Full mandatory gate clean, Harte sweep
+bit-identical to baseline (expected — Harte never enables either cache).
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 26/26,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
 backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) and the CAS bus-lock plan
-(`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL, and Stage 9's own
-genuine-memory-indirect-EA work (the backlog's last open item) is now ALSO closed in
-full as of Phase 245. No open plan of any kind remains in this project — ask the user
-for new work.
+(`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL, Stage 9's own
+genuine-memory-indirect-EA work closed at Phase 245, and `docs/cache.md`'s own last
+open item closed at Phase 246. No open plan of any kind remains in this project —
+ask the user for new work.
 
 ## Verification Commands
 

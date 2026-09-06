@@ -109,8 +109,10 @@ module biu_icache_if (
     // via biu_mmu_arb.sv, shared with biu_cache_if.sv's own D-side request
     // and the existing top-level (PTEST) requester. Instruction fetches are
     // always reads, so there's no xl_wp equivalent here (WP only matters
-    // for writes) — xl_ci is threaded through but not yet acted on, same
-    // documented deferral as biu_cache_if.sv's own xl_ci.
+    // for writes). xl_ci is now acted on (docs/cache.md fix, plan.md
+    // §Phase 246) -- see IC_XLATE's own dispatch decision below for the
+    // full reasoning (a CI page routes through the same never-cache
+    // IC_FROZEN_MISS shape Phase 158 Stage 5 already built for FI=1).
     output logic [31:0] xl_va,
     output logic [2:0]  xl_fc,
     output logic        xl_rw,
@@ -254,6 +256,21 @@ module biu_icache_if (
     wire [3:0]  idx  = ifu_addr[7:4];
     wire [1:0]  woff = ifu_addr[3:2];
     wire [24:0] vtag = {ifu_fc[2], ifu_addr[31:8]};
+    // docs/cache.md fix (plan.md §Phase 246): ihit deliberately does NOT
+    // re-check xl_ci here -- a genuine, structural limitation this fix
+    // doesn't attempt to close, matching biu_cache_if.sv's own dhit
+    // (10-item backlog Stage 2) exactly: a hit is decided from the tag
+    // array alone, before this particular fetch's own translation (if any)
+    // has even started, so no live per-access CI value exists yet at this
+    // check. In practice this is safe for the steady-state case this fix
+    // actually closes (a CI page's own line is simply never marked valid --
+    // see IC_XLATE's own dispatch decision below -- so it can never hit at
+    // all) -- the only residual gap is the same one already documented and
+    // left open for the D-cache: if a single physical page's own CI
+    // attribute could change between when a line was cached and a later
+    // hit on it (e.g. a PTE update), neither cache re-validates against
+    // that. Not attempted here, same as dhit's own documented scope
+    // boundary.
     wire        ihit = icache_en && valid_i[idx] && (tag_i[idx] == vtag);
 
     // Is the IFU, right now, still asking for the exact longword this
@@ -345,11 +362,33 @@ module biu_icache_if (
                         state         <= IC_DONE;
                     end else if (xl_hit || xl_walk_done) begin
                         fill_base_r     <= {xl_pa[31:4], 4'h0};
-                        if (ifreeze_en) begin
-                            // Phase 158 Stage 5: same FI=1 gate as IC_IDLE's
-                            // own branch above, for the post-translation
-                            // case -- fetches the translated word address
-                            // directly, not the line base.
+                        if (ifreeze_en || xl_ci) begin
+                            // Phase 158 Stage 5's own FI=1 gate ("the entry
+                            // is not replaced" -- fetch the requested word
+                            // directly, cache array untouched) turns out to
+                            // be exactly the right shape for a translated
+                            // CI=1 page too (docs/cache.md fix, plan.md
+                            // §Phase 246): CI means "not cacheable", so
+                            // there is nothing to gain from fetching a whole
+                            // line (unlike IC_SINGLE_0..3's own IBE=0
+                            // fallback, which still fills the whole line for
+                            // a genuinely cacheable miss) or from bursting
+                            // (matching this file's own header comment's
+                            // already-documented "the processor does not
+                            // assert CBREQ if... burst filling for the cache
+                            // is not enabled" principle, manual Figure
+                            // 6-13 -- bursting exists purely to fill the
+                            // cache, architecturally meaningless for a CI
+                            // page regardless of IBE). Reusing this existing
+                            // state means no new fault-immunity/staleness
+                            // reasoning is needed at all: the cache array is
+                            // never touched here by construction, so unlike
+                            // biu_cache_if.sv's own xl_ci_r (10-item backlog
+                            // Stage 2, needed because the D-cache's
+                            // populate-or-not decision happens much later,
+                            // at fill completion, long after the shared MMU
+                            // broadcast may have moved on), there is no
+                            // later re-check of xl_ci to get stale.
                             state            <= IC_FROZEN_MISS;
                             cg_single_req_r  <= 1'b1;
                             cg_single_addr_r <= {xl_pa[31:2], 2'b00};
@@ -387,7 +426,12 @@ module biu_icache_if (
                             // Phase 158 Stage 7: ciin checked once, for the
                             // whole line -- same "not true per-beat CIIN"
                             // documented simplification as biu_cache_if.sv's
-                            // own identical burst-completion gate.
+                            // own identical burst-completion gate. (A
+                            // translated CI page never reaches this state at
+                            // all -- see IC_XLATE's own dispatch decision,
+                            // docs/cache.md fix, plan.md §Phase 246 -- so
+                            // ciin alone is still the right and complete
+                            // gate here.)
                             if (!ciin) begin
                                 tag_i[idx_r]   <= vtag_r;
                                 valid_i[idx_r] <= 1'b1;
