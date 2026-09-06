@@ -49,6 +49,10 @@ module exc_tb;
     logic [31:0] ssp_in       = 0, vbr_in = 0;
     logic [31:0] ssp_out;
     logic        ssp_wr_en;
+    // docs/*.md review fix: raw ISP + Format $1 throwaway-frame write-back
+    logic [31:0] isp_in       = 0;
+    logic [31:0] isp_out;
+    logic        isp_wr_en;
     logic [31:0] exc_addr, exc_wdata;
     logic        exc_rw;
     logic [1:0]  exc_siz;
@@ -94,7 +98,7 @@ module exc_tb;
     logic [31:0] t_addr  [0:31];
     logic [31:0] t_wdata [0:31];
     logic        t_rw    [0:31];
-    logic [31:0] last_ssp, last_new_pc;
+    logic [31:0] last_ssp, last_new_pc, last_isp;
     logic [15:0] last_new_sr;
 
     // Use separate capture always_ff driven by cap_nrst
@@ -104,6 +108,7 @@ module exc_tb;
             last_ssp    <= 32'h0;
             last_new_pc <= 32'h0;
             last_new_sr <= 16'h0;
+            last_isp    <= 32'h0;
         end else begin
             if (exc_req && exc_ack) begin
                 t_addr [trans_cnt] <= exc_addr;
@@ -114,6 +119,7 @@ module exc_tb;
             if (ssp_wr_en) last_ssp    <= ssp_out;
             if (new_pc_wr) last_new_pc <= new_pc;
             if (new_sr_wr) last_new_sr <= new_sr;
+            if (isp_wr_en) last_isp    <= isp_out;
         end
     end
 
@@ -167,7 +173,7 @@ module exc_tb;
             trap_req=0; trap_num=0;
             fault_pc=0; fault_sr=0; fault_addr=0; fault_ssw=0;
             bus_err_fmt=4'hA; fault_data=0;
-            ssp_in=0; vbr_in=0;
+            ssp_in=0; vbr_in=0; isp_in=0;
             iack_berr_tb=1'b0; iack_vec_override_en=1'b0; iack_vec_override=8'h0;
 
             // Pulse capture reset
@@ -588,6 +594,73 @@ module exc_tb;
         chk32("EXC-13 fetchaddr", t_addr[2],   32'h0000_0060);  // 24*4=96=0x60
         chk32("EXC-13 new_pc",     last_new_pc, 32'h0000_F000);
         chk16("EXC-13 new_sr",     last_new_sr, 16'h2200);       // IPL updated to 2
+
+        // ================================================================
+        // EXC-14: Illegal Instruction (non-interrupt) with M=1 before the
+        // fault -- M must be PRESERVED, not cleared (docs/*.md review fix,
+        // MC68030UM.pdf §8.1.9: the M-bit clear is documented specifically
+        // for INTERRUPT exceptions; every other exception type must leave
+        // it exactly as it was). fault_sr also sets T1/T0 and bit 11 to
+        // confirm those are still forced to 0 regardless.
+        //   fault_sr = 0xF400 (T=11,S=1,M=1,IPL=4,CCR=0)
+        //   new_sr   = 0x3400 (T=00,S=1,M=1 PRESERVED,IPL=4,CCR=0)
+        //   (the old, buggy unconditional-clear behavior would have given
+        //   0x2400 here instead -- M wrongly forced to 0)
+        // ================================================================
+        $display("--- EXC-14: Illegal Instruction preserves M=1 ---");
+        begin_test;
+        ssp_in    = 32'h0000_4000;
+        fault_pc  = 32'h0000_2000;
+        fault_sr  = 16'hF400;
+        exc_rdata = 32'h0000_9000;
+        illegal_req = 1;
+        @(posedge clk_4x); #1;
+        illegal_req = 0;
+        wait_idle;
+
+        chk16("EXC-14 new_sr", last_new_sr, 16'h3400);  // M preserved (=1), not cleared
+
+        // ================================================================
+        // EXC-15: Interrupt taken while M=1 -- throwaway Format $1 frame
+        // (docs/*.md review fix, MC68030UM.pdf §8.1.9). The real frame
+        // still goes to MSP (ssp_in, as already exercised by EXC-5/12/13);
+        // a SECOND frame with the same PC/vector but format=1 and S forced
+        // set must ALSO land on ISP directly -- fault_sr deliberately has
+        // S=0 here specifically so the "S forced on the throwaway frame
+        // regardless" rule is distinguishable from "S copied unchanged."
+        //   ssp_in=0x9000 (MSP), isp_in=0xA000 (separate ISP)
+        //   fault_sr=0x1100 (S=0, M=1, IPL=1)
+        //   level=3 -> vec=27 (autovector stub default), fmtvec=$006C
+        //   real frame (MSP):   new_ssp=0x8FF8; [0x8FFC]=PC=$3000; [0x8FF8]={$006C,$1100}
+        //   throwaway (ISP):    new_isp=0x9FF8; [0x9FFC]=PC=$3000; [0x9FF8]={$106C,$3100}
+        //     (fmtvec1=$106C: format=1 not 0; throwaway_sr=$1100|$2000=$3100: S forced set)
+        //   final new_sr = 0x2300 (S=1,M=0 cleared,IPL=3,CCR=0)
+        // ================================================================
+        $display("--- EXC-15: Interrupt with M=1 -- throwaway Format $1 frame ---");
+        begin_test;
+        ssp_in    = 32'h0000_9000;
+        isp_in    = 32'h0000_A000;
+        fault_pc  = 32'h0000_3000;
+        fault_sr  = 16'h1100;  // S=0, M=1, IPL=1 (old mask)
+        exc_rdata = 32'h0000_C000;
+        ipl_mask  = 3'd0;
+        ipl_sync  = 3'd3;
+        @(posedge clk_4x); #1;  // FSM snaps ipl_sync=3
+        ipl_sync  = 3'd0;
+        wait_idle;
+
+        chk32("EXC-15 real_pc",    t_addr[0],   32'h0000_8FFC);
+        chk32("EXC-15 real_data",  t_wdata[1],  32'h006C_1100);  // {fmtvec($006C),fault_sr}
+        chk32("EXC-15 tw_pcaddr",  t_addr[3],   32'h0000_9FFC);
+        chk32("EXC-15 tw_pcdata",  t_wdata[3],  32'h0000_3000);  // same PC as real frame
+        chk32("EXC-15 tw_sraddr", t_addr[4],   32'h0000_9FF8);
+        chk32("EXC-15 tw_srdata", t_wdata[4],  32'h106C_3100);  // fmt=1, S forced set
+        chk32("EXC-15 last_isp",  last_isp,    32'h0000_9FF8);  // new_isp = isp_in-8
+        chk16("EXC-15 new_sr",    last_new_sr, 16'h2300);       // S=1, M=0 (interrupt clears it)
+        if (trans_cnt !== 5'd5) begin
+            $display("FAIL EXC-15 trans_cnt=%0d (exp 5: 2 real push + 1 fetch + 2 throwaway push)", trans_cnt);
+            fail = fail + 1;
+        end else $display("PASS EXC-15 trans_cnt=5");
 
         // ================================================================
         if (fail == 0)

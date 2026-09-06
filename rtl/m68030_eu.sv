@@ -38,6 +38,13 @@ module m68030_eu (
     input  logic [31:0] vbr_wr_data,
     output logic [31:0] vbr_out,
 
+    // ── ISP (external override from exception controller — docs/*.md
+    // review fix: Format $1 throwaway interrupt-stack frame writes ISP
+    // directly, regardless of the current M bit, mirroring vbr_wr_en's own
+    // exact shape) ──────────────────────────────────────────────────────
+    input  logic        exc_isp_wr_en,
+    input  logic [31:0] exc_isp_wr_data,
+
     // ── Stack pointer outputs (exception controller selects one) ──────────
     output logic [31:0] usp_out,
     output logic [31:0] msp_out,
@@ -470,6 +477,8 @@ module m68030_eu (
     logic        rf_sr_ccr_only;
     logic        rf_vbr_wr_en;
     logic [31:0] rf_vbr_wr_data;
+    logic        rf_isp_wr_en;
+    logic [31:0] rf_isp_wr_data;
 
     assign rf_wr_en       = ssp_wr_en    ? 1'b1           : wr_en;
     assign rf_wr_sel      = ssp_wr_en    ? 4'hF           : wr_sel;  // A7
@@ -480,6 +489,14 @@ module m68030_eu (
     assign rf_sr_ccr_only = exc_sr_wr_en ? 1'b0           : sr_ccr_only;
     assign rf_vbr_wr_en   = vbr_wr_en | seq_vbr_wr_en;
     assign rf_vbr_wr_data = vbr_wr_en ? vbr_wr_data : seq_vbr_wr_data;
+    // ISP: OR of external override (exc_isp_wr_en, the throwaway-frame
+    // write) and MOVEC write (seq_isp_wr_en); external takes priority for
+    // data, same shape as VBR above. The two can never fire the same
+    // cycle in practice (MOVEC ISP,Rn can't execute while exception
+    // dispatch owns the pipeline), but the OR/priority-mux shape costs
+    // nothing and matches the established VBR precedent exactly.
+    assign rf_isp_wr_en   = exc_isp_wr_en | seq_isp_wr_en;
+    assign rf_isp_wr_data = exc_isp_wr_en ? exc_isp_wr_data : seq_isp_wr_data;
 
     // -----------------------------------------------------------------------
     // eu_regfile — D0-D7, A0-A7, PC, SR, VBR, USP/ISP/MSP
@@ -536,8 +553,8 @@ module m68030_eu (
         // explicit USP/ISP/MSP writes
         .usp_wr_en    (seq_usp_wr_en),
         .usp_wr_data  (seq_usp_wr_data),
-        .isp_wr_en    (seq_isp_wr_en),
-        .isp_wr_data  (seq_isp_wr_data),
+        .isp_wr_en    (rf_isp_wr_en),
+        .isp_wr_data  (rf_isp_wr_data),
         .msp_wr_en    (seq_msp_wr_en),
         .msp_wr_data  (seq_msp_wr_data),
         // read port C (Phase 148, plan.md)

@@ -105,6 +105,8 @@ module system_tb;
     logic [31:0] ssp_wr_data  = 32'h0;
     logic        exc_sr_wr_en = 0;
     logic [15:0] exc_sr_wr_data = 16'h0;
+    logic        exc_isp_wr_en   = 0;
+    logic [31:0] exc_isp_wr_data = 32'h0;
 
     // ─── DUT ─────────────────────────────────────────────────────────────────
     m68030_eu dut (
@@ -189,7 +191,9 @@ module system_tb;
         .ssp_wr_en       (ssp_wr_en),
         .ssp_wr_data     (ssp_wr_data),
         .exc_sr_wr_en    (exc_sr_wr_en),
-        .exc_sr_wr_data  (exc_sr_wr_data)
+        .exc_sr_wr_data  (exc_sr_wr_data),
+        .exc_isp_wr_en   (exc_isp_wr_en),
+        .exc_isp_wr_data (exc_isp_wr_data)
     );
 
     // ─── Memory model (combinatorial ack, 8K longwords) ──────────────────────

@@ -891,7 +891,24 @@ this is the *only* one of 15 `m68030_top`-instantiating testbenches that ever
 triggers a real interrupt). Added `tb/exc_tb.sv` coverage for both new response
 paths (EXC-12 peripheral-vectored, EXC-13 spurious). Full mandatory gate clean,
 Harte bit-identical to baseline (never exercises real IPL-based interrupts).
-Items #2-10 still to come.
+**Item #2 (IMPLEMENTED AND VERIFIED)**: SR's M bit was hardcoded cleared for
+every exception, not just interrupts (`m68030_exc.sv`'s `new_sr_comb`) — a
+real bug that would silently corrupt the Master/Interrupt stack selector on
+any non-interrupt exception taken with M=1 (e.g. Illegal Instruction).
+Fixed by keying the clear on `snap_is_int_r` (Item #1's own dispatch-time
+interrupt flag). Also implemented the Format $1 "throwaway" stack frame
+§8.1.9 requires be pushed directly to ISP when an interrupt is taken with
+M=1 — new `EXC_PUSH2` FSM state plus a dedicated `isp_in`/`isp_out`/
+`isp_wr_en` port trio on `m68030_exc.sv`, threaded through `m68030_eu.sv`
+via the same "external override OR'd with MOVEC write" pattern already
+proven for VBR. Found and fixed a real regression: `tb/system_tb.sv`
+instantiates `m68030_eu` directly with an explicit port list that predated
+the two new ports, X-propagating into an unrelated `MOVEC An,ISP` test —
+fixed with a tie-off matching the file's own existing `vbr_wr_en`
+convention. New `tb/exc_tb.sv` coverage (EXC-14 non-interrupt M-preservation,
+EXC-15 full M=1 interrupt with both real and throwaway frames). Full
+mandatory gate clean, Harte bit-identical to baseline. Items #3-10 still to
+come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

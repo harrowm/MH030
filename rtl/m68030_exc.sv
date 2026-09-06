@@ -73,6 +73,17 @@ module m68030_exc (
     output logic [31:0] ssp_out,        // decremented SSP to write back
     output logic        ssp_wr_en,      // pulse when last frame word pushed
 
+    // ── Raw ISP, always (docs/*.md review: Format $1 throwaway interrupt
+    // frame, MC68030UM.pdf §8.1.9) — distinct from ssp_in/ssp_out above,
+    // which already resolve to MSP-or-ISP depending on the CURRENT M bit.
+    // When an interrupt is taken while M=1 (SSP==MSP), a second, throwaway
+    // frame must ALSO land on the interrupt stack specifically, regardless
+    // of M -- this needs direct, unconditional ISP access the ssp_in/out
+    // pair can't provide.
+    input  logic [31:0] isp_in,
+    output logic [31:0] isp_out,        // decremented ISP to write back (throwaway frame only)
+    output logic        isp_wr_en,      // pulse when throwaway frame's last word is pushed
+
     // ── Vector Base Register ──────────────────────────────────────────────
     input  logic [31:0] vbr_in,
 
@@ -206,6 +217,7 @@ module m68030_exc (
         EXC_IACK  = 3'd1,   // real CPU-space IACK cycle, interrupts only
         EXC_PUSH  = 3'd2,
         EXC_FETCH = 3'd3,
+        EXC_PUSH2 = 3'd5,   // throwaway Format $1 frame on ISP, M=1 interrupts only
         EXC_LOAD  = 3'd4
     } exc_state_t;
 
@@ -218,8 +230,10 @@ module m68030_exc (
     logic [15:0] snap_sr_r;
     logic [2:0]  snap_ipl_r;    // captured IPL for interrupt SR update
     logic [31:0] snap_dob_r;    // Data Output Buffer snapshot (fault_data at entry)
+    logic        snap_is_int_r; // captured pend_is_int (docs/*.md review fix)
     logic [4:0]  push_step_r;
     logic [31:0] vec_data_r;
+    logic [4:0]  push2_step_r;  // throwaway frame's own 2-step push counter
 
     // -----------------------------------------------------------------------
     // Per-format: total longword write count and SSP decrement
@@ -301,13 +315,44 @@ module m68030_exc (
     assign vec_addr = vbr_in + {22'd0, snap_vec_r, 2'b00};
 
     // -----------------------------------------------------------------------
-    // New SR: T1=0, T0=0, S=1, M=0, I=preserved (updated for interrupt)
+    // Throwaway Format $1 interrupt-stack frame (docs/*.md review fix,
+    // MC68030UM.pdf §8.1.9): pushed onto ISP directly (not the "active" SSP
+    // ssp_in/ssp_out above) only when an interrupt is taken while M=1.
+    // Always exactly 2 longword writes (4-word frame) regardless of what
+    // format the real frame used (interrupts always use FMT_SHORT for the
+    // real frame anyway) -- hardcoded rather than reusing
+    // total_steps/ssp_delta, which are keyed off snap_fmt_r, to keep this
+    // frame's own fixed size self-evident and independent of that field.
+    // "Same PC/vector offset as the master-stack frame... SR the same
+    // except S is forced set" (manual's own exact wording).
+    // -----------------------------------------------------------------------
+    logic [31:0] new_isp_calc;
+    logic [31:0] push2_addr;
+    logic [31:0] push2_data;
+    logic [15:0] fmtvec1;
+    logic [15:0] throwaway_sr;
+    assign new_isp_calc = isp_in - 32'd8;
+    assign fmtvec1       = {4'h1, 2'b00, snap_vec_r, 2'b00};
+    assign throwaway_sr  = snap_sr_r | 16'h2000;  // force S bit (bit 13) set
+    assign push2_addr    = (push2_step_r == 5'd0) ? (new_isp_calc + 32'd4) : new_isp_calc;
+    assign push2_data    = (push2_step_r == 5'd0) ? snap_pc_r : {fmtvec1, throwaway_sr};
+
+    // -----------------------------------------------------------------------
+    // New SR: T1=0, T0=0, S=1, I=preserved (updated for interrupt). M is
+    // cleared ONLY for interrupt exceptions (docs/*.md review fix,
+    // MC68030UM.pdf §8.1.9: "when the exception being processed is an
+    // INTERRUPT and the M bit is set, the M bit is cleared" -- every other
+    // exception type must leave M exactly as it was). Previously cleared
+    // unconditionally for every exception, invisible to Harte (68000 has
+    // no M bit at all).
     // -----------------------------------------------------------------------
     logic [15:0] new_sr_comb;
     logic [2:0]  new_ipl;
+    logic        new_m;
     assign new_ipl     = snap_ipl_r;            // non-zero only for interrupts
-    assign new_sr_comb = {2'b00, 1'b1, 1'b0, 1'b0, new_ipl, snap_sr_r[7:0]};
-    // [15:14]=T=00, [13]=S=1, [12]=M=0, [11]=0, [10:8]=new_ipl, [7:0]=CCR
+    assign new_m       = snap_is_int_r ? 1'b0 : snap_sr_r[12];
+    assign new_sr_comb = {2'b00, 1'b1, new_m, 1'b0, new_ipl, snap_sr_r[7:0]};
+    // [15:14]=T=00, [13]=S=1, [12]=M(interrupt-only clear), [11]=0, [10:8]=new_ipl, [7:0]=CCR
 
     // -----------------------------------------------------------------------
     // FSM sequential
@@ -320,23 +365,26 @@ module m68030_exc (
             snap_fmt_r  <= FMT_SHORT;
             snap_pc_r   <= 32'h0;
             snap_sr_r   <= 16'h0;
-            snap_ipl_r  <= 3'b0;
-            snap_dob_r  <= 32'h0;
-            push_step_r <= 5'd0;
-            vec_data_r  <= 32'h0;
+            snap_ipl_r    <= 3'b0;
+            snap_dob_r    <= 32'h0;
+            snap_is_int_r <= 1'b0;
+            push_step_r   <= 5'd0;
+            push2_step_r  <= 5'd0;
+            vec_data_r    <= 32'h0;
         end else begin
             case (state_r)
                 EXC_IDLE: begin
                     if (exc_pending) begin
-                        snap_ssp_r  <= ssp_in;
-                        snap_vec_r  <= pend_vec;   // interrupt case: placeholder,
-                                                    // overwritten in EXC_IACK below
-                        snap_fmt_r  <= pend_fmt;
-                        snap_pc_r   <= fault_pc;
-                        snap_sr_r   <= fault_sr;
-                        snap_ipl_r  <= int_pending ? ipl_sync_l : fault_sr[10:8];
-                        snap_dob_r  <= fault_data;
-                        push_step_r <= 5'd0;
+                        snap_ssp_r    <= ssp_in;
+                        snap_vec_r    <= pend_vec;   // interrupt case: placeholder,
+                                                       // overwritten in EXC_IACK below
+                        snap_fmt_r    <= pend_fmt;
+                        snap_pc_r     <= fault_pc;
+                        snap_sr_r     <= fault_sr;
+                        snap_ipl_r    <= int_pending ? ipl_sync_l : fault_sr[10:8];
+                        snap_dob_r    <= fault_data;
+                        snap_is_int_r <= pend_is_int;
+                        push_step_r   <= 5'd0;
                         if (pend_is_int) state_r <= EXC_IACK;
                         else             state_r <= EXC_PUSH;
                     end
@@ -374,8 +422,33 @@ module m68030_exc (
 
                 EXC_FETCH: begin
                     if (exc_ack) begin
-                        vec_data_r <= exc_rdata;
-                        state_r    <= EXC_LOAD;
+                        vec_data_r   <= exc_rdata;
+                        push2_step_r <= 5'd0;
+                        // docs/*.md review fix: throwaway Format $1 frame
+                        // (MC68030UM.pdf §8.1.9) only when this dispatch is
+                        // an interrupt AND M was set before it -- snap_sr_r
+                        // still holds the pre-exception SR at this point
+                        // (new_sr_comb/new_m, above, is what changes it).
+                        if (snap_is_int_r && snap_sr_r[12]) state_r <= EXC_PUSH2;
+                        else                                state_r <= EXC_LOAD;
+                    end
+                end
+
+                // Throwaway Format $1 frame onto ISP (docs/*.md review fix).
+                // Purely additional bookkeeping -- vec_data_r/new_pc/new_sr
+                // (the real, observable outcome of this exception) are
+                // already fully resolved by this point; this state only
+                // exists to also leave the interrupt-stack side effect real
+                // 68030 silicon produces here, for software that inspects
+                // ISP or expects to RTE through it later.
+                EXC_PUSH2: begin
+                    if (exc_ack) begin
+                        if (push2_step_r == 5'd1) begin
+                            push2_step_r <= 5'd0;
+                            state_r      <= EXC_LOAD;
+                        end else begin
+                            push2_step_r <= push2_step_r + 5'd1;
+                        end
                     end
                 end
 
@@ -408,6 +481,12 @@ module m68030_exc (
                 exc_rw   = 1'b1;        // read
                 exc_addr = vec_addr;
             end
+            EXC_PUSH2: begin
+                exc_req   = 1'b1;
+                exc_rw    = 1'b0;       // write
+                exc_addr  = push2_addr;
+                exc_wdata = push2_data;
+            end
             default: ;
         endcase
     end
@@ -423,6 +502,18 @@ module m68030_exc (
         ssp_out   = new_ssp;
         if (state_r == EXC_PUSH && exc_ack && (push_step_r == total_steps - 5'd1)) begin
             ssp_wr_en = 1'b1;
+        end
+    end
+
+    // ISP write (throwaway Format $1 frame only): fires when its own last
+    // word is acked. Independent of ssp_wr_en/ssp_out above -- when M=1
+    // those write MSP (ssp_in/ssp_out resolve to MSP in that case), this
+    // writes ISP directly regardless.
+    always_comb begin
+        isp_wr_en = 1'b0;
+        isp_out   = new_isp_calc;
+        if (state_r == EXC_PUSH2 && exc_ack && (push2_step_r == 5'd1)) begin
+            isp_wr_en = 1'b1;
         end
     end
 

@@ -226,6 +226,8 @@ module m68030_top #(
     logic        exc_req_w, exc_ack_w;
     logic        exc_iack_req_w;
     logic [2:0]  exc_iack_level_w;
+    logic [31:0] exc_isp_out_w;
+    logic        exc_isp_wr_en_w;
     logic [31:0] exc_ssp_out;
     logic        exc_ssp_wr_en;
     logic [31:0] exc_new_pc;
@@ -526,6 +528,10 @@ module m68030_top #(
         .an_wr_data    (eu_an_wr_data),
         .vbr_wr_en     (1'b0),
         .vbr_wr_data   (32'h0),
+        // docs/*.md review fix: Format $1 throwaway interrupt-stack frame
+        // (m68030_exc.sv's own EXC_PUSH2 state) writes ISP directly.
+        .exc_isp_wr_en   (exc_isp_wr_en_w),
+        .exc_isp_wr_data (exc_isp_out_w),
         .vbr_out       (eu_vbr_out),
         .usp_out       (eu_usp_out),
         .msp_out       (eu_msp_out),
@@ -612,6 +618,12 @@ module m68030_top #(
         .ssp_in       (exc_ssp_in),
         .ssp_out      (exc_ssp_out),
         .ssp_wr_en    (exc_ssp_wr_en),
+        // Raw ISP, always (docs/*.md review fix: Format $1 throwaway
+        // interrupt-stack frame -- distinct from ssp_in/out above, which
+        // already resolve to MSP-or-ISP depending on the current M bit).
+        .isp_in       (eu_isp_out),
+        .isp_out      (exc_isp_out_w),
+        .isp_wr_en    (exc_isp_wr_en_w),
         // VBR
         .vbr_in       (eu_vbr_out),
         // Bus interface

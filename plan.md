@@ -8396,4 +8396,67 @@ alongside the pre-existing EXC-5 (plain autovector) still passing unchanged.
 bit-identical to baseline (Harte's own corpus never triggers a real IPL-based
 interrupt at all).
 
-**Items #2-#10 continue below as each is addressed.**
+### Item #2: M-bit clearing during exceptions + Format $1 throwaway frame — IMPLEMENTED AND VERIFIED
+
+MC68030UM.pdf §8.1.9: SR's M bit (bit 12, Master/Interrupt stack selector)
+is cleared **only** as part of INTERRUPT exception processing when it was
+set; every other exception type must leave M unchanged. `m68030_exc.sv`'s
+own `new_sr_comb` previously hardcoded the new M bit to `1'b0`
+unconditionally for every exception — wrong for the other 8 exception
+types (e.g. Illegal Instruction with M=1 should stack SR with M still set).
+Separately, when M=1 and a genuine interrupt is taken, the manual requires
+a **second, "throwaway" exception stack frame** (Format $1, 2 words —
+distinct from Format $0/$9) to ALSO be pushed directly onto the interrupt
+stack (ISP), containing the same PC/vector-offset as the real frame but
+with SR's S-bit forced set — real 68030 hardware always switches to ISP
+for interrupt dispatch when M=1, but must leave a marker on the
+now-abandoned MSP-driven stack showing where the interrupted MSP context
+would resume, in case some later code walks that stack directly.
+
+**Fix**: `new_sr_comb`'s M-bit source changed from hardcoded `1'b0` to
+`new_m = snap_is_int_r ? 1'b0 : snap_sr_r[12]` (`snap_is_int_r` captures
+`pend_is_int` at dispatch, reusing Item #1's own new flag). Added a new
+`EXC_PUSH2` FSM state, entered from `EXC_FETCH` only when
+`snap_is_int_r && snap_sr_r[12]` (M was set at an interrupt), pushing the
+2-word throwaway frame directly to ISP via a new dedicated `isp_in`/
+`isp_out`/`isp_wr_en` port trio on `m68030_exc.sv` — mirroring VBR's
+already-proven "external override OR'd with MOVEC write" pattern
+(`rf_isp_wr_en = exc_isp_wr_en | seq_isp_wr_en` in `m68030_eu.sv`), so the
+throwaway push coexists cleanly with `MOVEC An,ISP` without either
+mechanism interfering with the other. `eu_regfile.sv` already exposed a
+dedicated `isp_wr_en`/`isp_wr_data` port independent of the S/M-bit-muxed
+general A7 write path, so no regfile change was needed at all — only
+plumbing through `m68030_eu.sv`/`m68030_top.sv`.
+
+**New tests** (`tb/exc_tb.sv`): EXC-14 (Illegal Instruction with
+`fault_sr=16'hF400` — a non-interrupt exception with M set — expects
+`new_sr==16'h3400`, proving M survives unchanged); EXC-15 (interrupt with
+M=1, `ssp_in=0x9000`, `isp_in=0xA000`, `fault_pc=0x3000`,
+`fault_sr=0x1100`, `ipl_sync=3`), checking both the real frame (pushed to
+the newly-selected ISP-turned-active-SSP stack, `new_sr=0x2300` showing M
+cleared+S set) and the throwaway frame's own two words landing at
+`isp_in`'s original address (`0x9FFC`/`0x9FF8`) with S forced set
+(`0x006C1100`... `0x106C3100`) — both confirmed via hand-derived expected
+values, passing on the first attempt against the standalone `sim/exc`
+build.
+
+**Regression found and fixed**: `make test` initially failed
+`MOVEC-06:isp_r`/`MOVEC-06:A2` in the `system` suite (`got xxxxxxxx`) —
+`tb/system_tb.sv` instantiates `m68030_eu` directly (built from
+`$(EU_SRCS)`, confirmed via the Makefile) with an explicit port list that
+predates the two new `exc_isp_wr_en`/`exc_isp_wr_data` input ports added
+to that module this item, leaving them floating as X and X-propagating
+through the new `rf_isp_wr_en`/`rf_isp_wr_data` OR/mux into every ISP
+read, including a completely unrelated `MOVEC An,ISP` test. Fixed by
+declaring `exc_isp_wr_en=0`/`exc_isp_wr_data=32'h0` in the testbench and
+wiring them into the `m68030_eu` instantiation, matching this same file's
+own existing tie-off convention for the analogous, similarly-unused
+`vbr_wr_en`/`vbr_wr_data` ports.
+
+**Full mandatory gate**: `make test` 37/37 (including the 2 new EXC-14/15
+tests), `make cosim_grp` 8/8, `make cosim_memind` 28/28, `make dat-synth`
+50/50, full 124-suite Tom Harte sweep: `TOTAL: PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0` — bit-identical to baseline (Harte's corpus never
+exercises SR's M bit or a genuine IPL-driven interrupt at all).
+
+**Items #3-#10 continue below as each is addressed.**
