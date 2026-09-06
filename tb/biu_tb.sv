@@ -1964,6 +1964,108 @@ module biu_tb;
         end
 
         // ----------------------------------------------------------------
+        // P-DXLB (10-item backlog docs/*.md review, plan.md §Phase 247 item
+        // #2): a translated D-cache burst that degrades to individual
+        // single-beat fallback must fetch beats 1-3 from the TRANSLATED
+        // physical address, not the pre-translation logical eu_addr.
+        // fill_base_r (consumed by the degraded-fallback continuation path,
+        // CI_D_FILL_1B/2B/3B below) was previously only ever latched from
+        // the untranslated eu_addr at CI_IDLE and never re-synced at
+        // CI_XLATE's own translated-burst-dispatch point -- unlike
+        // dc_burst_addr_r (beat 0's own dispatch address), which was
+        // already correct. eu_addr_tb (0x2000) and xl_pa_tb (0x9000) are
+        // deliberately different physical frames with the same line
+        // offset (0) so a wrong (untranslated) fallback address is
+        // unambiguously distinguishable from the correct (translated) one
+        // at every stage.
+        // ----------------------------------------------------------------
+        $display("--- D-cache translated burst degraded-fallback uses xl_pa, not eu_addr ---");
+        begin
+            int t;
+            wait_bus_idle;
+            use_cache   = 1'b1;
+            cacr_tb     = 32'h0000_1100;   // DBE=1 | dcache_en=1
+            tc_cache_tb = 32'h8000_0000;   // E=1 -- dispatch goes through CI_XLATE
+            eu_addr_tb  = 32'h0000_2000;   // untranslated logical addr, woff=0
+            eu_fc_tb    = 3'b101;
+            eu_rw_tb    = 1'b1;
+            eu_siz_tb   = 2'b00;
+            eu_req_tb   = 1'b1;
+            repeat(4) @(posedge clk_4x);   // let CI_IDLE -> CI_XLATE settle
+            xl_pa_tb  = 32'h0000_9000;     // translated PA -- different frame
+            xl_ci_tb  = 1'b0;
+            xl_hit_tb = 1'b1;
+            @(posedge clk_4x);
+            xl_hit_tb = 1'b0;
+
+            for (t = 0; t < 20 && u_cache.state !== u_cache.CI_D_BURST0; t++)
+                @(posedge clk_4x);
+            check("P-DXLB: reached CI_D_BURST0", u_cache.state === u_cache.CI_D_BURST0);
+            check32("P-DXLB: beat-0 dispatch address already uses xl_pa (pre-existing, unaffected by this fix)",
+                    u_cache.dc_burst_addr_r, 32'h0000_9000);
+            check32("P-DXLB: fill_base_r re-synced to the TRANSLATED base at CI_XLATE (the fix)",
+                    u_cache.fill_base_r, 32'h0000_9000);
+            #1;
+
+            // Degrade: CBACK# never asserted (dc_burst_beat=0), only beat 0
+            // arrives -- falls back to CI_D_FILL_1B, whose own dispatch
+            // address is fill_base_r+4.
+            dc_burst_rdata0_tb = 32'hD000_0000;
+            dc_burst_beat_tb   = 2'd0;
+            dc_burst_ack_tb    = 1'b1;
+            #1;
+            @(posedge clk_4x); #1;
+            dc_burst_ack_tb = 1'b0;
+            check("P-DXLB: degraded to CI_D_FILL_1B", u_cache.state === u_cache.CI_D_FILL_1B);
+            check32("P-DXLB: beat-1 fallback address is xl_pa+4, not eu_addr+4",
+                    u_cache.dc_burst_addr_r, 32'h0000_9004);
+
+            dc_burst_rdata0_tb = 32'hD000_0001;
+            dc_burst_ack_tb    = 1'b1;
+            #1;
+            @(posedge clk_4x); #1;
+            dc_burst_ack_tb = 1'b0;
+            check("P-DXLB: advanced to CI_D_FILL_2B", u_cache.state === u_cache.CI_D_FILL_2B);
+            check32("P-DXLB: beat-2 fallback address is xl_pa+8, not eu_addr+8",
+                    u_cache.dc_burst_addr_r, 32'h0000_9008);
+
+            dc_burst_rdata0_tb = 32'hD000_0002;
+            dc_burst_ack_tb    = 1'b1;
+            #1;
+            @(posedge clk_4x); #1;
+            dc_burst_ack_tb = 1'b0;
+            check("P-DXLB: advanced to CI_D_FILL_3B", u_cache.state === u_cache.CI_D_FILL_3B);
+            check32("P-DXLB: beat-3 fallback address is xl_pa+12, not eu_addr+12",
+                    u_cache.dc_burst_addr_r, 32'h0000_900C);
+
+            dc_burst_rdata0_tb = 32'hD000_0003;
+            dc_burst_ack_tb    = 1'b1;
+            #1;
+            check("P-DXLB: degraded fill completes (eu_ack)", cache_eu_ack);
+            check32("P-DXLB: returns beat 0's own (requested, woff=0) data",
+                    cache_eu_rdata, 32'hD000_0000);
+            @(posedge clk_4x); #1;
+            dc_burst_ack_tb = 1'b0;
+            check("P-DXLB: all 4 words of the line marked valid",
+                  u_cache.valid_d[u_cache.idx_r][0] === 1'b1 &&
+                  u_cache.valid_d[u_cache.idx_r][1] === 1'b1 &&
+                  u_cache.valid_d[u_cache.idx_r][2] === 1'b1 &&
+                  u_cache.valid_d[u_cache.idx_r][3] === 1'b1);
+
+            eu_req_tb   = 1'b0;
+            cacr_tb     = 32'h0;
+            tc_cache_tb = 32'h0;
+            // use_cache deliberately left at 1 (not disabled) -- P6-5/P6-6
+            // right after this test rely on it already being 1, matching
+            // P6-CI's own convention just above (never touches use_cache
+            // either); unlike the Stage6a/6b/9 burst-retry tests further
+            // down (which DO clear it at their own end), this test sits
+            // between two use_cache=1-assuming tests, not before another
+            // use_cache=1 setup.
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // ----------------------------------------------------------------
         // P6-5: Cache disabled → bus cycle for every access
         // ----------------------------------------------------------------
         $display("--- Cache disabled → bus read ---");

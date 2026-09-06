@@ -789,9 +789,29 @@ indexed, and `#imm`, mixing MUL/DIV/signed/unsigned) matches Musashi exactly
 (needed one 3-NOP settle fix for a benign IFU-readahead reordering — the first
 test to combine the `#imm` form's own long artificial stall with an immediate
 result-write). Full mandatory gate clean, Harte sweep bit-identical to baseline
-(no Harte coverage of `.L` mul/div forms at all — 68000-captured corpus). Items
-#2-10 (a `biu_cache_if.sv` translated-burst-fallback address bug, and several
-doc-staleness/low-priority items) still to come.
+(no Harte coverage of `.L` mul/div forms at all — 68000-captured corpus). **Item #2
+(IMPLEMENTED AND VERIFIED)**: `biu_cache_if.sv`'s degraded-burst-fallback path
+(`CI_D_FILL_1B`/`2B` — beats 1-3 of a burst that degrades to individual single-beat
+requests, CBACK# never asserted) derived its own fallback addresses from
+`fill_base_r`, a register only ever latched from the pre-translation `eu_addr` at
+`CI_IDLE` — never re-synced to the translated `xl_pa` at `CI_XLATE`'s own
+translated-burst-dispatch point, unlike `dc_burst_addr_r` (beat 0's own dispatch
+address), which was already correct. A genuine, narrow-window bug (MMU-translated +
+`CACR.DBE`-burst-enabled + degrades-to-fallback, all three at once) flagged but
+never fixed since Phase 232. Fixed with one new line re-syncing `fill_base_r` at
+`CI_XLATE`'s own dispatch, mirroring the pre-existing `dc_burst_addr_r` line right
+above it. New `tb/biu_tb.sv` test **P-DXLB** (same manual-`xl_pa`/`xl_hit` rig as
+the pre-existing P6-CI test) proves it: checks `fill_base_r` directly post-
+translation, then drives a degraded burst and checks `dc_burst_addr_r` at each
+fallback stage uses `xl_pa+4/8/12`, not `eu_addr+4/8/12` — confirmed to fail on
+baseline (stashed the fix, reran: 4 checks failed showing the exact wrong
+addresses) and pass after restoring it. Found and fixed one test-construction bug
+along the way (P-DXLB's first draft cleared the shared `use_cache` testbench flag,
+breaking the next test, P6-5, which — like P6-CI right before P-DXLB — relies on it
+already being 1; fixed by leaving it untouched, matching P6-CI's own convention).
+Full mandatory gate clean, Harte sweep bit-identical to baseline (this bug's
+trigger needs a translated+burst+degraded D-cache access no Harte vector
+constructs). Items #3-10 (doc-staleness and low-priority items) still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 27/27,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

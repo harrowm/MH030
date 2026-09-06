@@ -551,6 +551,31 @@ module biu_cache_if (
                             dc_burst_req_r  <= 1'b1;
                             dc_burst_addr_r <= {xl_pa[31:4], 4'h0};
                             dc_retry_used_r <= 1'b0;
+                            // docs/*.md review fix (plan.md §Phase 247,
+                            // item #2): fill_base_r must also be re-synced
+                            // to the translated physical address here --
+                            // it was previously only ever latched from the
+                            // pre-translation eu_addr at CI_IDLE (line
+                            // ~442) and never updated for a translated
+                            // access. The degraded-burst-fallback
+                            // continuation path (CI_D_BURST0's own "else"
+                            // branch, CI_D_FILL_1B/2B below) derives beats
+                            // 1-3's own addresses from fill_base_r+4/8/12 --
+                            // without this fix, a translated burst that
+                            // degrades to individual single-beat fallback
+                            // would fetch those three words from the WRONG
+                            // (untranslated, logical) address entirely,
+                            // while beat 0 itself (dc_burst_addr_r above)
+                            // correctly used xl_pa. Found and confirmed
+                            // real via direct trace while implementing this
+                            // fix (not merely inferred from the existing
+                            // comment) -- see tb/biu_tb.sv's own new
+                            // P-DXLB test. dc_retry_used_r's own retry path
+                            // (below) deliberately does NOT need this same
+                            // fix: it re-requests dc_burst_addr_r AS-IS
+                            // (never re-derived from fill_base_r), so it
+                            // was already correct regardless of this bug.
+                            fill_base_r     <= {xl_pa[31:4], 4'h0};
                         end else begin
                             state <= CI_D_MISS;
                         end
@@ -802,17 +827,18 @@ module biu_cache_if (
                             // untouched here (NOT re-derived from
                             // fill_base_r, unlike the degraded-fallback
                             // path's own +4/+8/+12 continuations above) --
-                            // fill_base_r is only ever latched from the
-                            // pre-translation eu_addr (CI_IDLE) and is
-                            // genuinely wrong for a translated access (the
-                            // real burst address for that case comes from
-                            // xl_pa instead, see CI_XLATE's own dispatch
-                            // above); dc_burst_addr_r itself, by contrast,
-                            // already holds whichever of the two was
-                            // actually used for the just-failed attempt, so
-                            // simply not reassigning it re-requests the
-                            // exact same (correct) frozen address either
-                            // way. dc_burst_req_r stays asserted (same
+                            // dc_burst_addr_r already holds whichever
+                            // address (translated or not) was actually used
+                            // for the just-failed attempt, so simply not
+                            // reassigning it re-requests the exact same
+                            // (correct) frozen address either way; no need
+                            // to re-derive it from fill_base_r at all.
+                            // (fill_base_r itself is now correctly re-synced
+                            // to xl_pa for a translated access at CI_XLATE's
+                            // own dispatch above -- docs/*.md review fix,
+                            // plan.md §Phase 247 item #2 -- but this retry
+                            // path never depended on that either way.)
+                            // dc_burst_req_r stays asserted (same
                             // established pattern as the degraded-fallback
                             // path above) and state stays at CI_D_BURST0
                             // (no reassignment needed), so biu_cycle_gen's

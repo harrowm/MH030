@@ -8064,4 +8064,65 @@ sweep via `run_harte_batch.py --backend verilator -j 10 --chunk-size 300`:
 (expected -- the Harte corpus is 68000-captured and has no coverage of the .L
 mul/div forms at all, confirmed already by Phase 185's own note).
 
-**Items #2-#10 continue below as each is addressed.**
+**Item #2 (`biu_cache_if.sv`'s degraded-burst-fallback path used the untranslated
+`fill_base_r` instead of the translated `xl_pa` — real correctness bug, IMPLEMENTED
+AND VERIFIED)**: `fill_base_r` (declared alongside `addr_r`/`wdata_r`, consumed only
+by the degraded-fallback continuation path — `CI_D_BURST0`'s own "else" branch,
+`CI_D_FILL_1B`/`CI_D_FILL_2B` — to derive beats 1-3's own fallback addresses as
+`fill_base_r+4/8/12`) was latched exactly once, at `CI_IDLE`'s own untranslated
+dispatch (`fill_base_r <= {eu_addr[31:4], 4'h0}`), and never re-synced at
+`CI_XLATE`'s own translated-burst-dispatch branch — unlike `dc_burst_addr_r` (beat
+0's own dispatch address), which the pre-existing code already correctly re-derived
+from `xl_pa` at that same point. Confirmed via direct code trace (not merely
+inferred from the Phase 232-era in-code comment that first flagged this gap): a
+translated (`TC.E=1`), D-cache-burst-enabled (`CACR.DBE=1`) access whose burst
+degrades (CBACK# never asserted) would fetch beats 1-3 from the wrong, untranslated
+logical address entirely, while beat 0 itself used the correct translated PA — a
+narrow but genuine window (MMU-translated + burst-enabled + degrades-to-fallback,
+all three conditions simultaneously). **Fix**: one new line re-syncing
+`fill_base_r <= {xl_pa[31:4], 4'h0}` inside `CI_XLATE`'s own translated-burst
+dispatch branch, mirroring the pre-existing `dc_burst_addr_r` line right above it.
+Also updated a now-stale comment on the Stage 6 retry path (`!dc_retry_used_r`
+branch) that previously claimed `fill_base_r` was "genuinely wrong for a translated
+access" — clarified it's now correctly re-synced, while noting the retry path
+itself never actually depended on `fill_base_r` either way (it re-requests
+`dc_burst_addr_r` as-is, unmodified).
+
+New `tb/biu_tb.sv` test **P-DXLB**, inserted right after the pre-existing P6-CI
+test (same rig: full manual control over `xl_hit`/`xl_pa`/`xl_ci`, no real
+walker/arbiter involved). Deliberately uses an untranslated `eu_addr` (0x2000) and
+a translated `xl_pa` (0x9000) in different physical frames but the same line
+offset, so a wrong (untranslated) fallback address is unambiguously distinguishable
+from the correct (translated) one at every stage. Checks `fill_base_r` directly
+right after `CI_XLATE` settles (proving the fix's core claim structurally), then
+drives a degraded (non-full) burst ack and checks `dc_burst_addr_r` at each of
+`CI_D_FILL_1B`/`2B`/`3B` equals `xl_pa+4/8/12`, not `eu_addr+4/8/12`, finishing with
+a full behavioral check (the degraded fill completes, returns the correct data, and
+all 4 words end up marked valid). **Confirmed the test fails on baseline before the
+fix** (temporarily stashed the RTL change, rebuilt: 4 of the new checks failed,
+showing the exact wrong addresses `0x2004/0x2008/0x200c` instead of
+`0x9004/0x9008/0x900c`) **and passes after restoring it** — proving this is a real,
+demonstrated bug, not merely a theoretical gap.
+
+**Found and fixed one test-construction bug while building P-DXLB**: a first
+version cleared the shared `use_cache` testbench flag (`use_cache = 1'b0`) in its
+own cleanup, mirroring the later Stage6a/6b/9 burst-retry tests' own convention —
+but P-DXLB sits between the pre-existing P6-CI and P6-5 tests, both of which rely
+on `use_cache` already being 1 (neither sets it itself), unlike Stage6a/6b/9's own
+position in the file (each followed by a fresh `use_cache=1` setup). Clearing it
+broke P6-5 (`u_cache`'s own `eu_req` port is gated `use_cache ? eu_req_tb : 1'b0`,
+so P6-5's read silently never dispatched, returning 0 instead of the expected
+`0x12345678`) — root-caused via a temporary debug `$display` (confirmed `use_cache`
+was the only anomalous signal at P6-5's entry; removed once diagnosed) rather than
+guessed at. Fixed by leaving `use_cache` untouched at P-DXLB's own end, matching
+P6-CI's own convention exactly instead of Stage6a/6b/9's.
+
+**Full mandatory gate**: `make test` 37/37 (biu now includes P-DXLB), `make
+cosim_grp` 8/8, `make cosim_memind` 27/27 (unaffected — testbench-only /
+`biu_cache_if.sv`-internal change, no new cosim test needed for this item), `make
+dat-synth` 50/50, full 124-suite Tom Harte sweep: `TOTAL: PASS 702142 FAIL 2 SKIP
+281221 TIMEOUT 0` — bit-identical to baseline (expected; this bug's trigger window
+needs a genuine MMU-translated, burst-enabled, degraded-fallback D-cache access,
+which no Harte single-instruction vector constructs).
+
+**Items #3-#10 continue below as each is addressed.**
