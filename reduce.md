@@ -3,7 +3,10 @@
 > **Historical, inactive.** Same session (2026-07-29) as `improve.md`; the line
 > counts below predate ~70 subsequent phases of feature work and are stale by a
 > wide margin (`eu_seq.sv` alone is roughly 9000+ lines now). Not referenced
-> anywhere else in the repo.
+> anywhere else in the repo. Reviewed as part of the Phase 247 documentation audit
+> (item #7) — unlike `improve.md`, every item here already carries a `[DONE]`/
+> `[SKIPPED]` status tag, so this file is already internally consistent; no changes
+> needed.
 
 Original: 15,776 lines across 29 RTL files. eu_seq.sv was 7,549 lines (48%).
 After items #2 and #1: eu_seq.sv = 7,226 lines; total RTL = 15,453 lines (-323).

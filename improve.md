@@ -3,10 +3,17 @@
 > **Historical, inactive.** A single-day (2026-07-29) refactor worklist targeting
 > specific `eu_seq.sv`/`biu_cycle_gen.sv` line numbers that no longer match the
 > current file (both have grown substantially since). The `make test (51/51)` count
-> below is stale (current is 35/35 — a different count for a different reason: the
-> test *suite* has grown, this isn't the same 51→35 as a regression). Not referenced
-> anywhere else in the repo. Items #8 and #10 have no `[DONE]`/`[SKIPPED]` tag — if
-> ever revisited, their line-number references need re-deriving from scratch first.
+> below is stale (current is 37/37 — a different count for a different reason: the
+> test *suite* has grown, this isn't the same 51→37 as a regression). Not referenced
+> anywhere else in the repo. Items #8 and #10 are now tagged `[NOT ATTEMPTED]`
+> (docs/*.md review, Phase 247 item #6) rather than left untagged — their own
+> `[High refactor cost, low net readability gain]`/`[Large mechanical refactor]` risk
+> notes already argue against pursuing them, matching #5/#7's own `[SKIPPED]`
+> precedent in this same file; their line-number references would need re-deriving
+> from scratch if ever revisited. Reviewed as part of the Phase 247 documentation
+> audit and confirmed this file needs no further action beyond the two tags above —
+> deliberately not re-attempting any of the speculative refactors on a
+> since-substantially-grown codebase.
 
 All changes are structural/cosmetic — no functional intent. Run `make test` (51/51) after each.
 
@@ -126,7 +133,7 @@ yet"). Would work with Verilator or ModelSim. Skip unless toolchain changes.
 
 ---
 
-## #8 — EX-latch as a packed struct (eu_seq.sv ~5595–5677)
+## #8 — EX-latch as a packed struct (eu_seq.sv ~5595–5677) [NOT ATTEMPTED]
 
 **Problem:** ~80-line `always_ff` block of sequential `ex_foo <= dec_foo` assignments.
 
@@ -148,7 +155,7 @@ separately, then use it in the `mem_req` expression.
 
 ---
 
-## #10 — FSM output/transition split (biu_cycle_gen.sv)
+## #10 — FSM output/transition split (biu_cycle_gen.sv) [NOT ATTEMPTED]
 
 **Problem:** Next-state logic and Moore outputs are interleaved across the file.
 
