@@ -311,15 +311,33 @@ re-investigating something already fixed.
   redispatch (`biu_cycle_gen.sv`'s own FSM already returns cleanly to `ST_IDLE` after
   any burst outcome, so simply re-asserting `dc_burst_req_r` causes a genuine retry
   with no new cross-module plumbing) before escalating to `CI_BERR` for real. A
-  related, deliberately NOT-fixed gap found while designing this: the degraded-
-  fallback path's own `fill_base_r` is latched pre-translation and would be wrong for
-  a translated burst — documented, sidestepped by leaving `dc_burst_addr_r` untouched
-  on retry rather than re-deriving it, not fixed (out of scope for this stage). Two
+  related gap found while designing this — the degraded-fallback path's own
+  `fill_base_r` is latched pre-translation and would be wrong for a translated
+  burst — was deliberately NOT fixed in this stage (sidestepped by leaving
+  `dc_burst_addr_r` untouched on retry rather than re-deriving it, out of scope at
+  the time). **This gap is now CLOSED too — see the next bullet.** Two
   new `tb/biu_tb.sv` tests (retry succeeds; retry also fails and escalates). Full
   Harte sweep bit-identical to baseline. This was the plan's own flagged riskiest RTL
   stage and closed cleanly — the plan's own explicit permission to defer it wasn't
-  needed. **This closed the last cache-correctness gap this document knew about at
-  the time.**
+  needed.
+- **`fill_base_r`'s own translated-burst-fallback gap — CLOSED (docs/*.md review,
+  Phase 247 item #2)**. The gap flagged (but deliberately left unfixed) by the
+  bullet above: `fill_base_r` (consumed only by the degraded-burst-fallback
+  continuation path, `CI_D_BURST0`'s own "else" branch / `CI_D_FILL_1B`/`2B`, to
+  derive beats 1-3's own fallback addresses as `fill_base_r+4/8/12`) was latched only
+  from the pre-translation `eu_addr` at `CI_IDLE`, never re-synced to the translated
+  `xl_pa` at `CI_XLATE`'s own translated-burst-dispatch point — unlike
+  `dc_burst_addr_r` (beat 0's own dispatch address), which was already correct. A
+  genuine, narrow-window bug (MMU-translated + `CACR.DBE`-burst-enabled +
+  degrades-to-fallback, all three at once): beats 1-3 of such a fill would have
+  fetched from the wrong, untranslated address. Fixed with one new line re-syncing
+  `fill_base_r` at `CI_XLATE`'s own dispatch, mirroring the pre-existing
+  `dc_burst_addr_r` line right above it. New `tb/biu_tb.sv` test **P-DXLB** (same
+  manual-`xl_pa`/`xl_hit` rig as the pre-existing P6-CI test) confirmed to fail on
+  baseline (stashed the fix, reran: 4 checks failed showing the exact wrong
+  addresses) and pass after restoring it. Full mandatory gate clean, Harte sweep
+  bit-identical to baseline. **This closes the last cache-correctness gap this
+  document knows about.**
 - **Genuine per-beat CIIN checking during a burst — CLOSED, D-cache only (10-item
   backlog Stage 3, Phase 229)**. Fixed with a deliberate scope refinement: the
   I-cache's own per-LINE `valid_i` makes true per-word CIIN gating architecturally
@@ -376,7 +394,8 @@ re-investigating something already fixed.
 open-items backlog's own Stage 1 — no single up-to-date count is maintained here; run
 `make test` for the current pass/fail state of the `cache` suite.
 
-**No known correctness gap remains in either cache as of Phase 246.** Every item
-this section used to list — BERR-during-fill's harder sub-case, per-beat CIIN, the
-D-cache's own `mmu_ci` staleness, the I-cache's own complete lack of
-MMU-CI-awareness, the dead EU-side I-cache array — is closed.
+**No known correctness gap remains in either cache as of Phase 247.** Every item
+this section used to list — BERR-during-fill's harder sub-case (including its own
+`fill_base_r` translated-burst-fallback follow-on, closed separately at Phase 247
+item #2), per-beat CIIN, the D-cache's own `mmu_ci` staleness, the I-cache's own
+complete lack of MMU-CI-awareness, the dead EU-side I-cache array — is closed.
