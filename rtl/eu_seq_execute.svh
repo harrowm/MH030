@@ -147,6 +147,7 @@
     logic        ex_md_64bit;         // 1=write second register
     // PEA, EXG, CMPM
     logic        ex_is_pea;           // PEA in EX stage
+    logic        ex_is_scc_mem;       // Scc-to-memory genuine-indirect EA (plan.md §Phase 245)
     logic        ex_is_exg;           // EXG in EX stage
     logic        ex_exg_dd;           // 1=Dx,Dy form
     logic        ex_is_cmpm;          // CMPM in EX stage
@@ -184,6 +185,17 @@
     logic [4:0]  tas_ccr_r;          // CCR {X,N,Z,V,C} captured from read value
     logic        tas_read_ack;       // hold stall on read-ack cycle before write starts
     logic        tas_sr_wr_en;       // combinational: fire CCR update when write ack
+    // TAS genuine memory-indirect EA (Stage 9c, plan.md §Phase 245): the
+    // memind FSM's own inner-read completion (memind_inner_r && mem_ack)
+    // resolves the final RMW target address directly into tas_memind_addr_r
+    // (using the SAME live mem_rdata combinational formula memind_addr_wr_data
+    // already uses for LEA/JMP's own address-only completion -- valid the
+    // same cycle, no extra one-cycle lag to wait out). tas_memind_pending_r
+    // then drives the real RMW-locked read dispatch (mem_rmw/mem_req/mem_addr)
+    // at that resolved address until it acks, at which point tas_run_r's own
+    // FSM takes over exactly as it does for the ordinary (non-memind) case.
+    logic        tas_memind_pending_r;
+    logic [31:0] tas_memind_addr_r;
 
     // RTR two-phase read state (module-level registers; declared here for stall)
     logic        rtr_phase_r;
@@ -803,7 +815,7 @@
     // itself is the correct, independent "give up now" signal regardless
     // of which path detected the fault.
     wire mem_abort = mem_berr || exc_active;
-    assign ex_mem_stall = tas_run_r || tas_read_ack || movem_start_r || movem_run_r ||
+    assign ex_mem_stall = tas_run_r || tas_read_ack || tas_memind_pending_r || movem_start_r || movem_run_r ||
                           movep_start_r || movep_pre_r || movep_run_r ||
                           move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
@@ -1822,6 +1834,7 @@
             ex_md_dst2        <= 3'b0;
             ex_md_64bit       <= 1'b0;
             ex_is_pea         <= 1'b0;
+            ex_is_scc_mem     <= 1'b0;
             ex_is_exg         <= 1'b0;
             ex_exg_dd         <= 1'b0;
             ex_is_cmpm        <= 1'b0;
@@ -1947,6 +1960,7 @@
             ex_md_dst2        <= 3'b0;
             ex_md_64bit       <= 1'b0;
             ex_is_pea         <= 1'b0;
+            ex_is_scc_mem     <= 1'b0;
             ex_is_exg         <= 1'b0;
             ex_exg_dd         <= 1'b0;
             ex_is_cmpm        <= 1'b0;
@@ -2099,6 +2113,7 @@
             ex_md_dst2        <= dec_md_dst2;
             ex_md_64bit       <= dec_md_64bit;
             ex_is_pea         <= dec_is_pea;
+            ex_is_scc_mem     <= dec_is_scc_mem;
             ex_is_exg         <= dec_is_exg;
             ex_exg_dd         <= dec_exg_dd;
             ex_is_cmpm        <= dec_is_cmpm;
@@ -2254,7 +2269,23 @@
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
                       (dyn_bit_get_Dn && (ex_dyn_bit_swap_a || ex_dyn_bit_swap_both)) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
                                                         ex_src_reg;
-    assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea || ex_is_abcd_sbcd_mem || ex_is_addx_mem) ? 2'b00 : ex_siz;
+    // Stage 9c fix (plan.md §Phase 245): ex_is_memind must ALSO force
+    // longword here, the same way rd_b_siz's own analogous mux already does
+    // (rd_b_siz = ... || ex_is_memind || ...) -- rd_a carries An, the EA's
+    // BASE register, which must never be size-truncated regardless of the
+    // instruction's own operand size. Every PRIOR memind family happened to
+    // dodge this: ex_is_mem_rd is deliberately suppressed for memind
+    // dispatch (the same convention this file uses throughout), so the
+    // pre-existing ex_is_mem_rd/ex_is_lea terms coincidentally never covered
+    // memind at all -- LEA/JMP/JSR/PEA's own dec_siz all happen to default
+    // to longword (no real "operand size" for a control-transfer/address
+    // op), and Phase 243/244's own byte/word-sized memind tests (DIVU.W)
+    // happened to use an An value that survives 16-bit sign-extension
+    // unchanged, masking the gap. Found via a genuine TAS/Scc-via-memind
+    // cosim mismatch (BYTE-sized dec_siz): rd_a_data read A0's sign-extended
+    // LOW BYTE (0x00 from A0=$2000) instead of the full address, corrupting
+    // ex_ea by exactly A0's own upper 24 bits.
+    assign rd_a_siz = (movem_run_r || ex_is_mem_rd || ex_is_mem_wr || ex_is_lea || ex_is_abcd_sbcd_mem || ex_is_addx_mem || ex_is_memind) ? 2'b00 : ex_siz;
     assign rd_b_sel = cas_get_du_r     ? {1'b0, ex_cas_du_reg}  :
                       cas2_rd2_r       ? {1'b0, ex_cas2_dc2_reg} :  // Dc2 for inline compare
                       cas2_get_du1_r   ? {1'b0, ex_cas2_du1_reg} :
@@ -2593,8 +2624,14 @@
             // 1-cycle cooldown pulse after write completes; clears re-trigger guard
             tas_after_write_r <= tas_run_r && mem_ack;
             if (!tas_run_r && !tas_after_write_r &&
-                ex_valid && ex_is_tas && ex_is_mem_rd && mem_ack) begin
-                // Read ack: capture data, start write phase
+                ex_valid && ex_is_tas &&
+                (ex_is_mem_rd || tas_memind_pending_r) && mem_ack) begin
+                // Read ack: capture data, start write phase. Genuine
+                // memory-indirect EA (plan.md §Phase 245): tas_memind_pending_r
+                // covers the memind-dispatched case (ex_is_mem_rd is
+                // deliberately suppressed there) -- mem_rdata here is the
+                // RMW-locked read's own value at the resolved address either
+                // way, so the capture body itself needs no change.
                 tas_run_r   <= 1'b1;
                 tas_wdata_r <= mem_rdata[7:0] | 8'h80;
                 tas_ccr_r   <= {flag_x, mem_rdata[7], (mem_rdata[7:0] == 8'h0), 1'b0, 1'b0};
@@ -3190,12 +3227,17 @@
             memind_is_pea_r    <= 1'b0;
             memind_pea_wr_addr_r <= 32'h0;
             memind_is_jsr_r    <= 1'b0;
+            tas_memind_pending_r <= 1'b0;
+            tas_memind_addr_r    <= 32'h0;
         end else if (!memind_start_r && !memind_inner_r && !memind_outer_r
                      && instr_ack && dec_is_memind) begin
             memind_start_r     <= 1'b1;
             // memind only supports load ops, except PEA/JSR's own outer
-            // phase, which is a write (PEA: resolved EA; JSR: return PC).
-            memind_is_rd_r     <= !dec_is_pea && !dec_is_jsr;
+            // phase, which is a write (PEA: resolved EA; JSR: return PC),
+            // and Scc-to-memory's own outer phase (plan.md §Phase 245:
+            // Scc-to-memory is architecturally a plain write, no discarded
+            // read -- see dec_is_scc_mem's own declaration comment).
+            memind_is_rd_r     <= !dec_is_pea && !dec_is_jsr && !dec_is_scc_mem;
             // dec_memind_rd_siz (not dec_siz directly) since MULU/MULS/
             // DIVU/DIVS's own dec_siz reflects their 32-bit RESULT, not
             // their 16-bit memory OPERAND read -- every memind-dispatching
@@ -3207,8 +3249,13 @@
             memind_od_r        <= dec_memind_od;
             // 10-item backlog Stage 9b (plan.md): JMP shares LEA's own
             // address-only shape exactly -- it never dereferences its own
-            // final EA either, just becomes the new PC directly.
-            memind_addr_only_r <= dec_is_lea || dec_is_jmp;
+            // final EA either, just becomes the new PC directly. TAS (Stage
+            // 9c, plan.md §Phase 245) shares the same "skip the ordinary
+            // outer-read dispatch" shape too, but for a different reason:
+            // its own outer phase must be the RMW-LOCKED read+write, not a
+            // plain discardable one, so it hands off to tas_memind_pending_r
+            // below instead of completing directly the way LEA/JMP do.
+            memind_addr_only_r <= dec_is_lea || dec_is_jmp || dec_is_tas;
             memind_is_pea_r    <= dec_is_pea;
             memind_is_jsr_r    <= dec_is_jsr;
         end else if (memind_start_r) begin
@@ -3231,6 +3278,18 @@
             // LEA never needs.
             memind_outer_r <= !memind_addr_only_r;
             memind_ptr_r   <= mem_rdata;   // 32-bit pointer from inner read
+            // TAS genuine memory-indirect EA (Stage 9c, plan.md §Phase 245):
+            // resolve the final RMW target address NOW, using the same live
+            // mem_rdata formula memind_addr_wr_data already uses for LEA/
+            // JMP's own address-only completion (valid this exact cycle --
+            // no need to wait for memind_ptr_r's own registered update next
+            // cycle the way memind_outer_addr_w would). tas_memind_pending_r
+            // takes over from here, driving the real RMW-locked read at
+            // tas_memind_addr_r until it acks.
+            if (ex_is_tas) begin
+                tas_memind_pending_r <= 1'b1;
+                tas_memind_addr_r    <= mem_rdata + memind_post_xn_r + memind_od_r;
+            end
         end else if (memind_outer_r && mem_ack) begin
             memind_outer_r <= 1'b0;
         end else if (memind_inner_r && mem_abort) begin
@@ -3241,6 +3300,13 @@
         end else if (memind_outer_r && mem_abort) begin
             // A fault on the outer read aborts the same way.
             memind_outer_r <= 1'b0;
+        end else if (tas_memind_pending_r && (mem_ack || mem_abort)) begin
+            // The real (locked) RMW read has now acked -- tas_run_r's own
+            // FSM below picks up from here (same mem_ack cycle) and drives
+            // the write phase; on mem_abort, just abandon the sequence
+            // (tas_run_r's own start condition requires mem_ack specifically,
+            // so it never starts on an aborted read).
+            tas_memind_pending_r <= 1'b0;
         end
     end
 
@@ -4314,9 +4380,17 @@
     // the just-arrived pointer value itself; memind_post_xn_r/memind_od_r
     // were already captured back at memind_start_r, so the final resolved
     // address is available combinationally the same cycle.
+    // TAS genuine memory-indirect EA (plan.md §Phase 245): TAS also sets
+    // memind_addr_only_r (to skip the ordinary outer-read dispatch), but
+    // its own completion is NOT a register write -- it hands off to
+    // tas_memind_pending_r instead (captured in this same always_ff, same
+    // cycle, using the identical live-mem_rdata formula below). Without
+    // this !ex_is_tas exclusion, this path would ALSO fire here and wrongly
+    // commit the resolved address as a raw register write to memind_dest_r
+    // (TAS never sets a meaningful destination register).
     logic        memind_addr_wr_en;
     logic [31:0] memind_addr_wr_data;
-    assign memind_addr_wr_en   = memind_inner_r && mem_ack && memind_addr_only_r;
+    assign memind_addr_wr_en   = memind_inner_r && mem_ack && memind_addr_only_r && !ex_is_tas;
     assign memind_addr_wr_data = mem_rdata + memind_post_xn_r + memind_od_r;
 
     // BF memory Dn write — non-mutating ops write extracted result to Dn at read ack.
@@ -4706,7 +4780,7 @@
     // move16_run_r drives 4 longword reads then 4 longword writes.
     // True when no multi-cycle bus op is active or cooling down; gate for the normal EU mem path.
     logic no_special_bus_op;
-    assign no_special_bus_op = !tas_after_write_r && !cmp2_run_r   && !cmp2_after_r   &&
+    assign no_special_bus_op = !tas_after_write_r && !tas_memind_pending_r && !cmp2_run_r   && !cmp2_after_r   &&
                                 !memind_start_r   && !memind_inner_r && !memind_outer_r &&
                                 !mem_rmw_run_r    && !mem_rmw_after_r && !pmove64_run_r &&
                                 !move_mm_run_r    && !move_mm_after_r &&
@@ -4715,7 +4789,7 @@
                                 !cas2_get_du2_r   && !cas2_wr2_r  && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
                                 !cas2_after_r     && !ex_cas2_done_r;
 
-    assign mem_req   = movem_run_r || tas_run_r  || cmp2_run_r  || movep_run_r || move16_run_r ||
+    assign mem_req   = movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r || move16_run_r ||
                        memind_inner_r || memind_outer_r || mem_rmw_run_r || move_mm_run_r ||
                        addx_mem_run_r || bf_mem_run_r || pack_mem_run_r || pmove64_run_r ||
                        cas_write_r || bcds_run_r ||
@@ -4724,6 +4798,7 @@
                        (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
     assign mem_rw    = movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
+                     : tas_memind_pending_r ? 1'b1   // genuine-indirect TAS: RMW-locked read phase
                      : cmp2_run_r     ? 1'b1
                      : movep_run_r    ? movep_load_r
                      : move16_run_r   ? !move16_phase_r
@@ -4769,6 +4844,7 @@
                        (ex_is_moves && !ex_moves_load) ? dfc_in :
                                                          {sr_live[13], 1'b0, 1'b1};
     assign mem_addr  = movem_run_r    ? movem_addr_r :
+                       (ex_is_tas && ex_is_memind && (tas_run_r || tas_memind_pending_r)) ? tas_memind_addr_r :
                        cmp2_run_r     ? cmp2_addr2_r :
                        movep_run_r    ? movep_addr_r :
                        move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
@@ -4822,6 +4898,13 @@
                      // (ptr+post_xn+od), not the ordinary An+d+Xn value the
                      // generic ex_is_pea case below computes.
                      : (memind_outer_r && memind_is_pea_r) ? memind_outer_addr_w
+                     // Scc genuine memory-indirect EA (plan.md §Phase 245):
+                     // the outer phase is a plain write of dec_imm's own
+                     // decode-time-computed FF/00 byte (see dec_is_scc_mem's
+                     // own declaration comment) -- not a value read from
+                     // memory at all, unlike every OTHER memind consumer's
+                     // outer-write case.
+                     : (memind_outer_r && ex_is_scc_mem) ? eu_lane(ex_imm, ex_siz)
                      : ex_is_pea               ? (ex_abs_jmp_en ? (ex_abs_ea_val + (ex_is_idx ? ex_xn_scaled : 32'h0))
                                                                  : (rd_a_data + ex_jump_offset + ex_xn_scaled))
                      : (ex_is_jsr || ex_is_bsr) ? ex_return_pc
@@ -4834,7 +4917,14 @@
                      : ex_is_move_reg_idx_dst  ? eu_lane(rd_c_data, ex_siz)
                      :                                             eu_lane(rd_a_data, ex_siz);
     // RMW — assert during TAS (An) read phase (not during write or cooldown).
-    assign mem_rmw   = ex_valid && ex_is_tas && ex_is_mem_rd && !tas_run_r && !tas_after_write_r;
+    // Genuine memory-indirect EA (Stage 9c, plan.md §Phase 245): the ordinary
+    // ex_is_mem_rd term never fires for memind dispatch (deliberately
+    // suppressed at decode) -- tas_memind_pending_r is the equivalent "read
+    // phase in flight, targeting the resolved address" condition once the
+    // memind FSM's own inner (pointer) read has completed.
+    assign mem_rmw   = ex_valid && ex_is_tas &&
+                       (ex_is_mem_rd || tas_memind_pending_r) &&
+                       !tas_run_r && !tas_after_write_r;
 
     // CAS's own genuine bus-level lock (silent-copper-latch.md, Phase
     // 241/242) -- see this signal's own port-declaration comment in
@@ -4852,7 +4942,7 @@
     // minus mem_ack, for rd1; cas2_rd2_r, an existing register already
     // representing "currently issuing the second read", for rd2).
     assign mem_rmw_lookup =
-        (ex_valid && ex_is_tas  && ex_is_mem_rd && !tas_run_r && !tas_after_write_r) ||
+        (ex_valid && ex_is_tas  && (ex_is_mem_rd || tas_memind_pending_r) && !tas_run_r && !tas_after_write_r) ||
         (ex_valid && ex_is_cas  && ex_is_mem_rd && !cas_get_du_r && !cas_active_r &&
          !ex_cas_mem_done_r) ||
         (ex_valid && ex_is_cas2 && ex_is_mem_rd && !cas2_active_r && !ex_cas2_done_r) ||

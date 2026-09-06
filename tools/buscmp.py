@@ -68,10 +68,50 @@ def parse_log(path, skip=0, reads_only=False, addr_mask=None, max_cycles=None):
             if skipped < skip:
                 skipped += 1
                 continue
-            addr = int(addr_s, 16)
+            raw_addr = int(addr_s, 16)
+            addr = raw_addr
             if addr_mask is not None:
                 addr &= addr_mask
             data = int(data_s, 16)
+            # Stage 9c fix (plan.md §Phase 245): the DUT's own bus trace
+            # reflects the REAL 32-bit D[31:0] pin state for byte/word
+            # transfers, not just the meaningful value -- for WRITES,
+            # biu_byte_lane_ctrl.sv replicates the byte/word across all four
+            # lanes (real 68030 pin-level behavior, per its own header
+            # comment: "so that a peripheral reading D[31:0] sees the
+            # byte/word on the correct pins"); for READS, the OTHER lanes
+            # simply carry whatever else happens to be in the addressed
+            # word's neighboring bytes (this testbench's own memory model
+            # returns the whole containing longword regardless of siz).
+            # Musashi's own reference log (tools/m68ksim.c) instead always
+            # prints just the canonical value with a size-matched field
+            # width (%02x/%04x/%08x for byte/word/longword) -- genuinely
+            # "the byte value" or "the word value," never a 32-bit pin
+            # trace at all, so its own field is NEVER wider than the
+            # transfer size and needs no shift. The DUT's own $display
+            # always uses Verilog's %h on a [31:0] signal, which
+            # unconditionally pads to 8 hex digits regardless of value --
+            # that field-width difference is what distinguishes the two
+            # log conventions here (data_s's own captured string length),
+            # not which file is being parsed (both dut and ref go through
+            # this same function). Every prior full (non-reads-only) bus
+            # comparison test happened to only ever compare LONGWORD
+            # transfers, where this never mattered -- found via a genuine
+            # TAS-via-memind cosim mismatch, the first test to full-compare
+            # a genuine byte READ (and separately, a byte WRITE) via this
+            # tool. Fixed by extracting the real, address-aligned
+            # big-endian byte/word LANE from the wide (DUT-style) field
+            # only (not just masking the low bits, since a byte at an odd
+            # address or a word at addr&2!=0 lives in the UPPER lanes, not
+            # the lower ones) and zero-extending it the same way Musashi's
+            # own narrow field already is -- a genuine wrong data VALUE in
+            # that same lane is still caught exactly as before.
+            if siz_s == '01' and len(data_s) > 2:
+                shift = (3 - (raw_addr & 3)) * 8
+                data = (data >> shift) & 0xFF
+            elif siz_s == '10' and len(data_s) > 4:
+                shift = 16 if (raw_addr & 2) == 0 else 0
+                data = (data >> shift) & 0xFFFF
             cycles.append((rw, addr, data, fc_s, siz_s))
             if max_cycles and len(cycles) >= max_cycles:
                 break

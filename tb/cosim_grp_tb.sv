@@ -115,7 +115,23 @@ module cosim_grp_tb;
     );
 
     // ── Bus logger (same format as cosim73) ──────────────────────────────────
-    logic        as_prev_r;
+    // Stage 9c fix (plan.md §Phase 245): RMW-LOCKED cycles (TAS, CAS, CAS2)
+    // hold AS continuously asserted across their whole indivisible read+write
+    // sequence (MC68030UM.pdf 7.3.3, this project's own documented and
+    // heavily-verified pin behavior) -- /DS is what actually toggles once
+    // per sub-phase within that single AS-asserted window. This logger
+    // previously bracketed cycles on AS's own edges, which happens to
+    // coincide with DS's edges for every ORDINARY (non-locked) cycle -- but
+    // for an RMW-locked cycle, AS only negates once, at the very END of the
+    // write phase, so the old AS-edge trigger only ever produced ONE log
+    // line for the whole read+write pair (whichever sub-phase's bus state
+    // happened to be on the pins last, always the write). Found via a
+    // genuine TAS-via-memind cosim mismatch (missing read cycle in the DUT's
+    // own trace) -- the first test to full-compare TAS's own bus trace via
+    // this testbench at all. Triggering on DS's own edges instead correctly
+    // captures each sub-phase as an independent line, and is equally correct
+    // for ordinary cycles (AS and DS negate together there).
+    logic        ds_prev_r;
     logic [31:0] log_addr_r;
     logic [2:0]  log_fc_r;
     logic [1:0]  log_siz_r;
@@ -124,15 +140,15 @@ module cosim_grp_tb;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            as_prev_r  <= 1'b1;
+            ds_prev_r  <= 1'b1;
             log_addr_r <= 32'h0;
             log_fc_r   <= 3'b0;
             log_siz_r  <= 2'b0;
             log_rw_r   <= 1'b1;
             log_data_r <= 32'h0;
         end else begin
-            as_prev_r <= ext_as_n;
-            if (!ext_as_n) begin
+            ds_prev_r <= ext_ds_n;
+            if (!ext_ds_n) begin
                 log_addr_r <= ext_a;
                 log_fc_r   <= ext_fc;
                 log_siz_r  <= ext_siz;
@@ -143,7 +159,7 @@ module cosim_grp_tb;
     end
 
     always_ff @(posedge clk_4x) begin
-        if (!as_prev_r && ext_as_n) begin
+        if (!ds_prev_r && ext_ds_n) begin
             if (log_rw_r)
                 $display("BUS R %h %h fc=%b siz=%b",
                          log_addr_r, log_data_r, log_fc_r, log_siz_r);

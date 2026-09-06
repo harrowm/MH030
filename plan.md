@@ -7745,3 +7745,167 @@ FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline.
 restructuring the RMW-locked bus protocol's own dispatch trigger, a structurally
 different and higher-risk change than either the ALU-EA (Phase 243) or CMP2/CHK2
 (this phase) integration shape.
+
+## Phase 245 (TAS/Scc genuine memory-indirect EA -- IMPLEMENTED, closes Stage 9c
+and the whole 10-item backlog's Stage 9 in full)
+
+Implemented both of Stage 9c's remaining deferred families. The two turned out to
+need almost entirely different treatment once actually investigated closely --
+TAS genuinely needed the RMW-locked bus protocol's own dispatch trigger
+restructured (the hard case Phase 239 anticipated); Scc turned out to be
+architecturally much simpler than Phase 239 assumed, but only after a real,
+previously-undiscovered bug in its EXISTING (non-indirect) implementation was
+found and fixed first. Along the way, two genuine test-infrastructure gaps were
+also found and fixed -- neither an RTL bug, but both were silently blocking any
+correct verification of these families' own bus behavior.
+
+**Bug 0 (found first, blocking): Scc-to-memory was modeled as a real
+read-modify-write; real 68020+/68030 Scc-to-memory is a plain write.** Direct
+inspection of Musashi's own `tools/musashi/m68kops.c` (`m68k_op_scc_8_*`, one
+handler shared by every CPU type table entry Musashi models, `tools/m68ksim.c`
+itself configured for `M68K_CPU_TYPE_68030`) showed every Scc-to-memory addressing
+form is a single `m68ki_write_8`, with no preceding read at all -- consistent with
+the real MC68030UM.pdf timing table showing 68020+/68030 Scc-to-memory taking
+noticeably fewer cycles than 68000/68010's own entry for the same mode. This
+RTL's own decode had modeled it as `dec_is_mem_rd+dec_is_mem_rmw` (genuine
+read-then-write) since it was first written -- invisible to Harte's own
+register/memory-END-STATE-only checks (a discarded read has no observable effect
+on final content in Musashi's own model), but very much a real bus-behavior bug
+on actual silicon (the same general class as 68000 CLR's own well-documented
+spurious-read quirk) -- found only because this phase's own new indirect-EA test
+was the first to ever full-compare Scc-to-memory's bus trace via `cosim_grp`/
+`buscmp.py`. Fixed in `eu_seq_decode.svh`: Scc-to-memory's whole family-wide arm
+now sets `dec_is_mem_wr` (no read phase at all) instead of
+`dec_is_mem_rd`+`dec_is_mem_rmw`; the already-existing generic
+`(ex_is_mem_wr && ex_use_imm)` write-value path in `eu_seq_execute.svh` picks up
+`dec_imm`'s FF/00 value automatically. Fixing this exposed a SECOND, self-induced
+bug immediately: `ex_an_base`'s own established convention for plain writes is
+"An (destination EA base) on `rd_b`, not `rd_a`" (documented at its own
+declaration -- every other `dec_is_mem_wr` family already follows this; only the
+*indexed*-write case is the documented exception, needing An on `rd_a` and Xn on
+`rd_b` simultaneously). Scc's own pre-existing code put An on `rd_a`
+unconditionally, which had silently relied on `ex_an_base`'s OTHER branch (used
+for reads, unconditionally `rd_a`) -- switching to `dec_is_mem_wr` flipped which
+branch applies. Fixed by moving An to `dec_dst_reg`/`rd_b` for the non-indexed
+modes, with the mode=110 (indexed) case explicitly overriding back to
+`dec_src_reg`/`rd_a` for An (Xn on `rd_b`), matching the documented indexed-write
+exception. Caught via a direct `ex_ea=0` trace in `tb/alu_mem_tb.sv`'s own
+pre-existing SEQ-01 unit test before it ever reached cosim.
+
+**Scc genuine memory-indirect EA** (now that the ordinary case is a plain write):
+mirrors PEA's own shape (the memind FSM's outer phase becomes a WRITE, not a
+discarded read) rather than the general-ALU-EA/CMP2-CHK2 read-based shape. New
+`dec_is_scc_mem` flag (mirrors `dec_is_pea`/`dec_is_jsr`'s own role) threaded to
+`ex_is_scc_mem`; `memind_is_rd_r`'s own formula extended to
+`!dec_is_pea && !dec_is_jsr && !dec_is_scc_mem`; a new `mem_wdata` mux entry
+`(memind_outer_r && ex_is_scc_mem) ? eu_lane(ex_imm, ex_siz)` supplies the
+decode-time-computed FF/00 write value (not a value read from memory at all,
+unlike every other memind outer-write consumer). `dec_memind_rd_siz` needed an
+explicit override to byte (PEA/JSR never needed this, since their own longword
+pushes already match the field's longword default).
+
+**TAS genuine memory-indirect EA** (the structurally harder case): TAS's read+
+write dispatches through the RMW-LOCKED bus protocol (`mem_rmw`/`eu_rmw` ->
+`biu_cycle_gen.sv`'s `ST_RMW_READ_*`/`ST_RMW_WRITE_*`, AS held continuously across
+both phases -- confirmed via direct trace that `eu_rmw` is sampled ONLY once, at
+the exact `ST_IDLE`-to-dispatch decision, not needed to stay asserted through the
+whole locked sequence once started). Genuine indirection needs the memind FSM's
+own inner (pointer) read to resolve the FINAL target address BEFORE `mem_rmw`
+ever asserts, since the real RMW read+write must target that resolved address,
+not the inner pointer's own address. Implemented as a clean two-register hand-off
+inside the shared memind FSM's own `always_ff` (kept in one block to avoid
+multiple drivers): `tas_memind_pending_r`/`tas_memind_addr_r`, set at
+`memind_inner_r && mem_ack && ex_is_tas` using the SAME live-`mem_rdata` formula
+`memind_addr_wr_data` already uses for LEA/JMP's own address-only completion
+(valid the exact same cycle, unlike `memind_outer_addr_w`, which needs an extra
+cycle for `memind_ptr_r`'s own registered update) -- `memind_addr_only_r` gained
+`|| dec_is_tas` to suppress the ordinary `memind_outer_r` dispatch entirely (TAS's
+own outer phase is neither a plain read nor a plain write). `tas_memind_pending_r`
+then drives `mem_req`/`mem_rw`(read)/`mem_addr`(via `tas_memind_addr_r`) and a new
+`mem_rmw` OR-term, exactly mirroring the ordinary `ex_is_mem_rd`-gated dispatch
+until the real locked read acks, at which point `tas_run_r`'s own pre-existing
+FSM (extended with a `tas_memind_pending_r` OR-term on its own start condition)
+takes over unchanged for the write phase. `memind_addr_wr_en` (LEA/JMP's own
+completion path, also gated on `memind_addr_only_r`) needed a new `!ex_is_tas`
+exclusion to keep out of TAS's way. A new `cmp2_memind_first_ack`-style stall
+term was NOT needed here (unlike CMP2/CHK2's own Phase 244 gap) -- keying the
+hand-off directly off `memind_inner_r && mem_ack` rather than the one-cycle-
+delayed `memind_outer_done_r` closes the transition with zero gap cycles by
+construction.
+
+**Bug found in Phase 243/244's own shared machinery, exposed by TAS's BYTE size
+specifically:** `rd_a_siz` (sizes the `rd_a` register-file read port, carrying
+An -- the EA's base register) was missing `ex_is_memind` from its own "force
+longword" exclusion list, even though `rd_b_siz`'s directly analogous formula
+already includes it. Every PRIOR memind family happened to dodge this by
+coincidence, not by any real protection: `ex_is_mem_rd` is deliberately
+suppressed for ALL memind dispatch (the same convention this file uses
+throughout), so the pre-existing `ex_is_mem_rd`/`ex_is_lea` terms never actually
+covered memind FSM occupancy at all; LEA/JMP/JSR/PEA's own `dec_siz` all happen
+to default to longword (no real "operand size" for a control-transfer/address
+op); Phase 243's own byte/word-sized memind test (`memind33`, DIVU.W) happened to
+use an An value that survives 16-bit sign-extension completely unchanged (upper
+16 bits already zero). TAS's own BYTE `dec_siz` was the first case where this
+actually mattered: `rd_a_data` read A0's sign-extended LOW BYTE (0x00 from
+A0=$2000) instead of the full address, corrupting the inner pointer's own EA by
+exactly A0's upper 24 bits (traced directly: `ex_ea=0x108` instead of `0x2108`,
+missing precisely A0's own $2000 contribution). Fixed by adding `ex_is_memind` to
+`rd_a_siz`'s exclusion list, matching `rd_b_siz`'s own already-correct
+convention. This is a general fix, not TAS-specific -- it also fixes Scc's own
+identical exposure (Scc's `dec_siz` is byte too; the same corrupted-An symptom
+appeared identically in the Scc cosim test before this fix), and protects any
+future byte/word-sized memind family from the same latent gap.
+
+**Two test-infrastructure gaps found and fixed while building the cosim tests**
+(neither an RTL bug -- both were silently blocking any correct bus-trace
+verification of RMW-locked or byte-lane-positioned cycles, apparently never
+exercised via `cosim_grp`/`buscmp.py` before this phase):
+1. `tb/cosim_grp_tb.sv`'s own bus logger bracketed each logged cycle on AS's own
+   rising edge (deassertion). This is equivalent to DS's own edge for every
+   ORDINARY cycle (AS and DS negate together), but an RMW-locked cycle holds AS
+   asserted continuously across its whole read+write pair (MC68030UM.pdf 7.3.3,
+   already correctly implemented and extensively verified pin behavior) --
+   DS is what actually toggles once per sub-phase. The old AS-edge trigger
+   therefore produced only ONE log line for TAS's entire read+write sequence
+   (whichever sub-phase's bus state happened to still be on the pins when AS
+   finally negated -- always the write), silently dropping the read cycle from
+   the trace entirely. Fixed by switching the logger to trigger on DS's own
+   edges instead, which is equally correct for ordinary cycles.
+2. `tools/buscmp.py`'s byte/word comparison didn't account for the DUT's own
+   real, address-aligned big-endian byte-lane positioning on its raw 32-bit pin
+   trace (`biu_byte_lane_ctrl.sv` replicates byte/word writes across all four
+   D[31:0] lanes on real silicon; byte/word READS present the whole containing
+   longword, with the other lanes carrying real neighboring-memory content) --
+   vs. Musashi's own reference log, which always prints a canonical,
+   zero-extended value with a size-matched field width (`%02x`/`%04x`/`%08x`),
+   never a raw pin trace at all. Every prior full (non-`--reads-only`) bus
+   comparison test happened to only ever compare LONGWORD transfers, where this
+   never mattered. Fixed by extracting the real address-aligned lane (not just
+   masking the low bits, since a byte at an odd address or a word at
+   `addr&2!=0` lives in the UPPER lanes) from the DUT's own wide field only,
+   zero-extending it the same way Musashi's own narrow field already is --
+   distinguishing the two log conventions by their own captured field width
+   (Verilog's `%h` on a `[31:0]` signal always pads to 8 hex digits; Musashi's
+   own byte/word fields never are).
+
+New cosim tests: `tests/memind38.s` (TAS.B, pre-indexed, verified via the full
+read+write bus trace at the resolved address -- not just a register/CCR check,
+since TAS's own atomicity claim is specifically about bus behavior) and
+`tests/memind39.s` (Scc.B, post-indexed, `SEQ` with Z=1 forced via a preceding
+`TST.B`). Both match Musashi's own reference trace exactly. Wired into
+`make cosim_memind` as `buscmp-memind38`/`39`, extending the target's own
+dependency list to 26 total.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8, `make dat-synth`
+50/50, `make cosim_memind` 26/26 (24 pre-existing + 2 new), full 124-suite Tom
+Harte sweep via `run_harte_batch.py --backend verilator -j 10 --chunk-size 300`:
+`TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline,
+confirming zero regression despite this phase touching the single highest-risk
+shared bus-protocol logic in the project (the RMW lock) plus two general-purpose
+verification tools used by every other cosim test in the corpus.
+
+**This closes Stage 9c, and Stage 9 (genuine memory-indirect EA beyond
+`MOVE <ea>,dst`) in full** -- 6 families now fully implemented and verified (LEA,
+PEA, JMP, JSR from Stage 9a/9b; general ALU-EA and CMP2/CHK2 from Phases 243/244;
+TAS and Scc this phase). No further genuine-memory-indirect-EA work remains
+documented or deferred anywhere in this project.

@@ -695,14 +695,64 @@ pre-indexed, `memind37.s` CHK2 post-indexed) both match Musashi exactly; wired i
 `make cosim_memind` (24 total). Full mandatory gate clean, Harte sweep bit-identical
 to baseline.
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 24/24,
+**Phase 245 (TAS/Scc genuine memory-indirect EA — IMPLEMENTED AND VERIFIED, closes
+Stage 9c and Stage 9 of the 10-item backlog in full)**: implemented both remaining
+Stage 9c families, which needed almost entirely different treatment. **Bug found
+first, blocking**: Scc-to-memory was modeled as a genuine read-modify-write
+(`dec_is_mem_rd`+`dec_is_mem_rmw`), but direct inspection of Musashi's own
+`m68kops.c` (`m68k_op_scc_8_*`, one handler shared across every CPU type it
+models, `tools/m68ksim.c` configured for `M68K_CPU_TYPE_68030`) showed every
+Scc-to-memory form is a single plain write with no preceding read at all — a
+real, previously-undiscovered bus-behavior bug invisible to Harte's
+register/memory-END-STATE-only checks, found only because this phase's own new
+test was the first to ever full-compare Scc's own bus trace. Fixed to
+`dec_is_mem_wr` (no read phase); this flipped which branch of `ex_an_base`'s own
+established "An on rd_b for plain writes, rd_a for indexed writes" convention
+applies, exposing a second, self-induced `ex_ea=0` bug fixed the same session
+(caught via `tb/alu_mem_tb.sv`'s own pre-existing SEQ-01 unit test before it
+shipped). **Scc's own genuine indirect EA** then mirrors PEA's shape (memind
+outer phase = a WRITE of the decode-time FF/00 value, new `dec_is_scc_mem`
+flag). **TAS's own genuine indirect EA** (the structurally hard case Phase 239
+anticipated): the RMW-LOCKED bus protocol's own dispatch trigger (`mem_rmw`/
+`eu_rmw`) needed to wait for the memind FSM's own inner-pointer read to resolve
+the final target address first — implemented via a clean `tas_memind_pending_r`/
+`tas_memind_addr_r` hand-off (set at `memind_inner_r&&mem_ack`, using the same
+live-`mem_rdata` formula LEA/JMP's own address-only completion already uses),
+driving `mem_rmw`/`mem_req`/`mem_addr` until the real locked read acks, at which
+point TAS's own pre-existing `tas_run_r` FSM takes over unchanged for the write.
+**Found a third real bug, exposed by TAS's BYTE size specifically**: `rd_a_siz`
+was missing `ex_is_memind` from its own "force longword" exclusion list (unlike
+`rd_b_siz`'s directly analogous, already-correct formula) — every prior memind
+family dodged this by coincidence (LEA/JMP/JSR/PEA default to longword;
+Phase 243's own DIVU.W test's An value happened to survive 16-bit truncation
+unchanged), but TAS's byte `dec_siz` corrupted An's own read to its
+sign-extended low byte, breaking EA resolution. Fixed generally (also fixes
+Scc's identical exposure). **Found two test-infrastructure gaps** while
+building the cosim tests (neither an RTL bug): `tb/cosim_grp_tb.sv`'s bus
+logger bracketed cycles on AS's own edge, which only logs ONE line for an
+entire RMW-locked read+write pair (AS stays asserted throughout; DS toggles
+per sub-phase) — fixed by triggering on DS's edges instead; `tools/buscmp.py`
+didn't account for the DUT's own real address-aligned byte-lane positioning
+vs. Musashi's own canonical zero-extended logging convention — fixed with
+lane-aware extraction, distinguishing the two conventions by field width.
+New cosim tests `memind38`/`39` both match Musashi exactly. Full mandatory
+gate clean (`make test` 37/37, `cosim_grp` 8/8, `dat-synth` 50/50,
+`cosim_memind` 26/26), Harte sweep bit-identical to baseline despite touching
+the project's single highest-risk shared bus-protocol logic (the RMW lock).
+
+**This closes Stage 9 (genuine memory-indirect EA beyond `MOVE <ea>,dst`) in
+full** — 6 families now fully implemented and verified (LEA, PEA, JMP, JSR;
+general ALU-EA and CMP2/CHK2; TAS and Scc).
+
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 26/26,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
 backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) and the CAS bus-lock plan
-(`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL. No open plan
-remains in this project — ask the user for new work. (TAS/Scc genuine memory-indirect
-EA remains a documented, deferred candidate if wanted — see `plan.md §Phase 239`.)
+(`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL, and Stage 9's own
+genuine-memory-indirect-EA work (the backlog's last open item) is now ALSO closed in
+full as of Phase 245. No open plan of any kind remains in this project — ask the user
+for new work.
 
 ## Verification Commands
 

@@ -195,6 +195,10 @@
     logic        dec_md_64bit;     // 1=write second register (Dh/Dr distinct from Dl/Dq)
     // PEA, EXG, RTD, CMPM
     logic        dec_is_pea;       // PEA (push EA to stack at A7-=4)
+    // Stage 9c fix (plan.md §Phase 245): Scc-to-memory's own genuine-indirect
+    // case, mirroring dec_is_pea/dec_is_jsr's own "outer memind phase is a
+    // WRITE, not a read" shape -- see this signal's own set-site comment.
+    logic        dec_is_scc_mem;
     logic        dec_is_exg;       // EXG (register exchange)
     logic        dec_exg_dd;       // 1=Dx,Dy (wr2 port); 0=Ax,Ay or Dx,Ay (an_wr)
     logic        dec_is_cmpm;      // CMPM (Ay)+,(Ax)+ — two-phase memory compare
@@ -363,6 +367,7 @@
         dec_is_lea       = 1'b0;
         dec_is_movea_w   = 1'b0;
         dec_is_pea       = 1'b0;
+        dec_is_scc_mem   = 1'b0;
         dec_is_pea_idx   = 1'b0;
         dec_is_link      = 1'b0;
         dec_is_unlk      = 1'b0;
@@ -3517,24 +3522,45 @@
                                 dec_is_idx    = 1'b1;
                                 dec_xn_wl     = ext_data[11];
                                 dec_xn_scale  = ext_data[10:9];
-                                // Full-format, non-indirect (fi_iis==000) reuses
-                                // MOVE's own "FULL, no indirection" template --
-                                // fi_bd instead of the brief 8-bit signed offset,
-                                // no FSM changes needed since the bus access
-                                // shape (single read via ex_is_mem_rd, TAS's own
-                                // tas_run_r doing the write) is unaffected either
-                                // way. Genuine memory-indirect (fi_iis!=000) for
-                                // TAS/NBCD-class RMW ops needs tas_run_r itself
-                                // taught an extra pointer-read phase ahead of its
-                                // existing read+write sequence -- deliberately
-                                // not attempted this pass (plan.md Phase 116);
-                                // fi_bd is used here regardless of fi_iis as the
-                                // least-wrong fallback (matches brief's own
-                                // pre-existing behavior of not distinguishing
-                                // indirection at all).
-                                dec_ea_offset = fi_is_full ? fi_bd
-                                              : {{24{ext_data[7]}}, ext_data[7:0]};
                                 dec_needs_ext = 1'b1;
+                                // Genuine memory-indirect EA (Stage 9c, plan.md
+                                // §Phase 239/245): TAS's own read+write is
+                                // dispatched through the RMW-LOCKED bus protocol
+                                // (mem_rmw/eu_rmw -> biu_cycle_gen.sv's
+                                // ST_RMW_READ_*/ST_RMW_WRITE_* -- AS held
+                                // continuously across both phases), which in the
+                                // ordinary case is triggered directly off
+                                // ex_is_mem_rd. For genuine indirection the real
+                                // RMW target is the FINAL resolved address, not
+                                // the inner pointer's own address -- so
+                                // dec_is_mem_rd is suppressed here (same
+                                // convention every other memind family uses) and
+                                // dec_is_memind drives the shared memind FSM's
+                                // inner-read phase instead. TAS's own execute-side
+                                // FSM (eu_seq_execute.svh) hooks memind_inner_r's
+                                // own completion directly -- bypassing
+                                // memind_outer_r's own ordinary read dispatch
+                                // entirely (the same "address-only" shape LEA/JMP
+                                // already use, via memind_addr_only_r) -- and
+                                // starts the real locked RMW sequence at the
+                                // resolved address once the pointer lands. Same
+                                // fi_bd/fi_od template as LEA's own memind arm
+                                // (no extra leading word to shift around, unlike
+                                // CMP2/CHK2).
+                                if (fi_is_full && fi_iis != 3'b000) begin
+                                    dec_is_mem_rd      = 1'b0;
+                                    dec_is_memind      = 1'b1;
+                                    dec_memind_is_post = fi_iis[2];
+                                    dec_memind_od      = fi_od;
+                                    dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                    dec_ea_offset      = fi_bd;
+                                end else begin
+                                    // Full-format, non-indirect (fi_iis==000) reuses
+                                    // MOVE's own "FULL, no indirection" template --
+                                    // fi_bd instead of the brief 8-bit signed offset.
+                                    dec_ea_offset = fi_is_full ? fi_bd
+                                                  : {{24{ext_data[7]}}, ext_data[7:0]};
+                                end
                             end
                             3'b111: begin  // (xxx).W / (xxx).L
                                 dec_abs_ea_en  = 1'b1;
@@ -3912,6 +3938,32 @@
                             dec_imm            = eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c) ? 32'hFF : 32'h00;
                             dec_is_scc_dn      = 1'b1;
                         // ── Scc to memory ea ───────────────────────
+                        // Stage 9c fix (plan.md §Phase 245): Musashi's own
+                        // m68kops.c (m68k_op_scc_8_*, shared by EVERY CPU
+                        // type it models including M68K_CPU_TYPE_68030,
+                        // confirmed via direct source inspection) implements
+                        // every Scc-to-memory form as a single m68ki_write_8
+                        // with NO preceding read at all -- also consistent
+                        // with the real MC68030UM.pdf timing table showing
+                        // 68020+/68030 Scc-to-memory taking fewer cycles than
+                        // 68000/68010's own entry for the same addressing
+                        // mode. This RTL previously modeled Scc as a genuine
+                        // read-modify-write (dec_is_mem_rd+dec_is_mem_rmw),
+                        // an undiscovered bug (invisible to Harte's
+                        // register/memory-END-STATE-only checks, since a
+                        // discarded read has no observable effect on final
+                        // memory content in Musashi's own model -- but very
+                        // much observable on real silicon, e.g. reading a
+                        // memory-mapped I/O register before an unrelated
+                        // write, the same general bug class as 68000 CLR's
+                        // own well-documented spurious-read quirk) -- found
+                        // via a genuine cosim/buscmp mismatch while building
+                        // this stage's own indirect-EA test. Fixed to a
+                        // plain dec_is_mem_wr (no read phase at all); the
+                        // already-existing generic (ex_is_mem_wr && ex_use_imm)
+                        // write-value path picks up dec_imm's FF/00 value
+                        // automatically, so the ordinary (non-indirect) EA
+                        // cases below need no further change.
                         end else if (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                      f_mode == 3'b101 || f_mode == 3'b110 ||
                                      (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001))) begin
@@ -3921,10 +3973,27 @@
                             dec_x_unchanged = 1'b1;
                             dec_use_imm     = 1'b1;
                             dec_imm         = eval_cc(f_cond, flag_n, flag_z, flag_v, flag_c) ? 32'hFF : 32'h00;
-                            dec_is_mem_rd   = 1'b1;
-                            dec_is_mem_rmw  = 1'b1;
-                            dec_src_reg     = {1'b1, f_reg};
-                            dec_reads_src   = 1'b1;
+                            dec_is_mem_wr   = 1'b1;
+                            dec_is_scc_mem  = 1'b1;
+                            // An (destination EA base) -> rd_b by default,
+                            // matching ex_an_base's own established
+                            // "plain write: An on rd_b" convention (every
+                            // other dec_is_mem_wr family, e.g. MOVE/CLR
+                            // non-indexed, already follows this) -- the
+                            // mode=110 indexed case below overrides this
+                            // back to rd_a (Xn takes rd_b instead), matching
+                            // that same convention's own documented indexed-
+                            // write exception. Scc's own PRE-existing code
+                            // put An on rd_a unconditionally here, which
+                            // silently relied on ex_an_base's OTHER branch
+                            // (used for reads, unconditionally rd_a) --
+                            // switching Scc from dec_is_mem_rd to
+                            // dec_is_mem_wr just above flips which branch
+                            // applies, so this needed to flip too (a real,
+                            // self-introduced bug caught via a direct
+                            // ex_ea=0 trace before it shipped).
+                            dec_dst_reg     = {1'b1, f_reg};
+                            dec_reads_dst   = 1'b1;
                             case (f_mode)
                                 3'b011: begin
                                     dec_an_upd_en  = 1'b1;
@@ -3943,14 +4012,48 @@
                                 end
                                 3'b110: begin  // (d8,An,Xn)/(bd,An,Xn): 1+ ext word
                                     dec_needs_ext  = 1'b1;
+                                    // Indexed write: An -> rd_a, Xn -> rd_b
+                                    // (overrides this arm's own outer default
+                                    // of An -> rd_b, per ex_an_base's own
+                                    // documented indexed-write exception).
+                                    dec_src_reg    = {1'b1, f_reg};
+                                    dec_reads_src  = 1'b1;
                                     dec_dst_reg    = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
                                     dec_reads_dst  = 1'b1;
                                     dec_is_idx     = 1'b1;
                                     dec_xn_wl      = ext_data[11];
                                     dec_xn_scale   = ext_data[10:9];
-                                    // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
-                                    dec_ea_offset  = fi_is_full ? fi_bd
-                                                   : {{24{ext_data[7]}}, ext_data[7:0]};
+                                    // Genuine memory-indirect EA (Stage 9c, plan.md
+                                    // §Phase 245): Scc-to-memory is a plain WRITE
+                                    // (see this arm's own outer comment above), so
+                                    // its memind case mirrors PEA's shape -- the
+                                    // shared memind FSM's own outer phase becomes a
+                                    // WRITE (memind_is_rd_r=0 via dec_is_scc_mem),
+                                    // writing dec_imm's own decode-time-computed
+                                    // FF/00 value at the resolved address, not a
+                                    // discarded read. dec_is_mem_wr suppressed here
+                                    // (dec_is_memind drives the dispatch instead);
+                                    // the outer-write value itself is wired in
+                                    // eu_seq_execute.svh's mem_wdata mux.
+                                    if (fi_is_full && fi_iis != 3'b000) begin
+                                        dec_is_mem_wr      = 1'b0;
+                                        dec_is_memind      = 1'b1;
+                                        dec_memind_is_post = fi_iis[2];
+                                        dec_memind_od      = fi_od;
+                                        dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                        // dec_memind_rd_siz also sizes the outer
+                                        // WRITE phase (its own name is a slight
+                                        // misnomer -- PEA/JSR never needed to
+                                        // override it since their own longword
+                                        // pushes match the field's default; Scc's
+                                        // own byte-sized write does not).
+                                        dec_memind_rd_siz  = dec_siz;
+                                        dec_ea_offset      = fi_bd;
+                                    end else begin
+                                        // Stage 3 (plan.md Phase 118): fi_is_full/fi_bd.
+                                        dec_ea_offset  = fi_is_full ? fi_bd
+                                                       : {{24{ext_data[7]}}, ext_data[7:0]};
+                                    end
                                 end
                                 3'b111: begin
                                     dec_needs_ext  = 1'b1;

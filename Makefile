@@ -684,12 +684,39 @@ buscmp-memind37: $(SIM)/cosim_grp winuae/tests/memind37_ref.log tests/memind37.h
 	    | grep "^BUS" > /tmp/_dut_memind37.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind37.log winuae/tests/memind37_ref.log \
 	    --dut-may-continue
+# memind38-39 (TAS/Scc genuine indirect stage, plan.md §Phase 245): TAS.B
+# pre-indexed (RMW-locked bus protocol's own dispatch trigger restructured to
+# wait for the memind FSM's inner-read completion) and Scc.B post-indexed
+# (found and fixed a genuine, previously-undiscovered bug along the way:
+# Scc-to-memory was modeled as a real read-modify-write, but real 68020+/
+# 68030 Scc-to-memory is a plain write with no discarded read at all, per
+# direct inspection of Musashi's own m68kops.c). Also found and fixed two
+# genuine test-infrastructure gaps while building these: cosim_grp_tb.sv's
+# own bus logger bracketed cycles on AS's edges, which only produces ONE log
+# line for an entire RMW-locked read+write pair (AS stays asserted
+# throughout; DS is what actually toggles per sub-phase) -- switched to
+# DS-edge triggering. tools/buscmp.py's own byte/word comparison didn't
+# account for the DUT's own real, address-aligned big-endian byte-lane
+# positioning (vs. Musashi's own canonical zero-extended-low-value logging
+# convention) -- fixed with lane-aware extraction, distinguishing the two
+# log conventions by their own field width (Verilog %h's fixed 8 hex digits
+# vs. Musashi's own size-matched %02x/%04x/%08x).
+buscmp-memind38: $(SIM)/cosim_grp winuae/tests/memind38_ref.log tests/memind38.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind38.hex +grp=memind38 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind38.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind38.log winuae/tests/memind38_ref.log \
+	    --dut-may-continue
+buscmp-memind39: $(SIM)/cosim_grp winuae/tests/memind39_ref.log tests/memind39.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind39.hex +grp=memind39 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind39.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind39.log winuae/tests/memind39_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
               buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
-              buscmp-memind36 buscmp-memind37 \
+              buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 \
               buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
