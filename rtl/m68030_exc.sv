@@ -56,6 +56,7 @@ module m68030_exc (
     input  logic        fmt_err_req,
     input  logic        div_zero_req,
     input  logic        chk_req,
+    input  logic        mmu_config_req, // PMOVE TC/CRP/SRP config error (vector 56)
     input  logic        trapv_req,
     input  logic        trap_req,
     input  logic [3:0]  trap_num,       // TRAP #0–#15
@@ -129,6 +130,7 @@ module m68030_exc (
     localparam [7:0] VEC_LINE_A   = 8'd10;
     localparam [7:0] VEC_LINE_F   = 8'd11;
     localparam [7:0] VEC_FMT_ERR  = 8'd14;
+    localparam [7:0] VEC_MMU_CONFIG = 8'd56;
     localparam [7:0] VEC_SPURIOUS = 8'd24;  // Spurious Interrupt (IACK BERR/timeout)
     localparam [7:0] VEC_TRAP0    = 8'd32;  // TRAP #0 (TRAP #n = 32+n)
 
@@ -197,9 +199,16 @@ module m68030_exc (
         end else if (fmt_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_FMT_ERR;   pend_fmt = FMT_SHORT;
         end else if (div_zero_req) begin
-            exc_pending = 1'b1; pend_vec = VEC_DIV_ZERO;  pend_fmt = FMT_SHORT;
+            // MC68030UM.pdf Table 8-6: Zero Divide shares the SIX WORD
+            // STACK FRAME - FORMAT $2 with CHK/CHK2/TRAPcc/TRAPV/Trace/MMU
+            // Configuration (docs/*.md review fix -- this previously used
+            // FMT_SHORT, a real compliance bug: real silicon always pushes
+            // the extra instruction-address word for this exception).
+            exc_pending = 1'b1; pend_vec = VEC_DIV_ZERO;  pend_fmt = FMT_INST;
         end else if (chk_req) begin
             exc_pending = 1'b1; pend_vec = VEC_CHK;       pend_fmt = FMT_INST;
+        end else if (mmu_config_req) begin
+            exc_pending = 1'b1; pend_vec = VEC_MMU_CONFIG; pend_fmt = FMT_INST;
         end else if (trapv_req) begin
             exc_pending = 1'b1; pend_vec = VEC_TRAPV;     pend_fmt = FMT_INST;
         end else if (trap_req) begin

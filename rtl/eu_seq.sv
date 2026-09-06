@@ -124,6 +124,7 @@ module eu_seq (
     output logic        seq_busy,     // pipeline stall
     output logic        div_trap,     // divide-by-zero trap
     output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
+    output logic        mmu_config_trap, // PMOVE TC/CRP/SRP config error (vector 56)
     output logic        eu_need_ext,  // 10-item backlog Stage 5 (plan.md): mirrors
                                        // need_ext (eu_seq_execute.svh) -- decode
                                        // wants an extension word for the CURRENT

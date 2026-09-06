@@ -930,19 +930,33 @@ module stall_fsm_tb;
         rom[16'h171C/4] = {PTEST_EXT, CLR_L_D5};
         rom[16'h1720/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h1724/4] = {16'd912, NOP_OP};
-        rom[16'h3800/4] = 32'h8000_0000;  // TC: E=1, PS/IS/TIA/TIB/TIC=0
+        // docs/*.md review fix: E=1 with PS/IS/TIx all 0 sums to 0, not 32
+        // (and PS=0 is separately reserved) -- a genuine MMU Configuration
+        // Exception per real hardware, which would clear E right back to 0
+        // and defeat this test's whole point. TC=0x8C077600: PS=12(4K),
+        // IS=0, TIA=7,TIB=7,TIC=6,TID=0 (stops at TID) -- sum=7+7+6=20,
+        // +PS(12)+IS(0)=32, a genuinely valid (if arbitrary) config. The
+        // actual field values are irrelevant to this test either way (TT0's
+        // own transparent bypass below means no real walk ever happens).
+        rom[16'h3800/4] = 32'h8C07_7600;  // TC: E=1, PS=12,TIA=7,TIB=7,TIC=6 (sum=32)
         rom[16'h3804/4] = 32'h00FF_80E0;  // TT0: LAB=0,LAM=0xFF(any VA),E=1,FCM=any
 
         // -----------------------------------------------------------------
         // B-21: PMOVE (A0),CRP — 64-bit load, 2 bus cycles (hi word first).
         // Same opcode word as PTEST (0xF010); the sub-operation is entirely
         // carried in the extension word's mmu_op_type field.
+        // docs/*.md review fix: CRP's DT field (lo word 0x3604, bits[1:0])
+        // must be nonzero or this now takes a genuine MMU Configuration
+        // Exception (vector 56) instead of completing normally. Hi word
+        // (0x3600) is untouched -- shared with INT-mid-TAS's own byte
+        // target further down, and DT lives in the LOW word only.
         // -----------------------------------------------------------------
         rom[16'h1800/4] = {MOVEA_L_IMM_A0, 16'h0000};
         rom[16'h1804/4] = {16'h3600, PMOVE_A0_OP};
         rom[16'h1808/4] = {PMOVE_CRP_EXT, CLR_L_D5};
         rom[16'h180C/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h1810/4] = {16'd913, NOP_OP};
+        rom[16'h3604/4] = 32'h0000_0002;  // CRP lo: DT=10 (table), base=0 (never walked)
 
         // ----- run to completion, checking each case in turn -----
         // Category B precision: exact data-bus-cycle counts (task #33 in
@@ -3176,6 +3190,7 @@ module stall_fsm_tb;
         rom[16'h2974/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h2978/4] = {16'd9010, JMP_ABS_L_OP};
         rom[16'h297C/4] = {16'h0000, 16'h3308};
+        rom[16'h29B4/4] = 32'h0000_0002;  // CRP lo: DT=10 (docs/*.md review fix, see B-21)
 
         // Stage 5 (elegant-gliding-fog.md): WS-ADDX/WS-ABCD/WS-PACK --
         // DSACK wait-states composing with 3 more FSM beats, all sharing
@@ -3511,10 +3526,15 @@ module stall_fsm_tb;
         rom[16'h3EE4/4] = 32'hCCCC_DDDD;
         rom[16'h3EE8/4] = 32'hEEEE_FFFF;
         rom[16'h3EEC/4] = 32'h1234_5678;
+        // docs/*.md review fix: CRP's DT field (lo word bits[1:0]) must be
+        // nonzero or a real MMU Configuration Exception fires (vector 56),
+        // corrupting these timing tests' own dependent-instruction flow.
+        // DT=10 (table) with a base of 0 is fine -- this CRP is never
+        // actually walked, per this block's own comment above.
         rom[16'h3F20/4] = 32'h0000_0000;
-        rom[16'h3F24/4] = 32'h0000_0000;
+        rom[16'h3F24/4] = 32'h0000_0002;
         rom[16'h3F30/4] = 32'h0000_0000;
-        rom[16'h3F34/4] = 32'h0000_0000;
+        rom[16'h3F34/4] = 32'h0000_0002;
 
         run_int_mid_test("INT-mid-CHK2", 32'h0000_2850, 2, 5, 32'd9005, 32'h0000_008A);
 

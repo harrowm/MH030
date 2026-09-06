@@ -479,7 +479,13 @@ module mmu_xlate_tb;
         // of the FOLLOWING line (0x0730-0x073F) -- its own 6-byte span
         // (0x072C-0x0731) genuinely straddles that boundary.
         // -------------------------------------------------------------
-        rom[16'h3B00/4] = 32'h8000_0000;  // TC: E=1
+        // docs/*.md review fix: E=1 with PS/IS/TIx all 0 sums to 0, not 32
+        // (and PS=0 is separately reserved) -- a genuine MMU Configuration
+        // Exception per real hardware, clearing E right back to 0 and
+        // defeating this test's own "PTEST resolves via TT0 bypass" setup.
+        // Same valid-but-arbitrary config as stall_fsm_tb.sv's B-20 fix:
+        // PS=12,TIA=7,TIB=7,TIC=6 sums to 32.
+        rom[16'h3B00/4] = 32'h8C07_7600;  // TC: E=1, PS=12,TIA=7,TIB=7,TIC=6 (sum=32)
         rom[16'h3B04/4] = 32'h00FF_80E0;  // TT0: LAM=0xFF (any VA), E=1, FCM=any
 
         rom[16'h070C/4] = {MOVEA_L_IMM_A0, 16'h0000};

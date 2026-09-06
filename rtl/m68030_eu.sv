@@ -159,6 +159,7 @@ module m68030_eu (
     // ── Exception signals ─────────────────────────────────────────────────
     output logic        div_trap,     // divide-by-zero (m68030_exc handles)
     output logic        chk_trap,     // CHK/CHK2 out-of-bounds trap
+    output logic        mmu_config_trap, // PMOVE TC/CRP/SRP config error (vector 56)
     output logic        eu_need_ext,  // 10-item backlog Stage 5 (plan.md): see
                                        // eu_seq.sv's own port comment
     // OS exception/control instructions
@@ -347,6 +348,7 @@ module m68030_eu (
         .seq_busy     (eu_busy),
         .div_trap     (div_trap),
         .chk_trap     (chk_trap),
+        .mmu_config_trap (mmu_config_trap),
         .eu_need_ext  (eu_need_ext),
         .decode_pc    (decode_pc),
         .ex_decode_pc_out (ex_decode_pc),

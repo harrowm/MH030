@@ -3310,6 +3310,30 @@
         end
     end
 
+    // MMU Configuration Exception validation for TC (MC68030UM.pdf
+    // §9.7.5.3): when E is set, the TIx fields are summed until the first
+    // zero field, then PS and IS are added; the total must be 32. PS values
+    // $0-$7 are reserved and always invalid. E=0 skips the check entirely
+    // (translation disabled, no consistency requirement). Declared here
+    // (ahead of the always_ff block below that reads tc_cfg_bad) to avoid
+    // the same Icarus forward-reference-in-always_ff limitation chk_trap_
+    // raw/chk_trap_fired_r's own comment already documents elsewhere.
+    wire [3:0] tc_new_ps  = mem_rdata[27:24];
+    wire [3:0] tc_new_is  = mem_rdata[23:20];
+    wire [3:0] tc_new_tia = mem_rdata[19:16];
+    wire [3:0] tc_new_tib = mem_rdata[15:12];
+    wire [3:0] tc_new_tic = mem_rdata[11:8];
+    wire [3:0] tc_new_tid = mem_rdata[7:4];
+    wire [5:0] tc_ti_sum  =
+        (tc_new_tia == 4'h0) ? 6'd0 :
+        (tc_new_tib == 4'h0) ? {2'b0, tc_new_tia} :
+        (tc_new_tic == 4'h0) ? ({2'b0, tc_new_tia} + {2'b0, tc_new_tib}) :
+        (tc_new_tid == 4'h0) ? ({2'b0, tc_new_tia} + {2'b0, tc_new_tib} + {2'b0, tc_new_tic}) :
+                               ({2'b0, tc_new_tia} + {2'b0, tc_new_tib} + {2'b0, tc_new_tic} + {2'b0, tc_new_tid});
+    wire [6:0] tc_total   = {1'b0, tc_ti_sum} + {3'b0, tc_new_ps} + {3'b0, tc_new_is};
+    wire       tc_ps_bad  = !tc_new_ps[3];   // $0-$7 reserved, $8-$F valid
+    wire       tc_cfg_bad = mem_rdata[31] && (tc_ps_bad || (tc_total != 7'd32));
+
     // -----------------------------------------------------------------------
     // PFLUSH / PTEST FSM
     // PFLUSH: start_r captures VA; req_r asserts eu_pflush_req until ack.
@@ -3378,9 +3402,12 @@
             end
 
             // ── PMOVE register capture (EA→MMU register direction) ───────────
+            // MMU Configuration Exception (docs/*.md review, MC68030UM.pdf
+            // §9.7.5.3): a PMOVE loading TC with E set and a bad TIx/PS/IS
+            // sum or reserved PS still updates TC, but with E forced clear.
             if (ex_valid && ex_is_pmove && !ex_pmove_to_mem && mem_ack) begin
                 case (ex_pmove_preg)
-                    3'b010: tc_r  <= mem_rdata;
+                    3'b010: tc_r  <= tc_cfg_bad ? {1'b0, mem_rdata[30:0]} : mem_rdata;
                     3'b001: tt0_r <= mem_rdata;
                     3'b011: tt1_r <= mem_rdata;
                     default: ;
@@ -3872,6 +3899,40 @@
     assign pmove64_wr_data_w =
         (!pmove64_run_r) ? (ex_pmove_preg == 3'b100 ? crp_hi_r : srp_hi_r)
                          : (pmove64_is_crp_r         ? crp_lo_r : srp_lo_r);
+
+    // MMU Configuration Exception trap pulse (vector 56, MC68030UM.pdf
+    // §8.1.10/§9.7.5.3): fires once per offending PMOVE, mirroring chk_trap/
+    // div_trap's own one-shot raw+fired_r shape (the one-shot gate matters
+    // less here since mem_ack itself only ever pulses one cycle, but keeps
+    // the same defensive shape as every other trap source).
+    // TC case fires the same cycle its own register-capture write lands
+    // (ex_valid genuinely holds through this single-cycle-per-phase path).
+    // CRP/SRP case: DT lives in the descriptor's LOW longword (bits 33:32
+    // of the 64-bit value == bits[1:0] of crp_lo_r/srp_lo_r, Figure 9-9 --
+    // biu_mmu_if.sv's own crp_base derivation from active_root[31:4]
+    // confirms the address/DT half is the low word, not the hi word this
+    // first carried), checked directly off mem_rdata at phase 1 ack.
+    // Deliberately does NOT gate on ex_valid: traced directly (special_
+    // instr_tb.sv MMU-09's own investigation) that ex_valid genuinely
+    // drops to 0 for the whole pmove64_run_r=1 phase -- the FSM's own
+    // dedicated registers (pmove64_run_r/pmove64_skip_r/pmove64_to_mem_r)
+    // already uniquely identify a live, in-flight CRP/SRP load without
+    // it, unlike every other trap source in this file.
+    wire mmu_config_trap_tc_raw =
+        ex_valid && ex_is_pmove && !ex_pmove_to_mem && mem_ack &&
+        (ex_pmove_preg == 3'b010) && tc_cfg_bad;
+    wire mmu_config_trap_crpsrp_raw =
+        pmove64_run_r && !pmove64_skip_r && mem_ack &&
+        !pmove64_to_mem_r && (mem_rdata[1:0] == 2'b00);
+    wire mmu_config_trap_raw = mmu_config_trap_tc_raw || mmu_config_trap_crpsrp_raw;
+
+    logic mmu_config_trap_fired_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                       mmu_config_trap_fired_r <= 1'b0;
+        else if (!ex_valid)               mmu_config_trap_fired_r <= 1'b0;
+        else if (mmu_config_trap_raw)     mmu_config_trap_fired_r <= 1'b1;
+    end
+    assign mmu_config_trap = mmu_config_trap_raw && !mmu_config_trap_fired_r;
 
     // -----------------------------------------------------------------------
     // general memory RMW FSM

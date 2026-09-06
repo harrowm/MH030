@@ -907,8 +907,30 @@ the two new ports, X-propagating into an unrelated `MOVEC An,ISP` test —
 fixed with a tie-off matching the file's own existing `vbr_wr_en`
 convention. New `tb/exc_tb.sv` coverage (EXC-14 non-interrupt M-preservation,
 EXC-15 full M=1 interrupt with both real and throwaway frames). Full
-mandatory gate clean, Harte bit-identical to baseline. Items #3-10 still to
-come.
+mandatory gate clean, Harte bit-identical to baseline.
+
+**Item #3 (IMPLEMENTED AND VERIFIED)**: MMU Configuration Exception
+(vector 56) was entirely missing — PMOVE writes to TC/CRP/SRP landed
+unconditionally with zero validation. Added the manual's own consistency
+checks (TC: TIx/PS/IS sum must equal 32 when E=1, PS reserved values
+$0-$7 rejected, E forced clear on violation; CRP/SRP: DT=0 always
+invalid, register still loaded regardless) via a new `mmu_config_trap`
+signal threaded `eu_seq.sv`→`m68030_eu.sv`→`m68030_top.sv`→a new
+`mmu_config_req` input on `m68030_exc.sv`, dispatched Format $2/vector 56.
+Found and fixed two adjacent real bugs while implementing this: Zero
+Divide was using Format $0 instead of the Format $2 six-word frame Table
+8-6 specifies (invisible to Harte, whose 68000 corpus has no format
+words at all); and `fault_addr`'s top-level mux fed every non-bus-error
+Format $2 exception (CHK/TRAPV/div_zero, and now MMU Config) the same
+stale bus-fault-capture register instead of the excepting instruction's
+own PC — a latent, previously-untested gap across every Format $2 user,
+fixed by muxing on `bus_err_req_w || ifu_addr_err_int` specifically.
+Also found and fixed a testbench-only issue: several pre-existing ROM
+values in `stall_fsm_tb.sv`/`mmu_xlate_tb.sv` PMOVE-loaded TC/CRP with
+degenerate all-zero placeholder data that now genuinely violates the new
+check — updated to valid (if arbitrary) configs. New coverage in
+`tb/special_instr_tb.sv` (MMU-08/09/10). Full mandatory gate clean,
+Harte bit-identical to baseline. Items #4-10 still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

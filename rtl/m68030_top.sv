@@ -172,6 +172,7 @@ module m68030_top #(
     logic [2:0]  eu_ipl_mask;
     logic        eu_div_trap;
     logic        eu_chk_trap;
+    logic        eu_mmu_config_trap;
     logic        eu_need_ext_w;  // 10-item backlog Stage 5 (plan.md)
     logic        eu_trap_req_w;
     logic [3:0]  eu_trap_num_w;
@@ -547,6 +548,7 @@ module m68030_top #(
         .exc_active    (exc_active),
         .div_trap      (eu_div_trap),
         .chk_trap      (eu_chk_trap),
+        .mmu_config_trap (eu_mmu_config_trap),
         .eu_need_ext   (eu_need_ext_w),
         .eu_trap_req   (eu_trap_req_w),
         .eu_trap_num   (eu_trap_num_w),
@@ -586,6 +588,7 @@ module m68030_top #(
         .fmt_err_req  (eu_fmt_err_req_w),
         .div_zero_req (eu_div_trap),
         .chk_req      (eu_chk_trap),
+        .mmu_config_req (eu_mmu_config_trap),
         .trapv_req    (eu_trapv_req_w),
         .trap_req     (eu_trap_req_w),
         .trap_num     (eu_trap_num_w),
@@ -610,7 +613,21 @@ module m68030_top #(
         // that just retired), making RTE silently re-execute it.
         .fault_pc     (bus_err_req_w ? eu_ex_decode_pc : ifu_decode_pc),
         .fault_sr     (eu_sr_out),
-        .fault_addr   (ifu_bus_err ? ifu_bus_err_addr : fault_addr_biu),
+        // docs/*.md review: fault_addr also feeds FMT_INST's ($2) own
+        // "instruction address" field (CHK/CHK2/TRAPcc/TRAPV/Trace/Zero
+        // Divide/MMU Configuration) -- the address of the instruction that
+        // caused the exception, NOT a bus fault address. Previously this
+        // always used the bus-fault-capture path even for these non-bus-
+        // fault sources, silently showing stale/leftover data (never
+        // caught: no existing test checks this field's actual content).
+        // Only bus_err_req_w/ifu_addr_err_int genuinely need a real bus
+        // fault address; everything else needs the excepting instruction's
+        // own PC, which is exactly eu_ex_decode_pc (already proven stable
+        // through the whole push sequence by fault_pc's own identical use
+        // of it for bus_err_req_w, above).
+        .fault_addr   ((bus_err_req_w || ifu_addr_err_int)
+                            ? (ifu_bus_err ? ifu_bus_err_addr : fault_addr_biu)
+                            : eu_ex_decode_pc),
         .fault_ssw    (exc_ssw),
         .bus_err_fmt  (exc_frame_format),   // format code from biu_exc_capture
         .fault_data   (fault_data_biu),     // DOB from biu at fault time

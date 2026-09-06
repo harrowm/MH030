@@ -38,6 +38,7 @@ module exc_tb;
     logic        trace_req    = 0, linea_req      = 0;
     logic        linef_req    = 0, fmt_err_req    = 0;
     logic        div_zero_req = 0, chk_req        = 0;
+    logic        mmu_config_req = 0;
     logic        trapv_req    = 0, trap_req        = 0;
     logic [3:0]  trap_num     = 0;
     logic [31:0] fault_pc     = 0;
@@ -169,7 +170,7 @@ module exc_tb;
             ipl_sync=0; ipl_mask=0;
             illegal_req=0; priv_req=0; trace_req=0;
             linea_req=0; linef_req=0; fmt_err_req=0;
-            div_zero_req=0; chk_req=0; trapv_req=0;
+            div_zero_req=0; chk_req=0; mmu_config_req=0; trapv_req=0;
             trap_req=0; trap_num=0;
             fault_pc=0; fault_sr=0; fault_addr=0; fault_ssw=0;
             bus_err_fmt=4'hA; fault_data=0;
@@ -349,7 +350,11 @@ module exc_tb;
         chk16("EXC-5 new_sr",      last_new_sr, 16'h2300);  // IPL updated to 3
 
         // ================================================================
-        // EXC-6: Divide-by-zero, VBR=0x10000, vec=5
+        // EXC-6: Divide-by-zero, VBR=0x10000, vec=5 → format $2 (docs/*.md
+        // review fix: real silicon shares Zero Divide's frame with CHK/
+        // TRAPV per MC68030UM.pdf Table 8-6 -- this used to wrongly use
+        // format $0/FMT_SHORT; now 3 LW writes + 1 read = 4 trans, same
+        // shape as EXC-4's own CHK test).
         //   fetch_addr = 0x10000 + 5*4 = 0x10014
         //   fault_sr=0x2014 → T=0, S=1, IPL=0, CCR=0x14 → new_sr=0x2014
         // ================================================================
@@ -359,15 +364,26 @@ module exc_tb;
         vbr_in    = 32'h0001_0000;
         fault_pc  = 32'h0001_0100;
         fault_sr  = 16'h2014;  // S=1, IPL=0, X=1 Z=1
+        fault_addr = 32'h0001_00F0;  // address of the DIVU/DIVS instruction itself
         exc_rdata = 32'hFFFF_0000;
         div_zero_req = 1;
         @(posedge clk_4x); #1;
         div_zero_req = 0;
         wait_idle;
 
-        chk32("EXC-6 fetch_addr",  t_addr[2],  32'h0001_0014);
+        chk32("EXC-6 push0_addr", t_addr[0],  32'h0000_5FFC);
+        chk32("EXC-6 push0_data", t_wdata[0], 32'h0001_00F0);  // fault_addr (step_rem=2)
+        chk32("EXC-6 push1_addr", t_addr[1],  32'h0000_5FF8);
+        chk32("EXC-6 push1_data", t_wdata[1], 32'h0001_0100);  // snap_pc_r  (step_rem=1)
+        chk32("EXC-6 push2_addr", t_addr[2],  32'h0000_5FF4);
+        chk32("EXC-6 push2_data", t_wdata[2], 32'h2014_2014);  // {fmtvec,SR} (step_rem=0)
+        chk32("EXC-6 fetch_addr",  t_addr[3],  32'h0001_0014);
         chk32("EXC-6 new_pc",      last_new_pc, 32'hFFFF_0000);
         chk16("EXC-6 new_sr",      last_new_sr, 16'h2014);  // T already 0, S=1
+        if (trans_cnt !== 5'd4) begin
+            $display("FAIL EXC-6 trans_cnt=%0d (exp 4)", trans_cnt);
+            fail = fail + 1;
+        end
 
         // ================================================================
         // EXC-7: Privilege violation, vec=8

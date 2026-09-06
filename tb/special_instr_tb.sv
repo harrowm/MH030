@@ -78,7 +78,7 @@ module special_instr_tb;
     logic [2:0]  an_wr_sel;
     logic [31:0] an_wr_data;
 
-    logic        div_trap, chk_trap;
+    logic        div_trap, chk_trap, mmu_config_trap;
     logic        eu_trap_req;
     logic [3:0]  eu_trap_num;
     logic        eu_trapv_req, eu_illegal_req;
@@ -160,6 +160,7 @@ module special_instr_tb;
         .an_wr_data      (an_wr_data),
         .div_trap        (div_trap),
         .chk_trap        (chk_trap),
+        .mmu_config_trap (mmu_config_trap),
         .eu_trap_req     (eu_trap_req),
         .eu_trap_num     (eu_trap_num),
         .eu_trapv_req    (eu_trapv_req),
@@ -176,10 +177,23 @@ module special_instr_tb;
         .exc_sr_wr_data  (exc_sr_wr_data)
     );
 
-    // Immediate ack; reads return DEAD_BEEF (PMOVE and MOVE16 only care
-    // that mem_ack fires, not about specific data values).
+    // Immediate ack; reads return DEAD_BEEF by default (PMOVE and MOVE16
+    // mostly only care that mem_ack fires, not about specific data
+    // values) -- MMU-08+ (docs/*.md review: MMU Configuration Exception
+    // validation) override this per-test via rdata_override to drive
+    // specific TC/CRP/SRP field patterns.
+    logic        rdata_override_en = 1'b0;
+    logic [31:0] rdata_override    = 32'h0;
     assign mem_ack   = mem_req;
-    assign mem_rdata = (mem_req && mem_rw) ? 32'hDEAD_BEEF : 32'h0;
+    assign mem_rdata = (mem_req && mem_rw)
+                           ? (rdata_override_en ? rdata_override : 32'hDEAD_BEEF)
+                           : 32'h0;
+
+    int mmu_config_trap_cnt = 0;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                  mmu_config_trap_cnt <= 0;
+        else if (mmu_config_trap)    mmu_config_trap_cnt <= mmu_config_trap_cnt + 1;
+    end
 
     int pass_count = 0, fail_count = 0;
 
@@ -407,14 +421,17 @@ module special_instr_tb;
 
         // MMU-04: PMOVE (A0),TC — memory read → tc_out
         // F010 4400: ext[15:13]=010 PMOVE, ext[11:9]=010 TC, ext[8]=0 EA→reg
-        // mem_rdata=DEAD_BEEF via immediate-ack model
+        // mem_rdata=DEAD_BEEF via immediate-ack model. docs/*.md review fix:
+        // 0xDEAD_BEEF has E=1 (bit31) with a TIx/PS/IS sum of 76 (not 32) —
+        // a genuine MMU Configuration Exception per real hardware, so TC
+        // is stored with E forced clear (0x5EAD_BEEF), not verbatim.
         $display("--- MMU-04: PMOVE (A0),TC ---");
         instr_word  = 16'hF010; instr_valid = 1'b1;
         ext_data    = 32'h0000_4400; ext_valid = 1'b1;
         repeat(100) begin @(posedge clk); if (instr_ack) break; end
         instr_valid = 1'b0; ext_valid = 1'b0;
         repeat(10) @(posedge clk);
-        chk32("MMU-04a: tc_out=mem_rdata", tc_out, 32'hDEAD_BEEF);
+        chk32("MMU-04a: tc_out=mem_rdata (E cleared, bad config)", tc_out, 32'h5EAD_BEEF);
 
         // MMU-05: PMOVE TC,(A0) — tc_out → memory write
         // F010 4500: ext[8]=1 reg→EA (write)
@@ -428,7 +445,7 @@ module special_instr_tb;
             @(posedge clk);
             if (mem_req && !mem_rw && mem_ack) begin cap_wdata = mem_wdata; break; end
         end
-        chk32("MMU-05a: mem_wdata=TC",   cap_wdata, 32'hDEAD_BEEF);
+        chk32("MMU-05a: mem_wdata=TC",   cap_wdata, 32'h5EAD_BEEF);  // TC holds the E-cleared value stored by MMU-04
         chk  ("MMU-05b: mem_rw=0 write", mem_rw === 1'b0);
         repeat(4) @(posedge clk);
 
@@ -443,7 +460,74 @@ module special_instr_tb;
         chk32("MMU-06a: tt0_out=mem_rdata", tt0_out, 32'hDEAD_BEEF);
 
         // MMU-07: TC still holds its value after other instructions
-        chk32("MMU-07: tc_out persistent", tc_out, 32'hDEAD_BEEF);
+        chk32("MMU-07: tc_out persistent", tc_out, 32'h5EAD_BEEF);
+
+        // MMU-04c: the bad DEAD_BEEF config above should have fired the
+        // MMU Configuration Exception trap exactly once (docs/*.md review:
+        // TC/CRP/SRP validation, MC68030UM.pdf §9.7.5.3).
+        chk("MMU-04c: config exception fired for MMU-04's bad TC", mmu_config_trap_cnt == 1);
+
+        // MMU-08: PMOVE (A0),TC with a VALID config -- no exception,
+        // verbatim store. PS=12,TIA=7,TIB=7,TIC=6 sums to 32.
+        $display("--- MMU-08: PMOVE (A0),TC (valid config, no trap) ---");
+        begin
+            int trap_before;
+            trap_before = mmu_config_trap_cnt;
+            rdata_override_en = 1'b1; rdata_override = 32'h8C07_7600;
+            instr_word  = 16'hF010; instr_valid = 1'b1;
+            ext_data    = 32'h0000_4400; ext_valid = 1'b1;
+            repeat(100) begin @(posedge clk); if (instr_ack) break; end
+            instr_valid = 1'b0; ext_valid = 1'b0;
+            repeat(10) @(posedge clk);
+            chk32("MMU-08a: tc_out=valid config verbatim", tc_out, 32'h8C07_7600);
+            chk  ("MMU-08b: no config exception", mmu_config_trap_cnt == trap_before);
+        end
+
+        // MMU-09: PMOVE (A0),CRP with DT=00 (invalid) -- exception fires,
+        // CRP is still loaded with the (invalid) value regardless
+        // (MC68030UM.pdf §9.5.1.2: "the register is loaded with the new
+        // value before the exception is taken").
+        $display("--- MMU-09: PMOVE (A0),CRP (DT=0, config exception) ---");
+        begin
+            int trap_before;
+            trap_before = mmu_config_trap_cnt;
+            rdata_override_en = 1'b1; rdata_override = 32'h7FFF_0000;  // hi: L/U=0,LIMIT=0x7FFF
+            instr_word  = 16'hF010; instr_valid = 1'b1;
+            ext_data    = 32'h0000_4800; ext_valid = 1'b1;
+            repeat(100) begin @(posedge clk); if (instr_ack) break; end
+            instr_valid = 1'b0; ext_valid = 1'b0;
+            repeat(20) begin
+                @(posedge clk);
+                if (mem_req && mem_rw && mem_ack) break;
+            end
+            rdata_override = 32'h0000_0000;  // lo: base=0, DT=00 (invalid)
+            repeat(20) @(posedge clk);
+            chk32("MMU-09a: crp_hi loaded despite bad DT", crp_out[63:32], 32'h7FFF_0000);
+            chk32("MMU-09b: crp_lo loaded despite bad DT", crp_out[31:0],  32'h0000_0000);
+            chk  ("MMU-09c: config exception fired", mmu_config_trap_cnt == trap_before + 1);
+        end
+
+        // MMU-10: PMOVE (A0),CRP with a valid DT -- no exception.
+        $display("--- MMU-10: PMOVE (A0),CRP (valid DT, no trap) ---");
+        begin
+            int trap_before;
+            trap_before = mmu_config_trap_cnt;
+            rdata_override_en = 1'b1; rdata_override = 32'h7FFF_0000;
+            instr_word  = 16'hF010; instr_valid = 1'b1;
+            ext_data    = 32'h0000_4800; ext_valid = 1'b1;
+            repeat(100) begin @(posedge clk); if (instr_ack) break; end
+            instr_valid = 1'b0; ext_valid = 1'b0;
+            repeat(20) begin
+                @(posedge clk);
+                if (mem_req && mem_rw && mem_ack) break;
+            end
+            rdata_override = 32'h0000_3002;  // lo: base=0x3000, DT=10 (table, valid)
+            repeat(20) @(posedge clk);
+            chk32("MMU-10a: crp_hi loaded", crp_out[63:32], 32'h7FFF_0000);
+            chk32("MMU-10b: crp_lo loaded", crp_out[31:0],  32'h0000_3002);
+            chk  ("MMU-10c: no config exception", mmu_config_trap_cnt == trap_before);
+            rdata_override_en = 1'b0;
+        end
 
         $display("");
         if (fail_count == 0)

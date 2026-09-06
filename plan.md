@@ -8459,4 +8459,106 @@ tests), `make cosim_grp` 8/8, `make cosim_memind` 28/28, `make dat-synth`
 SKIP 281221 TIMEOUT 0` — bit-identical to baseline (Harte's corpus never
 exercises SR's M bit or a genuine IPL-driven interrupt at all).
 
-**Items #3-#10 continue below as each is addressed.**
+### Item #3: MMU Configuration Exception (vector 56) — IMPLEMENTED AND VERIFIED
+
+MC68030UM.pdf §8.1.10/§9.7.5.3: a PMOVE that loads TC with E set must pass
+a consistency check (TIA/TIB/TIC/TID summed until the first zero field,
+plus PS plus IS, must equal 32; PS values $0-$7 are reserved) or a
+post-instruction MMU Configuration Exception (vector 56, Format $2 — same
+6-word frame as CHK/TRAPV) is taken; TC is still updated but with E forced
+clear. A PMOVE loading CRP or SRP with DT=0 (invalid) is unconditionally a
+config error regardless of TC.E; the register is still loaded with the new
+(invalid) value. Confirmed via direct grep that neither check existed at
+all — `eu_seq_execute.svh`'s PMOVE register-capture logic wrote `mem_rdata`
+into `tc_r`/`crp_hi_r`/`crp_lo_r`/`srp_hi_r`/`srp_lo_r` completely
+unconditionally.
+
+**Implementation**: new combinational `tc_cfg_bad` (TIx-sum + PS-reserved
+check, declared ahead of the always_ff block that reads it — the same
+Icarus forward-reference limitation `chk_trap_raw`'s own comment already
+documents) gates `tc_r`'s own capture (`{1'b0, mem_rdata[30:0]}` on
+violation). CRP/SRP's DT check is evaluated directly off `mem_rdata` at
+the 64-bit PMOVE's own phase-1 (lo word) ack — initially implemented
+against the WRONG half (hi word, `crp_hi_r[1:0]`) per a misreading of
+`biu_mmu_if.sv`'s own header comment ("DT lives at crp[33:32]"); re-derived
+correctly once `crp_base`'s existing derivation from `active_root[31:4]`
+made clear bits[33:32] of the 64-bit `{hi,lo}` value are bits[1:0] of the
+LOW word, not the high one — confirmed against a real in-file test
+(`BERR-mid-PTEST`'s own already-correct `CRP hi/lo` split) before trusting
+it. A new `mmu_config_trap` output threads through `eu_seq.sv` →
+`m68030_eu.sv` → `m68030_top.sv` into a new `mmu_config_req` input on
+`m68030_exc.sv`, dispatched at `VEC_MMU_CONFIG=56`/`FMT_INST`, inserted
+into the priority chain alongside `chk_req`/`trapv_req` (MC68030UM.pdf
+Table 8-5 groups MMU Configuration in the same priority tier as CHK/
+CHK2/TRAPV/TRAP#n/Divide-by-Zero).
+
+**Bonus finding #1, fixed**: MC68030UM.pdf Table 8-6 lists Zero Divide as
+sharing the same Format $2 six-word frame as CHK/TRAPV/MMU Configuration
+— `m68030_exc.sv`'s own `div_zero_req` branch used `FMT_SHORT` (format
+$0) instead, a genuine, previously-undiscovered compliance bug (invisible
+to Harte, whose 68000-captured corpus never produces a format-word-bearing
+frame at all for this exception). Fixed to `FMT_INST`; updated exc_tb.sv's
+own pre-existing EXC-6 test to the corrected 4-transaction shape (3
+pushes + 1 fetch, matching EXC-4's own CHK template) instead of the old
+2-push shape.
+
+**Bonus finding #2, fixed**: `fault_addr`'s own top-level mux in
+`m68030_top.sv` fed EVERY non-bus-error, non-addr-error exception source
+(CHK, TRAPV, div_zero, and now MMU Configuration) the same
+bus-fault-capture register (`fault_addr_biu`) used for genuine BERR/
+address-error frames — but Format $2's own "instruction address" field
+needs the address of the excepting instruction itself, not a bus fault
+address; for a non-bus-fault exception this was stale/leftover data from
+whatever bus fault (if any) last occurred, never the CHK/TRAPV/div_zero
+instruction's own PC. Confirmed via grep this was never once tested at
+the integration level (`tb/exception_tb.sv`'s own CHK/CHK2 tests only
+check trap counts and CCR flags, never stack frame content) — a real,
+previously-invisible gap across every Format $2 exception, not something
+this item introduced. Fixed by muxing `fault_addr` on
+`bus_err_req_w || ifu_addr_err_int` instead of unconditionally: those two
+sources keep the real bus/address-fault address; everything else
+(including the new `mmu_config_req`) now correctly gets `eu_ex_decode_pc`
+— the exact same "PC of whatever instruction is/was actually in EX"
+signal `fault_pc`'s own adjacent mux already uses for `bus_err_req_w`,
+proven stable through a whole push sequence there already.
+
+**Bonus finding #3, fixed (testbench-only, not an RTL bug)**: fixing the
+CRP/SRP DT check surfaced several existing ROM values across
+`stall_fsm_tb.sv`/`mmu_xlate_tb.sv` that PMOVE-load TC with E=1 but a
+degenerate all-zero PS/IS/TIx field (`32'h8000_0000`, sum=0 not 32) or
+CRP with an all-zero low word (DT=0) — previously harmless placeholder
+values ("just needs E=1 to unblock PTEST's own transparent-TT0 bypass" /
+"this CRP is never actually walked") that now genuinely trip the new
+config exception, corrupting each test's own downstream flow (confirmed
+via `git stash`, re-running against pre-item-#3 baseline, and seeing the
+exact same failure list vanish). Fixed every site to either a real valid
+config (`TC=0x8C077600`: PS=12,TIA=7,TIB=7,TIC=6 sums to 32) or a valid
+but arbitrary DT (`CRP/SRP lo=0x...02`, DT=10/table) — `stall_fsm_tb.sv`'s
+B-20/B-21, its two WS-PMOVE64 timing tests, its INT-mid-PMOVE64 test, and
+`mmu_xlate_tb.sv`'s Phase 6/7/8 shared TC setup.
+
+**New tests**: `tb/exc_tb.sv` needed no new dedicated MMU-config test
+(the controller-side FMT_INST/vector-56 dispatch is already fully
+exercised by EXC-4's own CHK template — `mmu_config_req` shares the exact
+same push/fetch mechanism). The actual EU-side validation logic (new this
+item) is tested in `tb/special_instr_tb.sv`: MMU-04c (confirms the
+pre-existing MMU-04's own DEAD_BEEF TC write, which happens to have E=1
+and a bad sum, fired the trap exactly once), MMU-08 (valid TC config,
+verbatim store, no trap), MMU-09 (CRP with DT=0, trap fires, register
+still loaded with the invalid value), MMU-10 (CRP with valid DT, no
+trap) — needed a new `rdata_override`/`rdata_override_en` pair added to
+this file's own previously-fixed `mem_rdata` stub so each test could
+drive specific TC/CRP hi/lo field patterns instead of the shared
+DEAD_BEEF constant. Also updated MMU-04a/05a/07's own pre-existing
+expected values from `DEAD_BEEF` to `5EAD_BEEF` (E correctly forced
+clear) now that the validation is real.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8,
+`make cosim_memind` 28/28, `make dat-synth` 50/50, full 124-suite Tom
+Harte sweep: `TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` —
+bit-identical to baseline (Harte's 68000-captured corpus has no MMU
+instructions and no 68020+ CAS/CAS2/CHK2 coverage either, and the two
+Format $2 fixes only change previously-unverified fields no Harte vector
+could exercise).
+
+**Items #4-#10 continue below as each is addressed.**
