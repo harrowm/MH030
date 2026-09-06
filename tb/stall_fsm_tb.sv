@@ -50,7 +50,6 @@ module stall_fsm_tb;
     logic        sterm_n  = 1'b1;
     logic        berr_n   = 1'b1;
     logic        halt_n   = 1'b1;
-    logic        avec_n   = 1'b1;
     logic        vpa_n    = 1'b1;
     logic [2:0]  ipl_n    = 3'b111;
     logic        br_n     = 1'b1;
@@ -87,6 +86,23 @@ module stall_fsm_tb;
     wire [1:0]  burst_beat_probe = u_top.u_biu.u_cg.u_bc.burst_beat;
     wire [11:0] beat_word_addr   = ext_a[13:2] + {10'h0, burst_beat_probe};
     wire [31:0] rd_word = (beat_word_addr < MEM_WORDS) ? rom[beat_word_addr] : 32'hDEAD_DEAD;
+
+    // docs/*.md review (plan.md, Chapter 8 audit item #1): real vectored
+    // interrupt acknowledge is now genuinely wired into the exception
+    // controller (rtl/m68030_exc.sv's own EXC_IACK state) instead of the
+    // old always-autovector shortcut -- every interrupt this file injects
+    // now needs a real external device to respond to the CPU-space IACK
+    // bus cycle, or the CPU waits (per MC68030UM.pdf's own documented real
+    // behavior) until this project's watchdog eventually times it out as a
+    // Bus Error (Spurious Interrupt). Auto-respond with AVEC# for every
+    // such cycle, matching a minimal real system's own autovector-only
+    // glue logic -- preserves every existing test's own "immediate
+    // autovector" expectation while making it a genuine bus cycle instead
+    // of an internal shortcut. Address pattern matches biu_cycle_gen.sv's
+    // own IACK dispatch exactly: cyc_addr = 0xFFFFFFF0 | (level<<1),
+    // i.e. A[31:4] all ones, FC=111 (CPU space).
+    wire iack_cycle_active = !ext_as_n && (ext_fc == 3'b111) && (ext_a[31:4] == 28'hFFFFFFF);
+    wire avec_n = !iack_cycle_active;
 
     // wait_states injects N extra clk_4x-cycle-granular... actually S-state
     // cycles of DSACK latency on top of the baseline 1-cycle ack, for

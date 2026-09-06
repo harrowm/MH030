@@ -85,6 +85,16 @@ module m68030_exc (
     input  logic        exc_ack,        // cycle complete
     input  logic [31:0] exc_rdata,      // read data from vector fetch
 
+    // ── CPU-space IACK interface (docs/*.md review: real vectored interrupt
+    // acknowledge, replacing the previous always-autovector shortcut) ─────
+    output logic        iack_req,       // request a real IACK bus cycle
+    output logic [2:0]  iack_level,     // interrupt level for A[3:1] encoding
+    input  logic        iack_ack,       // cycle complete (AVEC or DSACK'd vector)
+    input  logic [7:0]  iack_vec,       // resolved vector number (autovector
+                                         // already folded in by biu_cycle_gen
+                                         // when AVEC/VPA terminated the cycle)
+    input  logic        iack_berr,      // BERR during IACK -> Spurious Interrupt
+
     // ── Outputs to EU ─────────────────────────────────────────────────────
     output logic [31:0] new_pc,
     output logic        new_pc_wr,
@@ -108,7 +118,7 @@ module m68030_exc (
     localparam [7:0] VEC_LINE_A   = 8'd10;
     localparam [7:0] VEC_LINE_F   = 8'd11;
     localparam [7:0] VEC_FMT_ERR  = 8'd14;
-    localparam [7:0] VEC_AV1      = 8'd25;  // auto-vector level 1
+    localparam [7:0] VEC_SPURIOUS = 8'd24;  // Spurious Interrupt (IACK BERR/timeout)
     localparam [7:0] VEC_TRAP0    = 8'd32;  // TRAP #0 (TRAP #n = 32+n)
 
     // Frame format codes
@@ -125,32 +135,44 @@ module m68030_exc (
     // Interrupt pending
     // -----------------------------------------------------------------------
     logic       int_pending;
-    logic [7:0] int_vec;
     logic [2:0] ipl_sync_l;
     logic [2:0] ipl_mask_l;
     assign ipl_sync_l  = ipl_sync;
     assign ipl_mask_l  = ipl_mask;
     assign int_pending = (ipl_sync_l != 3'b000) && (ipl_sync_l > ipl_mask_l);
-    assign int_vec     = VEC_AV1 - 8'd1 + {5'd0, ipl_sync_l};
     assign int_pending_out = int_pending;
 
     // -----------------------------------------------------------------------
     // Priority encoder (combinational)
     // -----------------------------------------------------------------------
+    // docs/*.md review fix (Chapter 8 audit): pend_vec for the interrupt
+    // case used to be `24+level` (i.e. always autovector) computed
+    // right here -- this project's own real CPU-space IACK bus cycle
+    // (biu_cycle_gen.sv's ST_IACK_* states, fully built and unit-tested in
+    // isolation) was never actually wired into the dispatch path, so every
+    // interrupt silently autovectored regardless of whether a real
+    // peripheral would have supplied its own vector byte via DSACK, or
+    // failed to respond at all (Spurious Interrupt, vector 24). pend_is_int
+    // now routes the interrupt case through a new EXC_IACK state (below)
+    // that issues the real IACK cycle and lets its own response determine
+    // the vector -- pend_vec for this branch is now just a placeholder,
+    // overwritten in EXC_IACK before the frame is ever pushed.
     logic       exc_pending;
     logic [7:0] pend_vec;
     logic [3:0] pend_fmt;
+    logic       pend_is_int;
 
     always_comb begin
         exc_pending = 1'b0;
         pend_vec    = 8'h0;
         pend_fmt    = FMT_SHORT;
+        pend_is_int = 1'b0;
         if (bus_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
         end else if (addr_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_ADDR;
         end else if (int_pending && int_ready) begin
-            exc_pending = 1'b1; pend_vec = int_vec;       pend_fmt = FMT_SHORT;
+            exc_pending = 1'b1; pend_vec = 8'h0; pend_fmt = FMT_SHORT; pend_is_int = 1'b1;
         end else if (illegal_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ILLEGAL;   pend_fmt = FMT_SHORT;
         end else if (priv_req) begin
@@ -179,11 +201,12 @@ module m68030_exc (
     // -----------------------------------------------------------------------
     // FSM
     // -----------------------------------------------------------------------
-    typedef enum logic [1:0] {
-        EXC_IDLE  = 2'd0,
-        EXC_PUSH  = 2'd1,
-        EXC_FETCH = 2'd2,
-        EXC_LOAD  = 2'd3
+    typedef enum logic [2:0] {
+        EXC_IDLE  = 3'd0,
+        EXC_IACK  = 3'd1,   // real CPU-space IACK cycle, interrupts only
+        EXC_PUSH  = 3'd2,
+        EXC_FETCH = 3'd3,
+        EXC_LOAD  = 3'd4
     } exc_state_t;
 
     exc_state_t state_r;
@@ -306,14 +329,35 @@ module m68030_exc (
                 EXC_IDLE: begin
                     if (exc_pending) begin
                         snap_ssp_r  <= ssp_in;
-                        snap_vec_r  <= pend_vec;
+                        snap_vec_r  <= pend_vec;   // interrupt case: placeholder,
+                                                    // overwritten in EXC_IACK below
                         snap_fmt_r  <= pend_fmt;
                         snap_pc_r   <= fault_pc;
                         snap_sr_r   <= fault_sr;
                         snap_ipl_r  <= int_pending ? ipl_sync_l : fault_sr[10:8];
                         snap_dob_r  <= fault_data;
                         push_step_r <= 5'd0;
-                        state_r     <= EXC_PUSH;
+                        if (pend_is_int) state_r <= EXC_IACK;
+                        else             state_r <= EXC_PUSH;
+                    end
+                end
+
+                // Real CPU-space IACK cycle (docs/*.md review fix): drives
+                // iack_req/iack_level (below) and waits for the BIU's own
+                // response. iack_ack's own iack_vec already has the
+                // autovector formula folded in by biu_cycle_gen when AVEC#/
+                // VPA# terminated the cycle, so no further distinction is
+                // needed here -- either way it's just "the resolved vector
+                // number." A BERR (peripheral never responds) is Spurious
+                // Interrupt, vector 24, per MC68030UM.pdf §8.1.9 -- always
+                // vector 24 regardless of level, not derived from it.
+                EXC_IACK: begin
+                    if (iack_ack) begin
+                        snap_vec_r <= iack_vec;
+                        state_r    <= EXC_PUSH;
+                    end else if (iack_berr) begin
+                        snap_vec_r <= VEC_SPURIOUS;
+                        state_r    <= EXC_PUSH;
                     end
                 end
 
@@ -367,6 +411,11 @@ module m68030_exc (
             default: ;
         endcase
     end
+
+    // IACK request outputs: level is held from snap_ipl_r (captured at
+    // EXC_IDLE dispatch, same field the interrupt SR update already uses).
+    assign iack_req   = (state_r == EXC_IACK);
+    assign iack_level = snap_ipl_r;
 
     // SSP write: fire when last frame word is acked
     always_comb begin

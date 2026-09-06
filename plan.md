@@ -8325,3 +8325,75 @@ cosim_memind` 28/28, `make dat-synth` 50/50, full 124-suite Tom Harte sweep:
 
 **This closes the entire 10-item documentation audit (Phase 247, all 10
 items) in full.**
+
+## Phase 248 (MC68030UM.pdf chapter-by-chapter compliance review, `~/.claude/plans/elegant-gliding-fog.md`)
+
+User asked for a systematic, direct chapter-by-chapter read of `docs/MC68030UM.pdf`
+against the RTL (as opposed to the project's existing verification, which is entirely
+*behavioral* — Harte, Musashi cosim, hand-built pipeline tests), specifically flagging
+pin-level compliance as a known weak spot ("before we had missed cache enable pins
+etc."). Planned and executed via `EnterPlanMode`/`ExitPlanMode`; produced a 10-item
+findings list across all 14 chapters + Appendix A, then worked through fixing each
+one in order per the user's own explicit instruction, matching the Phase 247
+documentation-audit's own established discipline.
+
+### Item #1 (biggest finding): interrupt vector fetching was always autovectored — IMPLEMENTED AND VERIFIED
+
+Chapter 5's pin audit found `rtl/m68030_top.sv` hardwired `eu_iack_req=1'b0` — the
+fully-built, unit-tested CPU-space IACK bus cycle (`biu_cycle_gen.sv`'s own
+`ST_IACK_*` states, exercised only by `tb/biu_tb.sv`'s own standalone "IACK with
+DSACK"/"IACK with AVEC" tests) was never actually connected to the real
+interrupt-dispatch path. `m68030_exc.sv` computed every interrupt's vector as a pure
+autovector formula (`24 + level`) unconditionally, regardless of whether a real
+peripheral would supply its own vector byte via DSACK, fail to respond at all
+(Spurious Interrupt, vector 24), or respond with the uninitialized-interrupt
+convention byte ($0F, vector 15) — none of which this RTL's interrupt path could
+ever produce.
+
+**Fix**: added a new `EXC_IACK` state to `m68030_exc.sv`'s own exception-dispatch
+FSM (widened `exc_state_t` from 2 to 3 bits), reached only for the interrupt case
+(`pend_is_int`, a new flag alongside the existing `pend_vec`/`pend_fmt`). `EXC_IACK`
+drives new `iack_req`/`iack_level` outputs and waits for either `iack_ack` (success
+— use `iack_vec`, which already has the autovector formula folded in by
+`biu_cycle_gen.sv` when AVEC#/VPA# terminated the cycle, so no separate autovector-
+vs-DSACK'd-vector branch is needed on this side) or `iack_berr` (BERR during IACK —
+dispatch to vector 24, Spurious Interrupt, *unconditionally*, not derived from the
+level, per MC68030UM.pdf §8.1.9). Wired `m68030_top.sv`: `u_exc`'s new
+`iack_req`/`iack_level` now drive `m68030_biu`'s own `eu_iack_req`/`eu_iack_level`
+ports (previously hardwired to 0), and `u_exc`'s new `iack_ack`/`iack_vec` inputs
+come from the BIU's own existing (previously-dangling) `eu_iack_ack`/`eu_iack_vec`
+outputs; `iack_berr` reuses the existing shared `eu_berr` wire directly — confirmed
+safe without new plumbing since `exc_active` already gates the generic EU bus path
+off the instant exception dispatch begins, so nothing else can be driving `eu_berr`
+while `EXC_IACK` is active.
+
+**Found and fixed a real regression while verifying**: `tb/stall_fsm_tb.sv`'s own
+6 interrupt-injection call sites (INT-mid-CAS2 and friends) started failing —
+traced to exactly the architectural consequence of the fix itself: a real IACK bus
+cycle now genuinely needs an external device to respond (previously bypassed
+entirely), and this testbench's own `avec_n` was permanently tied inactive. Fixed
+with a generic auto-AVEC responder (`iack_cycle_active` continuous assign,
+detecting the exact CPU-space IACK address pattern `biu_cycle_gen.sv` itself
+generates: `A[31:4]` all ones, FC=111) — mirrors a minimal real system's own
+autovector-only glue logic, preserving every existing test's own "immediate
+autovector" expectation while making it architecturally genuine. Confirmed (via
+grep across all 15 testbenches instantiating `m68030_top`) that `stall_fsm_tb.sv`
+is the *only* one that ever drives `ipl_n` away from its default "no interrupt"
+value — every other testbench (including the full Harte corpus) is entirely
+unaffected by this fix.
+
+**New test coverage**: `tb/exc_tb.sv` (the exception controller's own standalone
+unit test) gained a stub IACK responder (mirrors `biu_cycle_gen.sv`'s own
+autovector formula by default, with override hooks for dedicated tests) plus two
+new tests — EXC-12 (peripheral-vectored interrupt, level 5, vector `$50` supplied
+via DSACK instead of AVEC#) and EXC-13 (Spurious Interrupt, level 2, BERR during
+IACK dispatches to vector 24 regardless of level) — both confirmed passing,
+alongside the pre-existing EXC-5 (plain autovector) still passing unchanged.
+
+**Full mandatory gate**: `make test` 37/37 (including the 2 new EXC-12/13 tests),
+`make cosim_grp` 8/8, `make cosim_memind` 28/28, `make dat-synth` 50/50, full
+124-suite Tom Harte sweep: `TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` —
+bit-identical to baseline (Harte's own corpus never triggers a real IPL-based
+interrupt at all).
+
+**Items #2-#10 continue below as each is addressed.**

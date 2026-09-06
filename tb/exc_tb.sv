@@ -65,6 +65,25 @@ module exc_tb;
     // Immediate-ack stub
     assign exc_ack = exc_req;
 
+    // docs/*.md review fix: IACK interface (was hardwired away entirely --
+    // every interrupt used to skip straight from EXC_IDLE to EXC_PUSH with
+    // pend_vec already computed as the autovector formula). Default stub
+    // here mirrors exactly what biu_cycle_gen.sv computes for a real
+    // AVEC#-terminated cycle (immediate ack, vector = 24+level) so EXC-5's
+    // own pre-existing "plain autovector" expectations are preserved
+    // unchanged; iack_vec_override/iack_berr_tb let dedicated new tests
+    // drive the peripheral-vectored and spurious-interrupt cases instead.
+    logic        iack_req, iack_ack, iack_berr;
+    logic [2:0]  iack_level;
+    logic [7:0]  iack_vec;
+    logic        iack_berr_tb = 1'b0;
+    logic        iack_vec_override_en = 1'b0;
+    logic [7:0]  iack_vec_override = 8'h0;
+    assign iack_ack  = iack_req && !iack_berr_tb;
+    assign iack_berr = iack_req && iack_berr_tb;
+    assign iack_vec  = iack_vec_override_en ? iack_vec_override
+                                             : (8'd24 + {5'b0, iack_level});
+
     m68030_exc dut (.*);
 
     // -----------------------------------------------------------------------
@@ -149,6 +168,7 @@ module exc_tb;
             fault_pc=0; fault_sr=0; fault_addr=0; fault_ssw=0;
             bus_err_fmt=4'hA; fault_data=0;
             ssp_in=0; vbr_in=0;
+            iack_berr_tb=1'b0; iack_vec_override_en=1'b0; iack_vec_override=8'h0;
 
             // Pulse capture reset
             cap_nrst = 0; #1; cap_nrst = 1;
@@ -513,6 +533,61 @@ module exc_tb;
             $display("FAIL EXC-11 trans_cnt=%0d (exp 24: 23 writes + 1 read)", trans_cnt);
             fail = fail + 1;
         end else $display("PASS EXC-11 trans_cnt=24");
+
+        // ================================================================
+        // EXC-12: Peripheral-vectored interrupt, level 5 (docs/*.md review
+        // fix: real IACK dispatch, replacing the old always-autovector
+        // behavior). Peripheral supplies vector byte $50 via DSACK instead
+        // of asserting AVEC# -- iack_vec_override models exactly what
+        // biu_cycle_gen.sv's own iack_vec_r <= ext_d_in[7:0] branch
+        // produces for a real DSACK'd (non-autovectored) IACK response.
+        //   vec = 0x50 = 80; fetch_addr = VBR + 80*4 = 0x140
+        //   new_sr: T=0,S=1,M=0,IPL=5(updated),CCR=fault_sr[7:0]=0x00 -> 0x2500
+        // ================================================================
+        $display("--- EXC-12: Peripheral-vectored interrupt (level 5, vec=$50) ---");
+        begin_test;
+        ssp_in    = 32'h0000_7000;
+        fault_pc  = 32'h0000_5000;
+        fault_sr  = 16'h2400;  // S=1, IPL=4 (old mask)
+        exc_rdata = 32'h0000_E000;
+        iack_vec_override_en = 1'b1;
+        iack_vec_override    = 8'h50;
+        ipl_mask  = 3'd2;
+        ipl_sync  = 3'd5;
+        @(posedge clk_4x); #1;  // FSM snaps ipl_sync=5
+        ipl_sync  = 3'd0;
+        wait_idle;
+
+        chk32("EXC-12 fetchaddr", t_addr[2],   32'h0000_0140);  // 80*4=320=0x140
+        chk32("EXC-12 new_pc",     last_new_pc, 32'h0000_E000);
+        chk16("EXC-12 new_sr",     last_new_sr, 16'h2500);       // IPL updated to 5
+
+        // ================================================================
+        // EXC-13: Spurious interrupt, level 2 (docs/*.md review fix): IACK
+        // gets a BERR (peripheral never responds -- no AVEC#, no DSACK) --
+        // must dispatch to vector 24 (Spurious Interrupt, MC68030UM.pdf
+        // §8.1.9) REGARDLESS of the interrupt level, not to any
+        // level-derived vector. SR's own IPL field still updates to the
+        // level that triggered it, same as every other interrupt.
+        //   vec = 24; fetch_addr = VBR + 24*4 = 0x60
+        //   new_sr: T=0,S=1,M=0,IPL=2(updated),CCR=fault_sr[7:0]=0x00 -> 0x2200
+        // ================================================================
+        $display("--- EXC-13: Spurious interrupt (level 2, IACK BERR) ---");
+        begin_test;
+        ssp_in    = 32'h0000_8000;
+        fault_pc  = 32'h0000_6000;
+        fault_sr  = 16'h2100;  // S=1, IPL=1 (old mask)
+        exc_rdata = 32'h0000_F000;
+        iack_berr_tb = 1'b1;
+        ipl_mask  = 3'd0;
+        ipl_sync  = 3'd2;
+        @(posedge clk_4x); #1;  // FSM snaps ipl_sync=2
+        ipl_sync  = 3'd0;
+        wait_idle;
+
+        chk32("EXC-13 fetchaddr", t_addr[2],   32'h0000_0060);  // 24*4=96=0x60
+        chk32("EXC-13 new_pc",     last_new_pc, 32'h0000_F000);
+        chk16("EXC-13 new_sr",     last_new_sr, 16'h2200);       // IPL updated to 2
 
         // ================================================================
         if (fail == 0)

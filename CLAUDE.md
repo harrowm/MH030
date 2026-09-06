@@ -869,6 +869,30 @@ itself is verified correct (full mandatory gate clean) and structurally sound
 (same proven template as Track A), just not independently tick-remeasured.
 **This closes the entire 10-item documentation audit (Phase 247) in full.**
 
+**Phase 248 (MC68030UM.pdf chapter-by-chapter compliance review, in progress)**:
+user asked for a systematic direct-manual-text-vs-RTL review (distinct from the
+project's existing entirely-behavioral verification — Harte, Musashi cosim,
+hand-built pipeline tests), specifically flagging pin-level compliance. Produced a
+10-item findings list across all 14 chapters + Appendix A; working through fixes
+in order. **Item #1 (IMPLEMENTED AND VERIFIED)**: interrupt vector fetching was
+always autovectored — `m68030_top.sv` hardwired `eu_iack_req=0`, so the fully-built
+CPU-space IACK bus cycle (`biu_cycle_gen.sv`) never actually ran; `m68030_exc.sv`
+computed every interrupt's vector as `24+level` unconditionally, so peripheral-
+vectored interrupts, Spurious Interrupt (vector 24), and Uninitialized Interrupt
+(vector 15) could never occur. Fixed by adding a new `EXC_IACK` state to
+`m68030_exc.sv`'s dispatch FSM (reached only for interrupts) that drives a real
+IACK cycle and uses its own response (`iack_vec` on ack, vector 24 unconditionally
+on `iack_berr`) to determine the vector, wired through `m68030_top.sv` into the
+BIU's previously-dangling `eu_iack_req`/`eu_iack_ack`/`eu_iack_vec` ports. Found
+and fixed a real regression while verifying: `tb/stall_fsm_tb.sv`'s own 6
+interrupt-injection tests broke because a real IACK cycle now needs an external
+device to respond — fixed with a generic auto-AVEC responder (confirmed via grep
+this is the *only* one of 15 `m68030_top`-instantiating testbenches that ever
+triggers a real interrupt). Added `tb/exc_tb.sv` coverage for both new response
+paths (EXC-12 peripheral-vectored, EXC-13 spurious). Full mandatory gate clean,
+Harte bit-identical to baseline (never exercises real IPL-based interrupts).
+Items #2-10 still to come.
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
@@ -877,7 +901,8 @@ backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), the CAS bus-lock plan
 (`~/.claude/plans/silent-copper-latch.md`), and the Phase 247 documentation audit
 (10/10 items) are all CLOSED IN FULL. Stage 9's own genuine-memory-indirect-EA work
 closed at Phase 245, and `docs/cache.md`'s own last open item closed at Phase 246.
-No open plan remains in this project — ask the user for new work.
+A manual compliance review (Phase 248) is in progress, working through a 10-item
+list one at a time — see above for status.
 
 ## Verification Commands
 

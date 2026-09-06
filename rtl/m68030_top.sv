@@ -224,6 +224,8 @@ module m68030_top #(
     logic        exc_rw_w;
     logic [1:0]  exc_siz_w;
     logic        exc_req_w, exc_ack_w;
+    logic        exc_iack_req_w;
+    logic [2:0]  exc_iack_level_w;
     logic [31:0] exc_ssp_out;
     logic        exc_ssp_wr_en;
     logic [31:0] exc_new_pc;
@@ -620,6 +622,13 @@ module m68030_top #(
         .exc_req      (exc_req_w),
         .exc_ack      (exc_ack_w),
         .exc_rdata    (exc_rdata_w),
+        // CPU-space IACK (docs/*.md review fix: real vectored interrupt
+        // acknowledge, replacing the previous always-autovector shortcut)
+        .iack_req     (exc_iack_req_w),
+        .iack_level   (exc_iack_level_w),
+        .iack_ack     (eu_iack_ack),
+        .iack_vec     (eu_iack_vec),
+        .iack_berr    (eu_berr),
         // Outputs to EU
         .new_pc       (exc_new_pc),
         .new_pc_wr    (exc_new_pc_wr),
@@ -736,9 +745,11 @@ module m68030_top #(
         .eu_berr         (eu_berr),
         .eu_retry        (eu_retry),
         .mem_rmw_lookup  (eu_mem_rmw_lookup),  // Phase 158 Stage 3
-        // IACK (stub)
-        .eu_iack_req     (1'b0),
-        .eu_iack_level   (3'b0),
+        // IACK: driven by u_exc's own EXC_IACK state (docs/*.md review fix
+        // -- was hardwired to 0/never triggered; every interrupt silently
+        // autovectored regardless of what a real peripheral would supply)
+        .eu_iack_req     (exc_iack_req_w),
+        .eu_iack_level   (exc_iack_level_w),
         .eu_iack_vec     (eu_iack_vec),
         .eu_iack_avec    (eu_iack_avec),
         .eu_iack_ack     (eu_iack_ack),
