@@ -811,7 +811,26 @@ breaking the next test, P6-5, which — like P6-CI right before P-DXLB — relie
 already being 1; fixed by leaving it untouched, matching P6-CI's own convention).
 Full mandatory gate clean, Harte sweep bit-identical to baseline (this bug's
 trigger needs a translated+burst+degraded D-cache access no Harte vector
-constructs). Items #3-10 (doc-staleness and low-priority items) still to come.
+constructs). **Items #3-#5 (FIXED)**: pure doc corrections — `docs/cache.md`'s own
+closing line contradicted an earlier bullet about the (now-fixed) `fill_base_r` gap;
+`port3.md` still listed MOVE indexed-src and CHK's remaining EA modes as open
+(actually closed at Phase 85/86, `plan.md.old`); `README.md` claimed the Verilator
+batch Harte runner isn't the default verification gate (it's been the actual
+practice throughout). **Items #6-#7 (REVIEWED)**: `improve.md`/`reduce.md`'s
+cosmetic refactor lists — both self-flagged historical/inactive; tagged
+`improve.md`'s two untagged items `[NOT ATTEMPTED]`, `reduce.md` needed nothing.
+**Item #8 (testbench bug FIXED, new coverage deliberately deferred)**:
+`tb/stall_fsm_tb.sv` had the same unfixed burst-address-freeze inline-memory-model
+bug Phase 230 found and fixed in `tb/mmu_xlate_tb.sv` (real silicon holds the
+address bus constant for a whole burst; an address-keyed read without
+`burst_beat_probe` serves the identical longword for every beat) — applied the
+identical proven fix here too, zero regressions (`vvp sim/stall_fsm` still 0
+failures, `make test` 37/37, `git diff --stat rtl/` empty so no Harte re-run
+needed). Deliberately did NOT reconstruct the actual `WS-PTEST`/`INT-mid-PTEST`
+tests in this same pass (needs a new collision-free ROM block in a file whose own
+history flags that as a recurring real risk) — scoped to fixing the known bug and
+documenting precisely, matching this project's own deferred-item precedent. Items
+#9-10 still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 27/27,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

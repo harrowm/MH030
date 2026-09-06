@@ -8125,4 +8125,50 @@ dat-synth` 50/50, full 124-suite Tom Harte sweep: `TOTAL: PASS 702142 FAIL 2 SKI
 needs a genuine MMU-translated, burst-enabled, degraded-fallback D-cache access,
 which no Harte single-instruction vector constructs).
 
-**Items #3-#10 continue below as each is addressed.**
+**Item #3 (docs/cache.md self-contradiction — FIXED)**, **item #4 (port3.md stale
+"still open" notes — FIXED)**, and **item #5 (README.md stale Harte runner claim —
+FIXED)** were pure documentation corrections, no RTL/testbench changes, no gate
+re-run needed. **Items #6-#7 (improve.md/reduce.md cosmetic refactor lists —
+REVIEWED)**: both explicitly self-flagged historical/inactive from a single
+2026-07-29 session; `improve.md` had two untagged items (#8, #10), tagged both
+`[NOT ATTEMPTED]` matching the file's own `[SKIPPED]` precedent; `reduce.md` was
+already fully self-consistent, no changes needed. Deliberately not re-attempting
+any of the listed speculative refactors on a since-substantially-grown codebase.
+
+**Item #8 (docs/stalls.md's PFLUSH/PTEST interrupt-injection gap — testbench bug
+FIXED, new coverage deliberately deferred)**: `tb/stall_fsm_tb.sv`'s own "WS-PTEST"
+note already documented a known-but-unapplied fix from the 10-item backlog's own
+Stage 4 (`plan.md` §Phase 230) — that phase found and fixed a genuine testbench-only
+burst-address-freeze modeling gap in `tb/mmu_xlate_tb.sv`'s inline memory model
+(real 68030 silicon holds the address bus constant for a whole burst; an
+address-keyed read without `burst_beat_probe` serves the identical longword for
+every beat instead of 4 distinct ones), confirmed via direct grep to be the same
+unfixed shape in `tb/stall_fsm_tb.sv`, but explicitly left unfixed there as
+"disproportionate scope for one investigation stage." Applied the identical,
+already-proven `burst_beat_probe` fix (mirroring `tb/cache_tb.sv`/
+`tb/mmu_xlate_tb.sv` exactly) to this file's own inline memory model. Confirmed
+zero regressions: this file's own full suite (`vvp sim/stall_fsm`) still shows 0
+failures, and `make test` stays 37/37. `git diff --stat rtl/` is empty (testbench-
+only), so no Harte re-run needed, per this project's own established precedent for
+testbench-only changes (e.g. Phase 240).
+
+**Deliberately did NOT reconstruct the `WS-PTEST`/`INT-mid-PTEST` tests
+themselves** in this same pass — the modeling bug is now closed (a real,
+generically-valuable fix: it would silently corrupt any FUTURE test in this file
+exercising a genuine multi-beat burst, not just a PTEST-specific one), but building
+the actual new coverage needs finding a safe, collision-free ROM address block and
+re-deriving the exact transparent-TT0/TC.E-toggle sequence the original hang
+depended on, in a file whose own history (this project's own memory notes) already
+flags ROM-address-collision bugs as a recurring real risk when adding new tests
+here. Scoped this narrowly (fix the known bug, verify no regression, document
+precisely) rather than open-endedly rebuilding a deferred test inside a
+documentation-cleanup pass — matching this project's own repeated precedent for
+comparably-sized deferred items (Phase 158 Stage 8, the CAS bus-lock plan's own
+several re-deferrals). Updated `docs/stalls.md`'s own PTEST note and Category H's
+catalog-row wording accordingly (from "permanently excluded" to "still excluded,
+underlying bug now fixed, new coverage remains a deliberately deferred follow-up").
+Category F's own PFLUSH/PTEST exclusion (no FC=101 bus activity to key an
+interrupt-injection off) is a completely different, unrelated, still-permanent
+limitation — untouched by this fix.
+
+**Items #9-#10 continue below as each is addressed.**

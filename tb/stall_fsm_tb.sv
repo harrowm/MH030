@@ -67,7 +67,26 @@ module stall_fsm_tb;
         for (i = 0; i < MEM_WORDS; i++) rom[i] = 32'h4E714E71;
     end
 
-    wire [31:0] rd_word = (ext_a[13:2] < MEM_WORDS) ? rom[ext_a[13:2]] : 32'hDEAD_DEAD;
+    // docs/*.md review (plan.md §Phase 247 item #8): real 68030 silicon
+    // freezes the address bus for the whole burst (MC68030UM.pdf 7.3.7);
+    // this model used to rely on ext_a itself incrementing per beat (a
+    // pre-existing RTL bug, fixed in biu_burst_ctrl.sv well before this
+    // file existed) to serve each beat's own distinct word -- with the
+    // address genuinely frozen, this address-keyed read serves the
+    // IDENTICAL longword for every beat of a real multi-beat burst
+    // instead of 4 distinct ones. Confirmed via direct grep (10-item
+    // backlog Stage 4, plan.md §Phase 230) to be the same unfixed shape
+    // already root-caused and fixed in tb/cache_tb.sv and
+    // tb/mmu_xlate_tb.sv -- flagged there as "almost certainly the real
+    // explanation" for a PTEST-triggered hang in this file, but not
+    // applied here until now. burst_beat_probe mirrors those two files'
+    // own already-proven fix exactly: testbench-only instrumentation
+    // (not a real pin) hierarchically referencing the DUT's own
+    // already-existing internal beat counter, reading 0 whenever no
+    // burst is in progress (a no-op for every ordinary access).
+    wire [1:0]  burst_beat_probe = u_top.u_biu.u_cg.u_bc.burst_beat;
+    wire [11:0] beat_word_addr   = ext_a[13:2] + {10'h0, burst_beat_probe};
+    wire [31:0] rd_word = (beat_word_addr < MEM_WORDS) ? rom[beat_word_addr] : 32'hDEAD_DEAD;
 
     // wait_states injects N extra clk_4x-cycle-granular... actually S-state
     // cycles of DSACK latency on top of the baseline 1-cycle ack, for
@@ -99,16 +118,16 @@ module stall_fsm_tb;
 
     always_ff @(posedge clk_4x) begin
         if (ds_active_r && !ext_ds_n && !ext_as_n && !ext_rw && ext_d_oe) begin
-            if (ext_a[13:2] < MEM_WORDS) begin
+            if (beat_word_addr < MEM_WORDS) begin
                 case ({ext_siz, ext_a[1:0]})
-                    4'b00_00: rom[ext_a[13:2]]        <= ext_d_out;
-                    4'b10_00: rom[ext_a[13:2]][31:16] <= ext_d_out[31:16];
-                    4'b10_10: rom[ext_a[13:2]][15:0]  <= ext_d_out[15:0];
-                    4'b01_00: rom[ext_a[13:2]][31:24] <= ext_d_out[31:24];
-                    4'b01_01: rom[ext_a[13:2]][23:16] <= ext_d_out[23:16];
-                    4'b01_10: rom[ext_a[13:2]][15:8]  <= ext_d_out[15:8];
-                    4'b01_11: rom[ext_a[13:2]][7:0]   <= ext_d_out[7:0];
-                    default:  rom[ext_a[13:2]]        <= ext_d_out;
+                    4'b00_00: rom[beat_word_addr]        <= ext_d_out;
+                    4'b10_00: rom[beat_word_addr][31:16] <= ext_d_out[31:16];
+                    4'b10_10: rom[beat_word_addr][15:0]  <= ext_d_out[15:0];
+                    4'b01_00: rom[beat_word_addr][31:24] <= ext_d_out[31:24];
+                    4'b01_01: rom[beat_word_addr][23:16] <= ext_d_out[23:16];
+                    4'b01_10: rom[beat_word_addr][15:8]  <= ext_d_out[15:8];
+                    4'b01_11: rom[beat_word_addr][7:0]   <= ext_d_out[7:0];
+                    default:  rom[beat_word_addr]        <= ext_d_out;
                 endcase
             end
         end

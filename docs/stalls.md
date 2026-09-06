@@ -318,12 +318,26 @@ never been exercised through a real multi-beat burst before. `tb/mem_model.sv`/
 by Phase 230 itself. **Confirmed via direct grep at the time: `tb/stall_fsm_tb.sv` — this
 file — has the identical unfixed line**, and Phase 230's own writeup calls this "almost
 certainly the real explanation" for the hang this file's own `WS-PTEST`/`INT-mid-PTEST`
-would hit too. **Still not fixed in this file specifically** — Phase 230 fixed only
-`tb/mmu_xlate_tb.sv`, explicitly flagging the other 7 files sharing the same inline-
-memory-model shape (including this one) as "a real, dormant, documented follow-up," out
-of scope for that investigation stage. If `WS-PTEST`/`INT-mid-PTEST` are ever wanted in
-this file, the fix is now known precisely (mirror `cache_tb.sv`'s own `burst_beat_probe`
-pattern in this file's own inline memory model) rather than needing fresh investigation.
+would hit too. Phase 230 fixed only `tb/mmu_xlate_tb.sv` at the time, explicitly flagging the other 7
+files sharing the same inline-memory-model shape (including this one) as "a real,
+dormant, documented follow-up," out of scope for that investigation stage.
+
+**Fixed in this file too (docs/*.md review, Phase 247 item #8)**: applied the identical,
+already-proven `burst_beat_probe` pattern (mirroring `tb/cache_tb.sv`/
+`tb/mmu_xlate_tb.sv` exactly) to this file's own inline memory model. Confirmed the fix
+compiles clean and introduces zero regressions across this file's own full suite
+(`vvp sim/stall_fsm`, 0 failures, same as baseline). **`WS-PTEST`/`INT-mid-PTEST`
+themselves were deliberately NOT reconstructed as part of this fix** — the modeling bug
+is now closed (a real, generically-valuable correction: it would have masked or
+corrupted any FUTURE test in this file that happens to exercise a genuine multi-beat
+burst, not just PTEST's own), but actually building the new coverage still needs finding
+a safe, collision-free ROM address block and re-deriving the exact transparent-TT0/
+TC.E-toggle sequence the original hang depended on, in a file whose own history
+documents ROM-address-collision bugs as a recurring, real risk when adding new tests. Left as a
+precisely-scoped, still-open follow-up rather than rushed in the same pass as a
+documentation-staleness cleanup — same disposition this project has given comparably-
+sized deferred items throughout its history (e.g. Phase 158 Stage 8, the CAS bus-lock
+plan's own several deferrals).
 
 **Head-start variant of the absorption effect (Stage 6)**: for BFINS/CMP2/MOVE-mem-mem,
 `wait_states=10` didn't just get absorbed with zero visible effect — it produced a
@@ -525,7 +539,7 @@ Harte sweep) — see `docs/cache.md`.
 | E. Control-transfer | `tb/stall_hazard_tb.sv` | BRA/JMP(register-indirect+abs)/DBF-taken/JSR+RTS round trip through real memory |
 | F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 18 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS/MOVE16/ABCD/SBCD/CMP2/CHK2/MOVEmm/RTR/RTE/PMOVE64, Phases 105/125/126/189, elegant-gliding-fog.md Stages 1-4 -- practical ceiling for this mechanism; PFLUSH/PTEST confirmed permanently untestable this way, no FC=101 bus activity to anchor an injection on); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
 | G. Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU 3-way priority; IFU starvation+recovery under a real multi-beat burst; DMA held off by `bus_lock` |
-| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 14 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS/ADDX/ABCD/PACK/MOVE16/PMOVE64 at wait_states=10; BFINS/CMP2/MOVEmm at wait_states=60, Phases 125/126/188, elegant-gliding-fog.md Stages 5-7; see Category H's own absorption-effect note, including the Stage 6 "head start" reversal variant, for why the values differ; PTEST confirmed permanently excluded, for a deeper reason than Category F's own -- see Category H's own PTEST note) |
+| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 14 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS/ADDX/ABCD/PACK/MOVE16/PMOVE64 at wait_states=10; BFINS/CMP2/MOVEmm at wait_states=60, Phases 125/126/188, elegant-gliding-fog.md Stages 5-7; see Category H's own absorption-effect note, including the Stage 6 "head start" reversal variant, for why the values differ; PTEST still excluded from the source count -- the testbench-modeling bug behind its own hang is now fixed (Phase 247), but the actual `WS-PTEST`/`INT-mid-PTEST` coverage remains a deliberately deferred follow-up, not yet built; see Category H's own PTEST note) |
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
 | J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
 | K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
