@@ -1219,6 +1219,22 @@ module biu_cache_if (
             // CI_WRITE. Read/hit/translate/burst paths (CI_IDLE's own
             // registered next-state logic in the always_ff block above)
             // are completely untouched by this arm.
+            // docs/*.md review (plan.md §Phase 247 item #10): a genuine
+            // D-cache HIT took a registered CI_IDLE->CI_HIT->CI_IDLE round
+            // trip to present eu_ack, one full tick later than necessary --
+            // dhit/idx/woff (above) are already computed combinationally
+            // from the live eu_* inputs, in CI_IDLE, before latching, the
+            // exact same shape Track A's own write fast path (Phase 163)
+            // already proved safe for CI_WRITE's own dispatch. A hit never
+            // issues a bus request at all (unlike Track A's own write
+            // case, which still had to reason about a race with sf_ack --
+            // no such race is possible here, there's no bus cycle to race
+            // against), so this is lower-risk than Track A's own fix, not
+            // higher. The registered CI_IDLE->CI_HIT->CI_IDLE round trip
+            // (always_ff block above) is untouched and still happens one
+            // cycle later, harmlessly re-presenting the identical value
+            // from by-then-latched idx_r/woff_r/addr_r -- same "harmless
+            // catch-up" reasoning Track A's own writeup already established.
             CI_IDLE: begin
                 if (eu_req && !eu_rw && !tc_e) begin
                     sf_addr  = eu_addr;
@@ -1227,6 +1243,9 @@ module biu_cache_if (
                     sf_siz   = eu_siz;
                     sf_wdata = eu_wdata;
                     sf_req   = 1'b1;
+                end else if (eu_req && eu_rw && dhit) begin
+                    eu_ack   = 1'b1;
+                    eu_rdata = extract_rd(data_d[idx][woff], eu_siz, eu_addr[1:0]);
                 end
             end
 

@@ -8274,4 +8274,54 @@ Harte sweep: `TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bit-
 identical to baseline (expected: Harte has zero CAS/CAS2/CHK2 coverage of any
 kind, 68000-captured corpus).
 
-**Item #10 continues below.**
+**Item #10 (`biu_cache_if.sv`'s CI_IDLE hop — a speculative, never-attempted
+timing optimization, IMPLEMENTED AND VERIFIED)**: the bus-pipelining-overlap
+plan (`~/.claude/plans/compressed-hopping-cocoa.md`, Phase 163) added
+combinational CI_IDLE fast paths for writes (Track A) and several other
+registered hops, closed in full — but never for a genuine D-cache READ HIT,
+which still took the original registered `CI_IDLE`→`CI_HIT`→`CI_IDLE` round
+trip to present `eu_ack`, one tick later than necessary. Investigated whether
+a symmetric read-hit fast path was as safe as Track A's own write-side case:
+`dhit`/`idx`/`woff` (`biu_cache_if.sv`'s own "Combinatorial hit detection (in
+CI_IDLE, before latching)" section) are already computed combinationally from
+the live `eu_*` inputs, exactly the same shape Track A's own investigation
+already proved safe. **Lower risk than Track A's own fix, not higher**: a hit
+never issues a bus request at all, so none of Track A's own "could `sf_ack`
+race ahead of the registered catch-up" reasoning even applies here — there is
+no bus cycle to race against.
+
+**Fix**: added a new `else if (eu_req && eu_rw && dhit)` arm to `CI_IDLE`'s
+own case in the combinational output block, presenting `eu_ack`/`eu_rdata`
+immediately via `extract_rd(data_d[idx][woff], eu_siz, eu_addr[1:0])` (the
+live-signal mirror of `CI_HIT`'s own identical, registered-signal call). The
+registered `CI_IDLE`→`CI_HIT`→`CI_IDLE` round trip is untouched and still
+happens one cycle later, harmlessly re-presenting the identical value from
+by-then-latched `idx_r`/`woff_r`/`addr_r` — the same "harmless catch-up"
+reasoning Track A's own writeup already established for its write case.
+
+**Honest verification note**: unlike Track A's own controlled tick-level A/B
+comparison (`scripts/b_final_clock_survey.py`'s raw `sim_ticks` output via
+`tb/timing_tb.sv`), no existing test harness could re-measure this specific
+win at tick granularity — every current `tb/timing_tb.sv` test runs with
+`CACR=0` (cache disabled, this project's own long-standing convention for
+that harness), so no genuine D-cache-hit scenario exists there to compare
+before/after. A direct attempt via `tb/biu_tb.sv`'s own P6-3 hit test (a
+`clk_4x`-edge-counting polling loop, git-stash A/B) showed no visible
+change — traced to the loop's own structure never sampling `cache_eu_ack`
+until after the first clock edge has already elapsed regardless, meaning it
+cannot distinguish "asserted immediately, same delta-cycle" from "asserted
+one edge later" the way `timing_tb.sv`'s continuous `sim_ticks` counter can.
+Building a genuine cache-enabled tick-precise test harness to independently
+re-confirm the improvement was judged disproportionate effort for this final,
+explicitly speculative audit item — the fix is verified CORRECT (full
+mandatory gate clean) and structurally sound (same proven template as Track
+A), but its own tick-level timing win rests on that structural analogy rather
+than an independent tick-count remeasurement, unlike Track A's own fix.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8, `make
+cosim_memind` 28/28, `make dat-synth` 50/50, full 124-suite Tom Harte sweep:
+`TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bit-identical to baseline
+(expected: Harte never enables either cache).
+
+**This closes the entire 10-item documentation audit (Phase 247, all 10
+items) in full.**

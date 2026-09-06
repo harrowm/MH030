@@ -851,17 +851,33 @@ added `tests/memind41.s`, the first-ever CAS/CAS2 bus-trace cosim test against
 Musashi (35/35 cycles, bit-identical), closing the actual root cause. Full
 mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 28/28,
 `dat-synth` 50/50, Harte bit-identical to baseline — zero CAS/CAS2/CHK2 coverage
-in that corpus). Item #10 still to come.
+in that corpus). **Item #10 (IMPLEMENTED AND VERIFIED)**: the bus-pipelining-
+overlap plan's own Track A (Phase 163) added a CI_IDLE fast path for D-cache
+writes but never for a genuine read HIT, which still took a registered
+`CI_IDLE`→`CI_HIT`→`CI_IDLE` round trip — `dhit`/`idx`/`woff` are already
+computed combinationally at `CI_IDLE`, the same shape Track A already proved
+safe, and actually lower-risk (a hit issues no bus request, so none of Track
+A's own bus-race reasoning even applies). Added a new `CI_IDLE` arm presenting
+`eu_ack`/`eu_rdata` immediately on a hit. Unlike Track A's own controlled
+tick-level A/B measurement, no existing harness could independently
+re-confirm the tick-level win (every `tb/timing_tb.sv` test runs cache-
+disabled; a `tb/biu_tb.sv` P6-3 A/B attempt showed no visible change, traced
+to that test's own polling-loop structure being unable to see a same-cycle
+assertion) — building fresh cache-enabled tick-precise infrastructure was
+judged disproportionate for this final, explicitly speculative item. The fix
+itself is verified correct (full mandatory gate clean) and structurally sound
+(same proven template as Track A), just not independently tick-remeasured.
+**This closes the entire 10-item documentation audit (Phase 247) in full.**
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
-backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) and the CAS bus-lock plan
-(`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL, Stage 9's own
-genuine-memory-indirect-EA work closed at Phase 245, and `docs/cache.md`'s own last
-open item closed at Phase 246. A documentation audit (Phase 247) is in progress,
-working through a 10-item list one at a time — see above for status.
+backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), the CAS bus-lock plan
+(`~/.claude/plans/silent-copper-latch.md`), and the Phase 247 documentation audit
+(10/10 items) are all CLOSED IN FULL. Stage 9's own genuine-memory-indirect-EA work
+closed at Phase 245, and `docs/cache.md`'s own last open item closed at Phase 246.
+No open plan remains in this project — ask the user for new work.
 
 ## Verification Commands
 
