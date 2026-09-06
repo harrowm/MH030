@@ -7976,3 +7976,92 @@ corpus itself; `tb/biu_tb.sv`'s own new P-ICI test is the real gate here).
 
 **This closes the last genuinely open item `docs/cache.md` documented** -- no known
 correctness gap remains in either cache.
+
+## Phase 247 (full documentation audit -- items #1-#2: real correctness gaps found and
+fixed; items #3-#10: doc staleness and low-priority items reviewed)
+
+The user asked for a full audit of every doc in the project (`CLAUDE.md`,
+`docs/cache.md`, `docs/stalls.md`, `port3.md`, `improve.md`, `reduce.md`,
+`README.md`, plus a background sweep of the two large archived phase-history
+files, `plan.md`/`plan.md.old`) for anything deferred or skipped that was never
+later closed. Found 10 items; user asked to fix them in order.
+
+**#1 (IMPLEMENTED AND VERIFIED): MULU.L/MULS.L/DIVU.L/DIVS.L's own indexed EA and
+`#imm` forms were entirely undecoded.** Confirmed directly in the RTL (a
+pre-existing comment on the register/memory-EA decode block already said
+"Deliberately deferred to a later pass: the indexed `(d8,An,Xn)`/`(d8,PC,Xn)`
+forms... and the `#imm` form... see plan.md for the full writeup") — real
+68020+ code using either form would hit an illegal-instruction fault. Deferred at
+Phase 192 (open-items backlog Stage 7), never revisited in the 55 phases since.
+
+Implemented both, following the exact precedent Phase 192's own text predicted:
+- **Indexed** `(d8,An,Xn)`/`(bd,An,Xn)`: same 3-operand-deferred-register conflict
+  CHK's own indexed form (Phase 84) and the general ALU-EA family (Phase 243)
+  already solve via `dyn_bit_get_Dn` — Xn occupies `rd_b` during the EA/read
+  phase, then swaps to Dl/Dq at the read's own ack (the exact cycle the EX-stage
+  compute actually consumes `md_dst=rd_b_data`). New `is_muldivl_idx_full`
+  classifier in `m68030_seq.sv` (mirroring `is_cmp2chk2_idx_full` exactly, same
+  shared `movem_bd_words`/`movem_od_words` wires) for the full-format
+  `ext_count`; brief-format folds into the existing `is_muldivl_2ext` bucket
+  (added `f_mode==3'b110` there, relying on `is_muldivl_idx_full`'s own earlier
+  priority-chain position to claim the full-format case first).
+- **`#imm`**: no memory operand at all — `md_src`'s own existing
+  `ex_is_mem_src ? alu_src_mem : (ex_use_imm ? ex_imm : rd_a_data)` mux already
+  had an unused `ex_use_imm` branch, so this needed zero EX-stage changes,
+  exactly matching Phase 192's own "no EX-stage changes needed" framing for the
+  other EA forms it did implement. The 32-bit immediate occupies the same
+  physical q2+q3 slots as the abs.L form's own address (`{ext_data[15:0],
+  q3_word}`). Folded into `is_muldivl_3ext` (same word count as abs.L, so shares
+  its bucket).
+
+**Found and fixed a real bug in my own first attempt, via a genuine cosim
+mismatch**: the full-format indexed case's own word-sized base displacement
+computed a wild, unrelated EA. Root cause: this family has its OWN extra leading
+extension word (the Dl/Dq/Dh/Dr descriptor, already established at
+`ext_data[31:16]` for the existing non-indexed 2-ext-word forms) — the exact same
+"extra leading word shifts every subsequent word one q-slot later" shape CMP2/CHK2
+needed a custom shifted extraction for (Phase 244). `fi_bd`'s own GENERIC formula
+assumes no such leading word and reads `ext_data[31:16]` directly for the bd
+value — for this family, that slot is already occupied by the muldivl descriptor,
+so `fi_bd` was silently reading the descriptor word itself as if it were an
+address displacement. Fixed by reusing CMP2/CHK2's own exact derivation
+(`q3_word`/`ext34_data` for the shifted bd, `fi_bd` never referenced) instead of
+the naive generic formula.
+
+**Found and fixed one more issue while building the cosim test — not an RTL bug,
+a test-construction one**: the `#imm` form gets the same long
+`dec_internal_stall_ticks_fixed` artificial-internal-stall calibration as the
+register-direct form (correctly — no memory operand, no natural bus-read timing
+to spend real time on instead), but this is the *first* time in the project's
+history that this specific long-stall path has been immediately followed by a
+result-write instruction in a full bus-trace-comparison test (Phase 192's own
+`memind25.s` used only memory-EA forms, which are excluded from the long stall
+and never exercised this interleaving). The IFU's own real readahead advances
+several words further than usual during the long stall, so the eventual result
+write lands one cycle later in the bus trace than the next instruction's own
+already-prefetched read — a benign pipelining artifact a non-pipelined reference
+trace can't reproduce (the same general "IFU prefetch race" class `docs/stalls.md`
+already documents, just wider than the usual one-adjacent-pair case). Fixed the
+test with 3 filler NOPs to let the readahead settle first, reducing the
+divergence to exactly the standard one-pair case `buscmp.py --allow-adjacent-swap`
+already tolerates.
+
+New `tests/memind40.s` (brief-indexed MULU.L, brief-indexed DIVS.L, full-format-
+indexed MULS.L, `#imm` DIVU.L — mixing MUL/DIV and signed/unsigned, each result
+written to a distinct memory address so the actual computed value is directly
+visible on the bus trace). Needed a 900-cycle reference-log override (two real
+divide-microcode instructions, exceeding even `memind25`'s own 600-cycle
+override). Musashi's own reference independently confirmed all four hand-derived
+expected values before the DUT was ever run. Wired into `make cosim_memind` as
+`buscmp-memind40`, extending the target's own dependency list to 27 total.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind`
+27/27, `make dat-synth` 50/50, `make sim/ext_count_overlap` (0 opcode-encoding
+overlaps across all 6 configs × 65536 opcodes — confirms the new classifiers don't
+collide with anything else in the whole opcode space), full 124-suite Tom Harte
+sweep via `run_harte_batch.py --backend verilator -j 10 --chunk-size 300`:
+`TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline
+(expected -- the Harte corpus is 68000-captured and has no coverage of the .L
+mul/div forms at all, confirmed already by Phase 185's own note).
+
+**Items #2-#10 continue below as each is addressed.**

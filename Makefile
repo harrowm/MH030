@@ -461,6 +461,11 @@ winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
 # with 600.
 winuae/tests/memind25_ref.log: tools/m68ksim tests/memind25.hex | winuae/tests
 	./tools/m68ksim tests/memind25.hex 600 > $@
+# memind40 needs even more than memind25's own 600: two real divide-microcode
+# instructions (DIVS.L and DIVU.L) plus the indexed/full-format/imm EA
+# overhead don't complete within 300 or even 600 cycles -- 900 needed.
+winuae/tests/memind40_ref.log: tools/m68ksim tests/memind40.hex | winuae/tests
+	./tools/m68ksim tests/memind40.hex 900 > $@
 
 buscmp-memind2: $(SIM)/cosim_grp winuae/tests/memind2_ref.log tests/memind2.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind2.hex +grp=memind2 2>&1 \
@@ -711,12 +716,25 @@ buscmp-memind39: $(SIM)/cosim_grp winuae/tests/memind39_ref.log tests/memind39.h
 	    | grep "^BUS" > /tmp/_dut_memind39.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind39.log winuae/tests/memind39_ref.log \
 	    --dut-may-continue
+# memind40 (docs/*.md review, plan.md §Phase 247): MULU.L/MULS.L/DIVU.L/
+# DIVS.L's own indexed EA and #imm forms -- the two forms Phase 192
+# explicitly deferred ("would need the dyn_bit_get_Dn 3rd-operand-deferred-
+# register trick for the Xn-vs-Dl/Dq register-port conflict... and a 2nd
+# 32-bit immediate word"), entirely undecoded until this phase (real code
+# using either form would hit an illegal-instruction fault). Covers brief
+# indexed, full-format indexed (word bd), and #imm, mixing MUL/DIV and
+# signed/unsigned.
+buscmp-memind40: $(SIM)/cosim_grp winuae/tests/memind40_ref.log tests/memind40.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind40.hex +grp=memind40 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind40.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind40.log winuae/tests/memind40_ref.log \
+	    --dut-may-continue --allow-adjacent-swap
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
               buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
-              buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 \
+              buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 buscmp-memind40 \
               buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)

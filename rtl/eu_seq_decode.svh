@@ -3900,6 +3900,108 @@
                             dec_abs_ea_val = decode_pc + 32'd4
                                            + {{16{ext_data[15]}}, ext_data[15:0]};
                         end
+                    end else if ((f_dn == 3'b110) && !f_dir &&
+                                 (f_ss == 2'b00 || f_ss == 2'b01) &&
+                                 (f_mode == 3'b110)) begin
+                        // (d8,An,Xn)/(bd,An,Xn) -- one of the two forms
+                        // Phase 192 explicitly deferred (docs/*.md review,
+                        // plan.md §Phase 247). Same "q1=muldivl descriptor
+                        // (HIGH half), q2=EA descriptor (LOW half)" layout
+                        // as the (d16,An)/abs.W/abs.L/(d16,PC) forms above.
+                        // Xn and Dl/Dq both need rd_b simultaneously (Xn
+                        // during the EA/read phase, Dl/Dq at the read's own
+                        // ack, when the EX-stage compute actually consumes
+                        // md_dst=rd_b_data) -- same 3-operand-deferred-
+                        // register conflict CHK's own indexed form (Phase
+                        // 84) and the general ALU-EA family (Phase 243)
+                        // already solve via dyn_bit_get_Dn.
+                        dec_needs_ext   = 1'b1;
+                        dec_siz         = 2'b00;
+                        dec_is_mem_src  = 1'b1;
+                        dec_is_mem_rd   = 1'b1;
+                        dec_dest_reg    = {1'b0, ext_data[18:16]};  // Dl/Dq -- final WB target
+                        dec_md_dst2     = ext_data[30:28];           // Dh/Dr
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_is_muldivl  = 1'b1;
+                        dec_src_reg     = {1'b1, f_reg};  // An → rd_a
+                        dec_reads_src   = 1'b1;
+                        dec_dst_reg     = {ext_data[15], ext_data[14:12]};  // Xn → rd_b (during read)
+                        dec_reads_dst   = 1'b1;
+                        dec_is_idx      = 1'b1;
+                        dec_xn_wl       = ext_data[11];
+                        dec_xn_scale    = ext_data[10:9];
+                        // Full-format bd needs the SAME one-q-slot shift
+                        // CMP2/CHK2's own indexed arm needed (Phase 244):
+                        // this family's own extra leading descriptor word
+                        // (Dl/Dq/Dh/Dr, at ext_data[31:16]) occupies the
+                        // slot fi_bd's own generic formula assumes holds
+                        // the bd value -- reusing fi_bd naively here reads
+                        // the descriptor word itself as if it were an
+                        // address displacement (caught via a genuine cosim
+                        // mismatch: EA computed as a wild, unrelated
+                        // address). q3_word/ext34_data are the real
+                        // shifted locations, exactly matching CMP2/CHK2's
+                        // own derivation. Genuine memory-indirect
+                        // (fi_iis!=0) is deliberately NOT covered here,
+                        // matching Stage 9b/Phase 238's own original
+                        // scoping decision for this family -- still an
+                        // open, documented, deferred candidate (see
+                        // plan.md §Phase 247), not attempted this pass.
+                        dec_ea_offset      = (fi_is_full && fi_bdsz == 2'b10) ? {{16{q3_word[15]}}, q3_word}
+                                           : (fi_is_full && fi_bdsz == 2'b11) ? {q3_word, ext34_data[15:0]}
+                                           : (fi_is_full)                    ? 32'h0
+                                           : {{24{ext_data[7]}}, ext_data[7:0]};
+                        dec_is_dyn_bit_idx = 1'b1;
+                        dec_dyn_bit_reg    = ext_data[18:16];   // Dl/Dq → rd_b after swap
+                        dec_dyn_bit_is_an  = 1'b0;
+                        if (f_ss == 2'b00) begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_MUL;
+                            dec_md_op    = ext_data[27] ? MUL_SL : MUL_UL;
+                            dec_md_64bit = ext_data[26];
+                        end else begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_DIV;
+                            dec_md_op    = ext_data[27] ? DIV_SL : DIV_UL;
+                            dec_md_64bit = (ext_data[30:28] != ext_data[18:16]);
+                        end
+                    end else if ((f_dn == 3'b110) && !f_dir &&
+                                 (f_ss == 2'b00 || f_ss == 2'b01) &&
+                                 (f_mode == 3'b111) && (f_reg == 3'b100)) begin
+                        // #imm -- the other form Phase 192 explicitly
+                        // deferred (docs/*.md review, plan.md §Phase 247).
+                        // No memory operand at all -- the 32-bit immediate
+                        // source occupies q2+q3, same physical slots as the
+                        // abs.L form's own address above (ext_data[15:0]=
+                        // high half, q3_word=low half). md_src's own
+                        // existing `ex_use_imm ? ex_imm : rd_a_data` branch
+                        // (eu_seq_execute.svh) already handles this case
+                        // with zero EX-stage changes needed, exactly
+                        // matching Phase 192's own "no EX-stage changes
+                        // needed" framing for the other EA forms.
+                        dec_needs_ext   = 1'b1;
+                        dec_siz         = 2'b00;
+                        dec_use_imm     = 1'b1;
+                        dec_imm         = {ext_data[15:0], q3_word};
+                        dec_dst_reg     = {1'b0, ext_data[18:16]};  // Dl/Dq → rd_b
+                        dec_dest_reg    = {1'b0, ext_data[18:16]};
+                        dec_md_dst2     = ext_data[30:28];           // Dh/Dr
+                        dec_reads_dst   = 1'b1;
+                        dec_writes_reg  = 1'b1;
+                        dec_updates_ccr = 1'b1;
+                        dec_is_muldivl  = 1'b1;
+                        if (f_ss == 2'b00) begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_MUL;
+                            dec_md_op    = ext_data[27] ? MUL_SL : MUL_UL;
+                            dec_md_64bit = ext_data[26];
+                        end else begin
+                            dec_valid    = 1'b1;
+                            dec_unit     = UNIT_DIV;
+                            dec_md_op    = ext_data[27] ? DIV_SL : DIV_UL;
+                            dec_md_64bit = (ext_data[30:28] != ext_data[18:16]);
+                        end
                     end
                 end
 

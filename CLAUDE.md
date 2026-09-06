@@ -768,15 +768,40 @@ edge-detector — fixed with the same settle-before/after-edge idiom `u_cache`'s
 Stage 6 test already established. Full mandatory gate clean, Harte sweep
 bit-identical to baseline (expected — Harte never enables either cache).
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 26/26,
+**Phase 247 (full documentation audit, in progress)**: user asked for a sweep of
+every doc in the project for anything deferred/skipped and never closed. Found 10
+items (2 real correctness gaps, the rest doc staleness or low-priority). **Item #1
+(IMPLEMENTED AND VERIFIED)**: `MULU.L`/`MULS.L`/`DIVU.L`/`DIVS.L`'s own indexed EA
+(`(d8,An,Xn)`/`(bd,An,Xn)`) and `#imm` forms were entirely undecoded since Phase 192
+explicitly deferred them — real 68020+ code using either form hit an
+illegal-instruction fault. Implemented both: indexed via the same
+`dyn_bit_get_Dn` 3-operand-deferred-register trick CHK's own indexed form (Phase
+84) uses (Xn on `rd_b` during the read, swaps to Dl/Dq at the ack); `#imm` needed
+zero EX-stage changes (`md_src`'s own mux already had an unused
+`ex_use_imm ? ex_imm : ...` branch). **Found and fixed a real bug in the first
+attempt**: the full-format indexed case's own word-sized bd computed a wild EA —
+this family has the SAME "extra leading descriptor word shifts every subsequent
+word one q-slot later" shape CMP2/CHK2 needed a custom extraction for (Phase 244),
+and the naive generic `fi_bd` formula was silently reading the muldivl descriptor
+word itself as if it were the bd value. Fixed by reusing CMP2/CHK2's own exact
+shifted-extraction derivation. New `tests/memind40.s` (brief-indexed, full-format-
+indexed, and `#imm`, mixing MUL/DIV/signed/unsigned) matches Musashi exactly
+(needed one 3-NOP settle fix for a benign IFU-readahead reordering — the first
+test to combine the `#imm` form's own long artificial stall with an immediate
+result-write). Full mandatory gate clean, Harte sweep bit-identical to baseline
+(no Harte coverage of `.L` mul/div forms at all — 68000-captured corpus). Items
+#2-10 (a `biu_cache_if.sv` translated-burst-fallback address bug, and several
+doc-staleness/low-priority items) still to come.
+
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 27/27,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item
 backlog plan (`~/.claude/plans/elegant-gliding-fog.md`) and the CAS bus-lock plan
 (`~/.claude/plans/silent-copper-latch.md`) are both CLOSED IN FULL, Stage 9's own
 genuine-memory-indirect-EA work closed at Phase 245, and `docs/cache.md`'s own last
-open item closed at Phase 246. No open plan of any kind remains in this project —
-ask the user for new work.
+open item closed at Phase 246. A documentation audit (Phase 247) is in progress,
+working through a 10-item list one at a time — see above for status.
 
 ## Verification Commands
 

@@ -629,12 +629,44 @@ module m68030_seq (
     logic is_muldivl_2ext;
     assign is_muldivl_2ext = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
                              (f_ss == 2'b00 || f_ss == 2'b01) &&
-                             (f_mode == 3'b101 ||
+                             (f_mode == 3'b101 || f_mode == 3'b110 ||
                               (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b010)));
+                             // f_mode==110 added (docs/*.md review, plan.md
+                             // §Phase 247): brief-format (d8,An,Xn)/(d8,PC,Xn)
+                             // indexed EA needs exactly 1 more word than the
+                             // descriptor, same count as (d16,An)/abs.W/
+                             // (d16,PC) -- is_muldivl_idx_full (checked
+                             // earlier in the ext_count chain) claims the
+                             // full-format case first, so this bucket is only
+                             // ever reached for the brief case in practice.
     logic is_muldivl_3ext;
     assign is_muldivl_3ext = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
                              (f_ss == 2'b00 || f_ss == 2'b01) &&
-                             (f_mode == 3'b111) && (f_reg == 3'b001);
+                             ((f_mode == 3'b111) && (f_reg == 3'b001 || f_reg == 3'b100));
+                             // f_reg==001 is abs.L (descriptor+abs32, 3 words);
+                             // f_reg==100 is #imm (descriptor+imm32, 3 words) --
+                             // same total word count, so sharing one bucket is
+                             // safe (docs/*.md review, plan.md §Phase 247: the
+                             // #imm form was one of the two forms Phase 192
+                             // explicitly deferred).
+
+    // MULU.L/MULS.L/DIVU.L/DIVS.L indexed EA (d8,An,Xn)/(bd,An,Xn) -- the
+    // other form Phase 192 explicitly deferred (docs/*.md review, plan.md
+    // §Phase 247). Full-format override, same "q1=other data (muldivl
+    // descriptor), q2=EA descriptor" shape as CMP2/CHK2's own
+    // is_cmp2chk2_idx_full (Phase 120) -- reuses the same shared
+    // movem_bd_words/movem_od_words wires (both already generically derived
+    // from ifu_ext_data's own low half, i.e. q2, regardless of which family
+    // is asking). Brief-format (non-full) falls through to is_muldivl_2ext's
+    // own generic 2-word bucket below (f_mode==3'b110 added there), exactly
+    // mirroring how CMP2/CHK2's own brief bucket coexists with its full
+    // override -- priority order (this check runs first) does the rest.
+    logic is_muldivl_idx_full;
+    assign is_muldivl_idx_full = (f_group == 4'h4) && (f_dn == 3'b110) && !f_dir &&
+                                 (f_ss == 2'b00 || f_ss == 2'b01) &&
+                                 (f_mode == 3'b110) && peek_fi_full_movem;
+    logic [2:0] muldivl_idx_full_ext_count;
+    assign muldivl_idx_full_ext_count = 3'd2 + movem_bd_words + movem_od_words;
 
     // PEA — 1 ext word for (d16,An)/indexed/abs.W/PC-rel, 2 for abs.L
     logic is_pea;
@@ -760,6 +792,8 @@ module m68030_seq (
             ext_count = movem_ext_count;
         else if (is_cmp2chk2_idx_full)
             ext_count = cmp2chk2_ext_count;
+        else if (is_muldivl_idx_full)
+            ext_count = muldivl_idx_full_ext_count;
         else if (is_move_mm_absw_idxdst_full || is_move_mm_pcrel_idxdst_full)
             ext_count = move_mm_idxdst_ext_count;
         else if (is_move_mm_immw_idxdst_full)
