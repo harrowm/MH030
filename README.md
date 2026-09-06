@@ -237,12 +237,14 @@ python3 -u scripts/run_harte_batch.py tests/harte/*.json.gz tests/harte/*.json.b
 
 Full-corpus result: `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — the 2 fails are the same
 documented `ASL.b` corpus anomaly (below), zero other differences from the original
-per-process runner. This baseline is re-verified after any RTL change with pipeline- or
-cache-wide reach (most recently Phase 149) and has stayed bit-identical since Phase 112.
-Not yet the default for RTL-change verification gates, which still
-use `run_harte.py`. See `plan.md §Phase 110`/`§Phase 111` for the full investigation
-(including two dead ends: tiered memory-array sizing and SystemVerilog associative
-arrays, both rejected before landing on batching).
+per-process runner. **This is the actual default for RTL-change verification gates** —
+every RTL change with pipeline- or cache-wide reach runs this full sweep via the
+Verilator batch backend (`--backend verilator -j 10 --chunk-size 300`) as part of the
+project's mandatory verification gate, and it has stayed bit-identical since Phase 112.
+`run_harte.py`'s single-suite, per-process form is still useful for a quick one-off
+check of a single mnemonic during development. See `plan.md §Phase 110`/`§Phase 111`
+for the full investigation (including two dead ends: tiered memory-array sizing and
+SystemVerilog associative arrays, both rejected before landing on batching).
 
 ### Pipeline stall/hazard coverage
 
