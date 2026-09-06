@@ -426,7 +426,14 @@ module biu_cache_if (
             // Phase 158 Stage 1: CD/CED were off by one bit (cacr[12]/cacr[11]
             // are really DBE/CD, not CD/CED) — fixed to cacr[11]/cacr[10].
             if (cacr[11]) for (k = 0; k < 16; k++) for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0; // CD
-            if (cacr[10]) for (m = 0; m < 4; m++) valid_d[caar[7:4]][m] <= 1'b0;  // CED
+            // docs/*.md review fix: MC68030UM.pdf §6.3.1.4 -- CED clears only
+            // the ONE longword CAAR's index+long-word-select portion names
+            // (CAAR[7:4]=line index, CAAR[3:2]=long-word select, matching
+            // this file's own idx/woff derivation from eu_addr[7:4]/[3:2]
+            // just above), not the whole 4-longword line. Previously cleared
+            // all 4 (m=0..3), silently evicting 3 unrelated, still-valid
+            // longwords on every real CED use.
+            if (cacr[10]) valid_d[caar[7:4]][caar[3:2]] <= 1'b0;  // CED
 
             case (state)
                 CI_IDLE: begin

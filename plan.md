@@ -8561,4 +8561,57 @@ instructions and no 68020+ CAS/CAS2/CHK2 coverage either, and the two
 Format $2 fixes only change previously-unverified fields no Harte vector
 could exercise).
 
-**Items #4-#10 continue below as each is addressed.**
+### Item #4: CED clears only the selected longword — IMPLEMENTED AND VERIFIED
+
+MC68030UM.pdf §6.3.1.4: CED (Clear Entry in Data Cache, CACR bit 10)
+clears only the ONE longword named by CAAR's index+long-word-select
+field (CAAR[7:4]=line index, CAAR[3:2]=long-word select, per Figure
+6-15/§6.3.2), not the whole 4-longword line. `biu_cache_if.sv`'s own CED
+handler (`if (cacr[10]) for (m=0;m<4;m++) valid_d[caar[7:4]][m]<=1'b0;`)
+cleared all 4 longwords of the line unconditionally — confirmed via
+direct grep this bit position was already correct (Phase 158 Stage 1 had
+already fixed the CD/CED bit-position swap), but the CLEAR SCOPE itself
+was still wrong, undiscovered until this direct-manual-text re-read.
+CEI (the I-cache's own equivalent, §6.3.1.9) shares the identical manual
+requirement, but `biu_icache_if.sv`'s own `valid_i` array is per-LINE
+only (16 entries, no per-longword granularity at all) — an
+already-documented, deliberate architectural limitation (Phase 229's own
+CIIN-gating comment: "the I-cache's own per-LINE valid_i makes true
+per-word ... gating architecturally impossible there"), not a new gap
+this item introduces or is scoped to fix.
+
+**Fix**: one line, `valid_d[caar[7:4]][caar[3:2]] <= 1'b0;` — matching
+this same file's own already-correct `idx`/`woff` derivation from
+`eu_addr[7:4]`/`eu_addr[3:2]` used everywhere else in the module.
+
+**New test**: `tb/cache_tb.sv` D-3's own pre-existing CED coverage only
+ever checked selectivity ACROSS cache lines (R at idx0, S at a genuinely
+different idx1) — it never exercised the actual bug (same line, two
+different longwords). A first attempt inlining a same-line probe (T)
+directly into D-3's own flowing R/S sequence found and fixed a real
+off-by-one in its own address bookkeeping, but STILL corrupted a much
+later, unrelated test (D-6b) even after that fix — traced to D-cache
+STATE carryover between tests (the inline T access left an extra live
+entry in line 0 that a later test implicitly didn't expect), not an
+address collision (confirmed: D-4b/D-5 reset the shared ROM-authoring
+pointer to a fixed `0x0900` before D-3's own length could ever matter).
+Reverted that approach entirely and instead added a new, fully isolated
+**D-14** test at a confirmed-free fixed address (`0x1A00`/data at
+`0x1B00`), following D-13's own already-established "own local pointer,
+explicit-jump-in/out" convention (D-13's own extensive comment already
+documents, at length, why this file's flowing-accumulator region is
+fragile around the fixed-address D-5/D-6 exception blocks) — hooked in
+by redirecting D-13's own exit JMP through D-14 first, then on to I-5
+exactly as before. R2/T2 share a line but different longwords (woff0/
+woff2); after CED targets R2's own woff, R2 must miss again (its own
+longword only) while T2 must still hit (proving the rest of the line
+survived) — the exact scenario the old "clear all 4" bug would have
+gotten wrong (T2 would have missed too).
+
+**Full mandatory gate**: `make test` 37/37 (including 8 new D-14 checks),
+`make cosim_grp` 8/8, `make cosim_memind` 28/28, `make dat-synth` 50/50,
+full 124-suite Tom Harte sweep (mandatory — `rtl/` changed): `TOTAL: PASS
+702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bit-identical to baseline (Harte
+never touches CACR/CAAR at all).
+
+**Items #5-#10 continue below as each is addressed.**

@@ -930,7 +930,21 @@ values in `stall_fsm_tb.sv`/`mmu_xlate_tb.sv` PMOVE-loaded TC/CRP with
 degenerate all-zero placeholder data that now genuinely violates the new
 check — updated to valid (if arbitrary) configs. New coverage in
 `tb/special_instr_tb.sv` (MMU-08/09/10). Full mandatory gate clean,
-Harte bit-identical to baseline. Items #4-10 still to come.
+Harte bit-identical to baseline.
+
+**Item #4 (IMPLEMENTED AND VERIFIED)**: CED (Clear Entry in Data Cache)
+cleared all 4 longwords of the CAAR-indexed cache line instead of only
+the ONE longword CAAR's own index+long-word-select field names
+(MC68030UM.pdf §6.3.1.4) — one-line fix, `valid_d[caar[7:4]][caar[3:2]]`
+instead of a 4-iteration loop. CEI (I-cache equivalent) shares the same
+manual requirement but the I-cache's own `valid_i` array is per-line
+only, a pre-existing documented limitation, not touched. New `tb/
+cache_tb.sv` D-14 test (same-line, different-longword selectivity) added
+as a fully isolated fixed-address block (D-13's own established
+convention) after an inline attempt was found to corrupt an unrelated
+later test via D-cache state carryover. Full mandatory gate clean
+(Harte re-run mandatory since `rtl/` changed), bit-identical to
+baseline. Items #5-10 still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

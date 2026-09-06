@@ -217,6 +217,8 @@ module cache_tb;
     // -------------------------------------------------------------------
     localparam MOVEA_L_IMM_A0 = 16'h207C;
     localparam MOVEA_L_IMM_A1 = 16'h227C;  // MOVEA.L #imm,A1
+    // CLR.L D4 = 0x4280+4 (docs/*.md review: D-14's own T2 register).
+    localparam CLR_L_D4       = 16'h4284;
     localparam CLR_L_D5       = 16'h4285;
     localparam ADDI_L_D5      = 16'h0685;
     localparam CLR_L_D6       = 16'h4286;
@@ -267,6 +269,8 @@ module cache_tb;
     // 10=long; DDD=dst reg; MMM=dst mode; mmm=src mode; rrr=src reg) and
     // cross-checked against MOVE_W_IMM_A0's own already-verified derivation
     // above.
+    // MOVE.L (A0),D4: same +0x200-per-register pattern as D5->D6->D7 above.
+    localparam MOVE_L_A0_D4   = 16'h2810;  // MOVE.L (A0),D4
     localparam MOVE_L_A0_D5   = 16'h2A10;  // MOVE.L (A0),D5
     // TAS (A0): opcode 0x4AD0 (already proven in tb/stall_fsm_tb.sv's own
     // TAS_A0 constant) -- Phase 158 Stage 3.
@@ -452,6 +456,8 @@ module cache_tb;
         rom[16'h2100/4] = 32'h5555_6666;  // Q   (idx=0, tag=0x21 -- aliases P)
         rom[16'h2600/4] = 32'h7777_8888;  // R   (idx=6, tag=0x26)
         rom[16'h2710/4] = 32'h9999_AAAA;  // S   (idx=1, tag=0x27 -- genuinely different index than R)
+        rom[16'h1B00/4] = 32'h7777_8888;  // R2  (D-14: CED per-longword test, own fresh line -- idx0/woff0)
+        rom[16'h1B08/4] = 32'hFEED_FACE;  // T2  (same line as R2, woff2)
         rom[16'h2800/4] = 32'hBBBB_CCCC;  // W1  (idx=8, tag=0x28 -- write-through-on-hit)
         rom[16'h2900/4] = 32'hDDDD_EEEE;  // W2  (idx=9, tag=0x29 -- write-no-allocate-on-miss)
         rom[16'h2A00/4] = 32'hFFFF_0000;  // T1  (idx=A, tag=0x2A -- BERR-mid-read-miss target)
@@ -773,8 +779,66 @@ module cache_tb;
             q4 = q + 32'd4;
             rom[q4[31:2]] = {MOVES_L_A0_D6_EXT, JMP_ABS_L_OP};  // MOVES #2's own ext word ; JMP.L opcode
             q = q + 32'd8;
-            rom[q[31:2]] = {16'h0000, 16'h0600};   // JMP.L 0x00000600 -- on to I-5 (D-12's own original target)
+            rom[q[31:2]] = {16'h0000, 16'h1A00};   // JMP.L 0x00001A00 -- on to D-14 (redirected below;
+                                                     // D-14 itself continues on to I-5 at 0x0600)
             q = q + 32'd4;
+        end
+
+        // ===================================================================
+        // D-14: CED per-longword selectivity (docs/*.md review, MC68030UM.pdf
+        // §6.3.1.4) -- CED must clear only the ONE longword named by CAAR's
+        // index+long-word-select fields, not the whole 4-longword line.
+        // Isolated fixed address (0x1A00, confirmed free -- grepped the
+        // whole file for any 0x1A00-0x1FFF literal, found none) reached via
+        // D-13's own exit JMP (redirected above) and left via JMP to I-5
+        // (0x0600, D-13's own original target) -- same "own local pointer,
+        // explicit jump in/out" convention D-13 itself established (see its
+        // own comment above), rather than folding this inline into D-3's
+        // own flowing-accumulator region: a first attempt doing exactly
+        // that (interleaving a same-line-different-longword access between
+        // D-3's own R/S checks) empirically corrupted a much later,
+        // unrelated test (D-6b) even after fixing a real off-by-one in the
+        // inline attempt's own address bookkeeping -- confirmed via a
+        // baseline re-run (this exact isolated version, D-3 fully
+        // untouched) that the corruption was D-cache STATE carryover
+        // between tests (D-3's own line 0 gaining an extra cached entry
+        // the inline version left behind), not a code-address collision
+        // (D-4b/D-5 reset the shared ROM-authoring pointer to a fixed
+        // 0x0900 before D-3's own length could matter at all). Fresh,
+        // never-before-touched data addresses (R2=0x1B00, T2=0x1B08, same
+        // line/woff2) sidestep the whole question entirely.
+        // ===================================================================
+        begin
+            logic [31:0] r, r4, r8;
+            r = 32'h0000_1A00;
+            r = emit_set_cacr(r, 32'h0000_0100);  // dcache_en=1 (ED), fresh baseline
+
+            rom[r[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            r4 = r + 32'd4; r8 = r + 32'd8;
+            rom[r4[31:2]] = {16'h1B00, CLR_L_D5};
+            rom[r8[31:2]] = {MOVE_L_A0_D5, MOVEA_L_IMM_A0};  // R2#1 (cold miss)
+            r = r + 32'd12;
+            rom[r[31:2]] = {16'h0000, 16'h1B08};
+            r4 = r + 32'd4;
+            rom[r4[31:2]] = {CLR_L_D4, MOVE_L_A0_D4};        // T2#1 (cold miss)
+            r = r + 32'd8;
+
+            r = emit_set_caar(r, 32'h0000_0000);  // CAAR = idx(R2)<<4|woff(R2) = 0 (R2's own real index/woff)
+            r = emit_set_cacr(r, 32'h0000_0501);  // dcache_en|CED pulse
+            r = emit_set_cacr(r, 32'h0000_0101);  // back to just dcache_en
+
+            rom[r[31:2]] = {MOVEA_L_IMM_A0, 16'h0000};
+            r4 = r + 32'd4; r8 = r + 32'd8;
+            rom[r4[31:2]] = {16'h1B00, CLR_L_D5};
+            rom[r8[31:2]] = {MOVE_L_A0_D5, MOVEA_L_IMM_A0};  // R2#2 (post-CED, must miss -- its own index+woff)
+            r = r + 32'd12;
+            rom[r[31:2]] = {16'h0000, 16'h1B08};
+            r4 = r + 32'd4; r8 = r + 32'd8;
+            rom[r4[31:2]] = {CLR_L_D4, MOVE_L_A0_D4};        // T2#2 (post-CED, must HIT -- same line, different woff)
+            rom[r8[31:2]] = {JMP_ABS_L_OP, 16'h0000};
+            r = r + 32'd12;
+            rom[r[31:2]] = {16'h0600, NOP_OP};    // JMP.L 0x00000600 -- on to I-5 (D-13's own original target)
+            r = r + 32'd4;
         end
 
         // ===================================================================
@@ -1888,6 +1952,37 @@ module cache_tb;
             check32("D-13: 2nd MOVES (user-FC) read loaded the correct value",
                     u_top.u_eu.u_rf.d_reg[6], 32'hAAAA_BBBB);
             check32("D-13: 2nd MOVES (user-FC) read was a pure hit (0 bus cycles)", fc3 - fc2, 32'd0);
+        end
+
+        // D-14: CED per-longword selectivity (see the ROM-setup comment
+        // above for full rationale/placement discussion). R2/T2 share a
+        // line (idx0) but different longwords (woff0/woff2); after a CED
+        // pulse targeting R2's own woff, R2 must miss again but T2 must
+        // still hit -- proving only R2's own longword was cleared, not
+        // the whole line (the real bug: the old RTL cleared all 4).
+        begin
+            int g0, g1, g2, g3, e;
+            g0 = data_ds_count;
+            wait_cleared_then_set(5, 32'h7777_8888, 20000, e);
+            g1 = data_ds_count;
+            check32("D-14: R2#1 (cold) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'h7777_8888);
+            check("D-14: R2#1 was a genuine miss (cold)", g1 - g0 > 0);
+
+            wait_cleared_then_set(4, 32'hFEED_FACE, 20000, e);
+            g2 = data_ds_count;
+            check32("D-14: T2#1 (cold) loaded D4 correctly", u_top.u_eu.u_rf.d_reg[4], 32'hFEED_FACE);
+            check("D-14: T2#1 was a genuine miss (cold)", g2 - g1 > 0);
+
+            wait_cleared_then_set(5, 32'h7777_8888, 20000, e);
+            g3 = data_ds_count;
+            check32("D-14: R2#2 (post-CED, must miss) loaded D5 correctly", u_top.u_eu.u_rf.d_reg[5], 32'h7777_8888);
+            check("D-14: CACR.CED forced a real miss on R2 (its own index+woff)", g3 - g2 > 0);
+
+            wait_cleared_then_set(4, 32'hFEED_FACE, 20000, e);
+            g0 = data_ds_count;
+            check32("D-14: T2#2 (post-CED, must HIT) loaded D4 correctly", u_top.u_eu.u_rf.d_reg[4], 32'hFEED_FACE);
+            check32("D-14: CACR.CED selectivity -- T2's own longword survived, only R2's own woff cleared (0 bus cycles)",
+                    g0 - g3, 32'd0);
         end
 
         // ===================================================================
