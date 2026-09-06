@@ -100,17 +100,21 @@ fetch.
 **Flush**: `CD` (global) and `CED` (index-selective via `CAAR[7:4]`), same
 level-sensitive shape as the I-cache's `CI`/`CEI`.
 
-### A dead-code note: `eu_is_icache`
+### A dead-code note: `eu_is_icache` — **removed (10-item backlog Stage 1, Phase 227)**
 
-`biu_cache_if.sv` also contains a *second*, full I-cache-shaped array
+`biu_cache_if.sv` used to also contain a *second*, full I-cache-shaped array
 (`valid_i`/`tag_i`/`data_i`) and an `eu_is_icache` select input, gating an EU-facing
-I-cache access path distinct from the D-cache path described above. **This path is
-never live**: `m68030_top.sv` hardwires `eu_is_icache` to `1'b0` permanently. Only the
-IFU's own, separate array in `biu_icache_if.sv` is ever exercised — the EU (data
-path) has no architectural reason to fetch through the instruction cache on real
-68030 silicon either. Worth knowing if you're reading this file cold: there are two
-identically-shaped I-cache storage arrays in the RTL, and only one of them does
-anything.
+I-cache access path distinct from the D-cache path described above. That path was
+never live — `m68030_top.sv` hardwired `eu_is_icache` to `1'b0` permanently since
+Phase 127 moved the real I-cache to `biu_icache_if.sv`, and the EU (data path) has no
+architectural reason to fetch through the instruction cache on real 68030 silicon
+either. The 10-item backlog's own Stage 1 (`plan.md` §Phase 227) removed the whole
+thing outright — the parallel array, its 4-state linefill FSM, and the dispatch/
+output-block wiring across `biu_cache_if.sv`/`m68030_biu.sv`/`m68030_top.sv` — plus 2
+now-meaningless dedicated tests in `tb/biu_tb.sv` (their own coverage was already
+extensive elsewhere, this file's own I-1..I-6). Full Harte sweep bit-identical to
+baseline. Worth knowing if you're reading this file cold only so you don't go looking
+for a second I-cache array that no longer exists.
 
 ## Arbitration (both caches)
 
@@ -271,13 +275,14 @@ accurate:
    regardless of which beat failed, diverging from the manual's "only the actually-
    requested word's own beat should fault") but not fixed in Phase 158 itself — the fix
    needed a genuine per-beat discrimination mechanism the burst controller didn't yet
-   expose. **Partially fixed later**: `deferred-items closure plan Stage 9` (`plan.md`
-   §Phase 217) added `burst_beat_at_berr` to `biu_burst_ctrl.sv` and used it in both
-   cache-if modules to resolve the "beat is *after* the requested word" sub-case
-   cleanly (the requested word's data was already captured in an earlier successful
-   beat — no fault needed, mark only the words that genuinely arrived valid). The harder
-   "beat is *at or before* the requested word" sub-case still needs a genuine retry
-   mechanism and remains open — see the next section.
+   expose. **Fixed in two later stages, now closed in full**: `deferred-items closure
+   plan Stage 9` (`plan.md` §Phase 217) added `burst_beat_at_berr` to
+   `biu_burst_ctrl.sv` and used it in both cache-if modules to resolve the "beat is
+   *after* the requested word" sub-case cleanly (the requested word's data was already
+   captured in an earlier successful beat — no fault needed, mark only the words that
+   genuinely arrived valid). The harder "beat is *at or before* the requested word"
+   sub-case — a genuine retry — was closed by the 10-item backlog's own Stage 6
+   (`plan.md` §Phase 232); see "What's left, if anything" below for the full writeup.
 
 Every stage passed the full mandatory gate (`make test`/`cosim_grp`/`cosim_memind`/full
 124-suite Harte sweep, bit-identical to baseline at every RTL-touching stage — Harte
@@ -294,20 +299,54 @@ hardcoded sites, not just one). Confirmed functionally inert for the entire Hart
 
 ## What's left, if anything
 
-- **BERR-during-fill, the harder sub-case** (Stage 8 above): a beat failing *at or
-  before* the actually-requested word still unconditionally faults the whole fill —
-  real hardware would, in principle, need a genuine retry there. Confirmed real,
-  deliberately not attempted — this sits directly on top of the extensively-hardened
-  BERR-abort machinery from Phases 108-114, and this project has consistently avoided
-  touching that machinery without overwhelming justification.
-- A related possible improvement, never pursued: **genuine per-beat CIIN checking
-  during a burst** — this RTL currently checks CIIN once, for the whole line, at final
-  burst completion (Stage 7 above), not per-beat as the manual's own text describes;
-  would need reworking the beat-tracking mechanism itself.
-- **`mmu_ci`** (used for `ciout_n`'s own computation, Stage 7) is fed from the
-  EXT/PTEST port, not the real, live, per-access MMU translation CI result — flagged
-  since the Phase 150-era MMU work as "threaded through but not yet acted on"; wiring
-  it into real cache-inhibit behavior is a separate, deeper MMU-integration item.
+Every item below that this section used to list as open has since been closed by the
+10-item backlog plan (`~/.claude/plans/elegant-gliding-fog.md`, Phases 227-240) —
+kept here with their closure notes rather than deleted, so a future reader doesn't go
+re-investigating something already fixed.
+
+- **BERR-during-fill, the harder sub-case — CLOSED (10-item backlog Stage 6, Phase
+  232)**. A beat failing *at or before* the actually-requested word used to
+  unconditionally fault the whole fill; real hardware needs a genuine retry there.
+  Fixed with one new register, `dc_retry_used_r`, gating a single fresh burst
+  redispatch (`biu_cycle_gen.sv`'s own FSM already returns cleanly to `ST_IDLE` after
+  any burst outcome, so simply re-asserting `dc_burst_req_r` causes a genuine retry
+  with no new cross-module plumbing) before escalating to `CI_BERR` for real. A
+  related, deliberately NOT-fixed gap found while designing this: the degraded-
+  fallback path's own `fill_base_r` is latched pre-translation and would be wrong for
+  a translated burst — documented, sidestepped by leaving `dc_burst_addr_r` untouched
+  on retry rather than re-deriving it, not fixed (out of scope for this stage). Two
+  new `tb/biu_tb.sv` tests (retry succeeds; retry also fails and escalates). Full
+  Harte sweep bit-identical to baseline. This was the plan's own flagged riskiest RTL
+  stage and closed cleanly — the plan's own explicit permission to defer it wasn't
+  needed. **This closed the last cache-correctness gap this document knew about at
+  the time.**
+- **Genuine per-beat CIIN checking during a burst — CLOSED, D-cache only (10-item
+  backlog Stage 3, Phase 229)**. Fixed with a deliberate scope refinement: the
+  I-cache's own per-LINE `valid_i` makes true per-word CIIN gating architecturally
+  impossible there (unlike the D-cache's per-WORD `valid_d`), so this stage covers
+  the D-cache side only — new per-beat CIIN capture threaded through
+  `biu_burst_ctrl.sv`/`biu_cycle_gen.sv`/`m68030_biu.sv` into `biu_cache_if.sv`,
+  gating each of the 4 `valid_d` bits individually instead of the whole line at once.
+  Verified via a new `tb/biu_tb.sv` test with a deliberately mixed per-beat CIIN
+  pattern (beats 0/3 inhibited, 1/2 not). The I-cache's own per-line limitation is
+  architectural, not a remaining to-do — there is no per-word `valid_i` to gate.
+- **`mmu_ci`'s own stale-broadcast risk — CLOSED for the D-cache (10-item backlog
+  Stage 2, Phase 228)**, a DIFFERENT and narrower problem than "not yet wired to a
+  real CI result" (`mmu_ci` was already the real, live per-access result by this
+  point — the bug was reading it on a stale cycle). `ciout_n`/`dhit_r`/`CI_D_MISS`
+  used to read `mmu_ci`'s own broadcast directly, which is only guaranteed correct on
+  the exact cycle a requester's own translation completes — reading it any later
+  cycle (the whole time a D-cache miss/write waits for its own bus cycle) risked
+  showing a concurrently in-flight I-side/EXT-side requester's own result instead.
+  Fixed with a new `xl_ci_r` register capturing THIS access's own translated CI bit
+  at the one correct cycle. Found and fixed a real bug along the way: an
+  untranslated-access burst-dispatch check was also reading the same stale
+  broadcast, capable of permanently blocking D-cache bursting after any one
+  unrelated MMU use. **Still genuinely open, found and documented by this same
+  stage, NOT fixed**: `biu_icache_if.sv` has zero MMU-CI-awareness at all for its
+  own linefill — a bigger, different, still-undone gap than this stage's own
+  "stale broadcast" scope (the I-cache's own fill path doesn't consult CI at all,
+  whereas the D-cache's bug was merely reading a stale copy of it).
 - A full MOVES-based D-cache FC-aliasing test was attempted once (predating Phase 158)
   and caused an unexplained timing sensitivity elsewhere in `tb/cache_tb.sv` when
   inserted mid-sequence — **root-caused and closed** by the open-items backlog's own
@@ -315,10 +354,10 @@ hardcoded sites, not just one). Confirmed functionally inert for the entire Hart
   test's own flowing accumulator and a fixed exception-handler block placed earlier in
   the file, not a simulation-timing race. A real FC-aliasing test now exists at an
   isolated address (D-13).
-- Two dead-code items are documented above (the unused EU-side I-cache array in
-  `biu_cache_if.sv`, gated by a permanently-0 `eu_is_icache`) rather than removed —
-  harmless, and removing them is a cleanup task independent of cache *correctness*,
-  out of scope for this document.
+- The dead-code EU-side I-cache array in `biu_cache_if.sv` (gated by a permanently-0
+  `eu_is_icache`) that used to be documented here rather than removed **has since been
+  removed outright** — see "A dead-code note" above (10-item backlog Stage 1, Phase
+  227).
 - The `JMP (An)`-after-exception-dispatch anomaly (Phase 133) was investigated and
   closed in Phase 137 (see D-6 above) — not an open item, listed here only so a
   future reader doesn't go looking for it as unresolved.
@@ -326,6 +365,10 @@ hardcoded sites, not just one). Confirmed functionally inert for the entire Hart
 `tb/cache_tb.sv`'s own check count has grown considerably past the "46 checks total
 (Phase 137)" figure quoted in the table above, via Phase 158's own 8 stages and the
 open-items backlog's own Stage 1 — no single up-to-date count is maintained here; run
-`make test` for the current pass/fail state of the `cache` suite. **No known
-correctness gap remains in either cache except the one item above** (BERR-during-fill's
-harder sub-case), which is confirmed real but deliberately deferred, not overlooked.
+`make test` for the current pass/fail state of the `cache` suite.
+
+**The one genuinely open item remaining in either cache, as of the 10-item backlog's
+own closure (Phase 240): `biu_icache_if.sv`'s own complete lack of MMU-CI-awareness
+for I-cache linefill** (found and documented, not fixed, by Stage 2 above). Everything
+else this section used to list — BERR-during-fill's harder sub-case, per-beat CIIN,
+the D-cache's own `mmu_ci` staleness, the dead EU-side I-cache array — is closed.

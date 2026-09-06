@@ -292,17 +292,38 @@ directly from the wording above -- PTEST's own opcode+ext straddling a cache-lin
 boundary itself, and (the more literal reading) the *following* `ADDI.L`'s own
 immediate-operand span straddling the next boundary instead -- both survived cleanly in
 isolation, no hang either time. Since both directly-derived alignment hypotheses failed
-in a clean environment, the most likely explanation is that the original hang depends on
-state specific to *this file's* own long execution history preceding `WS-PTEST` -- most
-plausibly a stale I-cache line from one of its own many earlier I-cache tests already
-resident at the same index, needing a genuine eviction the clean reproduction can't
-exercise. Matches this project's own "confirmed real, not reproduced under controlled
-conditions" precedent (closest prior example: the Phase 137 `JMP (An)`-after-exception-
-dispatch investigation) -- the isolated reproduction is kept as new permanent regression
-coverage (`tb/mmu_xlate_tb.sv`'s own Phase 6), but `WS-PTEST`/`INT-mid-PTEST` remain
-absent from *this* file specifically. Still not chased to full resolution -- a genuine
-`stall_fsm_tb.sv`-specific reproduction, if one is ever wanted, would need to be built
-inside this file's own execution history rather than isolated.
+in a clean environment, the most likely explanation at the time was that the original
+hang depends on state specific to *this file's* own long execution history preceding
+`WS-PTEST` -- most plausibly a stale I-cache line from one of its own many earlier
+I-cache tests already resident at the same index, needing a genuine eviction the clean
+reproduction can't exercise. Matches this project's own "confirmed real, not reproduced
+under controlled conditions" precedent (closest prior example: the Phase 137
+`JMP (An)`-after-exception-dispatch investigation) -- the isolated reproduction is kept
+as new permanent regression coverage (`tb/mmu_xlate_tb.sv`'s own Phase 6), but
+`WS-PTEST`/`INT-mid-PTEST` remained absent from *this* file specifically.
+
+**Root cause since found precisely (10-item backlog Stage 4, `plan.md` §Phase 230)** —
+the "stale I-cache line eviction" hypothesis above turned out to be wrong, and the real
+cause is much more specific than a vague eviction-timing issue. A new "Phase 8" test in
+`tb/mmu_xlate_tb.sv` (same shape as its own Phase 6, but with CACR's `EI`+`IBE` genuinely
+enabled first) reproduced a real, reliable hang on the first attempt, traced to:
+`tb/mmu_xlate_tb.sv`'s own inline memory model predates the burst-address-freeze fix
+(real 68030 silicon holds the address bus constant for a whole burst, MC68030UM.pdf
+7.3.7) — with the address genuinely frozen, the model's purely address-keyed read served
+the *identical* longword for every beat of a burst instead of 4 distinct ones, corrupting
+whatever instruction got fetched via a genuine multi-beat I-cache burst fill. Not an RTL
+bug — a testbench-only gap shared by every file with its own inline memory model that had
+never been exercised through a real multi-beat burst before. `tb/mem_model.sv`/
+`tb/cache_tb.sv` were already immune (`burst_beat_probe`); `tb/mmu_xlate_tb.sv` was fixed
+by Phase 230 itself. **Confirmed via direct grep at the time: `tb/stall_fsm_tb.sv` — this
+file — has the identical unfixed line**, and Phase 230's own writeup calls this "almost
+certainly the real explanation" for the hang this file's own `WS-PTEST`/`INT-mid-PTEST`
+would hit too. **Still not fixed in this file specifically** — Phase 230 fixed only
+`tb/mmu_xlate_tb.sv`, explicitly flagging the other 7 files sharing the same inline-
+memory-model shape (including this one) as "a real, dormant, documented follow-up," out
+of scope for that investigation stage. If `WS-PTEST`/`INT-mid-PTEST` are ever wanted in
+this file, the fix is now known precisely (mirror `cache_tb.sv`'s own `burst_beat_probe`
+pattern in this file's own inline memory model) rather than needing fresh investigation.
 
 **Head-start variant of the absorption effect (Stage 6)**: for BFINS/CMP2/MOVE-mem-mem,
 `wait_states=10` didn't just get absorbed with zero visible effect — it produced a
@@ -508,9 +529,10 @@ Harte sweep) — see `docs/cache.md`.
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
 | J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
 | K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
-| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 7 pairs (Phases 107/126/191, elegant-gliding-fog.md Stage 8): TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, CAS2→MOVE16, BFINS→CAS2, RTE→TAS, each a genuinely different FSM-shape handoff, no instruction between them; each with a real cross-boundary data-flow check (not just "did it unstick") |
+| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 9 pairs: TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, CAS2→MOVE16, BFINS→CAS2, RTE→TAS (Phases 107/126/191, pipeline-stall breadth extension plan's own Stage 8), plus MOVEM.L(store)→CAS and ABCD→SBCD (10-item backlog's own, later, Stage 10, `plan.md` §Phase 240 -- see the "What's left" section below for why these share the `elegant-gliding-fog.md` filename with an unrelated earlier plan), each a genuinely different FSM-shape handoff, no instruction between them; each with a real cross-boundary data-flow check (not just "did it unstick") |
 
-Run everything with `make test` (35/35, includes all of the above except Categories J/K,
+Run everything with `make test` (37/37 as of Phase 245 -- the count has grown via later,
+unrelated phases; includes all of the above except Categories J/K,
 which are verified via the Harte sweep instead — see those categories' own entries). See
 `plan.md`
 Phases 103–126 for the full session-by-session narrative, including dead ends that
@@ -544,16 +566,23 @@ has both decode-holdoff and BERR-abort coverage, and the two mechanisms layered 
 (interrupt dispatch, DSACK wait states) are proven correct in principle across several
 FSM shapes each. What remains is purely *breadth*, not depth:
 
-- **Back-to-back FSM composition** (Category D→D handoff) has 7 pairs (TAS→MOVEM,
+- **Back-to-back FSM composition** (Category D→D handoff) has 9 pairs (TAS→MOVEM,
   MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191, plus CAS2→MOVE16,
   BFINS→CAS2, and RTE→TAS, added by the pipeline-stall breadth extension plan's own
   Stage 8, elegant-gliding-fog.md -- the first pairing combining two multi-beat
   burst-adjacent mechanisms, the first where the producer's own FSM shape differs
   structurally from every earlier producer, and the first where the producer is a
-  control-transfer/stack-restore FSM rather than a data-processing one, respectively)
-  out of the many possible combinations. Nothing suggests a further pairing would behave
-  differently, but only these seven have been checked. **This closes the pipeline-stall
-  breadth extension plan (elegant-gliding-fog.md) in full** -- all 8 stages done.
+  control-transfer/stack-restore FSM rather than a data-processing one, respectively --
+  plus MOVEM.L(store)→CAS and ABCD→SBCD, added later by the DIFFERENT, LATER plan that
+  happens to reuse this same `elegant-gliding-fog.md` filename, the 10-item backlog's
+  own Stage 10 (`plan.md` §Phase 240, confirmed via `git log --follow` to be a distinct
+  plan from the one referenced just above, not a continuation of it) -- MOVEM's first
+  appearance as a producer/store rather than a load/consumer, and the first pairing of
+  two byte-granularity predecrement BCD FSMs, respectively) out of the many possible
+  combinations. Nothing suggests a further pairing would behave differently, but only
+  these nine have been checked. **This closes both the pipeline-stall breadth extension
+  plan's own Stage 8 (its 8 stages) and, later, the entire 10-item backlog plan's own
+  Stage 10 (its 10 stages) in full** -- two separate plans, both fully closed.
 - **Interrupt-mid-FSM** (Category F) has 18 of ~19-23 possible FSM sources checked
   individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS -- Phase 189's
   own open-items backlog Stage 5 added the last two -- plus MOVE16/ABCD/SBCD/CMP2/CHK2/
@@ -574,9 +603,12 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   PTEST was attempted (Stage 7) and found genuinely, more seriously broken than a mere
   non-source -- re-establishing the transparent-TT0/TC.E=1 state and running PTEST
   produced a sustained instruction-fetch translation-fault hang on a cache-line-crossing
-  fetch, confirmed real via direct signal tracing, not guessed at, but out of this
-  breadth-extension plan's own scope (deferred to a dedicated future phase; see Category
-  H's own PTEST note above).
+  fetch, confirmed real via direct signal tracing, not guessed at. **Root cause since
+  found precisely** (10-item backlog Stage 4, `plan.md` §Phase 230 -- a testbench-only
+  burst-address-freeze modeling gap in this file's own inline memory model, confirmed via
+  direct grep to be the same unfixed shape already root-caused and fixed in
+  `tb/mmu_xlate_tb.sv`) but **not yet applied to this file** -- see Category H's own
+  PTEST note above for the full finding and the now-known fix shape.
   Given Phase 125's own absorption-effect finding, a new source needs its own
   wait-state-value sanity check (don't assume `wait_states=3` or `=10` transfers
   automatically) rather than a purely mechanical extension -- Stage 5's own three
