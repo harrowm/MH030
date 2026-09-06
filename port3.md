@@ -27,10 +27,20 @@ against `ex_dest_reg`). Full 124-suite Harte re-run after both phases: bit-
 identical to baseline, zero regressions. **No other case in the codebase has
 needed the port** — kept built (not reverted) since it now has a real consumer.
 
-The only thing still open, unrelated to the port question, is MOVE's remaining
-`(d8,An,Xn)`/`(d8,PC,Xn)` indexed-*source* forms and CHK's remaining
-`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)` EA modes — both are ordinary
-missing-decode work, not port-related, and not attempted yet.
+**Update (docs/*.md review, Phase 247 item #4)**: both items this paragraph used
+to list as still open are closed. MOVE's indexed-*source* forms
+(`(d8,An,Xn)`/`(d8,PC,Xn)`) were closed at Phase 85 (`plan.md.old`) -- MOVE.b/w/l
+all reached 100%; along the way, found and fixed a genuinely new test-harness
+bug distinct from the earlier `f_dir`-disambiguation class: `gen_harte_hex.py`'s
+`get_scale_remap()` could only ever compute a scale remap for one side of an
+instruction, structurally unable to handle an indexed source *and* an indexed
+destination simultaneously -- split into a list-returning form covering both
+sides independently. CHK's remaining EA modes
+(`(An)+`/`-(An)`/`(xxx).L`/`(d16,PC)`/`(d8,PC,Xn)`) were closed at Phase 86
+(`plan.md.old`) -- all reused the existing 2-port `dyn_bit_get_Dn` mechanism with
+no port-count change, confirming this doc's own conclusion below (nothing in
+the codebase needs a 3rd port beyond the one genuine exception already built).
+No open items remain from this paragraph.
 
 **Update after Phase 0**: Bucket A is confirmed and closed. CLR.b/NEG.w/NOT.b/TST.b/
 TAS/ASL.w all went from their previous partial pass rates to **100%**, zero remaining
