@@ -414,15 +414,21 @@ module exception_tb;
         set_an(3'd0, 32'h40);
         set_an(3'd1, 32'h50);
 
-        // CAS2-01: CAS2.L match — D0:D2,D1:D3,(A0):(A1); ext=0x2309_0108
+        // CAS2-01: CAS2.L match — D0:D2,D1:D3,(A0):(A1); ext=0x8040_90C2
         // M[0x40]=4==Dc1=D0, M[0x50]=6==Dc2=D2 → write Du1=D1=5@0x40, Du2=D3=7@0x50
+        // docs/*.md review fix (plan.md §Phase 247 item #9): ext was
+        // 0x2309_0108 (both the ext1/ext2 word assignment AND the
+        // within-word bit positions backwards) until this phase -- confirmed
+        // via Musashi's own m68k_op_cas2_32 and independently via vasm's own
+        // assembled bytes for `cas2.l d0:d2,d1:d3,(a0):(a1)`. Intended
+        // semantics (Dc1=D0,Du1=D1,Rn1=A0,Dc2=D2,Du2=D3,Rn2=A1) unchanged.
         set_dn(0, 32'd4); set_dn(1, 32'd5); set_dn(2, 32'd6); set_dn(3, 32'd7);
         ram[32'h40>>2] = 32'd4;
         ram[32'h50>>2] = 32'd6;
         write_cnt = 0;
         @(posedge clk); #1;
         instr_word = 16'h0EFC; instr_valid = 1;
-        ext_data = 32'h2309_0108; ext_valid = 1;
+        ext_data = 32'h8040_90C2; ext_valid = 1;
         repeat(200) begin @(posedge clk); if (instr_ack) break; end
         instr_valid = 0; ext_valid = 0;
         repeat(80) @(posedge clk);
@@ -439,21 +445,24 @@ module exception_tb;
         write_cnt = 0;
         @(posedge clk); #1;
         instr_word = 16'h0EFC; instr_valid = 1;
-        ext_data = 32'h2309_0108; ext_valid = 1;
+        ext_data = 32'h8040_90C2; ext_valid = 1;
         repeat(200) begin @(posedge clk); if (instr_ack) break; end
         instr_valid = 0; ext_valid = 0;
         repeat(80) @(posedge clk);
         chk("CAS2-02:write_cnt", 32'(write_cnt), 32'd0);
         chk1("CAS2-02:Z=0", sr_out[2], 1'b0);
 
-        // CAS2-03: CAS2.W match — D4:D6,D5:D7,(A0):(A1); ext=0x6709_4508
+        // CAS2-03: CAS2.W match — D4:D6,D5:D7,(A0):(A1); ext=0x8144_91C6
+        // docs/*.md review fix (plan.md §Phase 247 item #9): ext was
+        // 0x6709_4508 -- same fix reasoning as CAS2-01 above. Intended
+        // semantics (Dc1=D4,Du1=D5,Rn1=A0,Dc2=D6,Du2=D7,Rn2=A1) unchanged.
         set_dn(4, 32'h12); set_dn(5, 32'h34); set_dn(6, 32'h56); set_dn(7, 32'h78);
         ram[32'h40>>2] = 32'h0000_0012;
         ram[32'h50>>2] = 32'h0000_0056;
         write_cnt = 0;
         @(posedge clk); #1;
         instr_word = 16'h0CFC; instr_valid = 1;
-        ext_data = 32'h6709_4508; ext_valid = 1;
+        ext_data = 32'h8144_91C6; ext_valid = 1;
         repeat(200) begin @(posedge clk); if (instr_ack) break; end
         instr_valid = 0; ext_valid = 0;
         repeat(80) @(posedge clk);

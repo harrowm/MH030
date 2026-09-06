@@ -871,8 +871,26 @@
                         endcase
                     // ── CAS2 Dc1:Dc2, Du1:Du2, (Rn1):(Rn2) ───────────────
                     // Opcode: 0x0CFC (.W) / 0x0EFC (.L)
-                    // ext_data[31:16] (ext1): [30:28]=Dc2, [26:24]=Du2, [19]=Rn2_an, [18:16]=Rn2
-                    // ext_data[15:0]  (ext2): [14:12]=Dc1, [10:8]=Du1,  [3]=Rn1_an,  [2:0]=Rn1
+                    // docs/*.md review fix (plan.md §Phase 247, item #9): this
+                    // block previously had BOTH the word assignment AND the
+                    // within-word bit positions wrong -- confirmed against
+                    // Musashi's own m68k_op_cas2_32 (word2 = the 32-bit pair
+                    // read MSW-first, i.e. ext_data[31:16] genuinely IS the
+                    // first/MSW word) and independently against vasm's own
+                    // assembled bytes for `cas2.l Dc1:Dc2,Du1:Du2,(Rn1):(Rn2)`:
+                    // the FIRST extension word (ext_data[31:16]) carries
+                    // Rn1/Du1/Dc1 (operand SET 1, matching the mnemonic's own
+                    // first-named Rn1), and the SECOND (ext_data[15:0])
+                    // carries Rn2/Du2/Dc2 -- this block previously had that
+                    // backwards (ext1 decoded as set-2 fields, ext2 as set-1)
+                    // AND used the wrong within-word bit positions on top of
+                    // that (Dc/Du swapped, same class of bug as single CAS
+                    // just above). Same "never independently verified"
+                    // history as single CAS: no Harte coverage (68000 corpus)
+                    // and no cosim/bus-trace test against Musashi ever
+                    // exercised CAS2 before this phase.
+                    // ext_data[31:16] (ext1, Rn1/Dc1/Du1): [31]=Rn1_an, [30:28]=Rn1, [24:22]=Du1, [18:16]=Dc1
+                    // ext_data[15:0]  (ext2, Rn2/Dc2/Du2): [15]=Rn2_an,  [14:12]=Rn2, [8:6]=Du2,   [2:0]=Dc2
                     end else if (!f_dir && f_ss == 2'b11 &&
                                  (f_dn == 3'b110 || f_dn == 3'b111) &&
                                  f_mode == 3'b111 && f_reg == 3'b100) begin
@@ -883,14 +901,14 @@
                         dec_is_mem_rd      = 1'b1;
                         dec_needs_ext      = 1'b1;
                         dec_x_unchanged    = 1'b1;
-                        dec_src_reg        = {ext_data[3], ext_data[2:0]};    // Rn1 → rd_a (EA)
+                        dec_src_reg        = {ext_data[31], ext_data[30:28]}; // Rn1 → rd_a (EA)
                         dec_reads_src      = 1'b1;
-                        dec_dst_reg        = {1'b0, ext_data[14:12]};         // Dc1 → rd_b (CMP)
+                        dec_dst_reg        = {1'b0, ext_data[18:16]};         // Dc1 → rd_b (CMP)
                         dec_reads_dst      = 1'b1;
-                        dec_cas2_du1_reg   = ext_data[10:8];
-                        dec_cas2_rn2_reg   = {ext_data[19], ext_data[18:16]};
-                        dec_cas2_dc2_reg   = ext_data[30:28];
-                        dec_cas2_du2_reg   = ext_data[26:24];
+                        dec_cas2_du1_reg   = ext_data[24:22];
+                        dec_cas2_rn2_reg   = {ext_data[15], ext_data[14:12]};
+                        dec_cas2_dc2_reg   = ext_data[2:0];
+                        dec_cas2_du2_reg   = ext_data[8:6];
                         dec_siz            = (f_dn == 3'b110) ? 2'b10 : 2'b00;  // .W or .L
                     // ── CAS Dc,Du,(An) ─────────────────────────────────────
                     end else if (!f_dir && f_ss == 2'b11 &&
@@ -904,9 +922,25 @@
                         dec_is_mem_rmw  = 1'b1;
                         dec_needs_ext   = 1'b1;
                         dec_x_unchanged = 1'b1;
+                        // docs/*.md review fix (plan.md §Phase 247, item #9):
+                        // Dc/Du were swapped here -- confirmed against
+                        // Musashi's own m68k_op_cas_32_ai (compare = D[word2
+                        // & 7], update = D[(word2>>6) & 7]) and independently
+                        // against vasm's own assembled bytes for
+                        // `cas.l Dc,Du,(ea)`: Dc (the compare register) is
+                        // ext_data[2:0], Du (the update register) is
+                        // ext_data[8:6] -- this file previously had them
+                        // backwards. A genuine, previously-undiscovered
+                        // correctness bug: Harte has no CAS coverage at all
+                        // (68000 corpus, CAS is 68020+), and no cosim/
+                        // bus-trace test had ever exercised CAS against
+                        // Musashi before this phase -- every existing
+                        // tb/stall_fsm_tb.sv/tb/biu_tb.sv CAS test hand-picks
+                        // its own raw opcode bytes, self-consistently with
+                        // whichever convention the RTL happened to use.
                         dec_src_reg     = {1'b1, f_reg};
-                        dec_dst_reg     = {1'b0, ext_data[8:6]};
-                        dec_cas_du_reg  = ext_data[2:0];
+                        dec_dst_reg     = {1'b0, ext_data[2:0]};
+                        dec_cas_du_reg  = ext_data[8:6];
                         dec_reads_src   = 1'b1;
                         dec_reads_dst   = 1'b1;
                         case (f_dn)

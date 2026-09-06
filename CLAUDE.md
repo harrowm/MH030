@@ -829,10 +829,31 @@ failures, `make test` 37/37, `git diff --stat rtl/` empty so no Harte re-run
 needed). Deliberately did NOT reconstruct the actual `WS-PTEST`/`INT-mid-PTEST`
 tests in this same pass (needs a new collision-free ROM block in a file whose own
 history flags that as a recurring real risk) — scoped to fixing the known bug and
-documenting precisely, matching this project's own deferred-item precedent. Items
-#9-10 still to come.
+documenting precisely, matching this project's own deferred-item precedent.
+**Item #9 (started as a test-coverage gap, uncovered a genuine correctness bug,
+FIXED)**: building CAS/CAS2/CHK2's own missing §11.6 timing benchmarks (deferred
+since the original Chapter 11 rollout's own Stage A6, `plan.md.old`) found that
+**CAS's Dc/Du register-field bits were swapped, and CAS2's had both its
+extension-word order and within-word bit positions wrong, relative to real 68030
+hardware** — confirmed against Musashi's own `m68k_op_cas_32_ai`/`m68k_op_cas2_32`
+and independently via `vasm`'s own assembled bytes. Never caught in 246 prior
+phases because CAS/CAS2 are 68020+-only (zero Harte coverage) and — confirmed via
+grep — no cosim/bus-trace test had ever exercised either against Musashi; every
+existing CAS/CAS2 test hand-picked its own opcode bytes to match whichever
+convention the RTL happened to use. User consulted (`AskUserQuestion`) before
+fixing, given the scope jump and the CAS/CAS2 bus-lock mechanism's own
+high-blast-radius history (Phases 213/233/241/242) — chose to fix now. Fixed the
+decode in `rtl/eu_seq_decode.svh` (zero `eu_seq_execute.svh` changes needed, every
+consumer is register-index-agnostic); recomputed ~10 existing hand-encoded opcode
+constants across `tb/stall_fsm_tb.sv`/`tb/atomic_tb.sv`/`tb/exception_tb.sv` that
+encoded specific intended Dc/Du/Rn assignments under the old (wrong) convention;
+added `tests/memind41.s`, the first-ever CAS/CAS2 bus-trace cosim test against
+Musashi (35/35 cycles, bit-identical), closing the actual root cause. Full
+mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 28/28,
+`dat-synth` 50/50, Harte bit-identical to baseline — zero CAS/CAS2/CHK2 coverage
+in that corpus). Item #10 still to come.
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 27/27,
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). The 10-item

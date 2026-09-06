@@ -8171,4 +8171,107 @@ Category F's own PFLUSH/PTEST exclusion (no FC=101 bus activity to key an
 interrupt-injection off) is a completely different, unrelated, still-permanent
 limitation — untouched by this fix.
 
-**Items #9-#10 continue below as each is addressed.**
+**Item #9 (CAS/CAS2/CHK2 manual §11.6 timing-table benchmarks — started as a
+test-coverage gap, uncovered a genuine, previously-undiscovered CORRECTNESS BUG
+in CAS/CAS2's own register-field decode, IMPLEMENTED AND VERIFIED)**: the
+original Chapter 11 timing-verification rollout's own Stage A6 (`plan.md.old`)
+explicitly deferred CAS/CAS2/CHK2's own `CONTROL_INSTR` (§11.6.16) rows as
+"more complex setup" — this item closed that gap by building `scripts/
+gen_a8_tests.py` (6 new `tests/timing/a8_*.s` tests + `a8_cas_chk2.json`
+manifest, mirroring `gen_a7_tests.py`'s own style) covering CAS Successful/
+Unsuccessful Compare, CAS2 Successful/Unsuccessful Compare, and CHK2 No-
+Exception/Exception-Taken.
+
+**The first new test (`a8_cas_success`, a real `vasm`-assembled
+`cas.l d1,d2,(a0)`) failed immediately** — not a timing mismatch, a full
+correctness failure (the write never happened). Investigating traced this to
+a genuine, previously-undiscovered bug: **this project's RTL had CAS's Dc/Du
+register-field bit positions backwards, and CAS2's had both the extension-
+word ORDER and the within-word bit positions backwards, relative to real
+68030 hardware.** Confirmed independently against two authoritative sources:
+Musashi's own `m68k_op_cas_32_ai`/`m68k_op_cas2_32` (`tools/musashi/
+m68kops.c` — this project's own trusted reference oracle for every other
+cosim comparison in its history) and `vasm` (a real, independent 68k
+assembler) — assembling `cas2.l d1:d3,d2:d4,(a0):(a1)` and decoding the
+resulting bytes by Musashi's own bit layout reproduces every operand
+exactly. This project's RTL (`rtl/eu_seq_decode.svh`) had Dc at
+`ext_data[8:6]`/Du at `ext_data[2:0]` for single CAS (backwards — real
+hardware: Dc at `[2:0]`, Du at `[8:6]`), and for CAS2, decoded the FIRST
+extension word as holding operand-SET-2's fields and the SECOND as holding
+SET-1's (backwards — real hardware: first word holds Rn1/Du1/Dc1, second
+holds Rn2/Du2/Dc2), each using different (also wrong) within-word bit
+positions on top of that.
+
+**Why this was never caught in 246 prior phases**: confirmed via direct grep
+that no cosim/bus-trace test had EVER exercised CAS or CAS2 against Musashi
+before this phase — CAS/CAS2 are 68020+-only, entirely absent from the
+Harte corpus (68000-captured), and every existing CAS/CAS2 test in this
+project's history (`tb/stall_fsm_tb.sv`, `tb/biu_tb.sv`, `tb/atomic_tb.sv`,
+`tb/exception_tb.sv`) hand-picks its own raw opcode bytes chosen to be
+self-consistent with whichever bit convention the RTL happened to
+implement — never independently derived from a real assembler or checked
+against real hardware semantics. This is precisely the kind of gap a
+dedicated `vasm`-assembled, Musashi-cross-checked cosim test (which never
+existed for these two instructions) is built to catch.
+
+**User consulted before fixing** (via `AskUserQuestion`, given this expands
+far beyond the original 10-item doc-audit scope and touches the single most
+heavily-hardened, highest-blast-radius mechanism in the project — the CAS/
+CAS2 bus-lock work, Phases 213/233/241/242): chose to fix it now rather than
+defer.
+
+**Fix**: swapped Dc/Du in the single-CAS decode block; for CAS2, swapped
+both the ext1/ext2 word roles AND the within-word bit positions to the
+Musashi/vasm-confirmed real layout. Zero changes needed anywhere in
+`eu_seq_execute.svh` — every downstream consumer (`rd_a_sel`/`rd_b_sel`
+muxes, the CAS/CAS2 compare-and-write FSMs) is register-index-agnostic, so
+correcting the decode-side extraction alone was sufficient.
+
+**Recomputed ~10 existing hand-encoded opcode constants** across
+`tb/stall_fsm_tb.sv` (`CAS_EXT`, `CAS_EXT_D2D3`, `CAS2_EXT1`, `CAS2_EXT2` —
+used at 11+ call sites), `tb/atomic_tb.sv` (3 CAS value-checking tests,
+CAS-01/02/03), and `tb/exception_tb.sv` (3 CAS2 value-checking tests,
+CAS2-01/02/03) — every one of these tests hand-picks a raw ext value chosen
+to encode a SPECIFIC intended Dc/Du/Rn register assignment (documented in
+each test's own comment); fixing the RTL's decode convention meant every
+existing constant now decoded to the WRONG registers unless recomputed for
+the new (correct) bit positions. Recomputed each via direct bit-arithmetic
+(verified against `vasm`'s own assembled bytes for the equivalent real
+mnemonic) preserving each test's own original INTENDED register semantics
+exactly.
+
+**Two dead-end investigation branches, each resolved without any further
+RTL change**: (1) `a8_chk2_noexc`/`a8_chk2_exc` measured `r=2`/`r=3`, not the
+manual's own `r=1`/`r=2` — traced to a genuine, pre-existing (unrelated to
+this phase's fix) implementation choice: CHK2/CMP2's shared `cmp2_run_r`
+two-read FSM always issues two SEPARATE bound reads regardless of operand
+size, never exploiting the word-size bound-packing the manual's own row
+assumes; `a8_chk2_exc`'s own `p=1` (not 3) and `w=3` (not 4) match this
+project's own already-established exception-dispatch/write-granularity
+harness conventions (`a7_trap_n`/`a7_illegal` precedent) exactly. (2)
+Building `tests/memind41.s` (the new CAS/CAS2 cosim test) initially showed a
+SECOND apparent failure — CAS2 reading garbage addresses — that turned out
+to be a stale, not-yet-rebuilt `sim/cosim_grp` binary in my own test
+methodology, not a real RTL issue; rebuilding and rerunning matched
+Musashi's own reference bit-for-bit (35/35 cycles).
+
+**New permanent regression coverage**: `tests/memind41.s` (the first-ever
+CAS/CAS2 bus-trace cosim test against Musashi, closing the actual root cause
+of why this bug was invisible for 246 phases), wired into `make cosim_memind`
+as `buscmp-memind41` (28 total). `a8_cas_success`'s own `expect_w=0` (not the
+architectural 1) documents a THIRD, separate, already-known-and-accepted
+harness limitation matching `tests/timing/a4_tas_mem.s`'s own precedent
+exactly: CAS is RMW-locked (`cas_as_hold`, Phase 242), so AS never produces a
+fresh edge for the write phase, which `tb/timing_tb.sv`'s own address-phase-
+edge-based `w_count` structurally cannot observe — not fixed, matching the
+established precedent's own reasoning exactly.
+
+**Full mandatory gate**: `make test` 37/37 (covers the corrected `atomic`/
+`exception`/`stall_fsm` suites directly), `make cosim_grp` 8/8, `make
+cosim_memind` 28/28 (new `memind41` bit-identical to Musashi), `make
+dat-synth` 50/50, all 6 new `a8_*` timing benchmarks pass, full 124-suite Tom
+Harte sweep: `TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bit-
+identical to baseline (expected: Harte has zero CAS/CAS2/CHK2 coverage of any
+kind, 68000-captured corpus).
+
+**Item #10 continues below.**

@@ -1,0 +1,74 @@
+[
+  {
+    "name": "a8_cas_success",
+    "hex": "tests/timing/a8_cas_success.hex",
+    "target_pc": "0x200",
+    "watch_reg": 5,
+    "watch_val": "0xcafebabe",
+    "expect_r": 1,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "CONTROL_INSTR '##CAS (Successful Compare)': CAS (Successful Compare) NCC=13(1/1/1) -- D1 (Dc) matches mem[$1000] exactly -> compare succeeds, D2 (Du) writes to memory (confirmed via direct trace: mem[$1000] genuinely becomes 0x22222222, the write really happens) -- but expect_w is 0, not the architectural 1, because CAS is RMW-locked (Phase 242's own cas_as_hold): AS stays continuously asserted across the whole read+write sequence, so this harness's own address-phase-edge-based w_count structurally cannot observe the write's own (non-existent) fresh AS-fall event -- the exact same, already-documented limitation tests/timing/a4_tas_mem.s hit for TAS's own locked write (see known_issues.json's own a4_tas_mem entry). Not an RTL bug",
+    "instr_len": 4
+  },
+  {
+    "name": "a8_cas_fail",
+    "hex": "tests/timing/a8_cas_fail.hex",
+    "target_pc": "0x200",
+    "watch_reg": 5,
+    "watch_val": "0xcafebabe",
+    "expect_r": 1,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "CONTROL_INSTR '##CAS (Unsuccessful Compare)': CAS (Unsuccessful Compare) NCC=11(1/1/0) -- D1 (Dc) deliberately does not match mem[$1100] -> compare fails, D1 reloaded from memory instead, NO write -- matches this project's own already-confirmed CAS semantics (CAS does not always write back on mismatch, see plan.md's deferred-items closure plan)",
+    "instr_len": 4
+  },
+  {
+    "name": "a8_cas2_success",
+    "hex": "tests/timing/a8_cas2_success.hex",
+    "target_pc": "0x200",
+    "watch_reg": 5,
+    "watch_val": "0xcafebabe",
+    "expect_r": 2,
+    "expect_p": 2,
+    "expect_w": 2,
+    "desc": "CONTROL_INSTR '+CAS2 (Successful Compare)': CAS2 (Successful Compare) NCC=26(2/2/2) -- both Dc1/Dc2 match their own operand -> both compares succeed, both Du1/Du2 write to memory; r=2/w=2 are the two compare reads and two successful writes",
+    "instr_len": 6
+  },
+  {
+    "name": "a8_cas2_fail",
+    "hex": "tests/timing/a8_cas2_fail.hex",
+    "target_pc": "0x200",
+    "watch_reg": 5,
+    "watch_val": "0xcafebabe",
+    "expect_r": 2,
+    "expect_p": 2,
+    "expect_w": 0,
+    "desc": "CONTROL_INSTR '+CAS2 (Unsuccessful Compare)': CAS2 (Unsuccessful Compare) NCC=24(2/2/0) -- Dc1 deliberately mismatches mem[A0]; Dc2 alone still matches mem[A1] -- CAS2 must read BOTH operands before it can know whether to write (r=2, same as the successful case), but a failure on EITHER side suppresses BOTH writes (w=0), not just the mismatched one -- the atomic, all-or-nothing semantics CAS2 is built for",
+    "instr_len": 6
+  },
+  {
+    "name": "a8_chk2_noexc",
+    "hex": "tests/timing/a8_chk2_noexc.hex",
+    "target_pc": "0x200",
+    "watch_reg": 5,
+    "watch_val": "0xcafebabe",
+    "expect_r": 2,
+    "expect_p": 1,
+    "expect_w": 0,
+    "desc": "CONTROL_INSTR '#+CHK2 Mem,Rn (No Exception)': CHK2 Mem,Rn (No Exception) NCC=18(1/1/0) -- D1=15 falls within the packed [10,20] word-bound pair at mem[$1600] -> no exception, falls through normally. Measured r=2, not the manual's own row value of 1: this RTL's CHK2/CMP2 implementation shares one dedicated two-read FSM (cmp2_run_r) that always issues two SEPARATE bus reads (lower bound, then upper bound) regardless of operand size, rather than exploiting a word-size optimization that packs both bounds into a single longword read -- the manual's own r=1 row value assumes that packing. Confirmed via direct trace, not guessed at; this project's own CHK2 cosim tests (tests/memind36.s/37.s) already confirm the comparison ITSELF is correct, only the manual's own resource-count row doesn't match this RTL's chosen (simpler, size-independent) implementation shape",
+    "instr_len": 4
+  },
+  {
+    "name": "a8_chk2_exc",
+    "hex": "tests/timing/a8_chk2_exc.hex",
+    "target_pc": "0x200",
+    "watch_reg": 5,
+    "watch_val": "0xcafebabe",
+    "expect_r": 3,
+    "expect_p": 1,
+    "expect_w": 3,
+    "desc": "CONTROL_INSTR '#+CHK2 Mem,Rn (Exception Taken)': CHK2 Mem,Rn (Exception Taken) NCC=42(2/3/4) -- D1=100 falls outside the packed [10,20] bound pair at mem[$1700] -> traps via vector 6 (addr $18) to chk2_handler, same vector/frame CHK's own Exception-Taken row uses. Three measured divergences from the manual's own row, each confirmed via direct trace, none a correctness issue (this project's own CHK2 cosim tests, tests/memind36.s/37.s, already confirm correct final memory content): (1) r=3, not 2 -- same two-separate-bound-reads shape a8_chk2_noexc already documents, PLUS the real vector-table read (vector 6, 1 longword) exception dispatch always needs; (2) p=1, not 3 -- this harness's own address-range 'p' gating only counts fetches within the tested instruction's own byte span, and chk2_handler's own opcode fetch (a genuinely different address) falls outside it, same convention every other exception-dispatch test in this project's own corpus (a7_trap_n/a7_illegal) already uses; (3) w=3, not 4 -- this RTL pushes the 6-word (FMT_INST) frame as THREE longword (siz=00) writes, not four word writes, the identical write-GRANULARITY divergence a7_trap_n/a7_illegal already documented for the 4-word (FMT_SHORT) frame case",
+    "instr_len": 4
+  }
+]

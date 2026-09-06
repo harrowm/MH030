@@ -226,9 +226,16 @@ module stall_fsm_tb;
     localparam MOVEQ_D0_42    = 16'h702A;  // MOVEQ #42,D0 (the replacement opcode)
     // CAS.L Dc,Du,(A0): opcode 0000_111_0_11_010_000 (f_dn=111=long,
     // f_mode=010=(An)) per eu_seq.sv's dec_is_cas block. Ext word:
-    // [8:6]=Dc(compared, ->D1=001), [2:0]=Du(written on match, ->D2=010).
+    // [2:0]=Dc(compared, ->D1=001), [8:6]=Du(written on match, ->D2=010).
+    // docs/*.md review fix (plan.md §Phase 247 item #9): this ext value was
+    // 16'h0042 (Dc/Du at the OPPOSITE bit positions) until this phase --
+    // confirmed via Musashi's own m68k_op_cas_32_ai and independently via
+    // vasm's own assembled bytes for `cas.l d1,d2,(a0)` that real hardware
+    // has Dc at [2:0] and Du at [8:6], not the reverse this RTL used to
+    // decode. This constant's own intended semantics (Dc=D1,Du=D2) are
+    // unchanged; only the bit encoding needed to catch up to the RTL fix.
     localparam CAS_L_D1D2_A0  = 16'h0ED0;
-    localparam CAS_EXT        = 16'h0042;
+    localparam CAS_EXT        = 16'h0081;
     // Stage 10 (elegant-gliding-fog.md, current 10-item backlog plan --
     // distinct from the earlier, already-closed plan that once reused this
     // same filename for Phase 208's own T4f/T4g/T4h): new back-to-back FSM
@@ -237,16 +244,26 @@ module stall_fsm_tb;
     localparam MOVEA_L_IMM_A2 = 16'h247C;  // MOVEA.L #imm,A2 (same formula as A0/A1/A7 above)
     localparam MOVEA_L_IMM_A3 = 16'h267C;  // MOVEA.L #imm,A3
     localparam CAS_L_D2D3_A1  = 16'h0ED1;  // CAS.L Dc,Du,(A1); f_mode=010,reg=001
-    localparam CAS_EXT_D2D3   = 16'h0083;  // [8:6]=Dc(D2=010<<6=0x80), [2:0]=Du(D3=011)
+    // docs/*.md review fix (plan.md §Phase 247 item #9): was 16'h0083 (Dc/Du
+    // swapped), same fix reasoning as CAS_EXT above -- intended semantics
+    // (Dc=D2,Du=D3) unchanged.
+    localparam CAS_EXT_D2D3   = 16'h00C2;  // [2:0]=Dc(D2=010), [8:6]=Du(D3=011<<6=0xC0)
     localparam SBCD_A3_A2     = 16'h850B;  // SBCD -(A3),-(A2): Rx(dest)=A2=010, Ry(src)=A3=011 (same embedding as ABCD_A1_A0)
     // CAS2.L: opcode 0x0EFC (f_dn=111, f_mode/f_reg=111/100), per the exact
-    // ext-word bit layout documented at eu_seq.sv's dec_is_cas2 block:
-    //   ext1 (ext_data[31:16]): [14:12]=Dc2, [10:8]=Du2, [3]=Rn2_an, [2:0]=Rn2
-    //   ext2 (ext_data[15:0]):  [14:12]=Dc1, [10:8]=Du1, [3]=Rn1_an, [2:0]=Rn1
-    // Using Rn1=A0, Rn2=A1, Dc1=D1, Du1=D2, Dc2=D3, Du2=D4.
+    // ext-word bit layout documented at eu_seq.sv's dec_is_cas2 block.
+    // docs/*.md review fix (plan.md §Phase 247 item #9): this whole block
+    // previously had BOTH the ext1/ext2 word assignment AND the within-word
+    // bit positions backwards -- confirmed via Musashi's own
+    // m68k_op_cas2_32 and independently via vasm's own assembled bytes for
+    // `cas2.l d1:d3,d2:d4,(a0):(a1)`, which reproduces CAS2_EXT1/EXT2 below
+    // exactly. Real layout:
+    //   ext1 (ext_data[31:16], Rn1/Dc1/Du1): [15]=Rn1_an, [14:12]=Rn1, [8:6]=Du1, [2:0]=Dc1
+    //   ext2 (ext_data[15:0],  Rn2/Dc2/Du2): [15]=Rn2_an, [14:12]=Rn2, [8:6]=Du2, [2:0]=Dc2
+    // Using Rn1=A0, Rn2=A1, Dc1=D1, Du1=D2, Dc2=D3, Du2=D4 (same intended
+    // semantics as before this fix).
     localparam CAS2_L         = 16'h0EFC;
-    localparam CAS2_EXT1      = 16'h3409;  // Dc2=D3,Du2=D4,Rn2_an=1,Rn2=A1
-    localparam CAS2_EXT2      = 16'h1208;  // Dc1=D1,Du1=D2,Rn1_an=1,Rn1=A0
+    localparam CAS2_EXT1      = 16'h8081;  // Rn1_an=1,Rn1=A0,Du1=D2,Dc1=D1
+    localparam CAS2_EXT2      = 16'h9103;  // Rn2_an=1,Rn2=A1,Du2=D4,Dc2=D3
     localparam ADDI_L_D1      = 16'h0681;
     localparam ADD_L_D1_D2    = 16'hD481;  // ADD.L D1,D2
     localparam DBF_D0         = 16'h51C8;  // DBF D0,disp

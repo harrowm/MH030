@@ -335,8 +335,14 @@ module atomic_tb;
 
         // ====================================================================
         // CAS — compare-and-swap
-        // CAS.L D2,D3,(A0): opcode=0x0ED0, ext={...,Dc=D2(010),Du=D3(011)}=0x0083
-        // CAS.W D2,D3,(A0): opcode=0x06D0, same ext=0x0083
+        // CAS.L D2,D3,(A0): opcode=0x0ED0, ext={...,Dc=D2(010),Du=D3(011)}=0x00C2
+        // CAS.W D2,D3,(A0): opcode=0x06D0, same ext=0x00C2
+        // docs/*.md review fix (plan.md §Phase 247 item #9): ext was 0x0083
+        // (Dc/Du at the opposite bit positions) until this phase -- confirmed
+        // via Musashi's own m68k_op_cas_32_ai and independently via vasm's
+        // own assembled bytes for `cas.l d2,d3,(a0)` that real hardware has
+        // Dc at [2:0] and Du at [8:6], not the reverse this RTL used to
+        // decode. Intended semantics (Dc=D2,Du=D3) unchanged.
         $display("--- CAS: compare-and-swap ---");
 
         // CAS-01: CAS.L match — M[0x100]=0xABCD_1234=D2 → write D3=0x5678_9ABC; Z=1
@@ -344,7 +350,7 @@ module atomic_tb;
         set_an(3'd0, 32'h0000_0100);
         set_dn(2, 32'hABCD_1234);
         set_dn(3, 32'h5678_9ABC);
-        run_instr(16'h0ED0, 1'b1, 32'h0083);
+        run_instr(16'h0ED0, 1'b1, 32'h00C2);
         chk("CAS-01:mem", ram[32'h100>>2], 32'h5678_9ABC);
         chk1("CAS-01:Z=1", sr_out[2], 1'b1);
 
@@ -354,7 +360,7 @@ module atomic_tb;
         set_an(3'd0, 32'h0000_0104);
         set_dn(2, 32'hFFFF_FFFF);
         set_dn(3, 32'h5678_9ABC);
-        run_instr(16'h0ED0, 1'b1, 32'h0083);
+        run_instr(16'h0ED0, 1'b1, 32'h00C2);
         chk("CAS-02:mem_unchanged", ram[32'h104>>2], 32'h1111_2222);
         chk1("CAS-02:Z=0", sr_out[2], 1'b0);
         chk("CAS-02:D2_loaded", dut.u_rf.d_reg[2], 32'h1111_2222);
@@ -364,7 +370,7 @@ module atomic_tb;
         set_an(3'd0, 32'h0000_0108);
         set_dn(2, 32'h0000_ABCD);
         set_dn(3, 32'h0000_5678);
-        run_instr(16'h06D0, 1'b1, 32'h0083);
+        run_instr(16'h06D0, 1'b1, 32'h00C2);
         chk("CAS-03:mem", ram[32'h108>>2], 32'h0000_5678);
         chk1("CAS-03:Z=1", sr_out[2], 1'b1);
 

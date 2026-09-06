@@ -729,12 +729,23 @@ buscmp-memind40: $(SIM)/cosim_grp winuae/tests/memind40_ref.log tests/memind40.h
 	    | grep "^BUS" > /tmp/_dut_memind40.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind40.log winuae/tests/memind40_ref.log \
 	    --dut-may-continue --allow-adjacent-swap
+# memind41 (docs/*.md review, plan.md §Phase 247 item #9): CAS/CAS2 real
+# bus-trace cosim test against Musashi -- the first ever built for either
+# instruction. Closes the actual root cause behind the Dc/Du-swap decode bug
+# item #9 found and fixed: no cosim/bus-trace test had ever exercised CAS or
+# CAS2 before this phase.
+buscmp-memind41: $(SIM)/cosim_grp winuae/tests/memind41_ref.log tests/memind41.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind41.hex +grp=memind41 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind41.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind41.log winuae/tests/memind41_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
               buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
               buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 buscmp-memind40 \
+              buscmp-memind41 \
               buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
