@@ -1125,8 +1125,40 @@ backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), the CAS bus-lock plan
 closed at Phase 245, and `docs/cache.md`'s own last open item closed at Phase 246.
 The manual compliance review (Phase 248, `~/.claude/plans/elegant-gliding-fog.md`)
 is CLOSED IN FULL — all 10 items resolved. Phase 249 (a code-review pass over
-items #1/#5, two real bugs found and fixed) is also closed. No outstanding plan
-remains open in this project as of Phase 249 — ask the user for new work.
+items #1/#5, two real bugs found and fixed) is also closed.
+
+**`plan.md` was archived a second time at Phase 250** (grown to ~8800 lines,
+same reason/pattern as the original Phase 162 archival) — the pre-Phase-250
+full history now lives in `plan.md.old2` (Phases 162-249), alongside the
+original `plan.md.old` (Phases 1-161); the live `plan.md` now starts fresh
+at Phase 250. **Phase 250 (a second, independent MC68030UM.pdf chapter-by-
+chapter compliance review, findings list only — NOT YET ACTIONED)** covered
+Ch.2/3/4/12 plus a fresh look at Ch.8's exception vector/priority table and
+Ch.7's CAS2/MOVEP cycles. Found 10 items, none fixed yet — see `plan.md
+§Phase 250` for full citations and detail. Highest-stakes: **F1**, visual
+confirmation against MC68030UM.pdf Figure 7-29's own flowchart text
+("Negate AS and DS" after the RMW read, "Assert AS" again for the write)
+appears to directly contradict this project's own current `rmw_as_hold`/
+`cas2_as_hold`/`cas_as_hold` AS-continuity model and CLAUDE.md's own
+"S-State Signal Timing" section above — flagged, NOT fixed, needs a
+dedicated re-investigation phase before any RTL changes given the blast
+radius (Phases 108-114/207/232/241/242 all built on the "AS never
+negates" premise). Also found: confirmed missing privilege checks on
+MOVES and PFLUSH/PLOAD/PMOVE/PTEST (F2/F3); a CHK2/CMP2 wrapped-bounds
+C-flag bug (F4); Format $9 ("MMU short bus fault") does not exist on
+real silicon — real Format $9 is the unrelated 10-word Coprocessor
+Mid-Instruction frame, so the frame-format table two sections above this
+one is itself wrong and needs correcting once F5 is fixed (F5); RTE
+never checks the Format $B version-number field per §8.1.8 (F6); the
+exception priority-chain order in `m68030_exc.sv` doesn't match Table
+8-5, particularly `int_pending` being checked far too early relative to
+higher-priority exceptions (F7, reachability not yet confirmed); and a
+scope-level finding that **MOVE16 does not exist on the MC68030 at all
+— it's an MC68040 instruction** — this project fully implements it as
+real 68030 silicon behavior, needs a user decision (remove vs.
+deliberately keep as an extension), not just a fix (F8). No outstanding
+IMPLEMENTED plan remains — Phase 250's findings are queued, awaiting
+direction on which to tackle first.
 
 ## Verification Commands
 
