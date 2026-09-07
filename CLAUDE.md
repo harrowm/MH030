@@ -55,6 +55,30 @@ Keep each module under ~3000 lines. Do not put everything in one file.
 - CAS2 dual-address atomic lock (most complex: 4 bus cycles without releasing the bus)
 - MOVEP byte-interleaved (individual byte cycles, address increments by 2)
 
+**Coprocessor conditional instructions (cpBcc/cpDBcc/cpScc/cpTRAPcc) —
+deliberate, currently out of scope**: Phase 157/199 implemented the CIR
+access bus protocol itself and cpSAVE/cpRESTORE's own full state-transfer
+handshake, closing those items. The four coprocessor-conditional
+instructions (Branch/Test-Decrement-Branch/Set/Trap on Coprocessor
+Condition, MC68030UM.pdf §10.2.2/§10.2.3/§10.2.4/§10.2.5) are NOT decoded
+or implemented anywhere in this RTL (confirmed via grep — zero occurrences
+of any of the four mnemonics in `rtl/`) and were never previously flagged
+as a known gap. Unlike cpSAVE/cpRESTORE (a fixed-shape state-transfer
+protocol this project could fully specify and test without a real
+coprocessor attached), the four conditional instructions require the
+MAIN PROCESSOR to read back a genuine coprocessor-evaluated condition
+(via the Condition CIR / "evaluate and return condition" primitive) and
+act on it — meaningfully testing this needs an actual attached
+coprocessor model (a real or emulated FPU) exercising its own condition-
+evaluation semantics, which this project has never built and has no
+current plan to. Documented here as a deliberate scope boundary (Phase
+248 item #7, docs/*.md review), not silently dropped. Coprocessor
+Protocol Violation (vector 13, MC68030UM.pdf §10.5.1.1/§10.5.4) — the
+exception either the main processor or a coprocessor can signal when
+the CIR handshake itself is malformed — is likewise unimplemented for
+the same reason (nothing in this project ever drives a genuine
+protocol-violation condition to detect).
+
 ## S-State Signal Timing (Critical)
 
 **Corrected against MC68030UM.pdf Section 7.3.1/7.3.2/7.3.3 directly** (a
@@ -145,7 +169,7 @@ FC must transition at the same time as the address, never mid-cycle.
 
 **CPU Space sub-types** (distinguished by A[19:16]):
 - `1111` — Interrupt Acknowledge (level in A[3:1])
-- `0010` — Coprocessor communication (FPU: A[15:13]=primitive type)
+- `0010` — Coprocessor communication (FPU: A[15:13]=CpID, A[4:0]=CIR — see the Design Constraints section above for the full, corrected breakdown)
 
 ## Exception Stack Frame Formats
 
@@ -984,7 +1008,16 @@ chose full removal. Deleted `biu_eclk_gen.sv` entirely, all
 tests in `tb/biu_tb.sv` (P18-1/P18-2, `test_eclk_timing`) and batch-fixed
 tie-offs across all 15 testbenches that instantiate `m68030_top`/
 `m68030_biu`. Full mandatory gate clean, Harte bit-identical to baseline.
-Items #7-10 still to come.
+**Item #7 (DOCUMENTED)**: cpBcc/cpDBcc/cpScc/cpTRAPcc (coprocessor-
+conditional instructions) and Coprocessor Protocol Violation (vector 13)
+are unimplemented and were never previously flagged — documented as a
+deliberate scope boundary above (see "Coprocessor conditional
+instructions" note), since meaningfully testing them needs a real
+attached coprocessor model this project doesn't have. Also fixed a
+stale duplicate claim in the CPU Space sub-types bullet list below.
+**Item #9 (RESOLVED BY ITEM #5)**: DBEN#'s doc/implementation mismatch
+closed once item #5 made it a real, precisely-timed pin. Items #8, #10
+still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

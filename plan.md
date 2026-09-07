@@ -8754,4 +8754,39 @@ exercises VPA/E-clock, and removing an unreachable-on-real-silicon
 termination path changes no reachable behavior for any cycle that
 doesn't explicitly assert the now-deleted pin).
 
-**Items #7-#10 continue below as each is addressed.**
+### Item #7: document cpBcc/cpDBcc/cpScc/cpTRAPcc + vector 13 scope boundary — DOCUMENTED
+
+Pure documentation item, no RTL change. Confirmed via grep that none of
+the 4 coprocessor-conditional instructions (cpBcc, cpDBcc, cpScc,
+cpTRAPcc — MC68030UM.pdf §10.2.2-10.2.5) are decoded anywhere in the
+RTL, and this was never previously flagged as a known gap (unlike
+cpSAVE/cpRESTORE, which Phase 157/199 already closed). Unlike
+cpSAVE/cpRESTORE's own fixed-shape state-transfer protocol, these 4
+instructions need the main processor to read back a genuine
+coprocessor-evaluated condition — meaningfully testable only with a
+real attached coprocessor model this project has never built. Coprocessor
+Protocol Violation (vector 13, §10.5.1.1/§10.5.4) is unimplemented for
+the same reason. Documented as a deliberate scope boundary in CLAUDE.md's
+own Design Constraints section, right after the existing coprocessor-CPU-
+Space-cycle bullet.
+
+**Bonus fix (doc-only)**: while researching this, found CLAUDE.md's own
+"CPU Space sub-types" bullet list still had the STALE "A[15:13]=primitive
+type" claim for coprocessor CPU-Space cycles — the exact wrong
+description a few lines above it (in the Design Constraints bullet)
+already says was corrected during Phase 157's own research
+(A[15:13] is actually CpID, not primitive type). Fixed the stale
+duplicate to reference the already-corrected text instead of repeating
+the error.
+
+### Item #9: reconcile DBEN doc/implementation mismatch — RESOLVED BY ITEM #5
+
+Folded into item #5's own DBEN implementation above: DBEN# is now a
+real, precisely-timed pin matching CLAUDE.md's own S-state table exactly
+(asserts one state after AS+DS for reads, same state as AS for writes;
+negates with AS/DS in both cases). No further doc reconciliation needed
+— CLAUDE.md's S-state table already correctly described DBEN's timing
+before this item even started; the mismatch was purely "documented but
+not implemented," which item #5 closed.
+
+**Items #8, #10 continue below as each is addressed.**
