@@ -506,10 +506,13 @@ COND_BRANCH = {
 # ── 11.6.16 Control Instructions — PDF 512, manual 11-49 ───────────────────
 # '*'=fea '**'=cea '#'=fiea '##'=ciea '%'=Add Jump Effective Address Time
 # (jea) '+'=Indicates Maximum Time (actual time is data dependent).
-# RTD/RTR/RTS/UNLK rows not yet independently cross-verified digit-by-digit
-# (UNLK's own I-cache(9) > No-Cache(5) looks like a possible mis-transcription
-# -- re-confirm against a fresh page read before relying on those 4 rows
-# specifically; every other row in this table is used with confidence).
+# docs/*.md review (Phase 248 item #8): RTD/RTR/RTS/UNLK cross-verified
+# directly against MC68030UM.pdf's own §11.6.16 table text. RTD/RTR
+# already matched exactly. RTS/UNLK had real transcription errors (RTS
+# I-cache was 12(2/0/0)/no-cache-total 14, should be 9(1/0/0)/11; UNLK
+# I-cache was 9(1/0/0), should be 5(1/0/0) -- the "UNLK I-cache(9) >
+# No-Cache(5)" anomaly this comment used to flag was correctly suspicious;
+# UNLK's own real I-cache figure is LESS than no-cache, as expected).
 CONTROL_INSTR = {
     'ANDI to SR':                  (4, 0,  12, 0,0,0,  14, 0,2,0),
     'EORI to SR':                  (4, 0,  12, 0,0,0,  14, 0,2,0),
@@ -537,8 +540,8 @@ CONTROL_INSTR = {
     '**PEA':                       (0, 2,   4, 0,0,1,   4, 0,1,1),
     'RTD':                         (2, 0,  10, 1,0,0,  12, 1,2,0),
     'RTR':                         (1, 0,  12, 2,0,0,  14, 2,2,0),
-    'RTS':                         (1, 0,  12, 2,0,0,  14, 1,2,0),
-    'UNLK':                        (0, 0,   9, 1,0,0,   5, 1,1,0),
+    'RTS':                         (1, 0,   9, 1,0,0,  11, 1,2,0),
+    'UNLK':                        (0, 0,   5, 1,0,0,   5, 1,1,0),
 }
 
 # ── 11.6.17 Exception-Related Instructions and Operations — PDF 513, 11-50 ─

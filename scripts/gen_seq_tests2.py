@@ -218,12 +218,14 @@ add('seq2_dbf_loop', "ADDQ.L #1,Dn / DBF loop, 4 passes",
 
 add('seq2_jsr_rts_pair', "JSR (An) / RTS / ADD Rn,Dn",
     ["movea.l #sub,a0", "move.l  #$10,d1", "clr.l   d2"],
-    ["jsr     (a0)", "add.l   d1,d2"], 3, [7, 14, 2], 4,
+    ["jsr     (a0)", "add.l   d1,d2"], 3, [7, 11, 2], 4,
     "A genuine call/return: JSR (An) to a real subroutine containing only "
     "RTS, then an ADD after the return -- the first real call/return "
     "sequence in this corpus (earlier BSR/JSR investigations, Phase 163 "
     "Track B, only ever measured the redirect in isolation). CONTROL_INSTR "
-    "'%JSR' NCC=7 + 'RTS' NCC=14 + ALU 'ADD Rn,Dn' NCC=2 = 23 manual total.",
+    "'%JSR' NCC=7 + 'RTS' NCC=11 + ALU 'ADD Rn,Dn' NCC=2 = 20 manual total "
+    "(docs/*.md review, Phase 248 item #8: RTS's own no-cache total was "
+    "corrected from a transcription error of 14 to the manual's real 11).",
     tail_lines=["", "        org     $300", "sub:", "        rts"])
 
 # ── Cluster H: longer heterogeneous chains (do longer real sequences keep

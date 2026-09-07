@@ -1016,8 +1016,19 @@ instructions" note), since meaningfully testing them needs a real
 attached coprocessor model this project doesn't have. Also fixed a
 stale duplicate claim in the CPU Space sub-types bullet list below.
 **Item #9 (RESOLVED BY ITEM #5)**: DBEN#'s doc/implementation mismatch
-closed once item #5 made it a real, precisely-timed pin. Items #8, #10
-still to come.
+closed once item #5 made it a real, precisely-timed pin.
+
+**Item #8 (FIXED)**: `scripts/timing_tables.py`'s own RTS/UNLK rows
+(flagged for years as "not yet independently cross-verified") had real
+transcription errors, confirmed by direct re-read of MC68030UM.pdf
+§11.6.16: RTS's I-cache figure was `12(2/0/0)` (real: `9(1/0/0)`) and
+no-cache total was `14` (real: `11`); UNLK's I-cache figure was
+`9(1/0/0)` (real: `5(1/0/0)`, confirming the table's own long-standing
+"I-cache > No-Cache looks wrong" suspicion). RTD/RTR already matched
+exactly. Fixed the table and one downstream hardcoded stale value in
+`scripts/gen_seq_tests2.py`. Pure Python data-table fix, no RTL touched.
+
+Item #10 still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

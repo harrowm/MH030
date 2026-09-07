@@ -8789,4 +8789,31 @@ negates with AS/DS in both cases). No further doc reconciliation needed
 before this item even started; the mismatch was purely "documented but
 not implemented," which item #5 closed.
 
-**Items #8, #10 continue below as each is addressed.**
+### Item #8: RTS/UNLK timing table transcription bugs — FIXED
+
+`scripts/timing_tables.py`'s own `CONTROL_INSTR` table carried a
+long-standing comment flagging RTD/RTR/RTS/UNLK as "not yet independently
+cross-verified digit-by-digit," with UNLK's own I-cache(9) > No-Cache(5)
+specifically called out as a likely mis-transcription. Cross-verified all
+4 rows directly against MC68030UM.pdf §11.6.16's own raw extracted text
+this session: RTD and RTR already matched exactly (no change). RTS and
+UNLK both had real transcription errors:
+- RTS: I-cache was `12(2/0/0)`, real value is `9(1/0/0)`; no-cache total
+  was `14`, real value is `11` (breakdown `1/2/0` was already correct).
+- UNLK: I-cache was `9(1/0/0)`, real value is `5(1/0/0)` — confirming the
+  table's own prior "I-cache > No-Cache" suspicion was correctly raised;
+  no-cache (`5(1/1/0)`) was already correct.
+
+Fixed both rows and replaced the uncertainty comment with the
+cross-verification result. Found one downstream consumer with a
+hardcoded stale value: `scripts/gen_seq_tests2.py`'s own
+`seq2_jsr_rts_pair` test cited RTS's old (wrong) NCC=14 in both its
+expected-cycle-count array and its own descriptive comment — updated to
+11 (and the "23 manual total" comment to "20"). `scripts/
+timing_benchmark.py` imports the table dynamically rather than hardcoding
+values, so it needed no change. Neither script is part of the automated
+`make test` gate (both are standalone Chapter-11 investigation/reporting
+tools, not regression tests), and this is a pure Python data-table
+correction — no RTL touched, no mandatory-gate re-run needed.
+
+**Items #10 continues below.**
