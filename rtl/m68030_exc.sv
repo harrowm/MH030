@@ -142,7 +142,20 @@ module m68030_exc (
     localparam [3:0] FMT_ADDR    = 4'h3;  //  8 words  (4 LW writes)
     localparam [3:0] FMT_FPU_PI  = 4'h4;  //  8 words  (4 LW writes)
     localparam [3:0] FMT_FPU_PR  = 4'h8;  // 29 words (15 LW + 1 word — stub)
-    localparam [3:0] FMT_MMU     = 4'h9;  // 12 words  (6 LW writes)
+    // docs/*.md review (Phase 250 F5): was FMT_MMU, "12 words, MMU short
+    // bus fault" -- confirmed against MC68030UM.pdf Table 8-6 this does
+    // not exist: real Format $9 is the unrelated 10-word Coprocessor
+    // Mid-Instruction frame (Coprocessor Mid-Instruction / Main-Detected
+    // Protocol Violation / Interrupt Detected During Coprocessor
+    // Instruction -- none implemented by this project, same documented
+    // scope boundary as the cpBcc/cpDBcc/cpScc/cpTRAPcc note above).
+    // MMU-detected bus faults now correctly use the ordinary $A/$B below
+    // (biu_exc_capture.sv no longer selects this format for them). Kept
+    // defined at its real size/shape, unreachable via any implemented
+    // trigger, matching FMT_FPU_PI/FMT_FPU_PR's own already-established
+    // "defined but never dispatched" treatment for other out-of-scope
+    // coprocessor-related formats.
+    localparam [3:0] FMT_CPMID   = 4'h9;  // 10 words  (5 LW writes)
     localparam [3:0] FMT_BUS_INS = 4'hA;  // 16 words  (8 LW writes)
     localparam [3:0] FMT_BUS_DAT = 4'hB;  // 46 words (23 LW writes)
 
@@ -274,7 +287,7 @@ module m68030_exc (
             FMT_ADDR:    begin total_steps = 5'd4;  ssp_delta = 8'd16; end
             FMT_FPU_PI:  begin total_steps = 5'd4;  ssp_delta = 8'd16; end
             FMT_FPU_PR:  begin total_steps = 5'd15; ssp_delta = 8'd58; end  // 29 words → 14 LW + 1 word; use 15 LW (round up)
-            FMT_MMU:     begin total_steps = 5'd6;  ssp_delta = 8'd24; end
+            FMT_CPMID:   begin total_steps = 5'd5;  ssp_delta = 8'd20; end
             FMT_BUS_INS: begin total_steps = 5'd8;  ssp_delta = 8'd32; end
             FMT_BUS_DAT: begin total_steps = 5'd23; ssp_delta = 8'd92; end
             default:     begin total_steps = 5'd2;  ssp_delta = 8'd8;  end
@@ -310,13 +323,14 @@ module m68030_exc (
     //   step 1: {fmtvec, fault_sr}  (format/SR pair just below PC)
     //   step 2: fault_addr  (instruction address for $2/$3; fault addr for others)
     //   step 3: {fault_ssw, 16'h0}  (SSW + reserved; used by $3/$A/$B)
-    //   step 4: snap_dob_r (Data Output Buffer; formats $9/$A/$B only)
+    //   step 4: snap_dob_r (Data Output Buffer; formats $A/$B only -- real
+    //           Format $9/Coprocessor Mid-Instruction has no DOB field at
+    //           all, docs/*.md review Phase 250 F5, so it's excluded below)
     //   step 5+: zeros (internal pipeline state; FPU not implemented)
     // -----------------------------------------------------------------------
     logic [31:0] push_data;
     logic        fmt_is_fault;
-    assign fmt_is_fault = (snap_fmt_r == FMT_MMU) ||
-                          (snap_fmt_r == FMT_BUS_INS) ||
+    assign fmt_is_fault = (snap_fmt_r == FMT_BUS_INS) ||
                           (snap_fmt_r == FMT_BUS_DAT);
 
     // push_data is indexed by step_rem (= distance from lowest stack address).

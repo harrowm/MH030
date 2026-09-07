@@ -439,29 +439,38 @@ module exc_tb;
         end else $display("PASS EXC-8 trans_cnt=5 (4 writes + 1 read)");
 
         // ================================================================
-        // EXC-9: MMU short bus fault → format $9, 6 LW writes + 1 read = 7 trans
-        //   bus_err_fmt=$9, ssp_in=0x9000, ssp_delta=24, new_ssp=0x8FE8
-        //   fault_data = 0xD0B0_CAFE (Data Output Buffer)
+        // EXC-9 (docs/*.md review, Phase 250 F5): format $9 is no longer
+        // reachable via any real MMU-fault trigger -- MMU faults now use
+        // the ordinary $A/$B bus-fault frames like any other bus error
+        // (biu_exc_capture.sv), matching real MC68030UM.pdf Table 8-6:
+        // real Format $9 is the unrelated 10-word Coprocessor
+        // Mid-Instruction frame, not an MMU-specific format at all. This
+        // test now just proves m68030_exc.sv's own generic FMT_CPMID
+        // frame-shape infrastructure builds the correct 10-word/5-LW
+        // frame when directly told format=$9 (still reachable only via
+        // direct bus_err_fmt injection, exactly as this standalone
+        // testbench does -- nothing in the real pipeline ever selects it).
+        //   format $9 → 10 words, 5 LW writes + 1 read = 6 trans
+        //   bus_err_fmt=$9, ssp_in=0x9000, ssp_delta=20, new_ssp=0x8FEC
         //   fault_ssw  = 0x9ABC
         //
-        //   step 0 @ 0x8FFC: reserved/0          (step_rem=5)
-        //   step 1 @ 0x8FF8: fault_data           (step_rem=4) fmtvec={4'h9,...}=0x9008
-        //   step 2 @ 0x8FF4: {fault_ssw,0}        (step_rem=3) = 0x9ABC_0000
-        //   step 3 @ 0x8FF0: fault_addr           (step_rem=2)
-        //   step 4 @ 0x8FEC: snap_pc_r            (step_rem=1)
-        //   step 5 @ 0x8FE8: {fmtvec,SR}          (step_rem=0)
+        //   step 0 @ 0x8FFC: reserved/0 (unpopulated -- real Coprocessor
+        //           Mid-Instruction frame has no DOB field)  (step_rem=4)
+        //   step 1 @ 0x8FF8: {fault_ssw,0}        (step_rem=3) = 0x9ABC_0000
+        //   step 2 @ 0x8FF4: fault_addr            (step_rem=2)
+        //   step 3 @ 0x8FF0: snap_pc_r             (step_rem=1)
+        //   step 4 @ 0x8FEC: {fmtvec,SR}           (step_rem=0) fmtvec=0x9008
         //   fetch  @ vec_addr = 2*4 = 0x8 (rw=1)
-        //   ssp_out = 0x8FE8
+        //   ssp_out = 0x8FEC
         // ================================================================
-        $display("--- EXC-9: MMU short bus fault format $9 ---");
+        $display("--- EXC-9: format $9 frame shape (Coprocessor Mid-Instruction, 10 words) ---");
         begin_test;
         ssp_in      = 32'h0000_9000;
         fault_pc    = 32'h0000_8800;
         fault_sr    = 16'h2700;
         fault_addr  = 32'hAABB_CCDD;
         fault_ssw   = 16'h9ABC;
-        fault_data  = 32'hD0B0_CAFE;
-        bus_err_fmt = 4'h9;          // MMU fault format
+        bus_err_fmt = 4'h9;
         exc_rdata   = 32'h0000_F000;
         bus_err_req = 1;
         @(posedge clk_4x); #1;
@@ -470,21 +479,21 @@ module exc_tb;
 
         // fmtvec = {4'h9, 2'b00, 8'd2, 2'b00} = 0x9008
         chk32("EXC-9 push0_addr",  t_addr[0],  32'h0000_8FFC);
-        chk32("EXC-9 push0_data",  t_wdata[0], 32'h0000_0000);   // reserved  (step_rem=5)
+        chk32("EXC-9 push0_data",  t_wdata[0], 32'h0000_0000);   // unpopulated (step_rem=4)
         chk32("EXC-9 push1_addr",  t_addr[1],  32'h0000_8FF8);
-        chk32("EXC-9 push1_data",  t_wdata[1], 32'hD0B0_CAFE);   // fault_data(step_rem=4)
-        chk32("EXC-9 push3_data",  t_wdata[3], 32'hAABB_CCDD);   // fault_addr(step_rem=2)
-        chk32("EXC-9 push4_addr",  t_addr[4],  32'h0000_8FEC);
-        chk32("EXC-9 push4_data",  t_wdata[4], 32'h0000_8800);   // snap_pc_r (step_rem=1)
-        chk32("EXC-9 push5_data",  t_wdata[5], 32'h9008_2700);   // {fmtvec,SR}(step_rem=0)
-        chk32("EXC-9 fetch_addr",  t_addr[6],  32'h0000_0008);  // vec 2 @ 2*4
-        chk_bit("EXC-9 fetch_rw", t_rw[6],    1'b1);
-        chk32("EXC-9 ssp_out",    last_ssp,    32'h0000_8FE8);  // 0x9000-24
+        chk32("EXC-9 push1_data",  t_wdata[1], 32'h9ABC_0000);   // {fault_ssw,0}(step_rem=3)
+        chk32("EXC-9 push2_data",  t_wdata[2], 32'hAABB_CCDD);   // fault_addr(step_rem=2)
+        chk32("EXC-9 push3_addr",  t_addr[3],  32'h0000_8FF0);
+        chk32("EXC-9 push3_data",  t_wdata[3], 32'h0000_8800);   // snap_pc_r (step_rem=1)
+        chk32("EXC-9 push4_data",  t_wdata[4], 32'h9008_2700);   // {fmtvec,SR}(step_rem=0)
+        chk32("EXC-9 fetch_addr",  t_addr[5],  32'h0000_0008);  // vec 2 @ 2*4
+        chk_bit("EXC-9 fetch_rw", t_rw[5],    1'b1);
+        chk32("EXC-9 ssp_out",    last_ssp,    32'h0000_8FEC);  // 0x9000-20
         chk32("EXC-9 new_pc",     last_new_pc, 32'h0000_F000);
-        if (trans_cnt !== 5'd7) begin
-            $display("FAIL EXC-9 trans_cnt=%0d (exp 7: 6 writes + 1 read)", trans_cnt);
+        if (trans_cnt !== 5'd6) begin
+            $display("FAIL EXC-9 trans_cnt=%0d (exp 6: 5 writes + 1 read)", trans_cnt);
             fail = fail + 1;
-        end else $display("PASS EXC-9 trans_cnt=7");
+        end else $display("PASS EXC-9 trans_cnt=6");
 
         // ================================================================
         // EXC-10: Bus error during read → format $A, 8 LW writes + 1 read = 9 trans

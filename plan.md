@@ -271,7 +271,8 @@ since the ext_count de-duplication plan, Phase 221-224); CAS/CAS2
 register-field bit positions (already fixed, Phase 247 item #9, not
 re-flagged); CCR-effect spot-checks for SWAP/EXG/TAS.
 
-### Proposed next steps (not yet actioned -- pending user direction)
+### Proposed next steps (as originally scoped; see "Execution update" below
+for what was actually done)
 
 Suggested order once resumed: F2/F3 (privilege checks) -> F4 (CHK2/CMP2
 wrapped bounds) -> F6/F7 (RTE version check, priority-chain order) -> F5
@@ -284,3 +285,107 @@ decide fix-vs-document) before touching any RTL there, given the stakes;
 and a **decision conversation on F8** (MOVE16) before any code changes,
 since removal is a real scope change touching 4+ files and CLAUDE.md's
 own architecture description, not a bug fix.
+
+### Execution update (same session, immediately following the findings pass)
+
+User asked to execute the plan. Worked the batch in the proposed order,
+with one deviation: **F6 turned out significantly more invasive than
+scoped once actually investigated**, and was deferred rather than pushed
+through -- see below.
+
+**F2/F3 (IMPLEMENTED AND VERIFIED)**: added the missing `if
+(!sr_live[13]) dec_is_priv=1` gate to all 4 MOVES decode arms and the
+whole MMU cpid=0 dispatch block (PFLUSH/PLOAD/PMOVE/PTEST) in
+`eu_seq_decode.svh`, matching the exact idiom the directly-adjacent
+cpSAVE/cpRESTORE block already used. New `tb/system_tb.sv` tests
+PRIV-02..06 (one per instruction) confirmed to FAIL on baseline (stashed
+the RTL fix, reran: all 5 failed with `priv_req` never firing) before
+being confirmed to pass with the fix restored. Full mandatory gate clean.
+
+**F4 (IMPLEMENTED AND VERIFIED)**: `eu_seq_execute.svh`'s `cmp2_c_w`
+rewritten to implement Table 3-12's full formula (`LB<=UB` branch
+unchanged; new `UB<LB` wrapped-range branch added). New
+`tb/ea_extended_tb.sv` tests CMP2-02 (LB=10,UB=5,R=3 -- the exact
+diverging case from the original finding, confirmed to fail on baseline
+with C=1 instead of the correct C=0) and CMP2-03 (a non-diverging control
+case, confirming the fix doesn't disturb an already-correct result). Full
+mandatory gate clean.
+
+**F7 (IMPLEMENTED AND VERIFIED)**: reordered `m68030_exc.sv`'s
+`always_comb` priority chain to match Table 8-5 exactly: `addr_err_req`
+now checked before `bus_err_req` (was reversed); `int_pending && int_ready`
+moved from 3rd position to last (after `trap_req`), since Table 8-5 ranks
+Interrupt (4.2) as the single lowest-priority exception in the entire
+table. New `tb/exc_tb.sv` test EXC-16 -- built specifically to answer the
+"is this race even reachable" question the original F7 finding left
+open -- drives `illegal_req` and a genuinely-pending, unmasked interrupt
+(`ipl_sync=3 > ipl_mask=1`, the same shape EXC-5 already uses) in the
+exact same cycle. **Confirmed the race IS reachable**: baseline dispatched
+the interrupt (fetching the autovector at VBR+0x6C, wrong per Table 8-5),
+the fix dispatches Illegal Instruction (VBR+0x10, correct). Full
+mandatory gate clean.
+
+**F5 (IMPLEMENTED AND VERIFIED)**: `biu_exc_capture.sv`'s
+`determine_format()` no longer takes an `mmu` parameter at all -- MMU
+faults now fall through to the exact same `!rw ? $B : $A` rule every
+other bus error already uses (the function's `mmu_fault` input port is
+left connected but genuinely unused now, documented as such; removing it
+entirely would require touching the module's callers in `m68030_biu.sv`,
+judged unnecessary churn for a value that was never used for anything
+else in this file). `m68030_exc.sv`'s own `FMT_MMU` constant renamed
+`FMT_CPMID` and corrected to ITS real shape per Table 8-6 (10 words / 5
+LW writes, not 12/6 -- the real Format $9 is Coprocessor Mid-Instruction,
+which this project doesn't implement, same documented scope boundary as
+the cpBcc/cpDBcc/cpScc/cpTRAPcc note); removed from `fmt_is_fault`'s
+membership too, since the real Coprocessor Mid-Instruction frame has no
+Data Output Buffer field the way $A/$B do (that field's step now defaults
+to 0, matching every other unpopulated internal-register step). This
+constant is now unreachable via any implemented trigger, kept defined
+only for shape-consistency with `FMT_FPU_PI`/`FMT_FPU_PR`'s own
+already-established "defined but never dispatched" treatment for other
+out-of-scope coprocessor-related formats.
+
+Updated two existing tests that directly asserted the old, fabricated
+behavior: `tb/exc_tb.sv`'s EXC-9 (re-derived for the new 10-word/5-step
+frame shape -- confirmed passing; now framed as testing the generic
+format-$9 frame-shape infrastructure directly via injection, since
+nothing in the real pipeline can reach it anymore) and
+`tb/mmu_xlate_tb.sv`'s Phase 3/4 (which exercise a REAL MMU fault
+end-to-end through the live pipeline -- Phase 3's fault is on a read
+(`MOVE.L (A0),D4`), Phase 4's is on a write; predicted $A for Phase 3 and
+$B for Phase 4 from the new `!rw` rule before running, then confirmed
+both exactly as predicted). CLAUDE.md's own top-level frame-format table
+corrected too (previously self-documented the same fabrication this
+finding flagged). Full mandatory gate clean.
+
+**F6 (investigated, deferred -- NOT implemented, more invasive than
+scoped)**: building the fix immediately hit a scope surprise: RTE's own
+`rte_phase_r` FSM only ever performs 2 bus reads total (format/vector+SR,
+then PC) and determines how many EXTRA bytes to skip via
+`rte_frame_extra()` -- it never actually reads back ANY of the rest of a
+fault frame's own content (SSW, fault address, DOB, internal registers,
+or critically the version-number word at SP+$36 this item needs to
+check). A correct fix needs a genuinely NEW conditional bus read added to
+RTE's own return-path FSM, specifically gated on Format $B. Weighed
+against the check's own stated purpose (MC68030UM.pdf: "required in a
+multiprocessor system" -- not applicable to this single-CPU project,
+which only ever constructs and pops its own frames, so the check would
+never fire in real usage, only via a deliberately-corrupted test frame)
+and the risk of bolting new bus-read machinery onto RTE's delicate return
+path without dedicated care, this was deferred with the precise scope
+found above documented, rather than rushed through in the same batch as
+the other four items -- matching this project's own established
+precedent for "found harder than expected mid-implementation" (Phase
+238/239's own TAS/Scc and ALU-EA/CMP2-CHK2 deferrals). No RTL or
+testbench changed for F6.
+
+**F1 and F8 remain untouched**, exactly as scoped in the original
+findings pass above -- F1 needs its own dedicated investigation phase
+before any RTL changes (see the findings section above for why); F8
+needs a user decision before any code changes.
+
+Full mandatory gate (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+28/28, `dat-synth` 50/50, full Harte sweep bit-identical to baseline --
+`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`) re-run and confirmed clean
+after EACH of F2/F3, F4, F7, and F5 individually, not just once at the
+end.

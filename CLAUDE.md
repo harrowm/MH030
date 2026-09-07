@@ -182,9 +182,15 @@ The EU + BIU together must produce all 9 68030 frame formats:
 | $3 | 8 words | Address error |
 | $4 | 8 words | FPU post-instruction |
 | $8 | 29 words | FPU pre-instruction |
-| $9 | 12 words | MMU short bus fault |
-| $A | 16 words | Bus error during instruction |
-| $B | 46 words | Bus error during data cycle |
+| $9 | 10 words | Coprocessor Mid-Instruction (not implemented — see Coprocessor conditional instructions note below) |
+| $A | 16 words | Bus error/address error at instruction boundary (incl. MMU faults) |
+| $B | 46 words | Bus error/address error mid-instruction-execution (incl. MMU faults) |
+
+(Phase 250 F5: $9 was previously documented here as "12 words, MMU short
+bus fault" — confirmed against MC68030UM.pdf Table 8-6 this format doesn't
+exist; real Format $9 is the unrelated Coprocessor Mid-Instruction frame.
+MMU-detected bus faults correctly use the ordinary $A/$B like any other
+bus error, distinguished by R/W, not a dedicated format code.)
 
 The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline state) at the moment of fault to populate these frames.
 
@@ -1132,33 +1138,93 @@ same reason/pattern as the original Phase 162 archival) — the pre-Phase-250
 full history now lives in `plan.md.old2` (Phases 162-249), alongside the
 original `plan.md.old` (Phases 1-161); the live `plan.md` now starts fresh
 at Phase 250. **Phase 250 (a second, independent MC68030UM.pdf chapter-by-
-chapter compliance review, findings list only — NOT YET ACTIONED)** covered
-Ch.2/3/4/12 plus a fresh look at Ch.8's exception vector/priority table and
-Ch.7's CAS2/MOVEP cycles. Found 10 items, none fixed yet — see `plan.md
-§Phase 250` for full citations and detail. Highest-stakes: **F1**, visual
+chapter compliance review)** covered Ch.2/3/4/12 plus a fresh look at
+Ch.8's exception vector/priority table and Ch.7's CAS2/MOVEP cycles,
+producing a 10-item findings list — see `plan.md §Phase 250` for full
+citations. Status: **F2/F3/F4/F5/F7 IMPLEMENTED AND VERIFIED**; F1
+flagged, not touched (needs a dedicated re-investigation, see below); F6
+investigated, found more invasive than scoped, deferred; F8 needs a user
+decision; F9/F10 low-priority, not yet actioned.
+
+**F2 (MOVES) + F3 (PFLUSH/PLOAD/PMOVE/PTEST) — IMPLEMENTED AND VERIFIED**:
+both were entirely missing their own privilege check (§4.2/Table 3-14
+both require supervisor state) — user-mode code could read/write
+supervisor address spaces via MOVES, or reconfigure the MMU/flush the ATC
+via the four PFLUSH/PLOAD/PMOVE/PTEST forms, with no trap. Fixed with the
+same `if (!sr_live[13]) dec_is_priv=1` idiom every other privileged
+instruction in `eu_seq_decode.svh` already uses. New `tb/system_tb.sv`
+tests PRIV-02..06 confirmed to fail on baseline, pass after.
+
+**F4 (CHK2/CMP2 wrapped bounds) — IMPLEMENTED AND VERIFIED**: Table
+3-12's real C-flag formula has a second branch for a wrapped range
+(UB<LB, a documented 68020+ idiom); the RTL unconditionally implemented
+only the `LB<=UB` branch — also wrong for the actual CHK2 trap decision,
+not just the flag. Fixed in `eu_seq_execute.svh`'s `cmp2_c_w`. New
+`tb/ea_extended_tb.sv` tests CMP2-02/03 confirm the diverging case fails
+on baseline, passes after.
+
+**F5 (fabricated Format $9) — IMPLEMENTED AND VERIFIED**:
+`biu_exc_capture.sv`'s `determine_format()` no longer special-cases
+`mmu_fault` — MMU-detected bus faults now correctly select the ordinary
+$A/$B frame like any other bus error (by R/W, matching every other bus
+error), exactly as real silicon does. `m68030_exc.sv`'s own `FMT_MMU`
+constant was renamed `FMT_CPMID` and corrected to its real size/shape
+(10 words, matching the actual Format $9/Coprocessor Mid-Instruction
+frame Table 8-6 defines — unreachable via any implemented trigger, kept
+defined only for shape-consistency with `FMT_FPU_PI`/`FMT_FPU_PR`'s own
+already-established "defined but never dispatched" treatment). Updated
+`tb/exc_tb.sv`'s EXC-9 (now tests the generic frame-shape infrastructure
+directly, not a fictional "MMU fault") and `tb/mmu_xlate_tb.sv`'s Phase
+3/4 (now correctly expect $A for the read-fault case, $B for the
+write-fault case) — both confirmed passing. The frame-format table above
+was also corrected (previously self-documented the same fabrication).
+
+**F7 (exception priority-chain order) — IMPLEMENTED AND VERIFIED**:
+`m68030_exc.sv`'s `always_comb` priority chain didn't match Table 8-5 —
+`bus_err_req` was checked before `addr_err_req` (Address Error is
+strictly higher priority per 1.0 vs 1.1), and `int_pending` was checked
+3rd, ahead of `illegal_req`/`priv_req`/`trace_req`/`chk_req`/
+`div_zero_req`/`trapv_req`/`trap_req`, every one of which Table 8-5 ranks
+strictly higher priority than Interrupt (4.2, the lowest priority of any
+exception in the table). Reordered to match Table 8-5 exactly. New
+`tb/exc_tb.sv` test EXC-16 proved the race is genuinely reachable
+(drives `illegal_req` and a pending unmasked interrupt the same cycle) —
+baseline dispatched the interrupt (wrong), the fix dispatches Illegal
+Instruction (correct).
+
+**F6 (RTE version-number check) — investigated, deferred, more invasive
+than scoped**: implementing this properly turned out to require RTE to
+perform a genuinely NEW bus read it doesn't do today — `rte_phase_r`'s
+own FSM only ever reads 2 words (format/vector+SR, then PC) and
+determines the extra byte count to SKIP via `rte_frame_extra()`, never
+actually reading back any of the rest of the frame's own content (SSW,
+fault address, DOB, internal registers, or the version-number word at
+SP+$36). A correct fix needs a new conditional read step in RTE's own
+delicate FSM, specifically for Format $B. Given the check's own stated
+purpose ("required in a multiprocessor system," per §8.1.8 — not
+applicable to this single-CPU project, which only ever constructs and
+pops its own frames) and the risk of adding new bus-read machinery to
+RTE's return path without dedicated care, this was deferred rather than
+rushed — matches this project's own precedent for "found harder than
+expected mid-implementation" (Phase 238/239). Not implemented this
+session.
+
+**F1 (RMW/CAS2/CAS AS# continuity) — flagged, NOT touched**: visual
 confirmation against MC68030UM.pdf Figure 7-29's own flowchart text
 ("Negate AS and DS" after the RMW read, "Assert AS" again for the write)
 appears to directly contradict this project's own current `rmw_as_hold`/
 `cas2_as_hold`/`cas_as_hold` AS-continuity model and CLAUDE.md's own
-"S-State Signal Timing" section above — flagged, NOT fixed, needs a
-dedicated re-investigation phase before any RTL changes given the blast
-radius (Phases 108-114/207/232/241/242 all built on the "AS never
-negates" premise). Also found: confirmed missing privilege checks on
-MOVES and PFLUSH/PLOAD/PMOVE/PTEST (F2/F3); a CHK2/CMP2 wrapped-bounds
-C-flag bug (F4); Format $9 ("MMU short bus fault") does not exist on
-real silicon — real Format $9 is the unrelated 10-word Coprocessor
-Mid-Instruction frame, so the frame-format table two sections above this
-one is itself wrong and needs correcting once F5 is fixed (F5); RTE
-never checks the Format $B version-number field per §8.1.8 (F6); the
-exception priority-chain order in `m68030_exc.sv` doesn't match Table
-8-5, particularly `int_pending` being checked far too early relative to
-higher-priority exceptions (F7, reachability not yet confirmed); and a
-scope-level finding that **MOVE16 does not exist on the MC68030 at all
-— it's an MC68040 instruction** — this project fully implements it as
-real 68030 silicon behavior, needs a user decision (remove vs.
-deliberately keep as an extension), not just a fix (F8). No outstanding
-IMPLEMENTED plan remains — Phase 250's findings are queued, awaiting
-direction on which to tackle first.
+"S-State Signal Timing" section above. Needs a dedicated re-investigation
+phase before any RTL changes given the blast radius (Phases
+108-114/207/232/241/242 all built on the "AS never negates" premise).
+
+**F8 (MOVE16 doesn't exist on the MC68030) — needs a user decision**:
+it's an MC68040 instruction; this project fully implements it as real
+68030 silicon behavior. Remove vs. deliberately keep as a documented
+extension — not a simple fix, not actioned this session.
+
+**F9/F10** — low-priority (STOP+trace timing nuance; STATUS pin's
+double-bus-fault sub-case), not yet actioned.
 
 ## Verification Commands
 

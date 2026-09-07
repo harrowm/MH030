@@ -671,7 +671,12 @@ module mmu_xlate_tb;
             end
             check("Phase 3: a real exception was taken on the deliberate invalid-descriptor fault", saw_exc3);
             check32("Phase 3: correct vector (2, Bus Error) dispatched", {24'h0, seen_vec}, 32'd2);
-            check32("Phase 3: correct frame format (9, FMT_MMU) dispatched", {28'h0, seen_fmt}, 32'd9);
+            // docs/*.md review (Phase 250 F5): MMU faults no longer use the
+            // fabricated format $9 -- real MC68030UM.pdf Table 8-6 has no
+            // MMU-specific frame at all; MMU-detected bus faults use the
+            // ordinary $A/$B like any other bus error. This fault is on a
+            // READ (MOVE.L (A0),D4), so it's format $A (16 words).
+            check32("Phase 3: correct frame format ($A, bus error on read) dispatched", {28'h0, seen_fmt}, 32'hA);
             check("Phase 3: handler ran, RTE'd, and the retried MOVE.L completed (D5=777)", saw_d5);
         end
         check32("Phase 3: D4 holds the *fixed* PA's own sentinel (0x13572468) -- the retry genuinely re-walked the now-valid descriptor, not stale state",
@@ -722,7 +727,9 @@ module mmu_xlate_tb;
             end
             check("Phase 4: the WRITE to the WP page raised a real exception", saw_exc4);
             check32("Phase 4: correct vector (2, Bus Error) dispatched for the WP violation", {24'h0, seen_vec4}, 32'd2);
-            check32("Phase 4: correct frame format (9, FMT_MMU) dispatched for the WP violation", {28'h0, seen_fmt4}, 32'd9);
+            // docs/*.md review (Phase 250 F5): same fix as Phase 3 above --
+            // this fault is on a WRITE, so it's format $B (46 words).
+            check32("Phase 4: correct frame format ($B, bus error on write) dispatched for the WP violation", {28'h0, seen_fmt4}, 32'hB);
             check("Phase 4: the new (non-retrying) handler ran to completion (D6=444)", saw_d6_444);
         end
 

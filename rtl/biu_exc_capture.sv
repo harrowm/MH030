@@ -7,11 +7,27 @@
 // and determines which of the 9 68030 exception stack frame formats applies.
 //
 // Frame format determination:
-//   mmu_fault                            →  $9  (MMU short bus fault)
 //   !fault_rw                            →  $B  (bus error during write)
 //   otherwise (read or fetch BERR)       →  $A  (bus error during read/fetch)
 //
-// SSW (Special Status Word) for bus-fault formats $9/$A/$B.
+// docs/*.md review (Phase 250 F5): mmu_fault previously selected a
+// fabricated $9 ("MMU short bus fault", 12 words) that does not exist on
+// real MC68030 silicon -- confirmed directly against MC68030UM.pdf Table
+// 8-6: the real Format $9 is the unrelated 10-word Coprocessor
+// Mid-Instruction frame (Coprocessor Mid-Instruction / Main-Detected
+// Protocol Violation / Interrupt Detected During Coprocessor Instruction
+// -- none of which this project implements). Real MMU-detected bus faults
+// use the SAME ordinary $A/$B bus-fault frames as any other bus error --
+// the MMU has no dedicated frame format of its own; it's distinguished
+// only by the fault having originated from a translation failure, not by
+// a different stack frame shape. mmu_fault is therefore now simply
+// ignored by determine_format() below (an MMU fault selects $A/$B via the
+// exact same fault_rw rule every other bus error already uses); the port
+// is left in place since biu_mmu_if.sv still needs to report the fault
+// upstream for other purposes (SSW's DF bit etc.), just no longer feeds a
+// format decision.
+//
+// SSW (Special Status Word) for bus-fault formats $A/$B.
 //
 // SSW bit layout (68030 hardware definition):
 //   [15:13] FC[2:0]         — function code at fault time
@@ -68,11 +84,9 @@ module biu_exc_capture (
 
     function automatic logic [3:0] determine_format(
         input logic [2:0] fc,
-        input logic       rw,
-        input logic       mmu
+        input logic       rw
     );
-        if (mmu)        determine_format = 4'h9;   // MMU short bus fault
-        else if (!rw)   determine_format = 4'hB;   // bus error during write
+        if (!rw)        determine_format = 4'hB;   // bus error during write
         else            determine_format = 4'hA;   // bus error during read/fetch
     endfunction
 
@@ -98,7 +112,7 @@ module biu_exc_capture (
                 // The else-clear is intentionally absent — frame_valid must
                 // not drop if fault_valid is ever deasserted externally.
                 frame_valid      <= 1'b1;
-                frame_format     <= determine_format(fault_fc, fault_rw, mmu_fault);
+                frame_format     <= determine_format(fault_fc, fault_rw);
                 frame_fault_addr <= fault_addr;
                 frame_fault_data <= fault_data;
                 frame_fault_fc   <= fault_fc;
