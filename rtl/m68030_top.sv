@@ -42,7 +42,6 @@ module m68030_top #(
     output logic        ext_ocs_n,
     output logic        ext_rstout_n,
     output logic        ext_cbreq_n,
-    output logic        ext_e,
     output logic        ext_bg_n,
     // docs/*.md review: RMC#/DBEN# (MC68030UM.pdf 5.6.4/5.6.7) -- both
     // previously mentioned only in comments, never actually driven.
@@ -62,7 +61,6 @@ module m68030_top #(
     input  logic        berr_n,
     input  logic        halt_n,
     input  logic        avec_n,
-    input  logic        vpa_n,
     input  logic [2:0]  ipl_n,
     input  logic        br_n,
     input  logic        bgack_n,
@@ -762,7 +760,6 @@ module m68030_top #(
         .ext_ocs_n       (ext_ocs_n),
         .ext_rstout_n    (ext_rstout_n),
         .ext_cbreq_n     (ext_cbreq_n),
-        .ext_e           (ext_e),
         .ext_bg_n        (ext_bg_n),
         .ext_rmc_n       (ext_rmc_n),
         .ext_dben_n      (ext_dben_n),
@@ -773,7 +770,6 @@ module m68030_top #(
         .berr_n          (berr_n),
         .halt_n          (halt_n),
         .avec_n          (avec_n),
-        .vpa_n           (vpa_n),
         .ipl_n           (ipl_n),
         .br_n            (br_n),
         .bgack_n         (bgack_n),

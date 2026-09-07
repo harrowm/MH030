@@ -12,7 +12,7 @@ This is a cycle-accurate Motorola MC68030 CPU implementation in SystemVerilog/Ve
 
 **No cheating cycles**: If an instruction takes N cycles on real silicon, the FSM must take exactly N cycles. Do not collapse or optimize timing.
 
-**External inputs are asynchronous**: `BERR`, `BR`, `IPL`, `HALT`, `VPA`, `DSACK0`, `DSACK1`, `STERM` must pass through 2-stage synchronizer flip-flops before any logic uses them. (The 68030 uses DSACK, not DTACK.)
+**External inputs are asynchronous**: `BERR`, `BR`, `IPL`, `HALT`, `DSACK0`, `DSACK1`, `STERM` must pass through 2-stage synchronizer flip-flops before any logic uses them. (The 68030 uses DSACK, not DTACK. `VPA`/`VMA`/`VSTB`/E-clock — the 68000/68010's own legacy 6800-style synchronous-peripheral mechanism — do not exist on the 68030 at all; confirmed by direct search of MC68030UM.pdf and removed from the RTL, Phase 248 item #6.)
 
 **Single DS, not LDS/UDS**: The 68030 is a true 32-bit processor and uses a single `/DS` (Data Strobe) pin. The `/LDS`+`/UDS` pair belongs to the 68000/68010 (16-bit bus). Byte-lane selection is conveyed to peripherals via `SIZ[1:0]` + `A[1:0]` — `SIZ0`/`SIZ1` are **outputs** from the chip, not inputs. Bus width is determined dynamically per-cycle by the DSACK0/1 response encoding. `biu_byte_lane_ctrl` steers write data to the correct bus lane so a peripheral receives the byte on the right D[31:0] pin.
 
@@ -968,7 +968,23 @@ tie-offs, plus the same fix batch-applied to all 13 testbenches that
 instantiate `m68030_top`. New pin-level tests in `tb/biu_tb.sv` (RMC/DBEN/
 CDIS/MMUDIS) and `tb/stall_fsm_tb.sv` (IPEND, free across all 15 existing
 interrupt-injection tests). Full mandatory gate clean, Harte bit-identical
-to baseline. Items #6-10 still to come.
+to baseline.
+
+**Item #6 (REMOVED, IMPLEMENTED AND VERIFIED)**: `vpa_n`/`ext_e`
+(VPA#/E-clock, the 68000/68010's own legacy 6800-style synchronous-
+peripheral mechanism) do not exist anywhere in the MC68030 manual
+(confirmed by direct search of the full text) — the RTL's own citation
+justifying it ("UM section 7.4.2") pointed to "Breakpoint Acknowledge
+Cycle," an uncaught error. Consulted the user given the mechanism reached
+into `biu_cycle_gen.sv`'s own core read/write/IACK termination logic;
+chose full removal. Deleted `biu_eclk_gen.sv` entirely, all
+`vpa_terminate`/`eclk_cnt` usage in `biu_cycle_gen.sv`, the `vpa_n`/
+`vpa_s` synchronizer in `biu_config.sv`, and all pin wiring through
+`m68030_biu.sv`/`m68030_top.sv`. Removed the corresponding dedicated
+tests in `tb/biu_tb.sv` (P18-1/P18-2, `test_eclk_timing`) and batch-fixed
+tie-offs across all 15 testbenches that instantiate `m68030_top`/
+`m68030_biu`. Full mandatory gate clean, Harte bit-identical to baseline.
+Items #7-10 still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

@@ -34,7 +34,7 @@ module biu_int_tb;
     logic [1:0]  ext_siz;
     logic        ext_ecs_n, ext_ocs_n;
     logic        ext_rstout_n, ext_cbreq_n;
-    logic        ext_e, ext_bg_n;
+    logic        ext_bg_n;
 
     // -----------------------------------------------------------------------
     // Async chip inputs — raw active-low (driven by testbench / mem_model)
@@ -44,7 +44,6 @@ module biu_int_tb;
     logic        berr_n   = 1'b1;   // deasserted
     logic        halt_n   = 1'b1;   // deasserted
     logic        avec_n   = 1'b1;   // deasserted
-    logic        vpa_n    = 1'b1;   // deasserted
     logic [2:0]  ipl_n    = 3'b111; // no interrupt
     logic        br_n     = 1'b1;   // no DMA request
     logic        bgack_n  = 1'b1;   // DMA not acknowledged
@@ -116,7 +115,6 @@ module biu_int_tb;
         .ext_ocs_n       (ext_ocs_n),
         .ext_rstout_n    (ext_rstout_n),
         .ext_cbreq_n     (ext_cbreq_n),
-        .ext_e           (ext_e),
         .ext_bg_n        (ext_bg_n),
         .dsack0_n        (dsack0_n),
         .dsack1_n        (dsack1_n),
@@ -124,7 +122,6 @@ module biu_int_tb;
         .berr_n          (berr_n),
         .halt_n          (halt_n),
         .avec_n          (avec_n),
-        .vpa_n           (vpa_n),
         .ipl_n           (ipl_n),
         .br_n            (br_n),
         .bgack_n         (bgack_n),

@@ -8,7 +8,7 @@
 //
 // Output signal polarities match the conventions used by biu_cycle_gen:
 //   Active-high (inverted from pin): dsack0_s, dsack1_s, sterm_s, berr_s, avec_s
-//   Active-low  (pin polarity kept): halt_s, vpa_s, br_s, bgack_s, cback_s
+//   Active-low  (pin polarity kept): halt_s, br_s, bgack_s, cback_s
 //   Pin value   (no inversion):      ipl_s[2:0]  (all-ones = no interrupt on pin)
 //
 // pins_released: asserts one cycle after rst_n deasserts, indicating that the
@@ -34,7 +34,6 @@ module biu_config #(
     input  logic        berr_n,     // BERR#
     input  logic        halt_n,     // HALT#
     input  logic        avec_n,     // AVEC# (autovector)
-    input  logic        vpa_n,      // VPA#  (valid peripheral address)
     input  logic [2:0]  ipl_n,      // IPL2:0 pins (all-ones = no interrupt)
     input  logic        br_n,       // BR#   (bus request from DMA)
     input  logic        bgack_n,    // BGACK# (bus grant acknowledge)
@@ -56,7 +55,6 @@ module biu_config #(
     output logic        avec_s,     // 1 = AVEC   asserted
     output logic        ciin_s,     // 1 = CIIN   asserted (active-high)
     output logic        halt_s,     // 0 = HALT   asserted (active-low retained)
-    output logic        vpa_s,      // 0 = VPA    asserted (active-low retained)
     output logic [2:0]  ipl_s,      // pin value — all-ones = no interrupt
     output logic        br_s,       // 0 = BR     asserted (active-low retained)
     output logic        bgack_s,    // 0 = BGACK  asserted (active-low retained)
@@ -110,7 +108,6 @@ module biu_config #(
     // Reset values: deasserted state for each pin (all active-low → reset to 1)
     // -----------------------------------------------------------------------
     logic        halt_m,  halt_q;
-    logic        vpa_m,   vpa_q;
     logic        br_m,    br_q;
     logic        bgack_m, bgack_q;
     logic        cback_m, cback_q;
@@ -121,7 +118,6 @@ module biu_config #(
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             halt_m  <= 1'b1;   halt_q  <= 1'b1;   // HALT# deasserted
-            vpa_m   <= 1'b1;   vpa_q   <= 1'b1;
             br_m    <= 1'b1;   br_q    <= 1'b1;
             bgack_m <= 1'b1;   bgack_q <= 1'b1;
             cback_m <= 1'b1;   cback_q <= 1'b1;
@@ -130,7 +126,6 @@ module biu_config #(
             ipl_m   <= 3'b111; ipl_q   <= 3'b111; // no interrupt
         end else begin
             halt_m  <= halt_n;   halt_q  <= halt_m;
-            vpa_m   <= vpa_n;    vpa_q   <= vpa_m;
             br_m    <= br_n;     br_q    <= br_m;
             bgack_m <= bgack_n;  bgack_q <= bgack_m;
             cback_m <= cback_n;  cback_q <= cback_m;
@@ -141,7 +136,6 @@ module biu_config #(
     end
 
     assign halt_s  = halt_q;
-    assign vpa_s   = vpa_q;
     assign br_s    = br_q;
     assign bgack_s = bgack_q;
     assign cback_s = cback_q;

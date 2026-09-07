@@ -44,14 +44,13 @@ module stall_fsm_tb;
     logic [2:0]  ext_fc;
     logic [1:0]  ext_siz;
     logic        ext_ecs_n, ext_ocs_n, ext_rstout_n, ext_cbreq_n;
-    logic        ext_e, ext_bg_n;
+    logic        ext_bg_n;
     logic        ext_ipend_n;  // docs/*.md review
     logic        bus_halted, eu_addr_err, ifu_addr_err;
 
     logic        sterm_n  = 1'b1;
     logic        berr_n   = 1'b1;
     logic        halt_n   = 1'b1;
-    logic        vpa_n    = 1'b1;
     logic [2:0]  ipl_n    = 3'b111;
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
@@ -168,7 +167,6 @@ module stall_fsm_tb;
         .ext_ocs_n    (ext_ocs_n),
         .ext_rstout_n (ext_rstout_n),
         .ext_cbreq_n  (ext_cbreq_n),
-        .ext_e        (ext_e),
         .ext_bg_n     (ext_bg_n),
         .ext_ipend_n  (ext_ipend_n),  // docs/*.md review
         .bus_halted   (bus_halted),
@@ -180,7 +178,6 @@ module stall_fsm_tb;
         .berr_n       (berr_n),
         .halt_n       (halt_n),
         .avec_n       (avec_n),
-        .vpa_n        (vpa_n),
         .ipl_n        (ipl_n),
         .br_n         (br_n),
         .bgack_n      (bgack_n),

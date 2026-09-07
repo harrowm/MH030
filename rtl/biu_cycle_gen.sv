@@ -44,7 +44,6 @@ module biu_cycle_gen #(
     input  logic        berr_s,
     input  logic        halt_s,
     input  logic        avec_s,
-    input  logic        vpa_s,
     input  logic [2:0]  ipl_s,
     input  logic        bgack_s,
     input  logic        cback_s,
@@ -98,9 +97,6 @@ module biu_cycle_gen #(
 
     // RESET instruction (BIU-063)
     input  logic        eu_rst_req,
-
-    // E-clock for VPA sync
-    input  logic [3:0]  eclk_cnt,
 
     // Status outputs
     output logic [1:0]  phase,
@@ -708,12 +704,13 @@ module biu_cycle_gen #(
     assign at_burst_s7_wire =
         (state == ST_BURST_S6) | (state == ST_BWRITE_S6);
 
-    // VPA termination: VPA# asserted (vpa_s=0, active-low) AND E-clock is at
-    // count 9 (E falls on this same clock edge: 9→0 transition fires at phase_r==3).
-    // Cycles that receive VPA# instead of DSACK# synchronize their termination
-    // to the E-clock falling edge per the 68030 UM section 7.4.2.
-    logic vpa_terminate;
-    assign vpa_terminate = !vpa_s && (eclk_cnt == 4'd9);
+    // docs/*.md review: VPA#/VMA#/VSTB#/E-clock (the 68000/68010 6800-style
+    // synchronous-peripheral mechanism this block used to model, citing
+    // "68030 UM section 7.4.2" -- confirmed by direct re-read that section
+    // is actually "Breakpoint Acknowledge Cycle," an uncaught citation
+    // error) do not exist anywhere in the real MC68030 manual and have no
+    // real pins on this chip; removed entirely rather than modeling a
+    // mechanism real 68030 silicon never had.
 
     // Address error conditions .
     // eu_ae_cond:  word access (SIZ=10) to odd address.  Byte is always legal;
@@ -726,7 +723,7 @@ module biu_cycle_gen #(
     assign ifu_ae_cond = ifu_addr[0];
 
     logic data_capture_ok;
-    assign data_capture_ok = ((!dsack_wait || sterm_active) || vpa_terminate) && !berr_s;
+    assign data_capture_ok = (!dsack_wait || sterm_active) && !berr_s;
 
     // biu_burst_ctrl output wires
     logic [1:0]  bc_burst_beat;
@@ -934,8 +931,8 @@ module biu_cycle_gen #(
         if (!rst_n) begin iack_vec_r <= 8'h00; iack_avec_r <= 1'b0; end
         else if (phase_r == 2'd3) begin
             if ((state == ST_IACK_S4 || state == ST_IACK_S5) && !berr_s) begin
-                if (avec_s || vpa_terminate) begin
-                    // AVEC# or VPA# (autovector): compute vector from interrupt level
+                if (avec_s) begin
+                    // AVEC# (autovector): compute vector from interrupt level
                     iack_vec_r  <= 8'd24 + {5'b0, eu_iack_level};
                     iack_avec_r <= 1'b1;
                 end else if (!dsack_wait) begin
@@ -997,7 +994,7 @@ module biu_cycle_gen #(
                     state == ST_WRITE_S4 || state == ST_WRITE_S5)
                     port_dsack_r <= {dsack1_s, dsack0_s};
             end
-            if ((!dsack_wait || sterm_active || vpa_terminate) && !berr_s) begin
+            if ((!dsack_wait || sterm_active) && !berr_s) begin
                 if (state == ST_READ_S4     || state == ST_READ_S5     ||
                     state == ST_RMW_READ_S4 || state == ST_RMW_READ_S5)
                     captured_rdata <= ext_d_in;
@@ -1204,7 +1201,6 @@ module biu_cycle_gen #(
             ST_READ_S5: begin
                 if      (berr_s)                         state_nxt = ST_READ_S6;
                 else if (sterm_active || !dsack_wait)    state_nxt = ST_READ_S6;
-                else if (vpa_terminate)                  state_nxt = ST_READ_S6;
                 else                                     state_nxt = ST_READ_S4;
             end
             ST_READ_S6: state_nxt = ST_READ_S7;
@@ -1228,7 +1224,6 @@ module biu_cycle_gen #(
             ST_WRITE_S5: begin
                 if      (berr_s)                         state_nxt = ST_WRITE_S6;
                 else if (sterm_active || !dsack_wait)    state_nxt = ST_WRITE_S6;
-                else if (vpa_terminate)                  state_nxt = ST_WRITE_S6;
                 else                                     state_nxt = ST_WRITE_S4;
             end
             // WRITE now skips S7 entirely -- real MC68030UM.pdf 7.3.2 has no
@@ -1271,7 +1266,6 @@ module biu_cycle_gen #(
             ST_IACK_S5: begin
                 if      (berr_s)                  state_nxt = ST_IACK_S6;
                 else if (avec_s || !dsack_wait)   state_nxt = ST_IACK_S6;
-                else if (vpa_terminate)            state_nxt = ST_IACK_S6;
                 else                              state_nxt = ST_IACK_S4;
             end
             ST_IACK_S6: state_nxt = ST_IACK_S7;

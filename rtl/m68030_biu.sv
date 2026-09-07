@@ -50,7 +50,6 @@ module m68030_biu #(
     output logic        ext_ocs_n,
     output logic        ext_rstout_n,
     output logic        ext_cbreq_n,
-    output logic        ext_e,          // E-clock output
     output logic        ext_bg_n,       // Bus Grant to external DMA
     // docs/*.md review: RMC#/DBEN# (MC68030UM.pdf 5.6.4/5.6.7) -- driven
     // combinationally by biu_cycle_gen, passed straight through here.
@@ -64,7 +63,6 @@ module m68030_biu #(
     input  logic        berr_n,
     input  logic        halt_n,
     input  logic        avec_n,
-    input  logic        vpa_n,
     input  logic [2:0]  ipl_n,
     input  logic        br_n,
     input  logic        bgack_n,
@@ -269,7 +267,7 @@ module m68030_biu #(
     // Synchronised async inputs (from biu_config)
     // -----------------------------------------------------------------------
     logic dsack0_s, dsack1_s, sterm_s, berr_s_ext;
-    logic halt_s, avec_s, vpa_s;
+    logic halt_s, avec_s;
     logic [2:0] ipl_s;
     logic br_s, bgack_s, cback_s;
     logic ciin_s;  // Phase 158 Stage 7
@@ -287,7 +285,6 @@ module m68030_biu #(
         .berr_n            (berr_n),
         .halt_n            (halt_n),
         .avec_n            (avec_n),
-        .vpa_n             (vpa_n),
         .ipl_n             (ipl_n),
         .br_n              (br_n),
         .bgack_n           (bgack_n),
@@ -301,7 +298,6 @@ module m68030_biu #(
         .berr_s            (berr_s_ext),
         .avec_s            (avec_s),
         .halt_s            (halt_s),
-        .vpa_s             (vpa_s),
         .ipl_s             (ipl_s),
         .br_s              (br_s),
         .bgack_s           (bgack_s),
@@ -313,17 +309,13 @@ module m68030_biu #(
         .poweron_rstout_n  (cfg_poweron_rstout_n)
     );
 
-    // -----------------------------------------------------------------------
-    // E-clock generator
-    // -----------------------------------------------------------------------
-    logic [3:0] eclk_cnt;
-
-    biu_eclk_gen u_eclk (
-        .clk_4x  (clk_4x),
-        .rst_n   (rst_n),
-        .e       (ext_e),
-        .eclk_cnt(eclk_cnt)
-    );
+    // docs/*.md review: E-clock generator (biu_eclk_gen) removed along with
+    // ext_e/vpa_n -- both modeled the 68000/68010's own legacy 6800-style
+    // synchronous-peripheral mechanism, which does not exist on the real
+    // MC68030 (confirmed by direct search: VPA/VMA/VSTB/E-clock appear
+    // nowhere in the manual; the RTL's own removed comment citing "UM
+    // section 7.4.2" for this mechanism was simply wrong -- that section
+    // is "Breakpoint Acknowledge Cycle").
 
     // -----------------------------------------------------------------------
     // BERR watchdog — fires berr_timeout after TIMEOUT_CLKS of no response.
@@ -984,7 +976,6 @@ module m68030_biu #(
         .berr_s          (berr_combined),
         .halt_s          (halt_s),
         .avec_s          (avec_s),
-        .vpa_s           (vpa_s),
         .ipl_s           (ipl_s),
         .bgack_s         (bgack_s),
         .cback_s         (cback_s),
@@ -1029,8 +1020,6 @@ module m68030_biu #(
         .eu_iack_ack     (eu_iack_ack),
         // RESET instruction
         .eu_rst_req      (eu_rst_req),
-        // E-clock for VPA synchronisation
-        .eclk_cnt        (eclk_cnt),
         // Status
         .phase           (phase),
         .s_state         (s_state),

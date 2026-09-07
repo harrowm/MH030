@@ -31,18 +31,9 @@ module biu_tb;
 
     logic rst_n = 1'b0;
 
-    // -----------------------------------------------------------------------
-    // E-clock generator
-    // -----------------------------------------------------------------------
-    logic       e;
-    logic [3:0] eclk_cnt;
-
-    biu_eclk_gen u_eclk (
-        .clk_4x   (clk_4x),
-        .rst_n    (rst_n),
-        .e        (e),
-        .eclk_cnt (eclk_cnt)
-    );
+    // docs/*.md review: E-clock generator (biu_eclk_gen) removed along with
+    // VPA#/ext_e -- neither exists on the real MC68030 (confirmed by
+    // direct search: VPA/VMA/VSTB/E-clock appear nowhere in the manual).
 
     // -----------------------------------------------------------------------
     // External bus signals
@@ -79,7 +70,6 @@ module biu_tb;
     logic berr_tb   = 1'b0;
     logic halt_tb   = 1'b1;   // 1 = HALT deasserted (active-low, sync'd)
     logic avec_tb   = 1'b0;
-    logic vpa_s_tb  = 1'b1;   // active-low retained; 1=deasserted (normal), 0=VPA# asserted
 
     // biu_error_handler outputs
     logic berr_timeout_tb;    // pulsed by watchdog when bus hangs
@@ -245,14 +235,13 @@ module biu_tb;
     logic        cfg_berr_n   = 1'b1;
     logic        cfg_halt_n   = 1'b1;
     logic        cfg_avec_n   = 1'b1;
-    logic        cfg_vpa_n    = 1'b1;
     logic [2:0]  cfg_ipl_n    = 3'b111;
     logic        cfg_br_n     = 1'b1;
     logic        cfg_bgack_n  = 1'b1;
     logic        cfg_cback_n  = 1'b1;
     // biu_config outputs (synchronized)
     logic        cfg_dsack0_s, cfg_dsack1_s, cfg_sterm_s;
-    logic        cfg_berr_s, cfg_halt_s, cfg_avec_s, cfg_vpa_s;
+    logic        cfg_berr_s, cfg_halt_s, cfg_avec_s;
     logic [2:0]  cfg_ipl_s;
     logic        cfg_br_s, cfg_bgack_s, cfg_cback_s;
     logic        cfg_pins_released;
@@ -493,7 +482,6 @@ module biu_tb;
         .berr_s       (berr_combined_tb),   // ext BERR | watchdog timeout
         .halt_s       (halt_tb),
         .avec_s       (avec_tb),
-        .vpa_s        (vpa_s_tb),
         .ipl_s        (3'b111),
         .bgack_s      (1'b1),
         .cback_s      (cback_s_tb),
@@ -531,7 +519,6 @@ module biu_tb;
         .eu_iack_avec (eu_iack_avec_tb),
         .eu_iack_ack  (eu_iack_ack_tb),
         .eu_rst_req   (eu_rst_req_tb),
-        .eclk_cnt     (eclk_cnt),
         .phase        (phase),
         .s_state      (s_state),
         .bus_idle       (bus_idle),
@@ -909,7 +896,6 @@ module biu_tb;
         .berr_n        (cfg_berr_n),
         .halt_n        (cfg_halt_n),
         .avec_n        (cfg_avec_n),
-        .vpa_n         (cfg_vpa_n),
         .ipl_n         (cfg_ipl_n),
         .br_n          (cfg_br_n),
         .bgack_n       (cfg_bgack_n),
@@ -921,7 +907,6 @@ module biu_tb;
         .berr_s        (cfg_berr_s),
         .halt_s        (cfg_halt_s),
         .avec_s        (cfg_avec_s),
-        .vpa_s         (cfg_vpa_s),
         .ipl_s         (cfg_ipl_s),
         .br_s          (cfg_br_s),
         .bgack_s       (cfg_bgack_s),
@@ -940,7 +925,7 @@ module biu_tb;
     logic        cfg51_poweron_rstout_n;
     // Unused output stubs for the dedicated biu_config instance
     logic        cfg51_dsack0_s, cfg51_dsack1_s, cfg51_sterm_s;
-    logic        cfg51_berr_s, cfg51_halt_s, cfg51_avec_s, cfg51_vpa_s;
+    logic        cfg51_berr_s, cfg51_halt_s, cfg51_avec_s;
     logic [2:0]  cfg51_ipl_s;
     logic        cfg51_br_s, cfg51_bgack_s, cfg51_cback_s;
     logic        cfg51_pins_released;
@@ -950,13 +935,13 @@ module biu_tb;
         .rst_n            (cfg51_rst_n),
         .dsack0_n         (1'b1), .dsack1_n(1'b1), .sterm_n (1'b1),
         .berr_n           (1'b1), .halt_n  (1'b1), .avec_n  (1'b1),
-        .vpa_n            (1'b1), .ipl_n   (3'b111),
+        .ipl_n            (3'b111),
         .br_n             (1'b1), .bgack_n (1'b1),  .cback_n (1'b1),
         .ciin_n           (1'b1), // Phase 158 Stage 7: inactive, unused by this testbench
         .dsack0_s         (cfg51_dsack0_s),  .dsack1_s (cfg51_dsack1_s),
         .sterm_s          (cfg51_sterm_s),   .berr_s   (cfg51_berr_s),
         .halt_s           (cfg51_halt_s),    .avec_s   (cfg51_avec_s),
-        .vpa_s            (cfg51_vpa_s),     .ipl_s    (cfg51_ipl_s),
+        .ipl_s            (cfg51_ipl_s),
         .br_s             (cfg51_br_s),      .bgack_s  (cfg51_bgack_s),
         .cback_s          (cfg51_cback_s),
         .ciin_s           (),
@@ -1092,15 +1077,13 @@ module biu_tb;
         MUX_16     = 3'd2,
         MUX_8      = 3'd3,
         MUX_NOSACK = 3'd4,   // no DSACK (STERM test): cycle must terminate via STERM
-        MUX_IACK   = 3'd5,   // immediate 32-bit DSACK + iack_test_vec on D[7:0]
-        MUX_VPA    = 3'd6    // no DSACK: cycle must terminate via VPA/E-clock
+        MUX_IACK   = 3'd5    // immediate 32-bit DSACK + iack_test_vec on D[7:0]
     } mux_sel_t;
 
     mux_sel_t test_mem_sel = MUX_FAST;
 
     logic [31:0] sterm_test_data = 32'hFACE_CAFE;  // data bus for STERM test
     logic [7:0]  iack_test_vec   = 8'd42;           // IACK vector for P4-4
-    logic [31:0] vpa_test_data   = 32'hB00B_1234;  // data bus for VPA read test
 
     always_comb begin
         case (test_mem_sel)
@@ -1128,11 +1111,6 @@ module biu_tb;
                 dsack0_s        = 1'b1;              // immediate 32-bit port response
                 dsack1_s        = 1'b1;
                 ext_d_in_to_biu = {24'h0, iack_test_vec};  // vector on D[7:0] per BIU-043
-            end
-            MUX_VPA: begin
-                dsack0_s        = 1'b0;              // no DSACK — cycle must end via VPA/E-clock
-                dsack1_s        = 1'b0;
-                ext_d_in_to_biu = vpa_test_data;
             end
             default: begin  // MUX_FAST
                 dsack0_s        = !dsack0_n_mem;
@@ -1268,18 +1246,8 @@ module biu_tb;
         end
     endtask
 
-    task test_eclk_timing;
-        int low_count, high_count, timeout;
-        timeout = 200;
-        while (e !== 1'b1 && timeout > 0) begin @(posedge clk_4x); timeout--; end
-        while (e !== 1'b0 && timeout > 0) begin @(posedge clk_4x); timeout--; end
-        if (timeout == 0) begin $display("FAIL  E-clock align timeout"); fail_count++; return; end
-        low_count  = 0; while (e === 1'b0) begin low_count++;  @(posedge clk_4x); end
-        high_count = 0; while (e === 1'b1) begin high_count++; @(posedge clk_4x); end
-        check("E low=24",   low_count  == 24);
-        check("E high=16",  high_count == 16);
-        check("period=40",  (low_count + high_count) == 40);
-    endtask
+    // docs/*.md review: test_eclk_timing removed along with E-clock itself
+    // (does not exist on the real MC68030).
 
     // EU read with per-S-state bus signal checks
     task eu_read_check_timing(
@@ -1369,9 +1337,8 @@ module biu_tb;
         check("init_ssp=$DEADBEF0",  init_ssp  === 32'hDEAD_BEF0);
         check("init_pc=$CAFE0010",   init_pc   === 32'hCAFE_0010);
 
-        // P1-3 E-clock (fine any time after reset)
-        $display("--- E-clock period and duty cycle ---");
-        test_eclk_timing;
+        // docs/*.md review: P1-3 E-clock test removed -- E-clock does not
+        // exist on the real MC68030.
 
         // P2-4..8 EU read with bus-signal timing
         $display("--- EU read: address/FC/AS#/DS# timing ---");
@@ -3692,87 +3659,11 @@ module biu_tb;
 
         // VPA / E-clock termination
         // ===================================================================
-        begin
-            $display("=== BIU: VPA / E-clock termination ===");
-
-            // P18-1: VPA read — cycle must loop in S4/S5 until eclk_cnt==9
-            // (the E-clock falling edge), then complete.  Data is captured at
-            // that same edge.
-            $display("--- VPA read: E-clock synchronized ---");
-            begin
-                int t; logic saw_ack, saw_early_ack;
-                logic [3:0]  term_eclk;
-                logic [31:0] got_rdata;
-                test_mem_sel = MUX_VPA;
-                vpa_s_tb     = 1'b0;    // assert VPA# (active-low)
-                p4_direct    = 1;
-                p4_eu_addr   = 32'h0000_0600;
-                p4_eu_fc     = 3'b101;
-                p4_eu_siz    = 2'b00;
-                p4_eu_rw     = 1'b1;
-                p4_eu_is_op  = 1'b1;
-                wait_bus_idle;
-                p4_eu_req = 1;
-                // The cycle enters S4 on about tick 13 (3 ticks setup + 10 for S0-S3).
-                // It must NOT ack until eclk_cnt==9.  Record eclk_cnt when ack fires.
-                // Capture rdata and eclk_cnt inside the loop: eu_rdata is combinational
-                // and returns to 0 once state leaves ST_READ_S7.
-                saw_ack = 0; saw_early_ack = 0; term_eclk = 4'hF; got_rdata = 32'h0;
-                for (t = 0; t < 200; t++) begin
-                    @(posedge clk_4x);
-                    if (cg_eu_ack_direct) begin
-                        term_eclk = eclk_cnt;
-                        got_rdata = cg_eu_rdata;
-                        saw_ack   = 1;
-                        break;
-                    end
-                end
-                p4_eu_req    = 0;
-                vpa_s_tb     = 1'b1;
-                test_mem_sel = MUX_FAST;
-                p4_direct    = 0;
-                while (!bus_idle) @(posedge clk_4x);
-                check("eu_ack fires",                   saw_ack);
-                // eclk_cnt reads 0 at ack time: E fell on the previous phase_r==3
-                // tick (9→0 NBA), so the registered eclk_cnt at the ack tick is 0.
-                check("ack at eclk_cnt==0 (just after E falls)", term_eclk === 4'd0);
-                check32("rdata from VPA bus", got_rdata, vpa_test_data);
-            end
-            repeat(8) @(posedge clk_4x);
-
-            // P18-2: VPA during IACK — autovector (same result as AVEC but
-            // using E-clock synchronization rather than immediate termination).
-            $display("--- VPA IACK: autovector via E-clock ---");
-            begin
-                int t; logic saw_ack;
-                logic [7:0]  got_vec;
-                logic        got_avec;
-                test_mem_sel = MUX_VPA;   // no DSACK; data bus irrelevant for IACK
-                vpa_s_tb     = 1'b0;      // assert VPA# instead of AVEC#
-                wait_bus_idle;
-                // Trigger IACK at level 5 (same setup as P4-5)
-                eu_iack_req_tb   = 1;
-                eu_iack_level_tb = 3'd5;
-                saw_ack = 0;
-                for (t = 0; t < 200; t++) begin
-                    @(posedge clk_4x);
-                    if (eu_iack_ack_tb) begin
-                        got_vec  = eu_iack_vec_tb;
-                        got_avec = eu_iack_avec_tb;
-                        saw_ack  = 1;
-                        break;
-                    end
-                end
-                eu_iack_req_tb = 0;
-                vpa_s_tb       = 1'b1;
-                test_mem_sel   = MUX_FAST;
-                while (!bus_idle) @(posedge clk_4x);
-                check("iack_ack fires",              saw_ack);
-                check("avec flag set (autovector)",  got_avec);
-                check8("vector = 24+5 = 29",        got_vec, 8'd29);
-            end
-            repeat(8) @(posedge clk_4x);
-        end
+        // docs/*.md review: P18-1/P18-2 (VPA/E-clock termination) removed --
+        // VPA#/VMA#/VSTB#/E-clock do not exist on the real MC68030 (confirmed
+        // by direct search of the manual); the mechanism they tested has
+        // been removed from biu_cycle_gen.sv/biu_config.sv/m68030_biu.sv/
+        // m68030_top.sv.
 
         // CAS2 BERR abort, RESET watchdog guard, frame_valid persistence
         // ===================================================================

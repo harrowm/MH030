@@ -46,7 +46,6 @@ rtl/eu_seq.sv: rtl/eu_seq_decode.svh rtl/eu_seq_execute.svh
 	@touch $@
 
 BIU_SRCS := \
-    rtl/biu_eclk_gen.sv \
     rtl/biu_cycle_gen.sv \
     rtl/biu_arbiter.sv \
     rtl/biu_sizing_fsm.sv \

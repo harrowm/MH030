@@ -8715,4 +8715,43 @@ rebuild of the Verilator batch runner after a stale-cache scare):
 baseline (Harte's corpus never touches CDIS/MMUDIS/RMC/DBEN/IPEND at
 all).
 
-**Items #6-#10 continue below as each is addressed.**
+### Item #6: non-existent VPA#/E-clock pins — REMOVED, IMPLEMENTED AND VERIFIED
+
+The original review's grounding pass flagged `vpa_n`/`ext_e` as "possibly
+modeling a pin that doesn't exist on real MC68030 silicon." Confirmed
+definitively this session via direct search of both `pdftotext` extractions
+(`-layout` and plain) of the full manual: `VPA`, `VMA`, `VSTB`, and
+"E-clock"/"E Clock" appear **nowhere** in the text. The RTL's own removed
+comment justified the mechanism by citing "68030 UM section 7.4.2" —
+directly checked, that section is actually "Breakpoint Acknowledge
+Cycle," an uncaught citation error, not a real cross-reference. Consulted
+the user given the blast radius (the mechanism reached into
+`biu_cycle_gen.sv`'s own core read/write/IACK termination logic, the
+single most delicate shared FSM in the project) — chose full removal
+over documenting-as-extra or partial defanging.
+
+**Removed**: `biu_eclk_gen.sv` (the E-clock generator module) deleted
+entirely; `vpa_terminate`/`eclk_cnt` and all 6 of their usage sites in
+`biu_cycle_gen.sv` (general `data_capture_ok`, the IACK autovector
+condition, the DSACK-wait combinational check, and the READ/WRITE/IACK
+state-transition `else if` branches); `vpa_n`/`vpa_s`'s own 2-stage
+synchronizer in `biu_config.sv`; `vpa_n`/`ext_e` ports and all wiring
+through `m68030_biu.sv`/`m68030_top.sv`; the `BIU_SRCS` Makefile entry.
+`tb/biu_tb.sv`'s own dedicated `P18-1`/`P18-2` VPA/E-clock tests and
+`test_eclk_timing` removed along with the `MUX_VPA` bus-mux state and
+`vpa_test_data`. All 13 other testbenches that instantiate `m68030_top`
+(plus `biu_int_tb.sv`, which instantiates it too) had their own
+`vpa_n`/`ext_e` tie-offs removed via a scripted batch edit (mirroring
+item #5's own batch-edit precedent), verified identical in shape across
+all files before editing.
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8,
+`make cosim_memind` 28/28, `make dat-synth` 50/50, full 124-suite Tom
+Harte sweep (mandatory — `rtl/` changed; verified against a genuine full
+rebuild of the Verilator batch runner): `TOTAL: PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0` — bit-identical to baseline (Harte's corpus never
+exercises VPA/E-clock, and removing an unreachable-on-real-silicon
+termination path changes no reachable behavior for any cycle that
+doesn't explicitly assert the now-deleted pin).
+
+**Items #7-#10 continue below as each is addressed.**
