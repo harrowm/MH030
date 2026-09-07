@@ -679,6 +679,37 @@ module exc_tb;
         end else $display("PASS EXC-15 trans_cnt=5");
 
         // ================================================================
+        // EXC-16 (docs/*.md review, Phase 250 F7): priority-chain reorder
+        // proof. Table 8-5 ranks Illegal Instruction (3.0) strictly higher
+        // priority than Interrupt (4.2, the lowest priority of any
+        // exception in the whole table) -- with both illegal_req and a
+        // genuinely-pending, unmasked interrupt asserted the SAME cycle,
+        // the controller must dispatch Illegal Instruction, never the
+        // interrupt. Before this fix, m68030_exc.sv's own always_comb
+        // priority chain checked int_pending&&int_ready 3rd, ahead of
+        // illegal_req -- confirmed to dispatch the WRONG exception
+        // (interrupt, vector 27 autovector) on baseline; this reorder
+        // fixes it to dispatch illegal_req (vector 4) as required.
+        //   illegal → vec=4, fmt=$0, fetch_addr = VBR + 4*4 = 0x10
+        // ================================================================
+        $display("--- EXC-16: Priority illegal_req > pending interrupt ---");
+        begin_test;
+        ssp_in    = 32'h0000_3000;
+        fault_pc  = 32'h0000_2000;
+        fault_sr  = 16'h2200;  // S=1, IPL=1 (old mask) -- same shape as EXC-5
+        exc_rdata = 32'h0000_5000;
+        ipl_mask  = 3'd1;
+        ipl_sync  = 3'd3;      // ipl_sync=3 > ipl_mask=1 -> int_pending=1
+        illegal_req = 1;
+        @(posedge clk_4x); #1;  // FSM snaps both conditions the same cycle
+        ipl_sync    = 3'd0;
+        illegal_req = 0;
+        wait_idle;
+
+        chk32("EXC-16 fetch_addr (illegal, not interrupt autovector)",
+              t_addr[2], 32'h0000_0010);  // vec=4 -> VBR+16=0x10, NOT VBR+108=0x6C
+
+        // ================================================================
         if (fail == 0)
             $display("ALL EXC TESTS PASSED");
         else

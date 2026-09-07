@@ -6,8 +6,10 @@
 // Handles all exception types, pushes the appropriate stack frame format,
 // fetches the handler vector, and loads the new PC/SR into the EU.
 //
-// Priority (highest first):
-//   Bus error / address error > Interrupt > Instruction faults > Traps
+// Priority (highest first, MC68030UM.pdf Table 8-5 -- docs/*.md review,
+// Phase 250 F7; the always_comb chain below is ordered to match exactly):
+//   Address error > Bus error > Illegal/Priv/Line-A/Line-F/Format-error >
+//   Zero-Divide/CHK/MMU-Config/TRAPV/TRAP#n > Interrupt (lowest of all)
 //
 // Frame push uses longword (32-bit) BIU writes.  Each push step covers 4
 // bytes; the step counter counts down from (total_LW_writes - 1) to 0 so
@@ -175,17 +177,30 @@ module m68030_exc (
     logic [3:0] pend_fmt;
     logic       pend_is_int;
 
+    // docs/*.md review (Phase 250 F7): reordered to match MC68030UM.pdf
+    // Table 8-5's own priority groups (0.0 highest .. 4.2 lowest; Reset is
+    // handled entirely outside this FSM). Previously: bus_err_req was
+    // checked before addr_err_req (Table 8-5 ranks Address Error 1.0
+    // strictly above Bus Error 1.1 -- swapped below), and int_pending was
+    // checked 3rd -- ahead of illegal/priv/trace/chk/div_zero/trapv/trap,
+    // every one of which Table 8-5 ranks strictly higher priority than
+    // Interrupt (4.2, the single LOWEST priority of every exception in the
+    // whole table) -- moved to last. Reachability of the int_pending case
+    // specifically (can int_ready and, say, illegal_req/chk_req genuinely
+    // be combinationally true in the same cycle given this project's own
+    // pipeline staging) was not proven either way; this reorder is correct
+    // regardless of whether that race is currently reachable, and removes
+    // the risk at zero cost if it ever becomes reachable via a future
+    // change.
     always_comb begin
         exc_pending = 1'b0;
         pend_vec    = 8'h0;
         pend_fmt    = FMT_SHORT;
         pend_is_int = 1'b0;
-        if (bus_err_req) begin
-            exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
-        end else if (addr_err_req) begin
+        if (addr_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_ADDR;
-        end else if (int_pending && int_ready) begin
-            exc_pending = 1'b1; pend_vec = 8'h0; pend_fmt = FMT_SHORT; pend_is_int = 1'b1;
+        end else if (bus_err_req) begin
+            exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
         end else if (illegal_req) begin
             exc_pending = 1'b1; pend_vec = VEC_ILLEGAL;   pend_fmt = FMT_SHORT;
         end else if (priv_req) begin
@@ -215,6 +230,8 @@ module m68030_exc (
             exc_pending = 1'b1;
             pend_vec    = VEC_TRAP0 + {4'd0, trap_num};
             pend_fmt    = FMT_SHORT;
+        end else if (int_pending && int_ready) begin
+            exc_pending = 1'b1; pend_vec = 8'h0; pend_fmt = FMT_SHORT; pend_is_int = 1'b1;
         end
     end
 
