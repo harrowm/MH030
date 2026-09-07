@@ -20,8 +20,20 @@
 //   terminated = dsack0_s | dsack1_s | sterm_s | berr_s_ext | bus_idle
 //
 // halt_out: asserts when any BERR (external or timeout) fires during a
-// retry cycle — this is the MC68030 double bus fault condition.  The
-// signal should be held by the EU/top-level to stop execution.
+// retry cycle — this is the CONDITION the MC68030 calls double bus fault.
+// The signal should be held by the EU/top-level to stop execution.
+//
+// Phase 248 item #10 (docs/*.md review): this is an internal control
+// signal only, NOT a drive for the real HALT pin. MC68030UM.pdf Table 5-1/
+// §5.10.2 lists HALT as Input-only (unlike the 68000, which does drive
+// HALT out on double bus fault) -- confirmed directly against the manual
+// text. Real 68030 silicon signals double bus fault by continuously
+// asserting STATUS instead (§7.5.4/§8.1.2), an emulator-support pin this
+// project deliberately deferred (Phase 248 item #5) since its semantics
+// tie to real silicon's own internal microsequencer staging with no
+// faithful analogue here. halt_out's own job -- stopping EU execution --
+// is correct and unaffected by this; only the name/pin association in
+// this comment was previously misleading.
 
 module biu_error_handler #(
     parameter int TIMEOUT_CLKS = 128   // 4x-clock ticks before timeout

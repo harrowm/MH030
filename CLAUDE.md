@@ -1028,7 +1028,32 @@ no-cache total was `14` (real: `11`); UNLK's I-cache figure was
 exactly. Fixed the table and one downstream hardcoded stale value in
 `scripts/gen_seq_tests2.py`. Pure Python data-table fix, no RTL touched.
 
-Item #10 still to come.
+**Item #10 (RESET input/output split + HALT-output question — DOCUMENTED, no
+RTL functional change, closes the Phase 248 10-item list in full)**: the
+original grounding pass (`~/.claude/plans/elegant-gliding-fog.md`) flagged two
+questions items #1-9 never addressed: whether RESET's own real bidirectional
+open-drain pin was being modeled correctly by this RTL's `rst_n`
+(input)/`ext_rstout_n` (output) split, and whether real silicon drives HALT as
+an output on double bus fault (this project already has an internal `halt_out`
+signal in `biu_error_handler.sv` whose own comment called it "the MC68030
+double bus fault condition," which reads as if it were a pin). Resolved both by
+direct re-read of MC68030UM.pdf's own Table 5-1 and §5.10.1/§5.10.2 text:
+**RESET** is confirmed genuinely "bidirectional open-drain" — the RTL's
+existing `rst_n`/`ext_rstout_n` split is correct, just previously undocumented
+as a deliberate real-pin split; added an explicit comment at both ports in
+`m68030_top.sv`. **HALT** is confirmed **Input-only** in Table 5-1 (unlike the
+68000, which does drive HALT out on double bus fault) — real 68030 silicon
+signals double bus fault by continuously asserting **STATUS** instead
+(§7.5.4/§8.1.2), an emulator-support pin already deliberately deferred at item
+#5 for the same "no faithful analogue in this project's own microarchitecture"
+reason. This project's own `halt_out` is therefore correct as an *internal*
+execution-stop control signal, but its doc comment was misleading about a pin
+association that doesn't exist on real silicon — fixed the comment in
+`biu_error_handler.sv` to state this precisely, and added a matching note at
+`halt_n`'s own port declaration in `m68030_top.sv`. Pure documentation/comment
+fix — `git diff` confirmed zero non-comment lines changed in either file — so
+`make test` (37/37, sanity only) was sufficient; no Harte re-run needed. **This
+closes the Phase 248 10-item compliance-review list in full.**
 
 **Phase 249 (code-review pass over Phase 248's own items #5/#1 — IMPLEMENTED AND
 VERIFIED, two real bugs found)**: a general code-review pass over the item #5/#1
@@ -1098,9 +1123,10 @@ backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), the CAS bus-lock plan
 (`~/.claude/plans/silent-copper-latch.md`), and the Phase 247 documentation audit
 (10/10 items) are all CLOSED IN FULL. Stage 9's own genuine-memory-indirect-EA work
 closed at Phase 245, and `docs/cache.md`'s own last open item closed at Phase 246.
-A manual compliance review (Phase 248) is in progress, working through a 10-item
-list one at a time (item #10 still to come) — see above for status. Phase 249
-(a code-review pass over items #1/#5, two real bugs found and fixed) is closed.
+The manual compliance review (Phase 248, `~/.claude/plans/elegant-gliding-fog.md`)
+is CLOSED IN FULL — all 10 items resolved. Phase 249 (a code-review pass over
+items #1/#5, two real bugs found and fixed) is also closed. No outstanding plan
+remains open in this project as of Phase 249 — ask the user for new work.
 
 ## Verification Commands
 

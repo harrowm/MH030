@@ -24,6 +24,15 @@ module m68030_top #(
     parameter int POWERON_RSTO_CLKS = 2048   // 4× clocks; pass-through to m68030_biu
 ) (
     input  logic        clk_4x,
+    // Phase 248 item #10 (docs/*.md review): real MC68030 RESET (Table 5-1/
+    // §5.10.1) is ONE bidirectional open-drain pin -- an external reset
+    // resets the whole chip; a processor-initiated reset (the RESET
+    // instruction) pulses the same wire to reset external devices only,
+    // leaving internal processor state untouched. This RTL splits that one
+    // real pin into two unidirectional ports for synthesis: rst_n here
+    // (the external-reset-in half) and ext_rstout_n below (the RESET-
+    // instruction-out half) -- a deliberate, correct modeling choice,
+    // previously implemented but never explicitly documented as such.
     input  logic        rst_n,
 
     // ───────────────────────────────────────────────────────────────────────
@@ -59,6 +68,14 @@ module m68030_top #(
     input  logic        dsack1_n,
     input  logic        sterm_n,
     input  logic        berr_n,
+    // Phase 248 item #10 (docs/*.md review): confirmed Input-only is
+    // correct -- MC68030UM.pdf Table 5-1/§5.10.2 lists HALT as Input,
+    // unlike the 68000 (which does drive HALT out on double bus fault).
+    // Real 68030 double-bus-fault signaling is via STATUS instead
+    // (§7.5.4/§8.1.2), an emulator-support pin deliberately deferred at
+    // item #5 -- see biu_error_handler.sv's own halt_out for the internal
+    // (non-pin) control signal that actually stops execution on this
+    // condition.
     input  logic        halt_n,
     input  logic        avec_n,
     input  logic [2:0]  ipl_n,
