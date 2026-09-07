@@ -103,6 +103,7 @@ module m68030_biu #(
     output logic [7:0]  eu_iack_vec,
     output logic        eu_iack_avec,
     output logic        eu_iack_ack,
+    output logic        eu_iack_berr,
 
     input  logic        eu_rst_req,
 
@@ -1018,6 +1019,7 @@ module m68030_biu #(
         .eu_iack_vec     (eu_iack_vec),
         .eu_iack_avec    (eu_iack_avec),
         .eu_iack_ack     (eu_iack_ack),
+        .eu_iack_berr    (eu_iack_berr),
         // RESET instruction
         .eu_rst_req      (eu_rst_req),
         // Status

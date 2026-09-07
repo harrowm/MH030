@@ -24,6 +24,13 @@ module m68030_mmu (
 
     // ── Translation control registers ────────────────────────────────────
     input  logic [31:0] tc,        // TC[31]=E enables MMU
+    // docs/*.md review (code-review pass): MMUDIS# was already threaded
+    // into biu_mmu_if.sv/biu_cache_if.sv/biu_icache_if.sv's own local tc_e
+    // copies (Phase 248 item #5) but missed this module's own 4th,
+    // independent copy -- with MMUDIS# asserted, PFLUSH/PTEST/PLOAD here
+    // would still dispatch a real biu_req instead of the immediate no-op
+    // every other consumer now correctly takes.
+    input  logic         mmudis_n,   // 0 = MMUDIS asserted (active-low)
 
     // ── EU translation request ────────────────────────────────────────────
     input  logic [31:0] va_in,
@@ -90,7 +97,7 @@ module m68030_mmu (
     output logic        mmu_active     // 1 while processing
 );
 
-    wire tc_e = tc[31];
+    wire tc_e = tc[31] && mmudis_n;  // docs/*.md review: MMUDIS# override
 
     // -----------------------------------------------------------------------
     // FSM

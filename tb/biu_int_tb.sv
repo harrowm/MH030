@@ -128,6 +128,8 @@ module biu_int_tb;
         .cback_n         (cback_n),
         .ciin_n          (ciin_n),   // Phase 158 Stage 7
         .ciout_n         (),
+        .cdis_n          (1'b1),     // docs/*.md review: deasserted (not asserted)
+        .mmudis_n        (1'b1),     // docs/*.md review: deasserted (not asserted)
         .eu_addr         (eu_addr),
         .eu_wdata        (eu_wdata),
         .eu_rdata        (eu_rdata),

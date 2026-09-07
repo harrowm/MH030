@@ -60,7 +60,8 @@ module trapv_debug;
         .eu_trap_req(eu_trap_req),.eu_trap_num(eu_trap_num),
         .eu_trapv_req(eu_trapv_req),.eu_illegal_req(eu_illegal_req),.eu_stop(eu_stop),
         .ssp_wr_en(ssp_wr_en),.ssp_wr_data(ssp_wr_data),
-        .exc_sr_wr_en(exc_sr_wr_en),.exc_sr_wr_data(exc_sr_wr_data)
+        .exc_sr_wr_en(exc_sr_wr_en),.exc_sr_wr_data(exc_sr_wr_data),
+        .exc_isp_wr_en(1'b0),.exc_isp_wr_data(32'h0)
     );
 
     task issue_wait(input logic [15:0] w0, has_ext, input logic [31:0] ext);

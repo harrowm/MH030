@@ -124,7 +124,7 @@ module m68030_top #(
     logic [31:0] eu_rdata;
     logic        eu_ack, eu_berr, eu_retry;
     logic [7:0]  eu_iack_vec;
-    logic        eu_iack_avec, eu_iack_ack;
+    logic        eu_iack_avec, eu_iack_ack, eu_iack_berr;
     logic        bus_lock;
     logic [31:0] eu_cas2_rdata1, eu_cas2_rdata2;
     logic        eu_cas2_ack;
@@ -672,7 +672,15 @@ module m68030_top #(
         .iack_level   (exc_iack_level_w),
         .iack_ack     (eu_iack_ack),
         .iack_vec     (eu_iack_vec),
-        .iack_berr    (eu_berr),
+        // docs/*.md review (code-review pass): was wired to the generic
+        // eu_berr (biu_cache_if's own EU-cache-request abort output) --
+        // IACK bypasses that path entirely via its own eu_iack_req/ack/vec
+        // port trio, so a real BERR-during-IACK (no AVEC#, no DSACK) never
+        // reached this controller; EXC_IACK just redispatched a fresh IACK
+        // cycle forever instead of ever taking Spurious Interrupt. Fixed
+        // with a dedicated eu_iack_berr output threaded through
+        // biu_cycle_gen.sv/m68030_biu.sv.
+        .iack_berr    (eu_iack_berr),
         // Outputs to EU
         .new_pc       (exc_new_pc),
         .new_pc_wr    (exc_new_pc_wr),
@@ -689,6 +697,7 @@ module m68030_top #(
         .clk_4x         (clk_4x),
         .rst_n          (rst_n),
         .tc             (eu_tc_w),           // TC register from EU
+        .mmudis_n       (mmudis_n),          // Phase 248 item #5 follow-up: 4th tc_e copy
         // EU virtual address for MMU translation
         .va_in          (32'h0),
         .fc_in          (3'b0),
@@ -799,6 +808,7 @@ module m68030_top #(
         .eu_iack_vec     (eu_iack_vec),
         .eu_iack_avec    (eu_iack_avec),
         .eu_iack_ack     (eu_iack_ack),
+        .eu_iack_berr    (eu_iack_berr),
         // RST (stub)
         .eu_rst_req      (1'b0),
         // RMW

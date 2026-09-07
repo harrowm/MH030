@@ -225,7 +225,9 @@ module pipeline_tb;
         .ssp_wr_en     (1'b0),
         .ssp_wr_data   (32'h0),
         .exc_sr_wr_en  (1'b0),
-        .exc_sr_wr_data(16'h0)
+        .exc_sr_wr_data(16'h0),
+        .exc_isp_wr_en (1'b0),
+        .exc_isp_wr_data(32'h0)
     );
 
     // -----------------------------------------------------------------------

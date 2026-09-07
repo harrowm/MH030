@@ -181,7 +181,9 @@ module ea_extended_tb;
         .ssp_wr_en       (ssp_wr_en),
         .ssp_wr_data     (ssp_wr_data),
         .exc_sr_wr_en    (exc_sr_wr_en),
-        .exc_sr_wr_data  (exc_sr_wr_data)
+        .exc_sr_wr_data  (exc_sr_wr_data),
+        .exc_isp_wr_en   (1'b0),
+        .exc_isp_wr_data (32'h0)
     );
 
     // Memory model with word-aware reads for CMP2.W bounds

@@ -94,6 +94,13 @@ module biu_cycle_gen #(
     output logic [7:0]  eu_iack_vec,
     output logic        eu_iack_avec,
     output logic        eu_iack_ack,
+    // docs/*.md review (code-review pass): dedicated BERR-during-IACK
+    // output. The shared generic eu_berr port below feeds biu_cache_if's
+    // own EU-cache-request completion path only -- IACK bypasses that
+    // entirely via this direct eu_iack_req/ack/vec port trio, so a BERR
+    // during IACK (no AVEC#, no DSACK -- Spurious Interrupt) must signal
+    // through its own dedicated output instead of the unrelated shared one.
+    output logic        eu_iack_berr,
 
     // RESET instruction (BIU-063)
     input  logic        eu_rst_req,
@@ -1490,6 +1497,7 @@ module biu_cycle_gen #(
         ifu_rdata    = 32'h0; ifu_ack  = 1'b0; ifu_berr = 1'b0;
         mmu_rdata    = 32'h0; mmu_ack  = 1'b0; mmu_berr = 1'b0;
         eu_iack_vec  = 8'h00; eu_iack_avec = 1'b0; eu_iack_ack = 1'b0;
+        eu_iack_berr = 1'b0;
         eu_coproc_rdata = 32'h0; eu_coproc_ack = 1'b0; eu_coproc_berr = 1'b0;
         eu_bkpt_rdata   = 32'h0; eu_bkpt_ack   = 1'b0; eu_bkpt_berr   = 1'b0;
         eu_cas2_rdata1 = cas2_rdata1_r;
@@ -1624,8 +1632,8 @@ module biu_cycle_gen #(
                 if (is_iack) begin
                         eu_iack_vec  = iack_vec_r;
                         eu_iack_avec = iack_avec_r;
-                        if (!berr_abort_r) eu_iack_ack = 1'b1;
-                        else               eu_berr     = 1'b1;
+                        if (!berr_abort_r) eu_iack_ack  = 1'b1;
+                        else               eu_iack_berr = 1'b1;
                     end else if (is_init_ssp | is_init_pc) begin
                         // init fetches complete internally
                     end else if (is_cas2) begin

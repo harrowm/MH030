@@ -1030,6 +1030,66 @@ exactly. Fixed the table and one downstream hardcoded stale value in
 
 Item #10 still to come.
 
+**Phase 249 (code-review pass over Phase 248's own items #5/#1 — IMPLEMENTED AND
+VERIFIED, two real bugs found)**: a general code-review pass over the item #5/#1
+diffs (not itself one of the numbered items) found two real, previously-
+undiscovered bugs. **Bug A**: MMUDIS# (item #5) was wired into three consumers'
+own local `tc_e` copies but missed `m68030_mmu.sv`'s own 4th, independent copy —
+with MMUDIS# asserted, PFLUSH/PTEST/PLOAD there would still dispatch a real
+`biu_req` instead of the immediate no-op every other consumer now correctly
+takes. Fixed with the same `tc_e = tc[31] && mmudis_n` pattern the other three
+consumers already use, plus the missing `.mmudis_n(mmudis_n)` connection at
+`m68030_top.sv`'s own `u_mmu` instantiation (the new port had been added to the
+module but never wired at its call site — caught before it shipped, since an
+unconnected input to a submodule is silently tied to X in simulation, not a
+compile error). **Bug B (the more serious one)**: item #1's own real IACK
+implementation wired `m68030_exc.sv`'s `iack_berr` input to the generic top-level
+`eu_berr` net — which is actually `biu_cache_if.sv`'s own "properly gated
+final-abort" output for the EU's ordinary cache-request path (`ca_eu_berr`,
+Phase 163's own bus-pipelining-overlap fix), completely unrelated to IACK's
+independent bypass route straight into `biu_cycle_gen.sv` via its own dedicated
+`eu_iack_req`/`eu_iack_ack`/`eu_iack_vec` port trio. `biu_cycle_gen.sv`'s own
+IACK-timeout case set the shared *generic* `eu_berr` output on `berr_abort_r`
+(the same signal `biu_cache_if.sv` drives from, an entirely different
+instantiation), which never reaches `m68030_exc.sv` at all — so a genuine BERR
+during IACK (a peripheral that never asserts AVEC# or DSACK) was never seen by
+the exception controller; `EXC_IACK` just silently redispatched a brand-new IACK
+bus cycle forever (each one individually timing out via the BERR watchdog and
+correctly re-entering, restarting the watchdog each time) instead of ever taking
+Spurious Interrupt. Found via the new `SPURIOUS-INT` test (below) — not via Harte
+(no 68000-captured corpus vector exercises this) or any pre-existing coverage
+(`tb/exc_tb.sv`'s own EXC-13 only proves the standalone controller's own response
+to an already-asserted `iack_berr`, never the real `biu_cycle_gen`→`m68030_top`
+wiring). Root-caused with a temporary instrumented trace (dumping
+`u_exc.state_r`/`u_biu.eu_iack_ack`/`u_biu.u_cg.berr_abort_r`/`u_biu.u_cg.state`/
+`u_biu.u_err.wdog_r` every 20 ticks, since removed) showing the FSM cycling
+`ST_IACK_S0`→`S2`→`S4`↔`S5`→(watchdog trips, `berr_abort_r` pulses one tick)→
+`S6`→`S7`→`ST_IDLE`→fresh `ST_IACK_S0` — over and over — while `m68030_exc.sv`'s
+own `state_r` never left `EXC_IACK`. Fixed with a new, dedicated
+`eu_iack_berr` output on `biu_cycle_gen.sv` (mirroring `eu_iack_ack`'s own
+existing shape exactly — set on `berr_abort_r` in the same completion branch that
+used to fall through to the generic `eu_berr`), threaded through
+`m68030_biu.sv`/`m68030_top.sv` into `m68030_exc.sv`'s `iack_berr` port in place
+of the generic net. New `tb/stall_fsm_tb.sv` test **SPURIOUS-INT**: a new
+`suppress_iack_resp` testbench flag (gating both the file's own auto-AVEC
+responder added by item #1 and its generic DSACK memory-model response — a first
+attempt suppressing only AVEC# still got a real, if garbage-vectored, DSACK
+response instead of a genuine timeout) forces a real IACK cycle to receive
+neither AVEC# nor DSACK, confirming it correctly times out and dispatches vector
+24 (previously failed reliably pre-fix, confirmed via the trace above; passes
+post-fix). Found and fixed one testbench-only construction issue while building
+it: an early draft held `ipl_n` asserted for the entire wait loop instead of
+following this file's own established convention (clear it the instant
+`exc_active` is first observed, since holding IPL asserted after the controller
+has already acted on it causes a legitimate re-recognition storm at every
+subsequent instruction boundary on real hardware too) — not actually the cause
+of the failure (the bug reproduced regardless), but fixed to match the file's own
+precedent (`plan.md`'s CAS2-interrupt test, line ~1361) before the test was
+considered done. Full mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8,
+`cosim_memind` 28/28, `dat-synth` 50/50), Harte bit-identical to baseline
+(`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — no real-interrupt vectors in that
+corpus at all).
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented
 ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
@@ -1039,7 +1099,8 @@ backlog plan (`~/.claude/plans/elegant-gliding-fog.md`), the CAS bus-lock plan
 (10/10 items) are all CLOSED IN FULL. Stage 9's own genuine-memory-indirect-EA work
 closed at Phase 245, and `docs/cache.md`'s own last open item closed at Phase 246.
 A manual compliance review (Phase 248) is in progress, working through a 10-item
-list one at a time — see above for status.
+list one at a time (item #10 still to come) — see above for status. Phase 249
+(a code-review pass over items #1/#5, two real bugs found and fixed) is closed.
 
 ## Verification Commands
 

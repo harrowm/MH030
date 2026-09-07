@@ -285,6 +285,7 @@ module mmu_tb;
         .clk_4x         (clk_4x),
         .rst_n          (rst_n),
         .tc             (tc),
+        .mmudis_n       (1'b1),  // docs/*.md review: deasserted (not asserted)
         .va_in          (va_in),
         .fc_in          (fc_in),
         .rw_in          (rw_in),
@@ -353,6 +354,7 @@ module mmu_tb;
         .mmu_ack      (stub_ack),
         .mmu_berr     (stub_berr),
         .tc           (tc),
+        .mmudis_n     (1'b1),  // docs/*.md review: deasserted (not asserted)
         .crp          (crp),
         .srp          (srp),
         .tt0          (tt0),

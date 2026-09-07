@@ -104,7 +104,19 @@ module stall_fsm_tb;
     // own IACK dispatch exactly: cyc_addr = 0xFFFFFFF0 | (level<<1),
     // i.e. A[31:4] all ones, FC=111 (CPU space).
     wire iack_cycle_active = !ext_as_n && (ext_fc == 3'b111) && (ext_a[31:4] == 28'hFFFFFFF);
-    wire avec_n = !iack_cycle_active;
+    // docs/*.md review (code-review pass): suppress_iack_resp lets one
+    // dedicated test (SPURIOUS-INT below) force a real Spurious Interrupt
+    // by leaving an IACK cycle to time out (no AVEC#, no DSACK) instead of
+    // the usual auto-response -- proving the real eu_iack_berr wiring fix
+    // end to end, not just via exc_tb.sv's own standalone-controller stub.
+    // Must also suppress this file's own generic memory model's DSACK
+    // response (below, ds_req/ds_active_r), which otherwise responds to
+    // ANY AS+DS assertion regardless of FC, including CPU-space IACK --
+    // discovered directly: a first attempt suppressing only AVEC# still
+    // got a real (if aliased/garbage-vector) DSACK response instead of a
+    // genuine timeout.
+    logic suppress_iack_resp = 1'b0;
+    wire avec_n = suppress_iack_resp ? 1'b1 : !iack_cycle_active;
 
     // wait_states injects N extra clk_4x-cycle-granular... actually S-state
     // cycles of DSACK latency on top of the baseline 1-cycle ack, for
@@ -129,8 +141,8 @@ module stall_fsm_tb;
         end
     end
 
-    wire dsack0_n = ~ds_active_r;
-    wire dsack1_n = ~ds_active_r;
+    wire dsack0_n = suppress_iack_resp ? 1'b1 : ~ds_active_r;
+    wire dsack1_n = suppress_iack_resp ? 1'b1 : ~ds_active_r;
 
     wire [31:0] ext_d_in = (!ext_ds_n & ext_rw) ? rd_word : {32{1'bz}};
 
@@ -3995,6 +4007,42 @@ module stall_fsm_tb;
         // excluded from Category H's own final source count, same
         // disposition as Stage 4 already gave it for Category F, just for
         // a more serious reason than originally predicted.
+
+        // docs/*.md review (code-review pass): SPURIOUS-INT proves the real
+        // eu_iack_berr wiring fix end to end -- a genuine IACK cycle that
+        // gets neither AVEC# nor DSACK must time out via the BERR watchdog
+        // and correctly dispatch Spurious Interrupt (vector 24), not hang
+        // EXC_IACK forever. tb/exc_tb.sv's own EXC-13 only proves the
+        // controller's own response to an already-asserted iack_berr on
+        // the standalone m68030_exc instance; it never exercises the real
+        // biu_cycle_gen -> m68030_top wiring this bug lived in. Injected
+        // wherever the previous test left the CPU (a quiescent self-loop
+        // per this file's own claim_park() convention) -- Spurious
+        // Interrupt has no dependency on what instruction is executing.
+        $display("--- SPURIOUS-INT: real IACK timeout dispatches vector 24 ---");
+        begin
+            int t;
+            logic saw_iack, saw_vec24, recovered;
+            suppress_iack_resp = 1'b1;
+            ipl_n = 3'b000;   // level 7 (NMI)
+            saw_iack  = 1'b0;
+            saw_vec24 = 1'b0;
+            for (t = 0; t < 400 && !saw_vec24; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.u_exc.state_r == 3'd1) saw_iack = 1'b1;  // EXC_IACK
+                if (u_top.u_exc.snap_vec_r == 8'd24) saw_vec24 = 1'b1;
+            end
+            ipl_n = 3'b111;
+            suppress_iack_resp = 1'b0;
+            recovered = 1'b0;
+            for (t = 0; t < 400; t++) begin
+                @(posedge clk_4x); #1;
+                if (!u_top.exc_active) begin recovered = 1'b1; break; end
+            end
+            check("SPURIOUS-INT: real IACK cycle was dispatched", saw_iack);
+            check("SPURIOUS-INT: watchdog timeout correctly resolved to vector 24 (not hung)", saw_vec24);
+            check("SPURIOUS-INT: CPU recovered (exc_active cleared, no lingering hang)", recovered);
+        end
 
         check("No address errors", ~(eu_addr_err | ifu_addr_err));
 
