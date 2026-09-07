@@ -364,6 +364,28 @@ module ea_extended_tb;
         chk1("CMP2-01:C=0", sr_out[0], 1'b0);
         chk1("CMP2-01:Z=0", sr_out[2], 1'b0);
 
+        // docs/*.md review (Phase 250 F4): Table 3-12's real C formula has a
+        // second branch for a WRAPPED range (UB<LB) that was previously
+        // unimplemented (only the LB<=UB branch existed). LB=10,UB=5,R=3:
+        // real formula gives C=0 (R=3 is within the wrapped-valid region,
+        // R<=UB); the old buggy formula (unconditional R<LB||R>UB) gave
+        // C=1 (3<10 true) -- confirmed to fail on baseline before this fix.
+        $display("--- CMP2.W: wrapped-bounds range (UB<LB), R within valid region ---");
+        ram[32'h910>>2] = 32'h000A_0005;   // LB=10, UB=5 (wrapped)
+        set_an(3'h0, 32'h0000_0900);
+        set_dn(0, 32'h0000_0003);          // R=3: valid (R<=UB)
+        run_instr(16'h02E8, 1'b1, 32'h0000_0010);
+        chk1("CMP2-02:C=0 (wrapped range, R within valid region)", sr_out[0], 1'b0);
+        chk1("CMP2-02:Z=0", sr_out[2], 1'b0);
+
+        // Same wrapped bounds, R=7: strictly between UB=5 and LB=10 ->
+        // invalid per the manual's own wrapped-range definition, C=1.
+        $display("--- CMP2.W: wrapped-bounds range (UB<LB), R outside valid region ---");
+        set_dn(0, 32'h0000_0007);
+        run_instr(16'h02E8, 1'b1, 32'h0000_0010);
+        chk1("CMP2-03:C=1 (wrapped range, R outside valid region)", sr_out[0], 1'b1);
+        chk1("CMP2-03:Z=0", sr_out[2], 1'b0);
+
         $display("");
         if (fail_count == 0)
             $display("PASS: %0d checks passed", pass_count);

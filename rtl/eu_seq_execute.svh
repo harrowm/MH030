@@ -721,8 +721,17 @@
                 cmp2_rn_sext_w = rd_b_data;
             end
         endcase
-        cmp2_c_w = ($signed(cmp2_rn_sext_w) < $signed(cmp2_lb_sext_w)) ||
-                   ($signed(cmp2_rn_sext_w) > $signed(cmp2_ub_sext_w));
+        // docs/*.md review (Phase 250 F4): Table 3-12's real formula has a
+        // second branch for a WRAPPED range (UB<LB, a documented 68020+
+        // idiom) -- was previously unconditionally implementing only the
+        // LB<=UB branch, giving a wrong C (and thus a wrong CHK2 trap
+        // decision, since cmp2_c_w gates that too) for e.g. LB=10,UB=5,R=3
+        // (wrapped-valid, C should be 0; old formula gave C=1).
+        cmp2_c_w = ($signed(cmp2_lb_sext_w) <= $signed(cmp2_ub_sext_w))
+                 ? (($signed(cmp2_rn_sext_w) < $signed(cmp2_lb_sext_w)) ||
+                    ($signed(cmp2_rn_sext_w) > $signed(cmp2_ub_sext_w)))
+                 : (($signed(cmp2_rn_sext_w) > $signed(cmp2_ub_sext_w)) &&
+                    ($signed(cmp2_rn_sext_w) < $signed(cmp2_lb_sext_w)));
         cmp2_z_w = (cmp2_rn_sext_w == cmp2_lb_sext_w) || (cmp2_rn_sext_w == cmp2_ub_sext_w);
     end
 
