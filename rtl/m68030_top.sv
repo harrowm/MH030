@@ -44,6 +44,14 @@ module m68030_top #(
     output logic        ext_cbreq_n,
     output logic        ext_e,
     output logic        ext_bg_n,
+    // docs/*.md review: RMC#/DBEN# (MC68030UM.pdf 5.6.4/5.6.7) -- both
+    // previously mentioned only in comments, never actually driven.
+    output logic        ext_rmc_n,
+    output logic        ext_dben_n,
+    // docs/*.md review: IPEND# (MC68030UM.pdf 5.8.2) -- direct mirror of
+    // the exception controller's own already-computed "interrupt pending,
+    // exceeds current SR mask" condition.
+    output logic        ext_ipend_n,
     output logic        bus_halted,
     output logic        eu_stop,
     output logic        eu_addr_err,
@@ -62,7 +70,11 @@ module m68030_top #(
     // Phase 158 Stage 7: CIIN#/CIOUT# -- confirmed via grep neither pin
     // existed anywhere in the RTL before this stage.
     input  logic        ciin_n,
-    output logic        ciout_n
+    output logic        ciout_n,
+    // docs/*.md review: CDIS#/MMUDIS# (MC68030UM.pdf 5.11.1/5.11.2) --
+    // emulator-support cache/MMU disable inputs.
+    input  logic        cdis_n,
+    input  logic        mmudis_n
 );
 
     // ─── Control register stubs (caches disabled; MMU wired to m68030_mmu) ──
@@ -165,6 +177,11 @@ module m68030_top #(
     // in DECODE" pulse flows back, replacing the old !eu_busy gate (which
     // raced with an instruction launching the same cycle stall cleared).
     logic        exc_int_pending_w, eu_int_ready_w;
+
+    // docs/*.md review: IPEND# (MC68030UM.pdf 5.8.2) -- direct mirror of
+    // m68030_exc.sv's own already-computed "interrupt pending, exceeds
+    // current SR mask" condition.
+    assign ext_ipend_n = !exc_int_pending_w;
     logic [31:0] eu_pc_out, eu_vbr_out;
     logic [31:0] eu_usp_out, eu_msp_out, eu_isp_out;
     logic [15:0] eu_sr_out;
@@ -747,6 +764,8 @@ module m68030_top #(
         .ext_cbreq_n     (ext_cbreq_n),
         .ext_e           (ext_e),
         .ext_bg_n        (ext_bg_n),
+        .ext_rmc_n       (ext_rmc_n),
+        .ext_dben_n      (ext_dben_n),
         // Async inputs
         .dsack0_n        (dsack0_n),
         .dsack1_n        (dsack1_n),
@@ -761,6 +780,8 @@ module m68030_top #(
         .cback_n         (cback_n),
         .ciin_n          (ciin_n),    // Phase 158 Stage 7
         .ciout_n         (ciout_n),
+        .cdis_n          (cdis_n),
+        .mmudis_n        (mmudis_n),
         // EU normal data interface (EXC mux)
         .eu_addr         (biu_eu_addr),
         .eu_wdata        (biu_eu_wdata),

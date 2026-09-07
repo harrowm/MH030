@@ -39,6 +39,8 @@ module cache_tb;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
     logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
+    logic        cdis_n   = 1'b1;   // docs/*.md review: CDIS# deasserted (not asserted)
+    logic        mmudis_n = 1'b1;   // docs/*.md review: MMUDIS# deasserted (not asserted)
 
     // 16KB unified instruction+data memory, matching stall_fsm_tb.sv.
     localparam int MEM_WORDS = 4096;
@@ -125,6 +127,8 @@ module cache_tb;
         .bgack_n      (bgack_n),
         .cback_n      (cback_n),
         .ciin_n       (ciin_n),
+        .cdis_n       (cdis_n),
+        .mmudis_n     (mmudis_n),
         .ciout_n      ()
     );
 

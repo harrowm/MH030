@@ -101,6 +101,11 @@ module biu_mmu_if (
     input  logic [63:0] srp,
     input  logic [31:0] tt0,
     input  logic [31:0] tt1,
+    // docs/*.md review: MMUDIS# (MC68030UM.pdf 5.11.2) -- emulator-support
+    // input that dynamically disables translation regardless of TC.E,
+    // without flushing the ATC (only tc_e below is gated; the ATC arrays
+    // themselves are untouched).
+    input  logic         mmudis_n,   // 0 = MMUDIS asserted (active-low)
 
     output logic [15:0] mmusr,
 
@@ -124,7 +129,7 @@ module biu_mmu_if (
     // -----------------------------------------------------------------------
     // TC field extraction
     // -----------------------------------------------------------------------
-    wire        tc_e   = tc[31];
+    wire        tc_e   = tc[31] && mmudis_n;  // docs/*.md review: MMUDIS# override
     wire [4:0]  ps     = {1'b0, tc[27:24]};   // page size in bits (e.g. 12 for 4KB)
     wire [4:0]  is_b   = {1'b0, tc[23:20]};   // initial shift
     wire [3:0]  tia    = tc[19:16];

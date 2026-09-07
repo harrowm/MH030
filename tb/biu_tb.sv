@@ -52,6 +52,7 @@ module biu_tb;
     logic [2:0]  ext_fc;
     logic [1:0]  ext_siz;
     logic        ext_ecs_n, ext_ocs_n;
+    logic        ext_rmc_n, ext_dben_n;  // docs/*.md review
     logic [31:0] ext_d_out;
     logic        ext_d_oe, ext_rstout_n, ext_cbreq_n;
     logic [31:0] ext_d_in_to_biu;
@@ -128,6 +129,10 @@ module biu_tb;
     logic [31:0] tc_cache_tb    = 32'h0;
     logic [31:0] xl_pa_tb       = 32'h0;
     logic        xl_hit_tb      = 1'b0;
+    // docs/*.md review: CDIS#/MMUDIS# testbench-driven overrides (default
+    // deasserted, matching every other pin's own quiescent-state default).
+    logic        cdis_n_cache_tb   = 1'b1;
+    logic        mmudis_n_cache_tb = 1'b1;
     logic        xl_walk_done_tb = 1'b0;
     logic        xl_ci_tb       = 1'b0;
     logic        ciout_tb;
@@ -160,6 +165,8 @@ module biu_tb;
     logic [31:0] cacr_icache_tb  = 32'h0;
     logic [31:0] caar_icache_tb  = 32'h0;
     logic [31:0] tc_icache_tb    = 32'h0;
+    logic        cdis_n_icache_tb   = 1'b1;  // docs/*.md review
+    logic        mmudis_n_icache_tb = 1'b1;  // docs/*.md review
     logic [31:0] xl_pa_icache_tb = 32'h0;
     logic        xl_hit_icache_tb = 1'b0;
     logic        xl_walk_done_icache_tb = 1'b0;
@@ -273,6 +280,7 @@ module biu_tb;
 
     // MMU interface control
     logic [31:0] tc_tb          = 32'h0;
+    logic        mmudis_n_mmu_tb = 1'b1;  // docs/*.md review
     logic [63:0] crp_tb         = 64'h0;
     logic [63:0] srp_tb         = 64'h0;
     logic [31:0] tt0_tb         = 32'h0;
@@ -472,6 +480,8 @@ module biu_tb;
         .ext_siz      (ext_siz),
         .ext_ecs_n    (ext_ecs_n),
         .ext_ocs_n    (ext_ocs_n),
+        .ext_rmc_n    (ext_rmc_n),
+        .ext_dben_n   (ext_dben_n),
         .ext_d_out    (ext_d_out),
         .ext_d_oe     (ext_d_oe),
         .ext_rstout_n (ext_rstout_n),
@@ -730,6 +740,8 @@ module biu_tb;
         // test in this file leaves these at their old default (0), so
         // nothing here changes their own behavior.
         .tc          (tc_cache_tb),
+        .cdis_n      (cdis_n_cache_tb),
+        .mmudis_n    (mmudis_n_cache_tb),
         .xl_va       (),
         .xl_fc       (),
         .xl_rw       (),
@@ -786,6 +798,8 @@ module biu_tb;
         .caar          (caar_icache_tb),
         .ciin          (1'b0),
         .tc            (tc_icache_tb),
+        .cdis_n        (cdis_n_icache_tb),
+        .mmudis_n      (mmudis_n_icache_tb),
         .xl_va         (),
         .xl_fc         (),
         .xl_rw         (),
@@ -828,6 +842,7 @@ module biu_tb;
         .mmu_ack      (cg_mmu_ack),
         .mmu_berr     (cg_mmu_berr),
         .tc           (tc_tb),
+        .mmudis_n     (mmudis_n_mmu_tb),
         .crp          (crp_tb),
         .srp          (srp_tb),
         .tt0          (tt0_tb),
@@ -1633,20 +1648,26 @@ module biu_tb;
             end
             check("RMW read ack", got_rd_ack);
             check32("RMW rdata", cg_eu_rdata, 32'hAB000000);
+            // docs/*.md review: RMC# (MC68030UM.pdf 5.6.4) must stay
+            // asserted throughout the whole indivisible RMW sequence.
+            check("RMC_n low during RMW read phase", ext_rmc_n === 1'b0);
             // Wait for ack to deassert (exit RMW_READ_S7) before polling write ack
             while (cg_eu_ack_direct) @(posedge clk_4x);
+            check("RMC_n still low between RMW phases", ext_rmc_n === 1'b0);
             // Now wait for write-phase ack (RMW_WRITE_S7)
             got_wr_ack = 0;
             for (t = 0; t < 80; t++) begin
                 @(posedge clk_4x);
                 if (cg_eu_ack_direct) begin got_wr_ack = 1; break; end
             end
+            check("RMC_n still low during RMW write phase", ext_rmc_n === 1'b0);
             p4_eu_req  = 0;
             eu_rmw_tb  = 0;
             p4_direct  = 0;
             while (!bus_idle) @(posedge clk_4x);
             check("RMW write ack", got_wr_ack);
             check32("mem written", u_mem.mem[64], 32'hFF000000);
+            check("RMC_n negated after RMW completes", ext_rmc_n === 1'b1);
         end
         repeat(8) @(posedge clk_4x);
 
@@ -4569,6 +4590,125 @@ module biu_tb;
 
             repeat(8) @(posedge clk_4x);
         end
+
+        // ===================================================================
+        // docs/*.md review: DBEN#/CDIS#/MMUDIS# pin-level verification
+        // ===================================================================
+        $display("=== BIU: DBEN#/CDIS#/MMUDIS# pins ===");
+
+        // DBEN# read timing: negated at S0, still negated at S2 (asserts
+        // together with AS+DS per the manual), asserted at S4 (one state
+        // later, per MC68030UM.pdf 7.1.6), negated again at S6 together
+        // with AS/DS.
+        $display("--- DBEN# read timing ---");
+        begin
+            int t;
+            u_mem.mem[32'h300/4] = 32'hCAFE_F00D;
+            wait_bus_idle;
+            eu_addr_tb  = 32'h0000_0300;
+            eu_fc_tb    = 3'b101;
+            eu_siz_tb   = 2'b00;
+            eu_rw_tb    = 1'b1;
+            eu_is_op_tb = 1'b1;
+            eu_req_tb   = 1'b1;
+            wait_for_state(7'd18, 20);   // ST_READ_S0
+            check("DBEN_n high at S0", ext_dben_n === 1'b1);
+            wait_for_state(7'd20, 20);   // ST_READ_S2 (AS+DS assert)
+            check("DBEN_n still high at S2 (lags AS by one state)", ext_dben_n === 1'b1);
+            wait_for_state(7'd22, 20);   // ST_READ_S4
+            check("DBEN_n low at S4", ext_dben_n === 1'b0);
+            wait_for_state(7'd24, 50);   // ST_READ_S6 (AS/DS negate)
+            check("DBEN_n high at S6 (negates with AS/DS)", ext_dben_n === 1'b1);
+            for (t = 0; t < 50; t++) begin
+                @(posedge clk_4x);
+                if (eu_ack) break;
+            end
+            eu_req_tb = 1'b0;
+            wait_bus_idle;
+        end
+
+        // DBEN# write timing: asserted at the SAME state AS first asserts
+        // (S2), held through the cycle, negated together with AS at S6.
+        $display("--- DBEN# write timing ---");
+        begin
+            int t;
+            wait_bus_idle;
+            eu_addr_tb  = 32'h0000_0300;
+            eu_fc_tb    = 3'b101;
+            eu_siz_tb   = 2'b00;
+            eu_wdata_tb = 32'h1234_5678;
+            eu_rw_tb    = 1'b0;
+            eu_is_op_tb = 1'b1;
+            eu_req_tb   = 1'b1;
+            wait_for_state(7'd26, 20);   // ST_WRITE_S0
+            check("DBEN_n high at write S0", ext_dben_n === 1'b1);
+            wait_for_state(7'd28, 20);   // ST_WRITE_S2 (AS asserts)
+            check("DBEN_n low at write S2 (same state as AS)", ext_dben_n === 1'b0);
+            wait_for_state(7'd32, 50);   // ST_WRITE_S6 (AS/DS negate)
+            check("DBEN_n high at write S6", ext_dben_n === 1'b1);
+            for (t = 0; t < 50; t++) begin
+                @(posedge clk_4x);
+                if (eu_ack) break;
+            end
+            eu_req_tb = 1'b0;
+            eu_rw_tb  = 1'b1;
+            wait_bus_idle;
+        end
+
+        // CDIS#: dynamically disables the D-cache and I-cache regardless
+        // of CACR's own ED/EI bits, without flushing either (MC68030UM.pdf
+        // 5.11.1). Checked directly against each module's own internal
+        // enable wire -- the most direct, unambiguous proof of the gate
+        // itself, independent of any particular access's own hit/miss
+        // bus-timing side effects.
+        $display("--- CDIS# disables both caches regardless of CACR ---");
+        cacr_tb        = 32'h0000_0100;  // ED=1
+        cacr_icache_tb = 32'h0000_0001;  // EI=1
+        #1;
+        check("dcache_en=1 with CDIS negated",  u_cache.dcache_en  === 1'b1);
+        check("icache_en=1 with CDIS negated",  u_icache.icache_en === 1'b1);
+        cdis_n_cache_tb  = 1'b0;
+        cdis_n_icache_tb = 1'b0;
+        #1;
+        check("CDIS# forces dcache_en=0 despite CACR.ED=1", u_cache.dcache_en  === 1'b0);
+        check("CDIS# forces icache_en=0 despite CACR.EI=1", u_icache.icache_en === 1'b0);
+        cdis_n_cache_tb  = 1'b1;
+        cdis_n_icache_tb = 1'b1;
+        #1;
+        check("dcache_en=1 again once CDIS# negated", u_cache.dcache_en  === 1'b1);
+        check("icache_en=1 again once CDIS# negated", u_icache.icache_en === 1'b1);
+        cacr_tb        = 32'h0;
+        cacr_icache_tb = 32'h0;
+
+        // MMUDIS#: dynamically disables translation regardless of TC.E,
+        // without flushing the ATC (MC68030UM.pdf 5.11.2). Same direct-
+        // internal-wire proof as CDIS# above, checked against all three
+        // tc_e copies this review found (biu_mmu_if.sv's own real walker
+        // gate, plus biu_cache_if.sv's/biu_icache_if.sv's own local copies
+        // used to decide whether an access needs translation at all).
+        $display("--- MMUDIS# disables translation regardless of TC.E ---");
+        tc_tb        = 32'h8C07_7600;  // E=1, PS=12,TIA=7,TIB=7,TIC=6 (valid, sum=32)
+        tc_cache_tb  = 32'h8C07_7600;
+        tc_icache_tb = 32'h8C07_7600;
+        #1;
+        check("mmu tc_e=1 with MMUDIS negated",    u_mmu.tc_e    === 1'b1);
+        check("cache tc_e=1 with MMUDIS negated",  u_cache.tc_e  === 1'b1);
+        check("icache tc_e=1 with MMUDIS negated", u_icache.tc_e === 1'b1);
+        mmudis_n_mmu_tb    = 1'b0;
+        mmudis_n_cache_tb  = 1'b0;
+        mmudis_n_icache_tb = 1'b0;
+        #1;
+        check("MMUDIS# forces mmu tc_e=0 despite TC.E=1",    u_mmu.tc_e    === 1'b0);
+        check("MMUDIS# forces cache tc_e=0 despite TC.E=1",  u_cache.tc_e  === 1'b0);
+        check("MMUDIS# forces icache tc_e=0 despite TC.E=1", u_icache.tc_e === 1'b0);
+        mmudis_n_mmu_tb    = 1'b1;
+        mmudis_n_cache_tb  = 1'b1;
+        mmudis_n_icache_tb = 1'b1;
+        #1;
+        check("mmu tc_e=1 again once MMUDIS# negated", u_mmu.tc_e === 1'b1);
+        tc_tb        = 32'h0;
+        tc_cache_tb  = 32'h0;
+        tc_icache_tb = 32'h0;
 
         $display("=== %0d failure(s) ===", fail_count);
         if (fail_count == 0) $display("ALL TESTS PASSED");

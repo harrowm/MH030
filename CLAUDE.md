@@ -944,7 +944,31 @@ as a fully isolated fixed-address block (D-13's own established
 convention) after an inline attempt was found to corrupt an unrelated
 later test via D-cache state carryover. Full mandatory gate clean
 (Harte re-run mandatory since `rtl/` changed), bit-identical to
-baseline. Items #5-10 still to come.
+baseline.
+
+**Item #5 (5/7 IMPLEMENTED AND VERIFIED, 2 DEFERRED)**: 7 real pins had
+zero prior RTL presence. Implemented RMC# (mirrors the existing RMW/CAS/
+CAS2 lock condition minus burst), DBEN# (a precisely-derived one-state-
+delayed-for-reads/same-state-for-writes AS mirror, matching MC68030UM.pdf
+§7.1.6's exact timing text), IPEND# (direct one-line mirror of
+`m68030_exc.sv`'s own already-computed interrupt-pending condition), and
+CDIS#/MMUDIS# (new synchronized input pins overriding the D-cache/I-cache/
+MMU enable logic in all three consumer modules, including duplicated
+local `tc_e` copies Item #3 also had to reason about). Deferred REFILL#/
+STATUS# — both are emulator-support debug signals whose semantics tie to
+real 68030 silicon's own internal microsequencer staging with no faithful
+analogue in this project's structurally-different microarchitecture; a
+guessed implementation risked being confidently wrong with no test able
+to catch it, so documented precisely instead of guessed at (matching this
+project's own precedent for genuinely-hard deferrals). Found and fixed a
+testbench-only regression: `tb/biu_tb.sv` instantiates the cache/MMU
+submodules directly and left the new `cdis_n`/`mmudis_n` inputs
+unconnected, X-propagating into every D-cache-burst test — fixed with
+tie-offs, plus the same fix batch-applied to all 13 testbenches that
+instantiate `m68030_top`. New pin-level tests in `tb/biu_tb.sv` (RMC/DBEN/
+CDIS/MMUDIS) and `tb/stall_fsm_tb.sv` (IPEND, free across all 15 existing
+interrupt-injection tests). Full mandatory gate clean, Harte bit-identical
+to baseline. Items #6-10 still to come.
 
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2 [documented

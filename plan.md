@@ -8614,4 +8614,105 @@ full 124-suite Tom Harte sweep (mandatory — `rtl/` changed): `TOTAL: PASS
 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bit-identical to baseline (Harte
 never touches CACR/CAAR at all).
 
-**Items #5-#10 continue below as each is addressed.**
+### Item #5: 7 missing pins (RMC, DBEN, IPEND, CDIS, MMUDIS, REFILL, STATUS) — 5 IMPLEMENTED AND VERIFIED, 2 DEFERRED
+
+MC68030UM.pdf Chapter 5 lists 7 real pins with zero prior RTL presence
+(confirmed via grep during the original review pass). Investigated all 7
+directly against the manual; implemented 5 with genuine, precisely-derived
+logic, deferred 2 (REFILL, STATUS) whose own semantics are tied to real
+silicon's internal microsequencer staging in a way this project's
+functionally-equivalent-but-structurally-different microarchitecture has
+no faithful analogue for.
+
+**RMC# (§5.6.4, output, active-low)**: asserted throughout an indivisible
+read-modify-write operation. `biu_cycle_gen.sv` already had `bus_lock`
+covering exactly this (RMW/CAS2/CAS's own `eu_cas_hold`) PLUS burst reads
+(a DMA-arbitration-suppression concern unrelated to RMC's own real
+semantics) — added a new `rmc_active` wire mirroring `bus_lock` minus the
+`is_burst` term, `assign ext_rmc_n = !rmc_active`.
+
+**DBEN# (§5.6.7/7.1.6, output, active-low)**: "During a read operation,
+DBEN is asserted one clock cycle after the beginning of the bus cycle...
+negated as DS is negated. In a write operation, DBEN is asserted at the
+time AS is asserted." Cross-referenced against this file's own
+already-verified S-state table (CLAUDE.md): reads assert AS+DS together
+at S1, DBEN one state later at S2 (both negate at S5); writes assert
+AS+DBEN together at S1. Implemented via a one-state-delayed register of
+`ext_as_n` (`as_n_reg`, updated on `state_adv` — the exact boundary
+between named S-states, confirmed via this file's own Phase 160 Stage 1
+derivation): `ext_dben_n = cyc_rw ? (as_n_reg | ext_as_n) : ext_as_n` —
+for reads this asserts one state late and negates in lockstep with AS
+(the OR degenerates to AS's own instantaneous value the moment AS negates,
+regardless of the stale delayed copy); for writes it tracks AS directly.
+Verified with new `tb/biu_tb.sv` tests checking `ext_dben_n` at each named
+S-state for both a plain read and a plain write cycle — this is the kind
+of precise, previously-never-tested per-state pin timing this whole
+review's own Stage 1 was originally asked to check for.
+
+**IPEND# (§5.8.2, output, active-low, non-tri-state)**: "asserted when the
+MC68030 makes an interrupt request pending" — an exact, pre-existing match
+for `m68030_exc.sv`'s own `int_pending_out` (`ipl_sync != 0 && ipl_sync >
+ipl_mask`). One-line top-level mirror: `ext_ipend_n = !exc_int_pending_w`.
+Verified for free across all 15 of `tb/stall_fsm_tb.sv`'s own pre-existing
+`INT-mid-<X>` interrupt-injection tests (via `run_int_mid_test`'s own
+shared task) — latched-observation checks (immune to exact synchronizer-
+delay timing) that IPEND asserts while pending and negates once genuinely
+recognized (SR's own I-mask rising to match the level taken causes
+`ipl_sync > ipl_mask` to go false even while the `ipl_n` pin itself may
+still read asserted).
+
+**CDIS#/MMUDIS# (§5.11.1/5.11.2, inputs, active-low)**: dynamically
+disable the caches/MMU translation regardless of CACR/TC.E, without
+flushing anything. Threaded through a new 2-stage synchronizer pair in
+`biu_config.sv` (mirroring every other async pin there) into
+`biu_cache_if.sv`'s/`biu_icache_if.sv`'s own `dcache_en`/`icache_en` wires
+and all three modules' own independent `tc_e` copies (`biu_mmu_if.sv`'s
+real walker gate, plus `biu_cache_if.sv`'s/`biu_icache_if.sv`'s own local
+"does this access need translation at all" copies — a class of duplicated
+local state this same review's own Item #3 also had to reason about
+carefully for MMUDIS, since disabling translation chip-wide means every
+copy must agree). Verified via new `tb/biu_tb.sv` checks reading each
+module's own internal enable wire directly (the most direct, unambiguous
+proof of the gate itself, independent of any one access's hit/miss bus
+timing) — CACR/TC.E forced enabled, then CDIS#/MMUDIS# asserted and
+confirmed to override regardless, then negated and confirmed to restore.
+
+**REFILL#/STATUS# (§5.11.3/8.3, outputs) — investigated and deferred**:
+REFILL "indicates the MC68030 is beginning to refill the internal
+instruction pipeline"; STATUS's own Table 8-2 ties specific clock-count
+widths (1/2/3 clocks) to specific real-silicon microsequencer conditions
+("sequencer at instruction boundary," "ATC miss, about to begin table
+search"). Both are explicitly framed by the manual itself as emulator-
+support debug signals (§12 Applications Information, non-normative) tied
+to REAL 68030 silicon's own internal pipeline/microsequencer staging —
+this project's microarchitecture is functionally equivalent but
+structurally different (no direct analogue to "the microsequencer is at
+an instruction boundary" as a single, real internal clock-width-coded
+condition). A guessed implementation risked being confidently wrong in a
+way no existing test could catch (neither pin has any correctness
+implication for instruction execution — they exist purely for external
+trace tools to observe internal state this design doesn't expose in the
+same shape). Deferred rather than guessed at, matching this project's own
+established precedent for genuinely double-checked-hard cases (Stage 7's
+CAS bus-lock, Stage 9c's TAS/Scc memind) — a real gap, explicitly
+documented, not silently dropped.
+
+**Testbench-only findings along the way**: `tb/biu_tb.sv` instantiates
+`biu_cache_if`/`biu_icache_if`/`biu_mmu_if` directly (not through
+`m68030_top`) and initially left the new `cdis_n`/`mmudis_n` input ports
+unconnected, X-propagating into `dcache_en`/`icache_en`/`tc_e` and
+breaking every D-cache-burst-related test in the file — fixed with the
+same tie-off convention this project always uses for new required ports
+on directly-instantiated submodules. All 13 testbenches that instantiate
+`m68030_top` needed the same `cdis_n`/`mmudis_n` tie-off (batch-applied
+via a scripted edit, verified identical before/after per file).
+
+**Full mandatory gate**: `make test` 37/37, `make cosim_grp` 8/8,
+`make cosim_memind` 28/28, `make dat-synth` 50/50, full 124-suite Tom
+Harte sweep (mandatory — `rtl/` changed; verified against a genuine full
+rebuild of the Verilator batch runner after a stale-cache scare):
+`TOTAL: PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bit-identical to
+baseline (Harte's corpus never touches CDIS/MMUDIS/RMC/DBEN/IPEND at
+all).
+
+**Items #6-#10 continue below as each is addressed.**

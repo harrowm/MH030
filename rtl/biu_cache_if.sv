@@ -105,6 +105,9 @@ module biu_cache_if (
     // MMU translation control (Phase 150, plan.md) — only tc[31]=E is used
     // here; the actual walk/ATC logic lives entirely in biu_mmu_if.sv.
     input  logic [31:0] tc,
+    // docs/*.md review: CDIS#/MMUDIS# (MC68030UM.pdf 5.11.1/5.11.2)
+    input  logic         cdis_n,     // 0 = CDIS   asserted (active-low)
+    input  logic         mmudis_n,   // 0 = MMUDIS asserted (active-low)
 
     // MMU translation request/response (Phase 150, plan.md) — arbitrated
     // via biu_mmu_arb.sv, one physical biu_mmu_if instance shared with the
@@ -148,7 +151,11 @@ module biu_cache_if (
     // own declaration comment for why the raw mmu_ci/xl_ci ports, both
     // literally the same shared arbiter broadcast, aren't safe to re-read
     // in a later cycle).
-    wire tc_e = tc[31];
+    // docs/*.md review: MMUDIS# (MC68030UM.pdf 5.11.2) gates this module's
+    // own local tc_e too, matching biu_mmu_if.sv's own identical gate --
+    // when MMUDIS is asserted, every access must be treated as untranslated
+    // chip-wide, not just at the table-walker itself.
+    wire tc_e = tc[31] && mmudis_n;
 
     // CACR bit aliases (Figure 6-14: 13=WA,12=DBE,11=CD,10=CED,9=FD,8=ED,
     // 4=IBE,3=CI,2=CEI,1=FI,0=EI — confirmed directly against the manual).
@@ -156,7 +163,9 @@ module biu_cache_if (
     // of cacr[8] (ED, enable) -- a real, previously-undiscovered bug meaning
     // software that set ED the textbook-correct way got a D-cache that never
     // activated. See plan.md Phase 158 Stage 1 for the full derivation.
-    wire dcache_en = cacr[8];
+    // docs/*.md review: CDIS# (5.11.1) dynamically disables the cache
+    // regardless of CACR.ED, without flushing it (valid_d untouched).
+    wire dcache_en = cacr[8] && cdis_n;
     wire wa_en     = cacr[13];
     wire dburst_en = cacr[12];
     // Phase 158 Stage 5: manual §6.3.1.5 (confirmed by direct re-read):

@@ -29,6 +29,10 @@ module biu_cycle_gen #(
     output logic        ext_d_oe,
     output logic        ext_rstout_n,
     output logic        ext_cbreq_n,
+    // docs/*.md review: RMC# (MC68030UM.pdf 5.6.4) and DBEN# (5.6.7) --
+    // both previously mentioned only in comments, never actually driven.
+    output logic        ext_rmc_n,
+    output logic        ext_dben_n,
 
     // External bus read data input
     input  logic [31:0] ext_d_in,
@@ -537,6 +541,20 @@ module biu_cycle_gen #(
                       (state == ST_RMW_READ_S6)  | (state == ST_RMW_READ_S7)  |
                       is_rmw_write | is_cas2 | is_burst | eu_cas_hold;
 
+    // docs/*.md review: RMC# (MC68030UM.pdf 5.6.4) -- "asserted...during
+    // all bus cycles of the read-modify-write operation." Deliberately
+    // narrower than bus_lock above: real RMC does NOT assert for ordinary
+    // burst reads (bus_lock's own is_burst term exists purely to suppress
+    // DMA arbitration, unrelated to RMC's own indivisible-RMW semantics).
+    wire rmc_active = (state == ST_RMW_READ_S0)  | (state == ST_RMW_READ_S1)  |
+                      (state == ST_RMW_READ_S2)  | (state == ST_RMW_READ_S3)  |
+                      (state == ST_RMW_READ_S4)  | (state == ST_RMW_READ_S5)  |
+                      (state == ST_RMW_READ_S6)  | (state == ST_RMW_READ_S7)  |
+                      is_rmw_write | is_cas2 | eu_cas_hold;
+    assign ext_rmc_n = !rmc_active;
+    // DBEN# logic lives further down (needs cyc_rw, declared later in this
+    // file) -- see the comment right after cyc_rw's own declaration.
+
     // Init-done and captured init vectors
     logic        init_done_r;
     logic [31:0] init_ssp_r, init_pc_r;
@@ -634,6 +652,25 @@ module biu_cycle_gen #(
     logic        cyc_rw;
     logic        cyc_is_op;
     logic [31:0] cyc_wdata;
+
+    // docs/*.md review: DBEN# (MC68030UM.pdf 5.6.7/7.1.6) -- "During a
+    // read operation, DBEN is asserted one clock cycle after the beginning
+    // of the bus cycle and is negated as DS is negated. In a write
+    // operation, DBEN is asserted at the time AS is asserted." Per this
+    // file's own already-verified S-state table (CLAUDE.md): reads assert
+    // AS+DS together at S1 and DBEN one state later at S2 (both negate
+    // together at S5); writes assert AS+DBEN together at S1 (DS lags to
+    // S3). as_n_reg lags ext_as_n by exactly one named S-state (state_adv
+    // marks each such boundary, confirmed via this file's own Phase 160
+    // Stage 1 comment above) -- ANDing it with the live ext_as_n gives
+    // "asserted for one state, then negates together with AS" for reads,
+    // while writes bypass the delay entirely and track ext_as_n directly.
+    logic as_n_reg;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)            as_n_reg <= 1'b1;
+        else if (state_adv)    as_n_reg <= ext_as_n;
+    end
+    assign ext_dben_n = cyc_rw ? (as_n_reg | ext_as_n) : ext_as_n;
 
     // Byte lane control — UDS_n/LDS_n enables and steered write data
     logic [31:0] blc_wdata;

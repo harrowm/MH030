@@ -52,6 +52,10 @@ module m68030_biu #(
     output logic        ext_cbreq_n,
     output logic        ext_e,          // E-clock output
     output logic        ext_bg_n,       // Bus Grant to external DMA
+    // docs/*.md review: RMC#/DBEN# (MC68030UM.pdf 5.6.4/5.6.7) -- driven
+    // combinationally by biu_cycle_gen, passed straight through here.
+    output logic        ext_rmc_n,
+    output logic        ext_dben_n,
 
     // Asynchronous chip inputs (raw pins — synchronised internally)
     input  logic        dsack0_n,
@@ -65,6 +69,11 @@ module m68030_biu #(
     input  logic        br_n,
     input  logic        bgack_n,
     input  logic        cback_n,
+    // docs/*.md review: CDIS#/MMUDIS# (MC68030UM.pdf 5.11.1/5.11.2) --
+    // emulator-support cache/MMU disable inputs, same async-synchronizer
+    // treatment as every other pin above.
+    input  logic        cdis_n,
+    input  logic        mmudis_n,
     // Phase 158 Stage 7: CIIN# (peripheral says "this data isn't
     // cacheable") -- async, synchronized like every other pin above.
     input  logic        ciin_n,
@@ -264,6 +273,7 @@ module m68030_biu #(
     logic [2:0] ipl_s;
     logic br_s, bgack_s, cback_s;
     logic ciin_s;  // Phase 158 Stage 7
+    logic cdis_s, mmudis_s;  // docs/*.md review
     logic ciout_w; // biu_cache_if's own CIOUT determination (active-high internal)
     logic pins_released;
     logic cfg_poweron_rstout_n;  // power-on RSTOUT from biu_config
@@ -283,6 +293,8 @@ module m68030_biu #(
         .bgack_n           (bgack_n),
         .cback_n           (cback_n),
         .ciin_n            (ciin_n),
+        .cdis_n            (cdis_n),
+        .mmudis_n          (mmudis_n),
         .dsack0_s          (dsack0_s),
         .dsack1_s          (dsack1_s),
         .sterm_s           (sterm_s),
@@ -295,6 +307,8 @@ module m68030_biu #(
         .bgack_s           (bgack_s),
         .cback_s           (cback_s),
         .ciin_s            (ciin_s),
+        .cdis_s            (cdis_s),
+        .mmudis_s          (mmudis_s),
         .pins_released     (pins_released),
         .poweron_rstout_n  (cfg_poweron_rstout_n)
     );
@@ -633,6 +647,7 @@ module m68030_biu #(
         .srp         (srp),
         .tt0         (tt0),
         .tt1         (tt1),
+        .mmudis_n    (mmudis_s),
         .pflush_req  (mmu_pflush_req),
         .pflush_all  (mmu_pflush_all),
         .pflush_fc   (mmu_pflush_fc),
@@ -739,6 +754,8 @@ module m68030_biu #(
         .cacr        (cacr),
         .caar        (caar),
         .tc          (tc),
+        .cdis_n      (cdis_s),
+        .mmudis_n    (mmudis_s),
         .xl_va       (ca_xl_va),
         .xl_fc       (ca_xl_fc),
         .xl_rw       (ca_xl_rw),
@@ -859,6 +876,8 @@ module m68030_biu #(
         .ic_burst_ack   (eu_burst_ack),
         .ic_burst_berr  (eu_burst_berr),
         .tc             (tc),
+        .cdis_n         (cdis_s),
+        .mmudis_n       (mmudis_s),
         .xl_va       (ic_xl_va),
         .xl_fc       (ic_xl_fc),
         .xl_rw       (ic_xl_rw),
@@ -955,6 +974,8 @@ module m68030_biu #(
         .ext_d_oe        (cg_ext_d_out_raw_oe),
         .ext_rstout_n    (cg_rstout_n),
         .ext_cbreq_n     (ext_cbreq_n),
+        .ext_rmc_n       (ext_rmc_n),
+        .ext_dben_n      (ext_dben_n),
         .ext_d_in        (ext_d_in),
         // Synchronised async inputs
         .dsack0_s        (dsack0_s),

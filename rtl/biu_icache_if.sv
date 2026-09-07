@@ -104,6 +104,9 @@ module biu_icache_if (
 
     // MMU translation control (Phase 150, plan.md)
     input  logic [31:0] tc,
+    // docs/*.md review: CDIS#/MMUDIS# (MC68030UM.pdf 5.11.1/5.11.2)
+    input  logic         cdis_n,     // 0 = CDIS   asserted (active-low)
+    input  logic         mmudis_n,   // 0 = MMUDIS asserted (active-low)
 
     // MMU translation request/response (Phase 150, plan.md) — arbitrated
     // via biu_mmu_arb.sv, shared with biu_cache_if.sv's own D-side request
@@ -134,10 +137,14 @@ module biu_icache_if (
     output logic [1:0]   xlate_fault_siz
 );
 
-    wire tc_e = tc[31];
+    // docs/*.md review: MMUDIS# gates this module's own local tc_e too,
+    // matching biu_mmu_if.sv's/biu_cache_if.sv's own identical gate.
+    wire tc_e = tc[31] && mmudis_n;
 
     // CACR bit aliases (shared encoding with biu_cache_if.sv)
-    wire icache_en = cacr[0];
+    // docs/*.md review: CDIS# dynamically disables the I-cache regardless
+    // of CACR.EI, without flushing it (valid_i untouched).
+    wire icache_en = cacr[0] && cdis_n;
     // Phase 158 Stage 4a: IBE now genuinely gates whether a burst is ever
     // requested at all, per manual Figure 6-13's own CBREQ-suppression
     // rule ("The processor does not assert CBREQ if... burst filling for

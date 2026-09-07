@@ -45,6 +45,7 @@ module stall_fsm_tb;
     logic [1:0]  ext_siz;
     logic        ext_ecs_n, ext_ocs_n, ext_rstout_n, ext_cbreq_n;
     logic        ext_e, ext_bg_n;
+    logic        ext_ipend_n;  // docs/*.md review
     logic        bus_halted, eu_addr_err, ifu_addr_err;
 
     logic        sterm_n  = 1'b1;
@@ -56,6 +57,8 @@ module stall_fsm_tb;
     logic        bgack_n  = 1'b1;
     logic        cback_n  = 1'b0;
     logic        ciin_n   = 1'b1;   // Phase 158 Stage 7: CIIN# deasserted (not asserted)
+    logic        cdis_n   = 1'b1;   // docs/*.md review: CDIS# deasserted (not asserted)
+    logic        mmudis_n = 1'b1;   // docs/*.md review: MMUDIS# deasserted (not asserted)
 
     // 16KB unified instruction+data memory, matching cosim_grp_tb.sv.
     localparam int MEM_WORDS = 4096;
@@ -167,6 +170,7 @@ module stall_fsm_tb;
         .ext_cbreq_n  (ext_cbreq_n),
         .ext_e        (ext_e),
         .ext_bg_n     (ext_bg_n),
+        .ext_ipend_n  (ext_ipend_n),  // docs/*.md review
         .bus_halted   (bus_halted),
         .eu_addr_err  (eu_addr_err),
         .ifu_addr_err (ifu_addr_err),
@@ -182,6 +186,8 @@ module stall_fsm_tb;
         .bgack_n      (bgack_n),
         .cback_n      (cback_n),
         .ciin_n       (ciin_n),
+        .cdis_n       (cdis_n),
+        .mmudis_n     (mmudis_n),
         .ciout_n      ()
     );
 
@@ -532,6 +538,15 @@ module stall_fsm_tb;
     );
         int t, d0, ds_at_exc;
         logic injected, exc_seen;
+        // docs/*.md review: IPEND# (MC68030UM.pdf 5.8.2) should assert the
+        // moment the interrupt is genuinely pending (int_pending_out) and
+        // negate again once actually recognized (SR's own I-mask rises to
+        // match the level taken, so ipl_sync>ipl_mask goes false even
+        // though the ipl_n PIN itself may still read asserted). Latched
+        // rather than checked at one fixed cycle -- immune to the exact
+        // synchronizer-delay timing between setting ipl_n and IPEND
+        // reacting, matching this task's own injected/exc_seen convention.
+        logic saw_ipend_asserted;
 
         for (t = 0; t < 20000 && u_top.ifu_decode_pc < code_start_addr; t++)
             @(posedge clk_4x);
@@ -541,6 +556,7 @@ module stall_fsm_tb;
         injected  = 1'b0;
         exc_seen  = 1'b0;
         ds_at_exc = -1;
+        saw_ipend_asserted = 1'b0;
         for (t = 0; t < 20000; t++) begin
             @(posedge clk_4x); #1;
             // Inject the moment this FSM's own first bus cycle is observed.
@@ -548,6 +564,7 @@ module stall_fsm_tb;
                 injected = 1'b1;
                 ipl_n = 3'b000;   // level 7 (NMI)
             end
+            if (injected && !exc_seen && !ext_ipend_n) saw_ipend_asserted = 1'b1;
             // Drop back to idle the cycle after the controller first acts
             // on it (real interrupt sources deassert once acknowledged;
             // holding it forever would re-recognize at every subsequent
@@ -562,6 +579,9 @@ module stall_fsm_tb;
                 break;
         end
         ipl_n = 3'b111;   // deassert before any later test could see it
+        check({test_name, ": IPEND# asserted while the interrupt was pending"}, saw_ipend_asserted);
+        check({test_name, ": IPEND# negated once the interrupt was actually recognized"},
+              ext_ipend_n);
         // Both markers reaching their expected values does not prove the
         // handler's own trailing RTE has executed yet (see the original
         // interrupt-mid-CAS2 test's own header comment for the full

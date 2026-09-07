@@ -42,6 +42,11 @@ module biu_config #(
     // Phase 158 Stage 7: CIIN# (cache inhibit in) -- peripheral-driven,
     // async, same 2-stage-synchronizer treatment as every other pin above.
     input  logic        ciin_n,     // CIIN# (cache inhibit input)
+    // docs/*.md review: CDIS#/MMUDIS# (emulator-support cache/MMU disable
+    // inputs, MC68030UM.pdf 5.11.1/5.11.2) -- same async synchronizer
+    // treatment as every other pin above.
+    input  logic        cdis_n,     // CDIS#   (cache disable)
+    input  logic        mmudis_n,   // MMUDIS# (MMU disable)
 
     // Synchronised outputs — to biu_cycle_gen and biu_arbiter
     output logic        dsack0_s,   // 1 = DSACK0 asserted (active-high)
@@ -56,6 +61,8 @@ module biu_config #(
     output logic        br_s,       // 0 = BR     asserted (active-low retained)
     output logic        bgack_s,    // 0 = BGACK  asserted (active-low retained)
     output logic        cback_s,    // 0 = CBACK# asserted (active-low retained)
+    output logic        cdis_s,     // 0 = CDIS   asserted (active-low retained)
+    output logic        mmudis_s,   // 0 = MMUDIS asserted (active-low retained)
 
     // Asserts one cycle after rst_n deasserts; used by biu_pin_driver
     output logic        pins_released,
@@ -107,6 +114,8 @@ module biu_config #(
     logic        br_m,    br_q;
     logic        bgack_m, bgack_q;
     logic        cback_m, cback_q;
+    logic        cdis_m,  cdis_q;
+    logic        mmudis_m, mmudis_q;
     logic [2:0]  ipl_m,   ipl_q;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -116,6 +125,8 @@ module biu_config #(
             br_m    <= 1'b1;   br_q    <= 1'b1;
             bgack_m <= 1'b1;   bgack_q <= 1'b1;
             cback_m <= 1'b1;   cback_q <= 1'b1;
+            cdis_m  <= 1'b1;   cdis_q  <= 1'b1;   // CDIS#   deasserted
+            mmudis_m<= 1'b1;   mmudis_q<= 1'b1;   // MMUDIS# deasserted
             ipl_m   <= 3'b111; ipl_q   <= 3'b111; // no interrupt
         end else begin
             halt_m  <= halt_n;   halt_q  <= halt_m;
@@ -123,6 +134,8 @@ module biu_config #(
             br_m    <= br_n;     br_q    <= br_m;
             bgack_m <= bgack_n;  bgack_q <= bgack_m;
             cback_m <= cback_n;  cback_q <= cback_m;
+            cdis_m  <= cdis_n;   cdis_q  <= cdis_m;
+            mmudis_m<= mmudis_n; mmudis_q<= mmudis_m;
             ipl_m   <= ipl_n;    ipl_q   <= ipl_m;
         end
     end
@@ -132,6 +145,8 @@ module biu_config #(
     assign br_s    = br_q;
     assign bgack_s = bgack_q;
     assign cback_s = cback_q;
+    assign cdis_s  = cdis_q;
+    assign mmudis_s = mmudis_q;
     assign ipl_s   = ipl_q;
 
     // -----------------------------------------------------------------------
