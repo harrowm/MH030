@@ -1095,6 +1095,13 @@
                                  (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100)) begin
                         // MOVES: 0000 1110 0ss mmm rrr + extension word
                         // ext[15]=D/A, ext[14:12]=Rn, ext[11]=direction (1=load, 0=store)
+                        // docs/*.md review (Phase 250 F2): MOVES is supervisor-only
+                        // per MC68030UM.pdf §4.2 -- was entirely missing the
+                        // privilege gate every other privileged instruction has.
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_MOVE;
                         dec_siz         = f_siz;
@@ -1119,10 +1126,17 @@
                             dec_reads_dst  = 1'b1;
                         end
                         setup_mem_incdec(f_siz, dec_an_upd_en, dec_an_upd_reg, dec_an_delta, dec_ea_offset);
+                        end
                     end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b101) begin
                         // MOVES (d16,An) — ext_count=2
                         // ext[31:16]=MOVES desc, ext[15:0]=d16
                         // ext[27]=dir (1=load), ext[31]=D/A, ext[30:28]=Rn
+                        // docs/*.md review (Phase 250 F2): same missing MOVES
+                        // privilege gate as the brief-EA arm above.
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_MOVE;
                         dec_siz         = f_siz;
@@ -1145,11 +1159,18 @@
                             dec_reads_src  = 1'b1;
                             dec_reads_dst  = 1'b1;
                         end
+                        end
                     end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b110 &&
                                  ext_data[27]) begin
                         // MOVES (d8,An,Xn) LOAD only — ext_count=2
                         // ext[31:16]=MOVES desc, ext[15:0]=brief ext word
                         // Store omitted: 3-register conflict (Rn+An+Xn simultaneously)
+                        // docs/*.md review (Phase 250 F2): same missing MOVES
+                        // privilege gate as the other arms.
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_MOVE;
                         dec_siz         = f_siz;
@@ -1168,10 +1189,17 @@
                         dec_xn_wl       = ext_data[11];
                         dec_xn_scale    = ext_data[10:9];
                         dec_ea_offset   = {{24{ext_data[7]}}, ext_data[7:0]};
+                        end
                     end else if (!f_dir && f_dn == 3'b111 && f_mode == 3'b111 &&
                                  f_reg == 3'b000) begin
                         // MOVES (xxx).W — ext_count=2
                         // ext[31:16]=MOVES desc, ext[15:0]=abs.W address
+                        // docs/*.md review (Phase 250 F2): same missing MOVES
+                        // privilege gate as the other arms.
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
                         dec_valid       = 1'b1;
                         dec_unit        = UNIT_MOVE;
                         dec_siz         = f_siz;
@@ -1190,6 +1218,7 @@
                             dec_is_mem_wr  = 1'b1;
                             dec_src_reg    = {ext_data[31], ext_data[30:28]};
                             dec_reads_src  = 1'b1;
+                        end
                         end
                     end else if (f_dir && f_mode == 3'b001) begin
                         // MOVEP: 0000 DDD1 dir siz 001 AAA + d16
@@ -6115,9 +6144,18 @@
                         dec_unit      = UNIT_NONE;
                         dec_needs_ext = 1'b1;   // FPU opcode always has extension word (CIR)
                     end else if (f_dn == 3'b000) begin
-                        // MMU cpid=0: PFLUSH / PTEST / PMOVE
+                        // MMU cpid=0: PFLUSH / PTEST / PMOVE / PLOAD
                         // Second word ext_data[15:13] selects operation.
+                        // docs/*.md review (Phase 250 F3): all four are
+                        // supervisor-only per Table 3-14 -- this block had no
+                        // privilege gate at all, unlike the directly adjacent
+                        // cpSAVE/cpRESTORE blocks above (same F-line region,
+                        // cpid=1) which correctly gate on sr_live[13].
                         dec_needs_ext = 1'b1;
+                        if (!sr_live[13]) begin
+                            dec_valid   = 1'b1;
+                            dec_is_priv = 1'b1;
+                        end else begin
                         case (mmu_op_type)
                             3'b001: begin
                                 // PFLUSH / PFLUSHA
@@ -6235,6 +6273,7 @@
                             end
                             default: ;
                         endcase
+                        end
                     end else begin
                         // Non-FPU, non-MMU, non-MOVE16 Group-F encoding → Line-F (vector 11)
                         dec_valid    = 1'b1;

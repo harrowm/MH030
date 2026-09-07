@@ -749,6 +749,46 @@ module system_tb;
         chk("PRIV-01:fired", priv_req_cnt - base_priv, 32'd1);
         set_sr(16'h2700);                           // restore supervisor
 
+        // docs/*.md review (Phase 250 F2/F3): MOVES and the 4 MMU
+        // instructions (PFLUSH/PLOAD/PMOVE/PTEST) were entirely missing
+        // their own privilege gate -- confirmed to fail (priv_req never
+        // fires, each falls through to its own normal supervisor-only
+        // decode) before this session's fix, confirmed passing after.
+        $display("--- PRIV-02: MOVES.L (A0),D6 in user mode ---");
+        set_sr(16'h0000);                           // S=0 (user mode)
+        base_priv = priv_req_cnt;
+        run_instr(16'h0E90, 1'b1, 32'h0000_6800);  // MOVES.L (A0),D6
+        chk("PRIV-02:fired", priv_req_cnt - base_priv, 32'd1);
+        set_sr(16'h2700);                           // restore supervisor
+
+        $display("--- PRIV-03: PFLUSHA in user mode ---");
+        set_sr(16'h0000);
+        base_priv = priv_req_cnt;
+        run_instr(16'hF000, 1'b1, 32'h0000_2400);  // PFLUSHA
+        chk("PRIV-03:fired", priv_req_cnt - base_priv, 32'd1);
+        set_sr(16'h2700);
+
+        $display("--- PRIV-04: PLOAD (A0) in user mode ---");
+        set_sr(16'h0000);
+        base_priv = priv_req_cnt;
+        run_instr(16'hF010, 1'b1, 32'h0000_6000);  // PLOAD (A0)
+        chk("PRIV-04:fired", priv_req_cnt - base_priv, 32'd1);
+        set_sr(16'h2700);
+
+        $display("--- PRIV-05: PMOVE (A0),TC in user mode ---");
+        set_sr(16'h0000);
+        base_priv = priv_req_cnt;
+        run_instr(16'hF010, 1'b1, 32'h0000_4400);  // PMOVE (A0),TC
+        chk("PRIV-05:fired", priv_req_cnt - base_priv, 32'd1);
+        set_sr(16'h2700);
+
+        $display("--- PRIV-06: PTEST (A0) in user mode ---");
+        set_sr(16'h0000);
+        base_priv = priv_req_cnt;
+        run_instr(16'hF010, 1'b1, 32'h0000_8E00);  // PTEST (A0)
+        chk("PRIV-06:fired", priv_req_cnt - base_priv, 32'd1);
+        set_sr(16'h2700);                           // restore supervisor
+
         // ====================================================================
         // Line-A / Line-F unimplemented opcodes
         // ====================================================================
