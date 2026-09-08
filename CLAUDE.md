@@ -1166,9 +1166,9 @@ at Phase 250. **Phase 250 (a second, independent MC68030UM.pdf chapter-by-
 chapter compliance review)** covered Ch.2/3/4/12 plus a fresh look at
 Ch.8's exception vector/priority table and Ch.7's CAS2/MOVEP cycles,
 producing a 10-item findings list — see `plan.md §Phase 250` for full
-citations. Status: **F1/F2/F3/F4/F5/F7/F8 IMPLEMENTED AND VERIFIED**; F6
-investigated, found more invasive than scoped, deferred; F9/F10
-low-priority, not yet actioned.
+citations. Status: **F1/F2/F3/F4/F5/F7/F8 IMPLEMENTED AND VERIFIED**; F9
+investigated and confirmed NOT a bug; F6 investigated, found more
+invasive than scoped, deferred; F10 low-priority, not yet actioned.
 
 **F2 (MOVES) + F3 (PFLUSH/PLOAD/PMOVE/PTEST) — IMPLEMENTED AND VERIFIED**:
 both were entirely missing their own privilege check (§4.2/Table 3-14
@@ -1326,8 +1326,67 @@ zero Tom Harte coverage — 68000-captured corpus, MOVE16 is 68040-only).
 See `docs/stalls.md` for the corresponding count corrections (Category F
 18→17, Category H 14→13, back-to-back FSM pairs 9→8).
 
-**F9/F10** — low-priority (STOP+trace timing nuance; STATUS pin's
-double-bus-fault sub-case), not yet actioned.
+**F9 (STOP + trace interaction) — INVESTIGATED, CONFIRMED NOT A BUG**:
+§8.1.7 requires STOP that begins execution with tracing (T1) already
+enabled to force a Trace exception immediately after loading SR, and to
+never actually enter the stopped condition. Flagged "plausible, not
+confirmed" since `stop_r`'s own presence in `ex_mem_stall`'s OR-chain
+could plausibly gate `eu_trace_req` shut before it ever fires. Built a
+real end-to-end test (`tb/stall_fsm_tb.sv`, new **F9**) rather than
+reasoning about it in the abstract: `MOVE.W #imm,SR` sets T1=1, then
+`STOP` immediately follows. Traced the exact cycle-by-cycle timing and
+confirmed the mechanism is correct by construction: `dec_is_trace` is
+computed combinationally at DECODE time (using the OLD SR, before
+STOP's own SR write ever commits, since decode strictly precedes EX),
+so `ex_is_trace`/`eu_trace_req` are already latched true by the same
+cycle STOP first enters EX — one full cycle *before* `stop_r` itself
+transitions to 1 (a registered signal, visible only starting the *next*
+cycle) even reaches `ex_mem_stall`'s own OR-chain. `m68030_exc.sv`'s own
+`EXC_IDLE`→`EXC_PUSH` transition only needs `exc_pending` true for that
+one cycle to latch its dispatch decision (and independently snapshots
+`fault_sr` the same edge, correctly capturing the OLD T1=1 SR before
+STOP's own write — two independent flip-flops sampling their own
+combinational inputs on the identical edge, no race). `stop_r` does
+still assert for one internal cycle (confirmed via direct trace,
+`eu_stop` briefly 1) before `exc_sr_wr_en` (fired by ANY exception
+reaching `EXC_LOAD`, not just interrupts — the same existing mechanism
+that already resumes STOP on a real interrupt) clears it — this is a
+purely internal, non-externally-observable transient (STOP produces no
+bus cycles either way), not a real "entered the stopped condition"
+violation. Confirmed execution correctly resumes at the instruction
+after STOP post-RTE (not re-executing STOP, not staying halted).
+**Found and fixed one real bug in the test's own construction, not the
+RTL**: a direct `rom[]` memory dump (needed to debug why the trace
+handler's own `ANDI.W #$7FFF,(A7)` fix — meant to clear T1 in the
+stacked frame before RTE, else every subsequent instruction retraces
+forever — didn't work) found this RTL's own Format $0 frame packs
+`{fmtvec, SR}` together as one longword at the frame's LOW address
+(fmtvec upper 16 bits, SR lower 16 bits) with PC at the HIGH address —
+`(A7)` alone addresses the fmtvec half, not the SR half; fixed to
+`(2,A7)`. **Flagging this layout as a separate, NOT independently
+verified compliance question** for a future session: this ordering
+appears to differ from the real 68030's own documented SR/PC/format-
+vector arrangement (SR lowest, PC middle, format/vector highest), and —
+confirmed via grep — no existing test in this project has ever
+independently dumped raw frame memory to check byte-for-byte layout
+(every existing frame-format test checks a derived format-code/register
+end-state, never the physical bytes); the RTL is internally
+self-consistent (the same code both pushes and later pops its own
+frames) so this has never surfaced as a functional failure, but it may
+be a genuine, previously-undiscovered structural bug worth its own
+dedicated investigation (re-derive against MC68030UM.pdf's actual frame
+diagrams directly, not from memory) before concluding either way. Also
+found a real, previously-latent testbench bug reusing the exact "ROM
+write issued after simulated time already passed that address" class
+this file's own history already documents: the JMP redirect skipping
+this test's own ROM setup was first placed in the *runtime* polling
+section (after AS-LOCK-MISMATCH's own checks) instead of upfront
+alongside every other test's own setup — fixed by moving it there. Full
+mandatory gate: `make test` 37/37 (testbench-only, `git diff --stat
+rtl/` empty, no Harte re-run needed).
+
+**F10** — low-priority (STATUS pin's double-bus-fault sub-case), not
+yet actioned.
 
 ## Verification Commands
 

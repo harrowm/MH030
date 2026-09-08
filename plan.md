@@ -624,4 +624,110 @@ not yet actioned). See `docs/stalls.md` for the corresponding coverage-
 count corrections (Category F 18→17 sources, Category H 14→13 sources,
 back-to-back FSM pairs 9→8) and `CLAUDE.md`'s own Phase 250 F8 summary
 for the condensed version of this writeup.
-not yet actioned.
+
+## F9 (STOP + trace interaction) — INVESTIGATED, CONFIRMED NOT A BUG
+
+MC68030UM.pdf §8.1.7: STOP that begins execution with tracing (T1)
+already enabled must force a Trace exception immediately after loading
+SR, and must never actually enter the stopped condition. Flagged
+"plausible, not confirmed" in the original findings list — `stop_r`'s
+own presence in `ex_mem_stall`'s OR-chain could plausibly gate
+`eu_trace_req` shut before it ever fires, and the RTL's own timing
+history (F1's AS/DS misconception, several genuine cycle-adjacent races
+found elsewhere in this project) made "appears self-correcting on paper"
+not good enough on its own — built a real end-to-end test instead of
+reasoning about it in the abstract.
+
+**Test**: new `tb/stall_fsm_tb.sv` test **F9**, reached via a JMP
+redirect from AS-LOCK-MISMATCH's own tail (was `BRA_SELF`) into freed
+MOVE16 opcode space (`0x2604`-`0x263C`, confirmed clear via grep — Phase
+250 F8 removed INT-mid-MOVE16's own code from here). Sequence:
+`MOVE.W #$A000,SR` (sets T1=1, S=1) immediately followed by
+`STOP #$2000`. Vector 9 (Trace) points at a handler that clears the
+stacked frame's own T1 bit (needed so subsequent instructions don't
+retrace forever) and sets D6=54321 as a marker, then RTEs. The
+instruction after STOP (`CLR.L D5`/`ADDI.L D5,#8001`) proves execution
+resumed correctly; a trailing `BRA_SELF` re-parks the CPU exactly as
+before this test was added, so `SPURIOUS-INT` (the next test) still
+finds it quiescent.
+
+**Finding: not a bug**. Direct cycle-by-cycle tracing confirmed the
+mechanism is correct by construction: `dec_is_trace` is computed
+combinationally at DECODE time using the OLD SR (T1 as it stood before
+STOP's own SR write, since decode strictly precedes EX) — so
+`ex_is_trace`/`eu_trace_req` are already latched true the very cycle
+STOP first enters EX, a full cycle *before* `stop_r` itself (a
+registered signal, visible only starting the next cycle) ever reaches
+`ex_mem_stall`'s own OR-chain. `m68030_exc.sv`'s `EXC_IDLE`→`EXC_PUSH`
+transition only needs `exc_pending` true for that one cycle to latch,
+and independently snapshots `fault_sr` on the identical edge — two
+separate flip-flops sampling their own combinational inputs on the same
+clock edge, no race, correctly capturing the OLD (T1=1) SR before
+STOP's own write commits. `stop_r`/`eu_stop` does assert for one
+internal cycle before `exc_sr_wr_en` (fired by ANY exception reaching
+`EXC_LOAD`, not just interrupts — the same pre-existing mechanism that
+already resumes STOP on a real interrupt) clears it, but this is a
+purely internal, non-externally-observable transient (STOP produces no
+bus cycles either way, so nothing pin-visible differs) — not a real
+"entered the stopped condition" violation. Confirmed execution correctly
+resumes at the instruction after STOP post-RTE, not re-executing STOP
+and not staying halted.
+
+**Found and fixed one real bug in the test's own construction (not the
+RTL)**: the trace handler's own `ANDI.W #$7FFF,(A7)` (meant to clear T1
+in the stacked frame before RTE) didn't work — confirmed via a direct
+`rom[]` memory dump that this RTL's own Format $0 frame packs
+`{fmtvec, SR}` together as ONE longword at the frame's LOW address
+(fmtvec in the upper 16 bits, SR in the lower 16 bits), with PC at the
+HIGH address instead. `(A7)` alone addresses the fmtvec half, not the SR
+half — fixed to `(2,A7)` (opcode `0x026F`, mode=101/(d16,An), reg=111/
+A7, displacement=+2).
+
+**Flagging a separate, NOT independently verified compliance question
+for a future session**: this frame layout (fmtvec+SR low, PC high)
+appears to differ from the real 68030's own documented arrangement (SR
+lowest, PC middle, format/vector highest per every reference this
+project has otherwise used). Confirmed via grep: no existing test in
+this project has ever independently dumped raw frame memory to check
+its physical byte layout — every existing frame-format test
+(`tb/mmu_xlate_tb.sv` Phase 3/4, `tb/exc_tb.sv` EXC-9, etc.) checks a
+derived format-code/register end-state, never the actual pushed bytes.
+The RTL is internally self-consistent (the same code both constructs
+and later pops its own frames via RTE, using matching offsets), so this
+has never surfaced as an observable functional failure in 250 prior
+phases of cosim/Harte verification — but it may be a genuine,
+previously-undiscovered structural compliance bug, distinct from and
+unrelated to F9 itself, worth its own dedicated investigation (re-derive
+against MC68030UM.pdf's actual frame diagrams directly — visually, not
+from OCR text or memory, matching this project's own F1 precedent for
+exactly this class of mistake) before concluding either way. Not
+investigated further this phase — out of scope for F9, and discovered
+only as a side effect of debugging the test's own handler.
+
+**Also found and fixed one real, previously-latent testbench-
+construction bug** reusing the exact "ROM write issued after simulated
+time already passed that address" class this file's own history
+already documents (`feedback_rom_write_ordering.md`): the JMP redirect
+skipping this test's own ROM setup was first written in the *runtime*
+polling section (physically after AS-LOCK-MISMATCH's own `check32`
+calls), racing real elapsed simulation time against this file's own
+giant upfront sequential setup block — by the time that statement
+executed, the CPU had already reached and started looping on the OLD
+`BRA_SELF` it was supposed to have overwritten. Fixed by moving all of
+this test's own `rom[]` writes to the upfront setup section, alongside
+AS-LOCK-MISMATCH's own (matching every other test's established
+convention), keeping only the runtime poll/check code in its original
+position.
+
+**Verification**: confirmed deterministic across 4+ repeated `vvp`
+reruns of the same compiled binary (0 failures each time) after both
+fixes. Full mandatory gate: `make test` 37/37 (testbench-only, `git
+diff --stat rtl/` empty, no Harte re-run needed).
+
+**This closes F9.** Of the original 10-item Phase 250 findings list,
+F1/F2/F3/F4/F5/F7/F8 are IMPLEMENTED AND VERIFIED, F9 is investigated
+and confirmed not a bug, F6 is investigated and deferred (documented
+above), and F10 remains low-priority, not yet actioned. The frame-
+layout question F9 surfaced as a side effect is documented above as a
+distinct, unconfirmed follow-up candidate, not part of this findings
+list.

@@ -335,6 +335,31 @@ module stall_fsm_tb;
     localparam RTR_OP         = 16'h4E77;
     localparam RTE_OP         = 16'h4E73;
     localparam RESET_OP       = 16'h4E70;
+    // F9 (STOP + trace interaction, plan.md's Phase 250 findings list):
+    // STOP_OP takes a 16-bit immediate SR extension word. MOVE_W_IMM_SR
+    // (0000_oo0_0_ss_mmm_rrr with oo=6=MOVE-to-SR special opcode 0100_0110
+    // 11_111_100) loads SR from an immediate. ANDI_W_A7_D16 (0000_001_0_01_
+    // 101_111, ANDI ooo=001, size=01=word, mode=101=(d16,An), reg=111=A7,
+    // displacement=+2) is used by the trace handler to clear the stacked
+    // frame's own T1 bit before RTE, mirroring how real trace-handling
+    // software must behave to stop re-tracing every subsequent instruction
+    // -- confirmed against eu_seq_tb.sv's own documented immediate-opcode
+    // format comment ("ooo=001(ANDI)"). The +2 displacement is real, not
+    // an off-by-one guess: a direct rom[] dump (F9's own debug trace) found
+    // this RTL's own Format $0 frame packs {fmtvec, SR} together as ONE
+    // longword at the frame's LOW address (fmtvec upper 16 bits, SR lower
+    // 16 bits) with PC at the frame's HIGH address instead -- a genuinely
+    // different physical layout than the real 68030's own documented SR/
+    // PC/format-vector ordering (SR lowest, PC middle, format/vector
+    // highest), though internally self-consistent (the same RTL constructs
+    // and later pops its own frames, and no existing test independently
+    // dumps raw frame memory to have ever caught this either way -- see
+    // this session's own writeup for the full flag; not investigated
+    // further here, out of scope for F9 itself). (A7) alone addresses the
+    // fmtvec half; (2,A7) is the actual SR half.
+    localparam STOP_OP          = 16'h4E72;
+    localparam MOVE_W_IMM_SR    = 16'h46FC;
+    localparam ANDI_W_A7_D16    = 16'h026F;
     // MOVEM.L D0/D1,-(A0): store form, mask bit15=D0,bit14=D1 (predecrement
     // mask order is reversed from the increment form used in B-2).
     localparam MOVEM_L_PREDEC_A0 = 16'h48E0;
@@ -3516,7 +3541,53 @@ module stall_fsm_tb;
         rom[16'h3CB0/4] = {16'h5555, CAS_L_D1D2_A0};
         rom[16'h3CB4/4] = {CAS_EXT, CLR_L_D5};
         rom[16'h3CB8/4] = {ADDI_L_D5, 16'h0000};
-        rom[16'h3CBC/4] = {16'd7301, BRA_SELF};
+        // F9 (plan.md's Phase 250 findings list, Tier 4): STOP that begins
+        // execution with tracing (T1) already enabled must force a Trace
+        // exception immediately after loading SR, and must never actually
+        // enter the stopped condition (MC68030UM.pdf Section 8.1.7).
+        // Flagged "plausible, not confirmed" -- the RTL's decode-time
+        // dec_is_trace correctly uses the OLD SR (T1 as it stood BEFORE
+        // STOP's own SR write, since decode happens strictly before EX),
+        // and stop_r's own clear condition (exc_sr_wr_en, fired by ANY
+        // exception reaching EXC_LOAD, not just interrupts) already exists
+        // for the interrupt-resumes-STOP case -- but whether stop_r's own
+        // presence in ex_mem_stall's OR-chain could gate eu_trace_req shut
+        // before it ever fires was never traced. Reached via a JMP
+        // redirect from THIS test's own tail (was BRA_SELF) into freed
+        // MOVE16 opcode space (0x2604-0x263C, confirmed clear via grep --
+        // Phase 250 F8 removed INT-mid-MOVE16's own code from here),
+        // ending in a fresh BRA_SELF so SPURIOUS-INT still finds the CPU
+        // quiescent exactly as before this test was added. All of this
+        // test's own rom[] content is written HERE, upfront, alongside
+        // every other test's own setup -- not interleaved with runtime
+        // check code further down, which would race real elapsed
+        // simulation time against this file's own giant sequential setup
+        // block (the exact "ROM write issued after simulated time already
+        // passed that address" bug class this file's own history
+        // documents repeatedly).
+        rom[16'h0024/4] = 32'h0000_00B0;             // vector 9 (Trace) handler ptr
+        // Trace handler: clear the STACKED frame's own T1 bit before RTE
+        // (SP points at the pushed SR word on entry, Format $0's own
+        // layout) -- otherwise RTE restores T1=1 into the live SR and
+        // every subsequent instruction (including this test's own
+        // BRA_SELF park) retraces forever, which would still prove no
+        // permanent hang but would leave the CPU busy dispatching trace
+        // exceptions instead of genuinely quiescent going into
+        // SPURIOUS-INT. D6=54321 proves the handler itself ran (and, via
+        // the dependent-marker check below, ran exactly once).
+        rom[16'h00B0/4] = {ANDI_W_A7_D16, 16'h7FFF};
+        rom[16'h00B4/4] = {16'h0002, CLR_L_D6};
+        rom[16'h00B8/4] = {ADDI_L_D6, 16'h0000};
+        rom[16'h00BC/4] = {16'd54321, RTE_OP};
+
+        rom[16'h2604/4] = {MOVE_W_IMM_SR, 16'hA000};  // T1=1, S=1, IPL=0
+        rom[16'h2608/4] = {STOP_OP, 16'h2000};         // STOP #$2000 (new SR: S=1, T=0)
+        rom[16'h260C/4] = {CLR_L_D5, ADDI_L_D5};       // the instruction AFTER STOP
+        rom[16'h2610/4] = {16'h0000, 16'd8001};
+        rom[16'h2614/4] = {BRA_SELF, NOP_OP};
+
+        rom[16'h3CBC/4] = {16'd7301, JMP_ABS_L_OP};
+        rom[16'h3CC0/4] = {16'h0000, 16'h2604};
         // Permanent park -- last test in this file.
 
         rom[16'h3EA0/4] = 32'h1111_2222;
@@ -3916,6 +3987,49 @@ module stall_fsm_tb;
                     negate_edges, 32'd1);
             check32("AS-LOCK-MISMATCH: CAS mismatch loaded Dc from memory (0x44444444), value semantics unaffected by the bus-lock fix",
                     u_top.u_eu.u_rf.d_reg[1], 32'h4444_4444);
+        end
+
+        // F9 (plan.md's Phase 250 findings list, Tier 4): STOP + trace
+        // interaction -- rom[] setup lives upfront alongside AS-LOCK-
+        // MISMATCH's own (see the JMP redirect at its tail, above); this
+        // block is pure runtime polling/checking.
+        begin
+            int t;
+            logic saw_stop, saw_trace_vec, reached_next_instr;
+            saw_stop           = 1'b0;
+            saw_trace_vec      = 1'b0;
+            reached_next_instr = 1'b0;
+            for (t = 0; t < 4000 && !reached_next_instr; t++) begin
+                @(posedge clk_4x); #1;
+                if (u_top.eu_stop) saw_stop = 1'b1;
+                if (u_top.u_exc.snap_vec_r == 8'd9) saw_trace_vec = 1'b1;
+                if (u_top.u_eu.u_rf.d_reg[5] === 32'd8001) reached_next_instr = 1'b1;
+            end
+            check("F9: STOP genuinely began to halt (eu_stop asserted) before tracing preempted it",
+                  saw_stop);
+            check("F9: a real Trace exception (vector 9) was dispatched",
+                  saw_trace_vec);
+            check("F9: execution resumed at the instruction after STOP (D5=8001) -- STOP did not permanently halt",
+                  reached_next_instr);
+            check32("F9: trace handler ran (D6=54321)",
+                    u_top.u_eu.u_rf.d_reg[6], 32'd54321);
+            // Give the CPU a settling window to actually reach BRA_SELF
+            // (ADDI.L's own WB/pipeline tail hasn't necessarily drained
+            // the instant D5 itself becomes visible) before judging
+            // quiescence -- matches every other test's own convention of
+            // not sampling a "done" signal on its very first true cycle.
+            // This is also the real proof the handler ran exactly ONCE
+            // (D6=54321 alone can't distinguish 1 vs. N idempotent runs):
+            // if the trace handler's own ANDI.W fix hadn't genuinely
+            // cleared the stacked frame's T1 bit, CLR.L D5/ADDI.L D5/
+            // BRA_SELF would each retrace in turn and exc_active would
+            // still show a fresh dispatch in progress somewhere in this
+            // window (confirmed empirically -- this is exactly what an
+            // earlier, wrong ANDI addressing mode produced before it was
+            // fixed to target the frame's real SR half).
+            for (t = 0; t < 50; t++) @(posedge clk_4x);
+            check("F9: CPU genuinely quiescent afterward (no lingering retrace storm -- eu_stop clear, not busy)",
+                  !u_top.eu_stop && !u_top.exc_active);
         end
 
         // WS-PTEST: checked directly, not assumed excludable -- and this
