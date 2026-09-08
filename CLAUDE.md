@@ -123,9 +123,31 @@ phase matches the plain write cycle's own S1/S3 stagger by the same
 symmetry — **confirmed directly against MC68030UM.pdf Section 7.3.3**
 (Phase 207, deferred-items closure Stage 1): real RMW is a 12-state
 cycle (S0-S11), with S6-S11 identical in shape to an ordinary write
-cycle (ECS+addr, AS+DBEN, data placed, DS asserted, negate). AS stays
-continuously asserted across the whole indivisible read+write sequence
-(Figure 7-30), never negating between the two phases.
+cycle (ECS+addr, AS+DBEN, data placed, DS asserted, negate).
+
+**AS/DS# genuinely negate between the read and write phases, then
+reassert for the write (Phase 250 F1, corrects the claim this section
+used to make)** — confirmed by visually inspecting both Figure 7-29
+(Asynchronous RMW Flowchart) and Figure 7-35 (Synchronous RMW Flowchart)
+directly, not just OCR'd text: the read-completion box explicitly reads
+"...Negate AS and DS..." and the write-start box explicitly reads
+"...Assert AS..." (a fresh ECS+AS dispatch, same shape as starting any
+new bus cycle) — independently in BOTH flowcharts, both of which also
+explicitly cover CAS2's own chained sub-cycles via the identical
+protocol. Only `RMC`/bus arbitration (the real "indivisible operation"
+guarantee — bus *ownership* never releases) stays continuous; the AS/DS
+*pins* toggle. A prior derivation here (Phases 108-114/207, generalized
+to CAS2, then reused by Phase 242's CAS bus-lock fix) held AS
+continuously instead, based on a misapplied quote — direct full-text
+search confirms "maintains AS, DS...throughout" appears exactly once in
+the whole manual, describing **Burst Mode's own State 3** (§7.3.7), a
+different cycle type, not RMW/CAS/CAS2 at all. `biu_cycle_gen.sv`'s
+`rmw_as_hold`/`cas2_as_hold`/`cas_as_hold` overrides (which suppressed
+the state machine's own otherwise-correct natural negate/reassert
+behavior) were removed; `tb/biu_tb.sv`'s P15-1 and
+`tb/stall_fsm_tb.sv`'s AS-LOCK tests were rewritten to assert the
+corrected behavior (AS negates twice across CAS's own read+write, not
+once) — full mandatory gate clean, Harte bit-identical to baseline.
 
 **This has since been fixed in full** (the RTL originally used the wrong
 8-state-per-cycle-type model described above; see CLAUDE.md.old for the
@@ -140,14 +162,17 @@ Burst mode and CAS2 don't reduce to a literal 6 states each (burst's
 first beat is 4 states/2 clocks matching a synchronous read, each
 subsequent beat only 2; CAS2 chains 4 RMW-shaped sub-cycles) but were
 independently redesigned against the manual and compressed the same way,
-in the process finding and fixing two real pin-continuity bugs (burst's
-DS# and CAS2's AS# were both dropping between beats/sub-cycles instead
-of staying held, contradicting the manual's own explicit "maintains
-AS, DS... throughout" text). The only remaining, confirmed-unavoidable
-gap to real silicon's absolute clock count is a small, structural
-per-cycle dispatch floor (the `ST_IDLE`-to-`S0` hand-off) and burst's own
-already-manual-derived internal state count — both investigated and
-found genuinely load-bearing, not implementation overhead.
+in the process finding and fixing one real pin-continuity bug (burst's
+DS# was dropping between beats instead of staying held, contradicting
+the manual's own explicit "maintains AS, DS... throughout" text — this
+part of the original finding was correct, since that quote genuinely
+does describe burst mode; CAS2's own analogous "fix" at the same time
+was not, see the AS/DS# correction above). The only remaining,
+confirmed-unavoidable gap to real silicon's absolute clock count is a
+small, structural per-cycle dispatch floor (the `ST_IDLE`-to-`S0`
+hand-off) and burst's own already-manual-derived internal state count —
+both investigated and found genuinely load-bearing, not implementation
+overhead.
 
 **IACK note**: IACK is architecturally a plain read cycle (FC=111, CPU
 Space) — AS and DS assert together at S1, exactly as the read table
@@ -1141,8 +1166,7 @@ at Phase 250. **Phase 250 (a second, independent MC68030UM.pdf chapter-by-
 chapter compliance review)** covered Ch.2/3/4/12 plus a fresh look at
 Ch.8's exception vector/priority table and Ch.7's CAS2/MOVEP cycles,
 producing a 10-item findings list — see `plan.md §Phase 250` for full
-citations. Status: **F2/F3/F4/F5/F7 IMPLEMENTED AND VERIFIED**; F1
-flagged, not touched (needs a dedicated re-investigation, see below); F6
+citations. Status: **F1/F2/F3/F4/F5/F7 IMPLEMENTED AND VERIFIED**; F6
 investigated, found more invasive than scoped, deferred; F8 needs a user
 decision; F9/F10 low-priority, not yet actioned.
 
@@ -1209,14 +1233,38 @@ rushed — matches this project's own precedent for "found harder than
 expected mid-implementation" (Phase 238/239). Not implemented this
 session.
 
-**F1 (RMW/CAS2/CAS AS# continuity) — flagged, NOT touched**: visual
-confirmation against MC68030UM.pdf Figure 7-29's own flowchart text
-("Negate AS and DS" after the RMW read, "Assert AS" again for the write)
-appears to directly contradict this project's own current `rmw_as_hold`/
-`cas2_as_hold`/`cas_as_hold` AS-continuity model and CLAUDE.md's own
-"S-State Signal Timing" section above. Needs a dedicated re-investigation
-phase before any RTL changes given the blast radius (Phases
-108-114/207/232/241/242 all built on the "AS never negates" premise).
+**F1 (RMW/CAS2/CAS AS# continuity) — IMPLEMENTED AND VERIFIED, same
+session, following a dedicated investigation**: the initial finding was
+confirmed with a second, independent source before touching anything —
+Figure 7-35 (Synchronous RMW Flowchart) shows the identical "negate then
+reassert" pattern as Figure 7-29 (Asynchronous), both visually inspected
+directly from the rendered PDF pages, not OCR text. Root cause found: a
+full-text search confirms "maintains AS, DS...throughout" (the quote
+Phases 108-114/207/242 built the AS-continuity model on) appears exactly
+once in the whole manual, describing **Burst Mode's own State 3**
+(§7.3.7) — a different cycle type, misapplied to RMW/CAS2/CAS. RTL trace
+confirmed the fix is cleanly isolated: `bus_lock`/`rmc_active` (the real
+"indivisible operation"/bus-ownership guarantee) are independently
+derived from `is_rmw_write`/`is_cas2`/`eu_cas_hold`, never gated on the
+three AS-hold overrides — removing them doesn't touch arbitration at
+all, only the AS *pin's* own toggling. Removed `rmw_as_hold`,
+`cas2_as_hold`, and `cas_as_hold` from `biu_cycle_gen.sv` — the
+underlying S0-S11 RMW/CAS2 state shape (Phase 207's own derivation)
+already naturally produces the correct negate-then-reassert behavior via
+its existing per-state `ext_as_n` logic once the overrides suppressing
+it are gone; no other RTL change was needed. Rewrote
+`tb/biu_tb.sv`'s P15-1 (now proves AS genuinely negates then reasserts,
+was the opposite) and `tb/stall_fsm_tb.sv`'s AS-LOCK match-case test (now
+expects AS to negate exactly twice across CAS's own read+write, was
+expecting exactly once) — AS-LOCK's own arbitration-continuity checks
+(IFU never preempts, EU grant never drops during the gap) needed no
+change and still pass, confirming the ownership-lock/pin-toggling
+distinction directly. AS-LOCK-MISMATCH (read-only, no write phase) was
+already correct and unaffected. Full mandatory gate clean (`make test`
+37/37, `cosim_grp` 8/8, `cosim_memind` 28/28, `dat-synth` 50/50), Harte
+bit-identical to baseline — despite touching the single highest-risk
+shared bus-protocol logic in the project (Phases 108-114/207/232/241/242
+all previously built on the wrong premise this corrects).
 
 **F8 (MOVE16 doesn't exist on the MC68030) — needs a user decision**:
 it's an MC68040 instruction; this project fully implements it as real

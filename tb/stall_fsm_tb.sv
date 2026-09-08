@@ -3830,19 +3830,27 @@ module stall_fsm_tb;
         end
 
         // AS-LOCK: CAS's own genuine bus-level lock (Phase 241/242,
-        // silent-copper-latch.md) -- direct signal-level proof that AS# stays
-        // continuously asserted across CAS's own read-then-write sequence,
-        // not negate-then-reassert (the bug this fix closes: single-address
-        // CAS dispatches its read and its conditional write as two ordinary,
-        // independent bus cycles with a real one-cycle return to ST_IDLE in
-        // between, eu_seq.sv's own cas_get_du_r step). Counts how many times
-        // ext_as_n rises 0->1 (a genuine negate) during the whole CAS
-        // instruction's own execution window -- real 68030 CAS holds the bus
-        // for the entire sequence, so this must be exactly 1 (the write's
-        // own true completion), not 2 (read completes, AS negates, briefly
-        // reasserts for the write, negates again -- confirmed via this
-        // exact test to be the baseline's own behavior before this fix,
-        // Phase 241's own investigation trace).
+        // silent-copper-latch.md; REWRITTEN by Phase 250 F1 -- see below).
+        // Direct signal-level proof that CAS's own read-to-write gap is
+        // genuinely arbitration-locked (RMC/bus_lock stay continuously
+        // asserted, so a different requester -- the IFU -- can never steal
+        // the bus mid-sequence) even though the AS# PIN itself genuinely
+        // negates and reasserts between the read and write phases, exactly
+        // as MC68030UM.pdf Figure 7-29's own explicit flowchart text
+        // describes ("...Negate AS and DS..." then "...Assert AS...").
+        // Counts how many times ext_as_n rises 0->1 (a genuine negate)
+        // during the whole CAS instruction's own execution window: this
+        // must be exactly 2 (once when the read completes, once when the
+        // write completes) -- NOT 1. Phase 241/242 originally built this
+        // fix (and this test) around the OPPOSITE premise -- that real
+        // silicon holds AS continuously across the whole read+write
+        // sequence -- traced (Phase 250 F1) to a misapplied quote:
+        // "maintains AS, DS...throughout" appears exactly once in the
+        // entire manual, and it describes BURST MODE's own State 3, not
+        // RMW/CAS/CAS2 at all. The real "indivisible operation" guarantee
+        // is bus OWNERSHIP (RMC/bus_lock, verified below), never the AS
+        // pin's own continuity -- this test's job is now to prove exactly
+        // that distinction, not to prove AS never negates.
         begin
             int t;
             int negate_edges;
@@ -3924,19 +3932,20 @@ module stall_fsm_tb;
                     disable as_lock_monitor;
                 end
             join
-            check32("AS-LOCK: CAS match -- AS# negates exactly once across the whole read+write sequence (genuine bus lock, not read-then-reassert)",
-                    negate_edges, 32'd1);
+            check32("AS-LOCK: CAS match -- AS# genuinely negates twice (read completion, then write completion), matching MC68030UM.pdf Figure 7-29's own negate-then-reassert protocol",
+                    negate_edges, 32'd2);
             check("AS-LOCK: read-to-write gap genuinely exercised (eu_req dropped -- confirms this isn't a vacuous check)", gap_seen);
             check("AS-LOCK: IFU had a real pending request during that gap (a genuine contender, not an absent one)", ifu_req_during_gap_seen);
             check("AS-LOCK: IFU never granted the bus during CAS's own entire execution window", !grant_ifu_during_cas);
             check("AS-LOCK: EU's own grant never dropped during CAS's own entire execution window", !grant_eu_dropped_during_cas);
         end
 
-        // AS-LOCK-MISMATCH: mismatch case -- no write follows, so this is
-        // regression coverage (confirming the fix doesn't hold AS beyond
-        // the one internal decision cycle when there's nothing to bridge
-        // to) rather than an independent proof of the bug like the match
-        // case above.
+        // AS-LOCK-MISMATCH: mismatch case -- no write follows, so there is
+        // only ever one AS assert/negate pair (the read itself) regardless
+        // of the Phase 250 F1 AS-continuity fix above -- unaffected, still
+        // expects exactly 1. Regression coverage (confirming CAS's own
+        // no-write mismatch path stays undisturbed) rather than a proof of
+        // anything F1-specific.
         begin
             int t;
             int negate_edges;

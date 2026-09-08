@@ -379,13 +379,111 @@ precedent for "found harder than expected mid-implementation" (Phase
 238/239's own TAS/Scc and ALU-EA/CMP2-CHK2 deferrals). No RTL or
 testbench changed for F6.
 
-**F1 and F8 remain untouched**, exactly as scoped in the original
-findings pass above -- F1 needs its own dedicated investigation phase
-before any RTL changes (see the findings section above for why); F8
-needs a user decision before any code changes.
+**F8 remains untouched**, exactly as scoped in the original findings
+pass above -- needs a user decision before any code changes.
 
 Full mandatory gate (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
 28/28, `dat-synth` 50/50, full Harte sweep bit-identical to baseline --
 `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`) re-run and confirmed clean
 after EACH of F2/F3, F4, F7, and F5 individually, not just once at the
 end.
+
+### F1 dedicated investigation and fix (same session, user asked to
+proceed directly to F1 after the batch above)
+
+**Re-confirmed the finding with a second, independent manual source
+before touching any RTL.** Beyond Figure 7-29 (Asynchronous RMW
+Flowchart) already cited in the original finding, visually inspected
+Figure 7-35 (Synchronous RMW Flowchart, PDF p.7-55) directly from the
+rendered page image: identical pattern -- "TERMINATE INPUT TRANSFER"
+box negates AS/DS ("1) Negate AS (and DS)"), "START OUTPUT TRANSFER" box
+reasserts AS ("6) Assert AS"). Both flowcharts independently confirm the
+same protocol, and both have CAS2-specific branch decisions built
+directly into them (the "IF CAS2 INSTRUCTION AND ONLY ONE OPERAND
+READ/WRITTEN..." diamond boxes), confirming the same negate-then-
+reassert protocol was always intended to cover CAS2's own chained
+sub-cycles too, not just plain single-operand RMW.
+
+**Root-caused the original mistake.** Full-text search of the entire
+~27,800-line manual for "maintains AS" returns exactly ONE match, and
+it's not in the RMW section at all -- it's in **7.3.6/7.3.7 Burst
+Operation Cycles**, State 3: "The processor maintains AS, DS, and DBEN
+asserted during S3... for continuation of the burst." Burst mode's own
+DS-continuity fix (same phases, 108-114/207) was a CORRECT application
+of this text -- burst genuinely does hold AS/DS asserted across beats.
+RMW/CAS2's own AS-continuity "fix," and Phase 242's CAS bus-lock
+extension explicitly built on the same precedent ("the same genuine
+bus-level lock guarantee RMW and CAS2 already had"), misapplied the
+identical burst-mode quote to a different cycle type three separate
+times.
+
+**Traced the RTL to confirm the fix is cleanly isolated before touching
+anything.** `bus_lock` (suppresses DMA/re-arbitration) and `rmc_active`
+(drives the real `RMC#` pin) are both derived from `is_rmw_write`/
+`is_cas2`/`eu_cas_hold` directly -- NEITHER is gated on
+`rmw_as_hold`/`cas2_as_hold`/`cas_as_hold` in any way. This confirms
+removing the three AS-hold overrides cannot touch bus arbitration or
+RMC continuity at all -- only the AS *pin's* own toggling changes. Also
+confirmed the underlying RMW/CAS2 state machine (Phase 207's own S0-S11
+shape) already naturally produces the correct negate-then-reassert
+behavior via its own existing per-sphase `ext_as_n` logic (`SP_S2`
+asserts, `SP_S6`/`S7` default-negates for non-burst cycles) -- the three
+overrides existed purely to SUPPRESS this already-correct behavior, so
+removing them needed no compensating change anywhere else.
+
+**Fix**: removed `rmw_as_hold`, `cas2_as_hold`, and `cas_as_hold` (and
+the now-dead `is_cas2_r1_next`/`is_cas2_w1_next`/`is_cas2_r2_next`/
+`is_cas2_w2_next`/`is_cas2_next` helper wires that only fed
+`cas2_as_hold`) from `biu_cycle_gen.sv`, replacing each with a comment
+explaining the correction and citing both flowcharts plus the burst-mode
+root-cause finding. `eu_is_cas`'s own input port is now unused within
+this module (only `cas_as_hold` consumed it) -- left in place rather
+than threading its removal through every caller, documented as such.
+
+**Test updates** (both previously asserted the OLD, now-confirmed-wrong
+behavior as correct -- not something to preserve):
+- `tb/biu_tb.sv`'s P15-1 (`--- RMW byte: AS# held through read→write
+  gap ---`) rewritten to `--- RMW byte: AS# genuinely negates then
+  reasserts through read→write gap ---`, asserting `ext_as_n` goes HIGH
+  at least once between `ST_RMW_READ_S6` and `ST_RMW_WRITE_S1`, then LOW
+  again by `ST_RMW_WRITE_S2`. Confirmed the ORIGINAL test failed reliably
+  pre-fix (`FAIL [42525000] AS# no glitch through RMW gap`) via a full
+  `sim/biu` run before making any RTL change; confirmed the rewritten
+  test passes post-fix, along with the file's own separate, unrelated
+  RMC-continuity checks (`RMC_n low during RMW read phase` /
+  `RMC_n still low between RMW phases` / `RMC_n still low during RMW
+  write phase` / `bus_lock asserted during RMW`) all still passing
+  unchanged -- direct proof RMC/bus_lock are unaffected, not just an
+  inference from the trace above.
+- `tb/stall_fsm_tb.sv`'s AS-LOCK (CAS match case) rewritten: was
+  `check32("...AS# negates exactly once across the whole read+write
+  sequence...", negate_edges, 32'd1)`, now expects `32'd2` (once for the
+  read's own completion, once for the write's own completion) --
+  confirmed passing, with the file's OWN pre-existing arbitration-
+  continuity checks in the same test (`IFU never granted the bus during
+  CAS's own entire execution window` / `EU's own grant never dropped
+  during CAS's own entire execution window`) needing NO changes and
+  still passing -- this is the clearest available proof that the
+  ownership-lock/pin-toggling distinction holds: a real, pending IFU
+  contender genuinely never got the bus during CAS's execution, even
+  though AS itself visibly toggled twice. AS-LOCK-MISMATCH (CAS's
+  no-write mismatch path) needed no change -- it only ever has one
+  assert/negate pair regardless of this fix, since there's no write
+  phase to toggle between.
+
+**Full mandatory gate re-run and confirmed clean**: `make test` 37/37
+(including the two rewritten tests, `sim/biu` and `sim/stall_fsm`
+individually re-verified beyond the aggregate `make test` pass),
+`cosim_grp` 8/8, `cosim_memind` 28/28, `dat-synth` 50/50, full 124-suite
+Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221
+TIMEOUT 0`) -- zero regressions anywhere despite touching the single
+highest-blast-radius shared bus-protocol logic in the project (Phases
+108-114/207/232/241/242 all previously built on the premise this
+corrects). CLAUDE.md's own "S-State Signal Timing" section corrected to
+match (previously stated the wrong model as established, verified fact).
+
+**This closes F1.** Of the original 10-item Phase 250 findings list, F1/
+F2/F3/F4/F5/F7 are now IMPLEMENTED AND VERIFIED; F6 is investigated and
+deferred (documented scope above); F8 (MOVE16 doesn't exist on the real
+MC68030) still needs a user decision; F9/F10 remain low-priority,
+not yet actioned.

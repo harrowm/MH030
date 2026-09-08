@@ -4156,12 +4156,22 @@ module biu_tb;
         begin
             $display("=== BIU: RMW AS# continuity + BERR at S6 ===");
 
-            // P15-1: AS# must stay asserted without glitch from RMW read S6
-            //        through write S1.  The rmw_as_hold override covers those
-            //        four states (READ_S6/S7 and WRITE_S0/S1).
-            $display("--- RMW byte: AS# held through read→write gap ---");
+            // P15-1 (docs/*.md review, Phase 250 F1 -- REWRITTEN): AS# must
+            // genuinely NEGATE between the RMW read and write phases, then
+            // REASSERT for the write, exactly matching MC68030UM.pdf
+            // Figure 7-29's own explicit flowchart text ("ACQUIRE DATA:
+            // ...Negate AS and DS..." then "START OUTPUT TRANSFER: ...Assert
+            // AS...") -- confirmed independently against Figure 7-35's own
+            // synchronous-RMW flowchart too. This test previously asserted
+            // the OPPOSITE (AS held continuously via the now-removed
+            // rmw_as_hold override) -- that was a real compliance bug, not
+            // this test's own precedent to preserve. RMC/bus_lock (the
+            // real "indivisible operation" guarantee -- bus OWNERSHIP never
+            // releases) are unaffected by this fix and not re-tested here;
+            // this test is specifically about the AS/DS PINS.
+            $display("--- RMW byte: AS# genuinely negates then reasserts through read→write gap ---");
             begin
-                int t; logic saw_as_gap, got_rd_ack, got_wr_ack;
+                int t; logic saw_as_negate, got_rd_ack, got_wr_ack;
                 u_mem.mem[64] = 32'hAB000000;  // addr=$100
                 p4_direct   = 1;
                 eu_rmw_tb   = 1;
@@ -4173,20 +4183,24 @@ module biu_tb;
                 p4_eu_is_op = 1'b1;
                 wait_bus_idle;
                 p4_eu_req = 1;
-                // Wait until READ_S6 (7'd53) where AS# must stay low via rmw_as_hold
+                // Wait until READ_S6 (7'd53), where AS# must now negate.
                 wait_for_state(7'd53, 80);  // ST_RMW_READ_S6
-                saw_as_gap = 0;
-                // Monitor ext_as_n from READ_S6 through WRITE_S1 — must never go high
+                saw_as_negate = 0;
+                // Monitor ext_as_n from READ_S6 through WRITE_S1 — must see
+                // it go HIGH (negate) at least once in this window, then be
+                // LOW again (reasserted) by the time WRITE_S2 is reached.
                 // READ_S6 (53) → READ_S7 (71) → WRITE_S0 (54) → WRITE_S1 (55)
                 // That span is about 16 internal clock ticks; scan 32 ticks to be safe
                 for (t = 0; t < 32; t++) begin
                     @(posedge clk_4x);
                     if (s_state == 7'd54 || s_state == 7'd55 || // WRITE_S0/S1
                         s_state == 7'd53 || s_state == 7'd71) begin // READ_S6/S7
-                        if (ext_as_n) saw_as_gap = 1;  // AS# went high when it shouldn't
+                        if (ext_as_n) saw_as_negate = 1;  // AS# went high — expected
                     end
                     if (s_state == 7'd56) break;  // reached WRITE_S2 — done checking
                 end
+                check("AS# genuinely negates between RMW read and write phases", saw_as_negate);
+                check("AS# reasserted by WRITE_S2", !ext_as_n);
                 got_rd_ack = 0;
                 for (t = 0; t < 80; t++) begin
                     @(posedge clk_4x);
@@ -4202,7 +4216,6 @@ module biu_tb;
                 eu_rmw_tb = 0;
                 p4_direct = 0;
                 while (!bus_idle) @(posedge clk_4x);
-                check("AS# no glitch through RMW gap", !saw_as_gap);
                 check("RMW read ack received",  got_rd_ack);
                 check("RMW write ack received", got_wr_ack);
             end

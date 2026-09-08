@@ -135,13 +135,14 @@ module biu_cycle_gen #(
     // single-address CAS dispatches its read and its conditional write as two
     // ordinary ST_READ_*/ST_WRITE_* cycles (no dedicated state sequence like
     // RMW/CAS2), with a real one-cycle return to ST_IDLE in between
-    // (eu_seq.sv's own cas_get_du_r step) -- unlike eu_rmw/eu_cas2_req above,
-    // this can't be identified by state alone since ST_READ_S6/S7 are shared
-    // with every other requester. eu_is_cas identifies "the read currently
-    // completing (if any) is CAS's own" (qualified with grant_eu below, since
-    // it's already true from EX-dispatch, before the bus cycle itself starts);
-    // eu_cas_hold is eu_seq.sv's own cas_active_r directly ("read-ack until
-    // FSM fully done" -- already precisely the post-read hold window needed).
+    // (eu_seq.sv's own cas_get_du_r step) -- eu_cas_hold (eu_seq.sv's own
+    // cas_active_r directly, "read-ack until FSM fully done") keeps bus_lock
+    // asserted through that gap so a different requester can't steal the bus
+    // mid-CAS. docs/*.md review (Phase 250 F1): eu_is_cas is no longer
+    // consumed by this module -- it only ever fed the now-removed
+    // cas_as_hold AS-continuity override (see bus_lock below for the
+    // correctly-independent lock mechanism that remains). Left as an input
+    // port rather than threading its removal through every caller.
     input  logic        eu_is_cas,
     input  logic        eu_cas_hold,
 
@@ -379,7 +380,7 @@ module biu_cycle_gen #(
 
     // Helper: which class of states we are in
     logic is_init_ssp, is_init_pc, is_iack, is_S4_or_S5, is_S6, is_S7;
-    logic is_rmw_write, rmw_as_hold;
+    logic is_rmw_write;
     logic is_cas2_r1, is_cas2_w1, is_cas2_r2, is_cas2_w2, is_cas2;
     logic is_burst_read, is_burst_write, is_burst;
 
@@ -473,61 +474,36 @@ module biu_cycle_gen #(
                          (state == ST_BURST_S7)    | (state == ST_BURST_NEXT_S7) |
                          (state == ST_BWRITE_S7)   | (state == ST_BWRITE_NEXT_S7);
 
-    // AS# must stay asserted through the RMW read→write transition: deassert is
-    // suppressed at READ_S6/S7 and WRITE_S0/S1; it naturally re-asserts at WRITE_S2.
-    assign rmw_as_hold = (state == ST_RMW_READ_S6)  | (state == ST_RMW_READ_S7) |
-                         (state == ST_RMW_WRITE_S0) | (state == ST_RMW_WRITE_S1);
-
-    // CAS2 timing investigation (plan.md): CAS2 chains 4 sub-cycles
-    // (R1,W1,R2,W2) with zero bus release (MC68030UM.pdf 7.3.3: "does not
-    // issue a bus grant... during this operation") -- the same
-    // indivisible-AS-hold requirement rmw_as_hold already implements for
-    // ordinary RMW's own single read-write transition, generalized here
-    // to CAS2's 3 internal transitions. Only AS is held -- DS legitimately
-    // toggles between phases, matching rmw_as_hold's own already-Harte-
-    // verified behavior for ordinary RMW (the "indivisible" lock governs
-    // bus ownership via AS, not per-transfer DS). Confirmed via direct
-    // trace before this fix: AS was fully negating between every CAS2
-    // sub-phase, a real, previously-undiscovered pin-level bug (the same
-    // class as burst mode's own DS-continuity bug, just AS instead of DS
-    // and CAS2 instead of burst).
+    // docs/*.md review (Phase 250 F1): rmw_as_hold/cas2_as_hold/cas_as_hold
+    // (formerly here) were REMOVED. Visually confirmed against both
+    // MC68030UM.pdf Figure 7-29 (Asynchronous RMW Flowchart, p.7-44) and
+    // Figure 7-35 (Synchronous RMW Flowchart, p.7-55) -- independently,
+    // via the actual rendered page images, not just OCR text -- that real
+    // 68030 silicon NEGATES AS and DS between an RMW/CAS2 sub-cycle's own
+    // read and write phases ("ACQUIRE DATA: ...3) Negate AS and DS...",
+    // then "START OUTPUT TRANSFER: ...6) Assert AS...", a fresh ECS+AS
+    // dispatch exactly like starting a new bus cycle). RMC stays asserted
+    // throughout (the real, correct "indivisible operation" guarantee --
+    // bus OWNERSHIP never releases, confirmed unaffected by this fix since
+    // rmc_active/bus_lock below were already independently derived, never
+    // gated on these removed signals) -- only the AS/DS PINS toggle.
     //
-    // Rather than hand-deriving the exact per-state hold/release condition
-    // (error-prone given CAS2's own multiple conditional exit points --
-    // berr abort from any phase, or R2's own early exit when no write2 is
-    // needed), this reuses the transition table's own already-correct
-    // "are we leaving the CAS2 sequence this cycle" decision directly:
-    // hold AS whenever state_nxt is ALSO a CAS2 state (i.e. state_nxt !=
-    // ST_IDLE), for every CAS2 state except R1's own genuine start
-    // (before AS has ever asserted, where the default negated behavior is
-    // correct, matching an ordinary read's own S0).
-    wire is_cas2_r1_next = (state_nxt == ST_CAS2_R1_S0) | (state_nxt == ST_CAS2_R1_S2) |
-                           (state_nxt == ST_CAS2_R1_S4) | (state_nxt == ST_CAS2_R1_S5) |
-                           (state_nxt == ST_CAS2_R1_S6);
-    wire is_cas2_w1_next = (state_nxt == ST_CAS2_W1_S0) | (state_nxt == ST_CAS2_W1_S2) |
-                           (state_nxt == ST_CAS2_W1_S3) | (state_nxt == ST_CAS2_W1_S4) |
-                           (state_nxt == ST_CAS2_W1_S5) | (state_nxt == ST_CAS2_W1_S6);
-    wire is_cas2_r2_next = (state_nxt == ST_CAS2_R2_S0) | (state_nxt == ST_CAS2_R2_S2) |
-                           (state_nxt == ST_CAS2_R2_S4) | (state_nxt == ST_CAS2_R2_S5) |
-                           (state_nxt == ST_CAS2_R2_S6);
-    wire is_cas2_w2_next = (state_nxt == ST_CAS2_W2_S0) | (state_nxt == ST_CAS2_W2_S2) |
-                           (state_nxt == ST_CAS2_W2_S3) | (state_nxt == ST_CAS2_W2_S4) |
-                           (state_nxt == ST_CAS2_W2_S5) | (state_nxt == ST_CAS2_W2_S6);
-    wire is_cas2_next = is_cas2_r1_next | is_cas2_w1_next | is_cas2_r2_next | is_cas2_w2_next;
-    logic cas2_as_hold;
-    assign cas2_as_hold = is_cas2 && is_cas2_next && (state != ST_CAS2_R1_S0);
-
-    // CAS's own genuine bus-level lock (silent-copper-latch.md, Phase 241/242):
-    // holds AS across the read's own S6/S7 negate point (grant_eu-qualified,
-    // since those states are shared with every other requester, unlike RMW/
-    // CAS2's own dedicated, non-shared state names) and across the entire
-    // post-read-ack window eu_cas_hold covers -- EXCLUDING the write's own
-    // final ST_WRITE_S6, so its already-correct natural AS-negate there is
-    // left completely untouched (matching rmw_as_hold's own precedent of
-    // never touching its own final write-completion state).
-    logic cas_as_hold;
-    assign cas_as_hold = (grant_eu && eu_is_cas && (state == ST_READ_S6 || state == ST_READ_S7)) ||
-                         (eu_cas_hold && state != ST_WRITE_S6);
+    // Root cause of the original (wrong) model: the "maintains AS,
+    // DS...throughout" text these three overrides were built to satisfy
+    // (Phases 108-114/207 for RMW, generalized to CAS2, then Phase 242's
+    // CAS bus-lock fix built explicitly on the same precedent) is real
+    // manual text -- but a direct full-text search confirms it appears
+    // EXACTLY ONCE in the entire ~27,800-line manual, and it's in
+    // §7.3.7 BURST OPERATION CYCLES describing burst's own State 3, a
+    // completely different cycle type -- not RMW/CAS2/CAS at all. Burst's
+    // own DS/AS continuity fix (same phases) was correctly derived from
+    // this text; RMW/CAS2/CAS's use of the same text was not.
+    //
+    // No other change was needed: the underlying S0-S11 RMW/CAS2 state
+    // shape (Phase 207's own derivation) already naturally produces the
+    // correct negate-then-reassert behavior via the shared per-sphase
+    // ext_as_n logic below (SP_S2 asserts, SP_S6/S7 default-negates for
+    // non-burst) -- these overrides existed only to suppress it.
 
     // bus_lock: suppress DMA during RMW, CAS2, burst, and single-address CAS
     // sequences. eu_cas_hold's own inclusion here is the part that matters
@@ -1304,10 +1280,12 @@ module biu_cycle_gen #(
             // WRITE's real timing exactly (MC68030UM.pdf 7.3.3 State 6-11 is
             // the same 6-state shape as 7.3.2's own State 0-5 -- ECS+addr,
             // AS+DBEN, data placed, DS asserted, nothing new, negate), so
-            // the same S1/S7 skip applies. AS# staying continuously
-            // asserted across the whole indivisible cycle (rmw_as_hold,
-            // below) is unaffected: SP_S2's own unconditional ext_as_n=0
-            // covers the gap the removed S1 used to bridge.
+            // the same S1/S7 skip applies. docs/*.md review (Phase 250 F1):
+            // AS# genuinely negates after the read (SP_S6/S7) and reasserts
+            // fresh here at SP_S2's own unconditional ext_as_n=0 -- the
+            // skipped S1 just means that reassert happens one state earlier
+            // than an ordinary write's own S1, not that S1's AS-assert is
+            // lost.
             ST_RMW_WRITE_S0: state_nxt = ST_RMW_WRITE_S2;
             ST_RMW_WRITE_S2: state_nxt = ST_RMW_WRITE_S3;
             ST_RMW_WRITE_S3: state_nxt = ST_RMW_WRITE_S4;
@@ -1360,7 +1338,10 @@ module biu_cycle_gen #(
                 if      (berr_abort_r)       state_nxt = ST_IDLE;
                 else if (eu_cas2_do_write1)  state_nxt = ST_CAS2_W1_S0;
                 else                         state_nxt = ST_CAS2_R2_S0;
-            // W1: write at addr1 (no bus release -- cas2_as_hold below)
+            // W1: write at addr1 (no bus release -- RMC/bus_lock stay
+            // asserted throughout per MC68030UM.pdf 7.3.3, AS# itself
+            // genuinely negates/reasserts between sub-cycles, docs/*.md
+            // review Phase 250 F1)
             ST_CAS2_W1_S0: state_nxt = ST_CAS2_W1_S2;
             ST_CAS2_W1_S2: state_nxt = ST_CAS2_W1_S3;
             ST_CAS2_W1_S3: state_nxt = ST_CAS2_W1_S4;
@@ -1717,19 +1698,14 @@ module biu_cycle_gen #(
                         if (!berr_abort_r) ifu_ack  = 1'b1; else ifu_berr = 1'b1;
                     end
             end
-            // RMW atomic lock: AS# must stay asserted continuously from read-S2
-            // through write-S1; the case above deasserts it at SP_S6/S7 and
-            // leaves it low at SP_S0/S1 only if it was already in a cycle.
-            // Override here to keep it low during the read→write gap states.
-            if (rmw_as_hold) ext_as_n = 1'b0;
-            // CAS2 atomic lock (plan.md): same idea, generalized across
-            // CAS2's own 4 chained sub-cycles -- see cas2_as_hold's own
-            // declaration comment for the full derivation.
-            if (cas2_as_hold) ext_as_n = 1'b0;
-            // Single-address CAS's own genuine bus-level lock
-            // (silent-copper-latch.md, Phase 241/242) -- see cas_as_hold's
-            // own declaration comment for the full derivation.
-            if (cas_as_hold) ext_as_n = 1'b0;
+            // docs/*.md review (Phase 250 F1): the three AS-hold overrides
+            // formerly here (rmw_as_hold/cas2_as_hold/cas_as_hold) were
+            // removed -- see the comment above bus_lock's own declaration
+            // for the full derivation. The case above's own natural
+            // per-sphase ext_as_n behavior (negate at SP_S6/S7, reassert at
+            // SP_S2) already correctly reproduces MC68030UM.pdf Figure
+            // 7-29/7-35's own explicit "negate AS and DS" / "assert AS"
+            // read-to-write transition with no override needed.
         end
     end
 
