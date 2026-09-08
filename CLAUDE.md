@@ -1166,9 +1166,9 @@ at Phase 250. **Phase 250 (a second, independent MC68030UM.pdf chapter-by-
 chapter compliance review)** covered Ch.2/3/4/12 plus a fresh look at
 Ch.8's exception vector/priority table and Ch.7's CAS2/MOVEP cycles,
 producing a 10-item findings list — see `plan.md §Phase 250` for full
-citations. Status: **F1/F2/F3/F4/F5/F7/F8 IMPLEMENTED AND VERIFIED**; F9
-investigated and confirmed NOT a bug; F6 investigated, found more
-invasive than scoped, deferred; F10 low-priority, not yet actioned.
+citations. Status: **F1/F2/F3/F4/F5/F7/F8/F10 IMPLEMENTED AND VERIFIED**;
+F9 investigated and confirmed NOT a bug; F6 investigated, found more
+invasive than scoped, deferred.
 
 **F2 (MOVES) + F3 (PFLUSH/PLOAD/PMOVE/PTEST) — IMPLEMENTED AND VERIFIED**:
 both were entirely missing their own privilege check (§4.2/Table 3-14
@@ -1385,8 +1385,52 @@ alongside every other test's own setup — fixed by moving it there. Full
 mandatory gate: `make test` 37/37 (testbench-only, `git diff --stat
 rtl/` empty, no Harte re-run needed).
 
-**F10** — low-priority (STATUS pin's double-bus-fault sub-case), not
-yet actioned.
+**F10 (STATUS pin, double-bus-fault sub-case) — IMPLEMENTED AND
+VERIFIED**: MC68030UM.pdf Table 12-4/§7.5.4/§8.1.2's real STATUS pin
+(confirmed active-low, Output, per the Chapter 5 signal summary table)
+has 4 distinct meanings; 3 (1/2/3-clock pulses tied to instruction-
+boundary/trace-interrupt/MMU-dispatch microsequencer staging) need real
+microsequencer-cycle correlation this project's structurally different
+microarchitecture has no faithful analogue for, matching Phase 248 item
+#5's own REFILL#/STATUS# deferral reasoning — left deliberately
+unimplemented. The 4th — continuously asserted = processor halted due
+to double bus fault — is NOT microsequencer-timing-dependent at all,
+just a sticky bit, and this project already computes exactly that
+condition (`biu_error_handler.sv`'s `halt_out`) but never latched or
+wired it to any pin; `halt_out`'s own header comment already says "the
+top-level should register it to avoid glitches" — this closes that gap.
+Added a new sticky register (`m68030_biu.sv`'s `status_r`, set on
+`halt_out`, cleared only on reset) and a new `status_n` output port,
+threaded straight through `m68030_top.sv` as a genuine top-level pin.
+New output ports never need existing-testbench tie-offs (unlike new
+*input* ports, per item #5's own precedent) — confirmed via `make test`
+37/37 with zero testbench changes beyond the one dedicated new test.
+New coverage in `tb/biu_int_tb.sv` (the only file that instantiates the
+real `m68030_biu` directly, rather than testing its submodules in
+isolation): a genuine BERR+HALT retry (via a new `suppress_dsack`
+testbench override, since `mem_model.sv` has no address-range gating to
+exploit for "no device responds") proves `status_n` asserts on a real
+double bus fault and stays asserted (sticky) long after the underlying
+condition passes, clearing only on reset. **Found and fixed one real
+test-construction bug while building it**: asserting `halt_n` before or
+simultaneously with `eu_req` never even started the bus cycle at all
+(real HALT# gates cycle *initiation* itself, via `bus_halted`'s own
+`!halt_s` term keeping the FSM parked in `ST_IDLE`) — fixed by letting
+the cycle dispatch first, then asserting HALT# partway through,
+matching what real hardware actually requires (HALT#/BERR# sampled
+together at fault recognition, not from the cycle's own start). Also
+noted, not fixed (out of scope for a pin-wiring task): `halt_out`
+itself fires on the SAME cycle as `retry_pending` in this exact test
+scenario, since `berr_timeout` is a sticky latch held until `bus_idle`
+rather than a one-cycle pulse — a pre-existing nuance of `halt_out`'s
+own formula that `tb/biu_tb.sv`'s own existing test never distinguished
+either. Full mandatory gate clean: `make test` 37/37, `cosim_grp` 8/8,
+`cosim_memind` 28/28, `dat-synth` 50/50, full 124-suite Harte sweep
+bit-identical to baseline.
+
+**This closes the entire Phase 250 10-item findings list** except F6
+(investigated, deferred, documented above) — the last one to remain
+open, by explicit choice given its own real risk to RTE's delicate FSM.
 
 ## Verification Commands
 

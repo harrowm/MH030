@@ -89,7 +89,7 @@ module biu_int_tb;
     logic        fault_rw_out;
     logic [1:0]  fault_siz_out;
     logic        fault_valid, fault_retry, fault_is_rmw;
-    logic        retry_pending, halt_out;
+    logic        retry_pending, halt_out, status_n;
     logic [3:0]  exc_frame_format;
     logic        exc_frame_valid;
     logic [15:0] exc_ssw;
@@ -236,6 +236,7 @@ module biu_int_tb;
         .fault_is_rmw    (fault_is_rmw),
         .retry_pending   (retry_pending),
         .halt_out        (halt_out),
+        .status_n        (status_n),
         .exc_frame_format(exc_frame_format),
         .exc_frame_valid (exc_frame_valid),
         .exc_ssw         (exc_ssw),
@@ -272,8 +273,16 @@ module biu_int_tb;
         .burst_beat_probe (u_biu.u_cg.u_bc.burst_beat)
     );
 
-    assign dsack0_n = mem_dsack0_n;
-    assign dsack1_n = mem_dsack1_n;
+    // Phase 250 F10: lets a test simulate "no device responds" (needed to
+    // drive a genuine watchdog-timeout-driven double bus fault) without
+    // touching mem_model.sv itself, which every other test in this file
+    // relies on responding normally -- mem_model's own state machine has
+    // no address-range gating (confirmed via direct read), so an
+    // out-of-range address alone wouldn't suppress DSACK the way it does
+    // in some other testbenches' own memory models.
+    logic suppress_dsack = 1'b0;
+    assign dsack0_n = suppress_dsack ? 1'b1 : mem_dsack0_n;
+    assign dsack1_n = suppress_dsack ? 1'b1 : mem_dsack1_n;
     assign ext_d_in = mem_ext_d_in;
 
     // Pre-load vector table
@@ -392,6 +401,77 @@ module biu_int_tb;
             repeat(4) @(posedge clk_4x);
             check("read eu_ack fires",          got_ack);
             check32("rdata=DEAD_BEEF",      rdata_snap, 32'hDEAD_BEEF);
+        end
+
+        // ===================================================================
+        // Phase 250 F10: STATUS pin, double-bus-fault sub-case. A real
+        // STATUS pin (MC68030UM.pdf Table 12-4/§7.5.4/§8.1.2) has 4
+        // distinct meanings; this project deliberately implements only
+        // the one that isn't microsequencer-timing-dependent --
+        // continuously asserted (active low here, matching the manual's
+        // own "Output, Low" polarity) = processor halted due to double
+        // bus fault. Reached via the same shape this project's own
+        // biu_error_handler.sv/tb/biu_tb.sv already prove works for
+        // halt_out itself: HALT# asserted + no DSACK/STERM response
+        // produces a BERR+HALT retry (retry_pending=1); a fault condition
+        // overlapping that retry is the real double-bus-fault condition.
+        // (Confirmed via direct trace: retry_pending and halt_out assert
+        // the SAME cycle here, since berr_timeout is a sticky latch held
+        // until bus_idle, not a one-cycle pulse -- a pre-existing nuance
+        // of halt_out's own formula, unrelated to and not fixed by this
+        // pin addition; tb/biu_tb.sv's own existing test never
+        // distinguishes same-cycle from later either.) Run LAST
+        // (permanent park, matching this project's own established
+        // precedent) -- a genuine double bus fault escalates into a Bus
+        // Error exception with no installed handler, not something
+        // sensible to test anything after.
+        // ===================================================================
+        $display("--- Double bus fault -> status_n (sticky) ---");
+        begin
+            logic saw_retry, saw_status;
+            saw_retry  = 1'b0;
+            saw_status = 1'b0;
+            check("status_n deasserted before any fault", status_n);
+            // Real HALT# gates bus-cycle *initiation* itself (bus_halted's
+            // own !halt_s term keeps the FSM parked in ST_IDLE while
+            // HALT# is asserted) -- asserting it before/alongside eu_req
+            // would prevent the cycle from ever starting at all, never
+            // reaching the S4/S5/S6 BERR-check states where the real
+            // BERR+HALT retry decision lives. Let the cycle genuinely
+            // dispatch first (HALT# deasserted), then assert HALT#
+            // partway through, matching what real hardware requires:
+            // HALT# and BERR# sampled together at the point the fault is
+            // recognized, not necessarily from the cycle's own start.
+            suppress_dsack = 1'b1;   // no device ever responds
+            eu_addr = 32'h0000_0030;
+            eu_fc   = 3'b101;
+            eu_rw   = 1'b1;
+            eu_siz  = 2'b00;
+            eu_req  = 1'b1;
+            repeat(10) @(posedge clk_4x);
+            halt_n  = 1'b0;   // assert HALT# (active-low: 0 = asserted)
+            for (int t = 0; t < 2000 && !saw_status; t++) begin
+                @(posedge clk_4x);
+                if (retry_pending) saw_retry = 1'b1;
+                if (!status_n)     saw_status = 1'b1;
+            end
+            eu_req         = 1'b0;
+            halt_n         = 1'b1;   // restore HALT# deasserted
+            suppress_dsack = 1'b0;   // restore normal DSACK response
+            check("BERR+HALT genuinely produced a retry", saw_retry);
+            check("status_n asserts on double bus fault", saw_status);
+            // Sticky: real STATUS stays asserted "continuously... until
+            // the processor is reset" (MC68030UM.pdf) -- confirm it
+            // doesn't clear on its own once the underlying halt_out
+            // pulse (combinational, momentary) has long since passed and
+            // the bus has genuinely gone back to responding normally.
+            repeat(200) @(posedge clk_4x);
+            check("status_n stays asserted (sticky, not a momentary pulse)", !status_n);
+            rst_n = 1'b0;
+            repeat(4) @(posedge clk_4x);
+            rst_n = 1'b1;
+            repeat(4) @(posedge clk_4x);
+            check("status_n clears on reset", status_n);
         end
 
         $display("=== %0d failure(s) ===", fail_count);

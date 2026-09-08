@@ -238,6 +238,7 @@ module m68030_biu #(
     output logic        fault_is_rmw,
     output logic        retry_pending,
     output logic        halt_out,
+    output logic        status_n,      // Phase 250 F10: STATUS pin, double-bus-fault sub-case only
 
     output logic [3:0]  exc_frame_format,
     output logic        exc_frame_valid,
@@ -341,6 +342,35 @@ module m68030_biu #(
     );
 
     assign berr_combined = berr_s_ext | berr_timeout;
+
+    // Phase 250 F10 (docs/*.md review): the real STATUS pin (MC68030UM.pdf
+    // Table 12-4/§7.5.4/§8.1.2) has 4 distinct meanings -- three
+    // (1/2/3-clock pulses tied to instruction-boundary/trace-interrupt/
+    // MMU-dispatch microsequencer staging) need real microsequencer-cycle
+    // correlation this project's structurally different microarchitecture
+    // has no faithful analogue for, matching Phase 248 item #5's own
+    // REFILL#/STATUS# deferral reasoning exactly -- deliberately still not
+    // implemented. The 4th -- continuously asserted = processor halted due
+    // to double bus fault -- is NOT microsequencer-timing-dependent at
+    // all, just a sticky bit, and this project already computes exactly
+    // that condition (halt_out, above) but never latched or wired it to
+    // any output pin. halt_out's own header comment already says "the
+    // top-level should register it to avoid glitches" -- this is that
+    // registration. Real silicon's own double bus fault halts permanently
+    // until RESET; this RTL instead lets the retry escalate into an
+    // ordinary, software-recoverable Bus Error exception (eu_berr, tested
+    // directly in tb/biu_tb.sv's own "Double bus fault" test) rather than
+    // a hard, unrecoverable halt -- a deliberate, pre-existing design
+    // choice (Phase 248 item #10) this pin doesn't change; it only makes
+    // the already-computed diagnostic condition observable on a real pin,
+    // matching the manual's own "asserted continuously until reset" text
+    // for this one sub-case.
+    logic status_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)       status_r <= 1'b0;
+        else if (halt_out) status_r <= 1'b1;
+    end
+    assign status_n = ~status_r;
 
     // -----------------------------------------------------------------------
     // Internal signals declared here so Icarus sees them before any use

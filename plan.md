@@ -727,7 +727,97 @@ diff --stat rtl/` empty, no Harte re-run needed).
 **This closes F9.** Of the original 10-item Phase 250 findings list,
 F1/F2/F3/F4/F5/F7/F8 are IMPLEMENTED AND VERIFIED, F9 is investigated
 and confirmed not a bug, F6 is investigated and deferred (documented
-above), and F10 remains low-priority, not yet actioned. The frame-
-layout question F9 surfaced as a side effect is documented above as a
-distinct, unconfirmed follow-up candidate, not part of this findings
-list.
+above). The frame-layout question F9 surfaced as a side effect is
+documented above as a distinct, unconfirmed follow-up candidate, not
+part of this findings list.
+
+## F10 (STATUS pin, double-bus-fault sub-case) — IMPLEMENTED AND VERIFIED
+
+MC68030UM.pdf's real STATUS pin (Table 12-4/§7.5.4/§8.1.2; confirmed
+Output, active-low, per the Chapter 5 signal summary table's own "Output
+Low" entry) has 4 distinct meanings. Table 8-2 describes 3 of them as
+1/2/3-clock pulses tied to instruction-boundary/trace-interrupt/MMU-
+dispatch microsequencer staging — these need real microsequencer-cycle
+correlation this project's structurally different microarchitecture has
+no faithful analogue for, matching Phase 248 item #5's own REFILL#/
+STATUS# deferral reasoning exactly. Left deliberately unimplemented.
+
+The 4th meaning — continuously asserted, until reset, signaling the
+processor halted due to double bus fault — is NOT microsequencer-
+timing-dependent at all; it's just a sticky bit. This project already
+computes exactly that condition (`biu_error_handler.sv`'s `halt_out`,
+`assign halt_out = (berr_s | berr_timeout_r) & retry_pending;`) but
+never latched or wired it to any output pin — `halt_out`'s own header
+comment already says "halt_out is combinational — the top-level should
+register it to avoid glitches propagating to the halt pin," a genuine,
+never-closed gap this finding is the natural opportunity to close.
+
+**Implementation**: added a new sticky register in `rtl/m68030_biu.sv`
+(`status_r`, set when `halt_out` fires, cleared only on `!rst_n`) and a
+new `status_n` output port (`assign status_n = ~status_r;`), threaded
+straight through `rtl/m68030_top.sv` as a genuine top-level chip pin.
+Documented at both sites that this deliberately implements only the
+sticky-halt sub-case; the other 3 STATUS meanings remain out of scope.
+New output ports don't need tie-offs in existing testbenches (unlike
+new *input* ports, which X-propagate if left unconnected — Phase 248
+item #5's own precedent) — confirmed via `make test` 37/37 with zero
+changes to any file besides the one new dedicated test.
+
+**Test**: new coverage in `tb/biu_int_tb.sv` — the only testbench that
+instantiates the real `m68030_biu` module directly (every other BIU
+test either drives `biu_error_handler`/`biu_cycle_gen` standalone, or
+goes through the full `m68030_top`, neither of which is the right unit
+boundary for a BIU-level pin like this). Added a `suppress_dsack`
+testbench override (`mem_model.sv` has no address-range gating to
+exploit for "no device responds," unlike some other testbenches' own
+inline models) to simulate a genuinely unanswered bus cycle. Drove a
+real BERR+HALT retry sequence and confirmed `status_n` asserts on the
+resulting double bus fault and stays asserted (sticky) for 200+ cycles
+after the underlying condition has long since passed and the bus has
+gone back to responding normally, clearing only on a genuine reset.
+
+**Found and fixed one real bug in the test's own construction (not the
+RTL)**: an early attempt asserted `halt_n` before/simultaneously with
+`eu_req`, and the bus cycle never started at all for the full 2000-cycle
+budget (confirmed via direct trace: `s_state` frozen, `phase` cycling
+0-3 forever, `retry_pending`/`halt_out` never firing). Root cause: real
+HALT# gates bus-cycle *initiation* itself — `biu_cycle_gen.sv`'s own
+`bus_halted = (state==ST_IDLE) && init_done_r && !retry_r && !halt_s`
+keeps the FSM parked in `ST_IDLE` while HALT# is asserted, so asserting
+it before the cycle starts prevents it from ever reaching the S4/S5/S6
+states where the real BERR+HALT retry decision lives at all. Fixed by
+letting the cycle genuinely dispatch first (10 cycles with HALT#
+deasserted), then asserting HALT# partway through — matching what real
+hardware actually requires (HALT# and BERR# sampled together at the
+point a fault is recognized, not necessarily present from the cycle's
+own start).
+
+**Noted, not fixed (out of scope for a pin-wiring task)**: direct
+tracing during test construction found `halt_out` itself asserts on the
+SAME cycle as `retry_pending` in this exact scenario, not a cycle later
+as `tb/biu_tb.sv`'s own existing "Double bus fault" test comment
+describes ("Retry cycle: also no DSACK → second timeout fires while
+retry_pending=1 → halt_out asserts"). Root cause: `berr_timeout` is a
+sticky latch held until `bus_idle` (not a one-cycle pulse), so it can
+still read 1 from the ORIGINAL fault at the exact cycle `retry_pending`
+freshly asserts, making `halt_out`'s formula fire immediately rather
+than requiring a genuinely independent second timeout during the retry.
+`tb/biu_tb.sv`'s own existing, already-passing test never distinguished
+same-cycle from later either (it only checks `saw_halt` at any point
+over up to 500 cycles), so this isn't a regression — just a pre-existing
+timing nuance in `halt_out`'s own formula, noted here for a future
+session rather than touched, since fixing it isn't what F10 asked for
+and risks the same class of subtle timing mistake this project's own
+BERR/RMW history has repeatedly warned about.
+
+**Verification**: confirmed deterministic across 3 repeated `vvp`
+reruns of the same compiled binary. Full mandatory gate: `make test`
+37/37, `cosim_grp` 8/8, `cosim_memind` 28/28, `dat-synth` 50/50, full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+[documented ASL.b corpus anomaly] SKIP 281221 TIMEOUT 0`).
+
+**This closes F10**, and with it the entire Phase 250 10-item findings
+list except F6 (investigated, deferred, documented above — the only
+item left open, by explicit choice given its own real risk to RTE's
+delicate FSM). See `CLAUDE.md`'s own Phase 250 F10 summary for the
+condensed version of this writeup.

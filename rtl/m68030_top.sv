@@ -72,11 +72,18 @@ module m68030_top #(
     // correct -- MC68030UM.pdf Table 5-1/§5.10.2 lists HALT as Input,
     // unlike the 68000 (which does drive HALT out on double bus fault).
     // Real 68030 double-bus-fault signaling is via STATUS instead
-    // (§7.5.4/§8.1.2), an emulator-support pin deliberately deferred at
-    // item #5 -- see biu_error_handler.sv's own halt_out for the internal
-    // (non-pin) control signal that actually stops execution on this
-    // condition.
+    // (§7.5.4/§8.1.2) -- status_n below (Phase 250 F10) implements the
+    // one sub-case of that pin (continuous assertion = double bus fault)
+    // that doesn't need real microsequencer-cycle correlation; the other
+    // 3 STATUS meanings (instruction-boundary/trace-interrupt/MMU-
+    // dispatch pulses) remain deliberately deferred, matching item #5's
+    // own REFILL#/STATUS# reasoning.
     input  logic        halt_n,
+    // Phase 250 F10: real STATUS pin, active low, double-bus-fault
+    // sub-case only -- see m68030_biu.sv's own status_r for the sticky
+    // latch (halt_out's own header comment already asked for this: "the
+    // top-level should register it to avoid glitches").
+    output logic        status_n,
     input  logic        avec_n,
     input  logic [2:0]  ipl_n,
     input  logic        br_n,
@@ -952,6 +959,7 @@ module m68030_top #(
         .fault_is_rmw    (fault_is_rmw_biu),
         .retry_pending   (retry_pending),
         .halt_out        (halt_out),
+        .status_n        (status_n),
         .exc_frame_format(exc_frame_format),
         .exc_frame_valid (exc_frame_valid),
         .exc_ssw         (exc_ssw),
