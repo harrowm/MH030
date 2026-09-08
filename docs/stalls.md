@@ -192,11 +192,13 @@ and `plan.md §Phase 105` for the original discovery.
 `EXC_PUSH`/`EXC_FETCH`/`EXC_LOAD` sequence in `m68030_exc.sv`, clearing naturally once
 the IFU flush on `pc_wr_en` changes `dec_valid` out from under it.
 
-**Coverage depth**: fixed and tested against 18 FSM sources — CAS2 (Phase 105,
+**Coverage depth**: fixed and tested against 17 FSM sources — CAS2 (Phase 105,
 the original discovery), MOVEM and genuine memory-indirect EA (Phase 125), TAS, MOVEP,
 single CAS, and ADDX predecrement (Phase 126), PACK and BFINS (open-items backlog Stage
-5, Phase 189), and MOVE16, ABCD, SBCD, CMP2, CHK2, MOVE mem-mem, RTR, RTE, and PMOVE64
-(pipeline-stall breadth extension plan, elegant-gliding-fog.md Stages 1-4), via the
+5, Phase 189), and ABCD, SBCD, CMP2, CHK2, MOVE mem-mem, RTR, RTE, and PMOVE64
+(pipeline-stall breadth extension plan, elegant-gliding-fog.md Stages 1-4; INT-mid-MOVE16,
+originally an 18th source here, was removed along with MOVE16 itself -- Phase 250 F8,
+MOVE16 is not a real MC68030 instruction), via the
 shared `run_int_mid_test` task, chosen to span the RMW-lock, byte-interleaved,
 dual-address-predecrement, burst, two-read-bounds-check, control-transfer/
 stack-restore, and 64-bit-load FSM shapes. The mechanism is decode-content-agnostic (it
@@ -224,7 +226,7 @@ asserted (RMW/CAS2/locked sequences in progress).
 
 **Duration**: bounded by whatever's ahead of you in priority order finishing its own
 current cycle — this is where an IFU prefetch can be starved for the full duration of
-a long EU burst (MOVE16, MOVEM) before finally getting a grant.
+a long EU burst (MOVEM, genuine memory-indirect EA chains) before finally getting a grant.
 
 ## Category H — DSACK wait states
 
@@ -259,17 +261,18 @@ showed a clearly measurable delta on the first attempt (no repeat of the absorpt
 surprise) — but this was *verified*, not assumed, per the guidance above; a future
 source could still land back in the absorbed regime.
 
-**Coverage depth**: 14 FSM sources — TAS (`wait_states=3`), MOVEM, CAS2, genuine
+**Coverage depth**: 13 FSM sources — TAS (`wait_states=3`), MOVEM, CAS2, genuine
 memory-indirect EA (Phases 125-126), MOVEP, single-address CAS (Phase 188), ADDX, ABCD,
 and PACK predecrement (pipeline-stall breadth extension plan, elegant-gliding-fog.md
 Stage 5 -- all three added `wait_states=10`, verified against the absorption-effect
 guidance above: each showed a clearly measurable delta on the first attempt, no
 absorption surprise this time), BFINS, CMP2, and MOVE mem-mem (Stage 6 -- see below,
-`wait_states=60`, needed to overcome a *reversal*, not mere absorption), and MOVE16 and
-PMOVE64 (Stage 7 -- `wait_states=10`, both showed a clean, unreversed delta on the first
-attempt). PTEST was checked directly for this stage too and excluded again, for a more
-serious reason than Category F's own "no bus activity" finding -- see the PTEST note
-below.
+`wait_states=60`, needed to overcome a *reversal*, not mere absorption), and PMOVE64
+(Stage 7 -- `wait_states=10`, showed a clean, unreversed delta on the first attempt;
+WS-MOVE16, originally also added at Stage 7, was removed along with MOVE16 itself --
+Phase 250 F8, MOVE16 is not a real MC68030 instruction). PTEST was checked directly for
+this stage too and excluded again, for a more serious reason than Category F's own "no
+bus activity" finding -- see the PTEST note below.
 
 **PTEST remains excluded, for a deeper reason than predicted (Stage 7)**: re-establishing
 the transparent-TT0/TC.E=1 state (needed since it's not still live by this point in the
@@ -537,13 +540,13 @@ Harte sweep) — see `docs/cache.md`.
 | C. Missing ext word | *(folded into A's harness where reachable; see file header for scope note)* | |
 | D. Multi-cycle FSM | `tb/stall_fsm_tb.sv` | All 23 of ~23 sources (closed Phase 124), decode-holdoff + a real dependent instruction after; exact bus-cycle counts for TAS/MOVEM/CMPM/CAS2/MOVEP/ADDX.L/memory-indirect EA; the memory-indirect EA check (B-22) also verifies the loaded register's actual value, not just "did it unstick" |
 | E. Control-transfer | `tb/stall_hazard_tb.sv` | BRA/JMP(register-indirect+abs)/DBF-taken/JSR+RTS round trip through real memory |
-| F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 18 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS/MOVE16/ABCD/SBCD/CMP2/CHK2/MOVEmm/RTR/RTE/PMOVE64, Phases 105/125/126/189, elegant-gliding-fog.md Stages 1-4 -- practical ceiling for this mechanism; PFLUSH/PTEST confirmed permanently untestable this way, no FC=101 bus activity to anchor an injection on); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
+| F. Interrupt dispatch | `tb/stall_fsm_tb.sv` | Level-7 NMI mid-instruction, 17 sources (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS/ABCD/SBCD/CMP2/CHK2/MOVEmm/RTR/RTE/PMOVE64, Phases 105/125/126/189, elegant-gliding-fog.md Stages 1-4 -- practical ceiling for this mechanism; PFLUSH/PTEST confirmed permanently untestable this way, no FC=101 bus activity to anchor an injection on; INT-mid-MOVE16, originally an 18th source, was removed along with MOVE16 itself -- Phase 250 F8, MOVE16 is not a real MC68030 instruction); non-idempotent dependent-instruction marker (regression would show up as a doubled value); exact bus-cycle count before the interrupt was recognized |
 | G. Bus arbitration | `tb/biu_tb.sv` | MMU>EU>IFU 3-way priority; IFU starvation+recovery under a real multi-beat burst; DMA held off by `bus_lock` |
-| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 14 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS/ADDX/ABCD/PACK/MOVE16/PMOVE64 at wait_states=10; BFINS/CMP2/MOVEmm at wait_states=60, Phases 125/126/188, elegant-gliding-fog.md Stages 5-7; see Category H's own absorption-effect note, including the Stage 6 "head start" reversal variant, for why the values differ; PTEST still excluded from the source count -- the testbench-modeling bug behind its own hang is now fixed (Phase 247), but the actual `WS-PTEST`/`INT-mid-PTEST` coverage remains a deliberately deferred follow-up, not yet built; see Category H's own PTEST note) |
+| H. DSACK wait states | `tb/stall_fsm_tb.sv` | 0/2/5 wait states on a simple access, and separately on every beat of a real multi-phase FSM — 13 sources (TAS at wait_states=3; MOVEM/CAS2/memory-indirect EA/MOVEP/CAS/ADDX/ABCD/PACK/PMOVE64 at wait_states=10; BFINS/CMP2/MOVEmm at wait_states=60, Phases 125/126/188, elegant-gliding-fog.md Stages 5-7; see Category H's own absorption-effect note, including the Stage 6 "head start" reversal variant, for why the values differ; PTEST still excluded from the source count -- the testbench-modeling bug behind its own hang is now fixed (Phase 247), but the actual `WS-PTEST`/`INT-mid-PTEST` coverage remains a deliberately deferred follow-up, not yet built; see Category H's own PTEST note; WS-MOVE16, originally also at wait_states=10, was removed along with MOVE16 itself -- Phase 250 F8, MOVE16 is not a real MC68030 instruction) |
 | I. BERR abort | `tb/stall_fsm_tb.sv` | Sustained fault injected mid-instruction for **every one of the ~19 `ex_mem_stall` sources** (closed Phases 108/109/113/114/123/124) — real vector-2 dispatch, handler reached, `eu_busy` recovers (no lingering hang), for each |
 | J. Internal exception dispatch | *(no dedicated unit test — see Category J above)* | Verified via the full 4-config Harte re-run (`tb/harte_vbatch`) coming back bit-identical to the disabled-cache baseline, Phase 134 |
 | K. STOP SR-write collision | *(no dedicated unit test — see Category K above)* | Same 4-config Harte re-run as Category J, Phase 134 |
-| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 9 pairs: TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, CAS2→MOVE16, BFINS→CAS2, RTE→TAS (Phases 107/126/191, pipeline-stall breadth extension plan's own Stage 8), plus MOVEM.L(store)→CAS and ABCD→SBCD (10-item backlog's own, later, Stage 10, `plan.md` §Phase 240 -- see the "What's left" section below for why these share the `elegant-gliding-fog.md` filename with an unrelated earlier plan), each a genuinely different FSM-shape handoff, no instruction between them; each with a real cross-boundary data-flow check (not just "did it unstick") |
+| Back-to-back FSMs | `tb/stall_fsm_tb.sv` | 8 pairs: TAS→MOVEM, MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, BFINS→CAS2, RTE→TAS (Phases 107/126/191, pipeline-stall breadth extension plan's own Stage 8), plus MOVEM.L(store)→CAS and ABCD→SBCD (10-item backlog's own, later, Stage 10, `plan.md` §Phase 240 -- see the "What's left" section below for why these share the `elegant-gliding-fog.md` filename with an unrelated earlier plan), each a genuinely different FSM-shape handoff, no instruction between them; each with a real cross-boundary data-flow check (not just "did it unstick"). CAS2→MOVE16, originally a 9th pair, was removed along with MOVE16 itself -- Phase 250 F8, MOVE16 is not a real MC68030 instruction |
 
 Run everything with `make test` (37/37 as of Phase 245 -- the count has grown via later,
 unrelated phases; includes all of the above except Categories J/K,
@@ -580,9 +583,9 @@ has both decode-holdoff and BERR-abort coverage, and the two mechanisms layered 
 (interrupt dispatch, DSACK wait states) are proven correct in principle across several
 FSM shapes each. What remains is purely *breadth*, not depth:
 
-- **Back-to-back FSM composition** (Category D→D handoff) has 9 pairs (TAS→MOVEM,
-  MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191, plus CAS2→MOVE16,
-  BFINS→CAS2, and RTE→TAS, added by the pipeline-stall breadth extension plan's own
+- **Back-to-back FSM composition** (Category D→D handoff) has 8 pairs (TAS→MOVEM,
+  MOVEP→CAS, memory-indirect-EA→TAS, ADDX→TAS, Phases 107/126/191, plus BFINS→CAS2,
+  and RTE→TAS, added by the pipeline-stall breadth extension plan's own
   Stage 8, elegant-gliding-fog.md -- the first pairing combining two multi-beat
   burst-adjacent mechanisms, the first where the producer's own FSM shape differs
   structurally from every earlier producer, and the first where the producer is a
@@ -594,26 +597,32 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   appearance as a producer/store rather than a load/consumer, and the first pairing of
   two byte-granularity predecrement BCD FSMs, respectively) out of the many possible
   combinations. Nothing suggests a further pairing would behave differently, but only
-  these nine have been checked. **This closes both the pipeline-stall breadth extension
-  plan's own Stage 8 (its 8 stages) and, later, the entire 10-item backlog plan's own
-  Stage 10 (its 10 stages) in full** -- two separate plans, both fully closed.
-- **Interrupt-mid-FSM** (Category F) has 18 of ~19-23 possible FSM sources checked
+  these eight have been checked (CAS2→MOVE16, originally a 9th pair, was removed along
+  with MOVE16 itself -- Phase 250 F8, MOVE16 is not a real MC68030 instruction). **This
+  closes both the pipeline-stall breadth extension plan's own Stage 8 (its 8 stages) and,
+  later, the entire 10-item backlog plan's own Stage 10 (its 10 stages) in full** -- two
+  separate plans, both fully closed.
+- **Interrupt-mid-FSM** (Category F) has 17 of ~18-22 possible FSM sources checked
   individually (CAS2/MOVEM/memory-indirect EA/TAS/MOVEP/CAS/ADDX/PACK/BFINS -- Phase 189's
-  own open-items backlog Stage 5 added the last two -- plus MOVE16/ABCD/SBCD/CMP2/CHK2/
+  own open-items backlog Stage 5 added the last two -- plus ABCD/SBCD/CMP2/CHK2/
   MOVEmm/RTR/RTE/PMOVE64, added by the pipeline-stall breadth extension plan's own
-  Stages 1-4, elegant-gliding-fog.md). Same reasoning as above — the mechanism is
+  Stages 1-4, elegant-gliding-fog.md; INT-mid-MOVE16, originally an 18th source, was
+  removed along with MOVE16 itself -- Phase 250 F8, MOVE16 is not a real MC68030
+  instruction). Same reasoning as above — the mechanism is
   decode-agnostic by construction, but only spot-checked, not exhaustively swept the way
   Category I was. **This is now the practical ceiling**: PFLUSH/PTEST were both
   attempted (Stage 4) and confirmed permanently untestable via this specific mechanism
   (`run_int_mid_test` keys on FC=101 bus activity; neither instruction produces any
   under this file's own transparent-TT0 MMU setup) -- a real, documented limitation of
   the injection technique itself, not a gap in FSM coverage.
-- **DSACK wait-states-on-FSM-beats** (Category H) has 14 sources checked (TAS, MOVEM,
+- **DSACK wait-states-on-FSM-beats** (Category H) has 13 sources checked (TAS, MOVEM,
   CAS2, memory-indirect EA, MOVEP, single-address CAS -- Phase 188's own open-items
   backlog Stage 4 added the last two -- plus ADDX, ABCD, and PACK predecrement, added by
   the pipeline-stall breadth extension plan's own Stage 5, BFINS, CMP2, and MOVE
-  mem-mem, added by that same plan's Stage 6, and MOVE16 and PMOVE64, added by Stage 7,
-  elegant-gliding-fog.md). **This is now the practical ceiling**, same as Category F:
+  mem-mem, added by that same plan's Stage 6, and PMOVE64, added by Stage 7,
+  elegant-gliding-fog.md; WS-MOVE16, originally also added at Stage 7, was removed along
+  with MOVE16 itself -- Phase 250 F8, MOVE16 is not a real MC68030 instruction). **This
+  is now the practical ceiling**, same as Category F:
   PTEST was attempted (Stage 7) and found genuinely, more seriously broken than a mere
   non-source -- re-establishing the transparent-TT0/TC.E=1 state and running PTEST
   produced a sustained instruction-fetch translation-fault hang on a cache-line-crossing
@@ -629,8 +638,9 @@ FSM shapes each. What remains is purely *breadth*, not depth:
   additions all showed a clearly visible delta at `wait_states=10` on the first try
   (ADDX 227->255, ABCD 113->255, PACK 99->233 ticks), Stage 6's own three needed
   `wait_states=60` after `=10` produced an outright *reversed* comparison (see Category
-  H's own "head start" note above), and Stage 7's own two (MOVE16, PMOVE64) both showed a
-  clean, unreversed delta at `wait_states=10` on the first attempt.
+  H's own "head start" note above), and Stage 7's own PMOVE64 showed a
+  clean, unreversed delta at `wait_states=10` on the first attempt (Stage 7's other
+  addition, WS-MOVE16, is gone along with MOVE16 itself -- Phase 250 F8).
 
 None of these block using the CPU today; they're the natural next increment if more
 confidence is wanted in the generic mechanisms specifically.

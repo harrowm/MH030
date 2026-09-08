@@ -856,7 +856,17 @@ module m68030_top #(
         .eu_burst_rdata3 (eu_burst_rdata3),
         .eu_burst_ack    (eu_burst_ack),
         .eu_burst_berr   (eu_burst_berr),
-        // MOVE16 (stub)
+        // MOVE16 (permanent stub -- Phase 250 F8): MOVE16 is not a real
+        // MC68030 instruction (confirmed via exhaustive MC68030UM.pdf text
+        // search -- zero occurrences; it's MC68040-only). The live decode/
+        // execute implementation that used to drive this port was removed;
+        // this BIU-side burst-write mechanism (biu_burst_ctrl.sv's write
+        // mux, biu_cycle_gen.sv's ST_BWRITE_* states, m68030_biu.sv's own
+        // eu_m16_* ports) was already fully dead code before that removal
+        // (this tie-off never fired in this project's history) and is left
+        // in place deliberately rather than untangled, since it shares
+        // plumbing with the live burst-READ path -- see plan.md's Phase
+        // 250 F8 writeup for the full reasoning.
         .eu_m16_req      (1'b0),
         .eu_m16_addr     (32'h0),
         .eu_m16_fc       (3'b0),

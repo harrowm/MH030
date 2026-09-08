@@ -483,7 +483,145 @@ corrects). CLAUDE.md's own "S-State Signal Timing" section corrected to
 match (previously stated the wrong model as established, verified fact).
 
 **This closes F1.** Of the original 10-item Phase 250 findings list, F1/
-F2/F3/F4/F5/F7 are now IMPLEMENTED AND VERIFIED; F6 is investigated and
-deferred (documented scope above); F8 (MOVE16 doesn't exist on the real
-MC68030) still needs a user decision; F9/F10 remain low-priority,
+F2/F3/F4/F5/F7/F8 are now IMPLEMENTED AND VERIFIED; F6 is investigated and
+deferred (documented scope above); F9/F10 remain low-priority,
+not yet actioned.
+
+## F8 (MOVE16 removal) — IMPLEMENTED AND VERIFIED
+
+User decision: remove MOVE16 rather than keep it as a documented
+extension, since exhaustive full-text search of MC68030UM.pdf found zero
+occurrences of "MOVE16" anywhere, and Appendix A's own complete
+MC68020/68030 instruction-extension table (which correctly lists
+CAS/CAS2/CHK2/CMP2/PACK/UNPK/etc., and correctly flags CALLM/RTM as
+68020-only and absent from this RTL) does not include it. MOVE16 is a
+real M68000-family instruction, but belongs to the MC68040 (cache-line
+burst move), not the 68020 or 68030. This project had fully implemented
+it as real, working, cycle-accurate 68030 silicon behavior.
+
+**Key finding that shaped scope**: `m68030_top.sv` hardwired
+`eu_m16_req = 1'b0` at the `m68030_biu` instantiation ("MOVE16 (stub)").
+The BIU's own dedicated MOVE16 burst-write mechanism
+(`biu_burst_ctrl.sv`'s write-data mux, `biu_cycle_gen.sv`'s `ST_BWRITE_*`
+state family, `m68030_biu.sv`'s `eu_m16_*` port plumbing) has **never
+fired in this project's history** — fully dead code, unreachable from
+the live datapath. The real, working implementation lived entirely in
+`eu_seq_execute.svh`'s own `move16_run_r` FSM, which performed 4 ordinary
+longword reads then 4 ordinary longword writes via the generic
+`mem_req`/`mem_addr`/`mem_wdata` path — the same pattern `movem_run_r`
+uses, not a genuine burst bus cycle at all.
+
+**Decision**: remove the live decode/execute implementation; leave the
+already-dead BIU-side plumbing in place, documented explicitly as a
+deliberate scope decision (matching this project's own established
+pattern — e.g. Phase 248 item #7's coprocessor-conditional-instructions
+boundary). Untangling the dead BIU-side code is separate, higher-risk
+work with no functional benefit (it's already provably unreachable) and
+real risk of breaking the live, heavily-verified burst-READ path by
+mistake, since they share significant plumbing (`is_burst =
+is_burst_read | is_burst_write`, the shared `sphase` case statement, the
+shared burst DS-continuity fix).
+
+**Implementation**:
+- `rtl/eu_seq_decode.svh`: removed the MOVE16 decode arm entirely. The
+  freed opcode range now falls straight through into the existing
+  generic `else if (f_dn == 3'b001) begin ... dec_is_fpu = 1'b1; ... end`
+  fallback — exactly correct real-hardware behavior (any cpid=1 F-line
+  encoding not otherwise claimed is FPU coprocessor space), needing no
+  new code, just removal. Also removed `dec_is_move16`/`dec_move16_form`
+  declarations/resets and fixed 3 stale comments.
+- `rtl/eu_seq_execute.svh`: removed the entire `move16_run_r` FSM —
+  every `move16_*` register/wire, the `move16_wdata_w` case statement,
+  the dispatch/run `always_ff` block, `move16_an1_wr_en` and its
+  postinc-mux terms, and every `move16_run_r`/`move16_*` term feeding the
+  shared `mem_req`/`mem_wr`/`mem_siz`/`mem_addr`/`mem_wdata` muxes and
+  `ex_mem_stall`'s own OR-chain.
+- `rtl/m68030_seq.sv`: one-line stale-comment fix (cpSAVE/cpRESTORE
+  decode comment referenced MOVE16).
+- `rtl/m68030_top.sv`: added a comment at the existing `eu_m16_req(1'b0)`
+  tie-off marking it a *permanent* stub (MOVE16 doesn't exist on real
+  68030 silicon), not a "not yet wired up" placeholder.
+- `tb/data_move_tb.sv`: removed `run_move16`/`test_move16` tasks and
+  their call site; fixed the file's own header comment.
+- `tb/special_instr_tb.sv`: rewrote FPU-06 completely — it used to prove
+  opcode `0xF208` (formerly MOVE16 (A0)+,(A1)+) triggers `mem_req`, NOT
+  `eu_coproc_req`; the new test proves the OPPOSITE using the existing
+  `send_fpu` helper (same pattern as FPU-01..05), confirming
+  `coproc_req` fires and `mem_req` does not.
+- `tb/stall_fsm_tb.sv`: 5 removal sites (B-8; BERR-mid-MOVE16;
+  INT-mid-MOVE16; WS-MOVE16-1/2; T4f CAS2→MOVE16), each removing the ROM
+  block/check and retargeting a JMP to skip straight to the next test.
+  Removed unused `MOVE16_A0P_A1P`/`MOVE16_EXT` localparams.
+
+**Two real, previously-latent testbench bugs found and fixed while
+re-verifying this removal (neither an RTL bug)**:
+
+1. Retargeting `rom[0x3FD0]`'s JMP from `0x2604` (INT-mid-MOVE16's start)
+   directly to `0x26C4` (INT-mid-ABCD's start) exposed that
+   `INT-mid-ABCD`'s own test was missing the explicit JMP redirect to its
+   own next test that every other test in this file uses — it fell
+   through NOP-padding all the way to `0x2784` (SBCD's start), a span
+   that includes `0x26F0`, ABCD's OWN predecrement write destination
+   (`A0=0x26F1`, predecrements to `0x26F0`). That write legitimately
+   turns the NOP sitting at `0x26F0` (`0x4e71`) into a real, non-NOP
+   opcode (`0x0271` — only the high byte changes, exactly matching a
+   1-byte BCD-result write) via genuine self-modifying-code semantics.
+   Since `0x26F0` sat directly on the fall-through execution path
+   (unlike B-10's own ABCD test, which deliberately uses isolated
+   scratch addresses far from any code), the CPU decoded and executed
+   the corrupted opcode instead of ever reaching SBCD's code — hanging
+   `INT-mid-SBCD` and cascading into every test after it (~48 failures,
+   confirmed via full test-log capture before the fix). This hazard was
+   already latent before the F8 retarget; the retarget's timing change
+   is what newly exposed it (previously, execution reached the same
+   ABCD code via a different path — through MOVE16's own longer
+   instruction stream first — which happened to change exactly when the
+   corrupted word was reached relative to other test state). Root-caused
+   via direct signal tracing (`ifu_ack`/`ifu_rdata`/I-cache internal
+   state), not guessed at — confirmed the corruption originates
+   genuinely at `biu_icache_if.sv`'s own `fill_rdata_r` capture, from a
+   real (not stale/hazard-timing) bus read of already-modified memory.
+   **Fixed** with a one-line explicit JMP from ABCD's tail (`0x26DC`)
+   straight to SBCD's start (`0x2784`), matching this file's own
+   established "explicit JMP, isolated address" convention used
+   everywhere else.
+2. With (1) fixed, one failure remained: `WS-PMOVE64`'s own
+   `elapsedX > elapsed0` timing check inverted (measured 155 > 143 —
+   `wait_states=10` looked FASTER than `wait_states=0`). Retargeting the
+   WS-MOVE16 JMP to land directly on `0x3E34` made `WS-PMOVE64-1`'s own
+   timed run the very first-ever fetch of that I-cache line (EI=1/IBE=0
+   degraded single-beat mode has been active since ~0x2DA0's own
+   `MOVEC D7,CACR`) — a genuine cold-miss penalty that used to be masked
+   because falling through WS-MOVE16's own longer instruction stream
+   gave the IFU's ambient-readahead mechanism enough of a head start to
+   already have that line cached by the time execution naturally
+   arrived. With the direct jump, that cold-miss overhead landed
+   entirely inside `elapsed0`, inverting the intended comparison. Not an
+   RTL bug — the same I-cache warm/cold measurement-asymmetry class this
+   project's own history already documents for back-to-back timed runs.
+   **Fixed** by restoring a short, collision-free NOP runway
+   (`0x3E04`-`0x3E33`, confirmed clear — `0x3E00` alone is TAS's own data
+   operand) between the JMP landing and `0x3E34`'s real code, giving
+   readahead the same head start the old MOVE16-preceded flow provided
+   incidentally. Verified deterministic across 6+ repeated `vvp` runs of
+   the same compiled binary before and after.
+
+**Verification**: `make sim/stall_fsm` compiled clean (zero dangling
+`move16` references — would have been a hard compile error); full
+`stall_fsm` suite went from ~48 cascading failures (the ABCD/SBCD hang)
+down to 1 (`WS-PMOVE64`) after fix (1), then to 0 after fix (2),
+confirmed deterministic across repeated runs. Full mandatory gate:
+`make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 28/28,
+`make dat-synth` 50/50, full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 [documented ASL.b corpus anomaly]
+SKIP 281221 TIMEOUT 0` — MOVE16 has zero Tom Harte coverage, 68000-
+captured corpus, MOVE16 is 68040-only, and no cosim/`tests/*.s` file ever
+referenced it).
+
+**This closes F8**, and with it the entire Phase 250 10-item findings
+list except F6 (deferred, documented above) and F9/F10 (low-priority,
+not yet actioned). See `docs/stalls.md` for the corresponding coverage-
+count corrections (Category F 18→17 sources, Category H 14→13 sources,
+back-to-back FSM pairs 9→8) and `CLAUDE.md`'s own Phase 250 F8 summary
+for the condensed version of this writeup.
 not yet actioned.

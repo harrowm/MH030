@@ -27,7 +27,8 @@ m68030_top
 │   ├── biu_cycle_generator S-state FSM (~2000 lines; one branch per cycle type)
 │   ├── biu_pin_driver      Output pin control + tri-state management
 │   ├── biu_byte_lane_ctrl  Write-data steering + byte-enable mask from SIZ+A[1:0]
-│   ├── biu_burst_ctrl      Burst linefill + MOVE16 burst control
+│   ├── biu_burst_ctrl      Burst linefill (+ MOVE16's own dead burst-write
+│   │                       stub, retained but unreachable — Phase 250 F8)
 │   ├── biu_error_handler   BERR detection, timeout, fault data capture
 │   ├── biu_cache_interface Cache hit/miss signaling and CBREQ/CBACK handshake
 │   ├── biu_mmu_interface   MMU table-walk bus hijack port
@@ -49,7 +50,6 @@ Keep each module under ~3000 lines. Do not put everything in one file.
 - Normal read / Normal write (S0–S7)
 - RMW read → RMW write (no bus release between phases; AS stays asserted or reasserts immediately)
 - Burst read — first longword (AS asserts) vs. subsequent longwords (AS does not reassert; only DS toggles; address increments at specific S-state)
-- MOVE16 (four distinct opcode forms; each has a different burst pattern)
 - Interrupt Acknowledge — FC=111 (CPU Space), AS and DS both assert; address bus encodes interrupt level in A[3:1] with A[31:4]=all-1s ($FFFFFFF2–$FFFFFFFE for levels 1–7); peripheral responds with DSACK and drives vector on D[7:0]
 - Coprocessor interface (FPU) — FC=111 (CPU Space) cycles with A[19:16]=0010 identifying CPU Space type 2 (coprocessor access, distinct from IACK's own A[19:16]=1111 pattern); A[15:13] selects the CpID (which of up to 7 coprocessors, matching the F-line operation word's own bits[11:9] — confirmed against MC68030UM.pdf Figure 10-3/10-1 during Phase 157's own research, correcting an earlier "A[15:13] = primitive type" description here); A[4:0] selects a specific Coprocessor Interface Register (CIR) within that coprocessor's own register block (Figure 10-5: Response/Control/Save/Restore/Operation-Word/Command/Condition/Operand/Register-Select/Instruction-Address/Operand-Address). The response primitive code itself is a *data value* read back from the Response CIR (offset 0x00), not encoded in the address at all.
 - CAS2 dual-address atomic lock (most complex: 4 bus cycles without releasing the bus)
@@ -1166,9 +1166,9 @@ at Phase 250. **Phase 250 (a second, independent MC68030UM.pdf chapter-by-
 chapter compliance review)** covered Ch.2/3/4/12 plus a fresh look at
 Ch.8's exception vector/priority table and Ch.7's CAS2/MOVEP cycles,
 producing a 10-item findings list — see `plan.md §Phase 250` for full
-citations. Status: **F1/F2/F3/F4/F5/F7 IMPLEMENTED AND VERIFIED**; F6
-investigated, found more invasive than scoped, deferred; F8 needs a user
-decision; F9/F10 low-priority, not yet actioned.
+citations. Status: **F1/F2/F3/F4/F5/F7/F8 IMPLEMENTED AND VERIFIED**; F6
+investigated, found more invasive than scoped, deferred; F9/F10
+low-priority, not yet actioned.
 
 **F2 (MOVES) + F3 (PFLUSH/PLOAD/PMOVE/PTEST) — IMPLEMENTED AND VERIFIED**:
 both were entirely missing their own privilege check (§4.2/Table 3-14
@@ -1266,10 +1266,65 @@ bit-identical to baseline — despite touching the single highest-risk
 shared bus-protocol logic in the project (Phases 108-114/207/232/241/242
 all previously built on the wrong premise this corrects).
 
-**F8 (MOVE16 doesn't exist on the MC68030) — needs a user decision**:
-it's an MC68040 instruction; this project fully implements it as real
-68030 silicon behavior. Remove vs. deliberately keep as a documented
-extension — not a simple fix, not actioned this session.
+**F8 (MOVE16 doesn't exist on the MC68030) — IMPLEMENTED AND VERIFIED**:
+it's an MC68040 instruction (exhaustive MC68030UM.pdf text search found
+zero occurrences); this project had fully implemented it as real 68030
+silicon behavior. User chose removal. Key finding that shaped scope:
+`m68030_top.sv` hardwired `eu_m16_req=1'b0` at the `m68030_biu`
+instantiation — the BIU's own dedicated MOVE16 burst-write mechanism
+(`biu_burst_ctrl.sv`'s write mux, `biu_cycle_gen.sv`'s `ST_BWRITE_*`
+states, `m68030_biu.sv`'s own `eu_m16_*` ports) had **never fired in this
+project's history**, fully dead code unreachable from the live datapath —
+the real, working implementation lived entirely in `eu_seq_execute.svh`'s
+own `move16_run_r` FSM (4 ordinary longword reads then 4 ordinary
+longword writes via the generic `mem_req` path, the same shape
+`movem_run_r` uses, not a genuine burst cycle at all). Removed the live
+decode arm (`rtl/eu_seq_decode.svh` — the freed opcode space now falls
+naturally into the existing generic FPU-coprocessor fallback, exactly
+matching real 68030 behavior for any cpid=1 F-line encoding not otherwise
+claimed) and the entire `move16_run_r` FSM (`rtl/eu_seq_execute.svh`).
+Deliberately left the already-dead BIU-side plumbing untouched
+(documented, not fixed — it shares plumbing with the live burst-READ
+path, untangling it is separate, higher-risk work with no functional
+benefit since it's already provably unreachable); added a comment at
+`m68030_top.sv`'s own tie-off marking it a *permanent* stub. Testbench:
+removed `tb/data_move_tb.sv`'s MOVE16 tasks/tests; flipped
+`tb/special_instr_tb.sv`'s FPU-06 (now proves the former MOVE16 opcode
+genuinely dispatches as FPU coprocessor space); five `tb/stall_fsm_tb.sv`
+removal sites (B-8, BERR-mid-MOVE16, INT-mid-MOVE16, WS-MOVE16-1/2, T4f
+CAS2→MOVE16), each retargeting a JMP to skip the removed block. **Found
+and fixed two real, previously-latent testbench bugs while re-verifying
+this removal, neither an RTL bug**: (1) retargeting the JMP entry point
+for INT-mid-ABCD/SBCD directly to `0x26C4` (skipping MOVE16's own code)
+exposed that `INT-mid-ABCD`'s own test was missing the explicit JMP
+redirect to its own next test that every other test in this file uses —
+it fell through NOP-padding all the way to `0x2784` (SBCD's start), a
+span that includes `0x26F0`, ABCD's OWN predecrement write destination
+(`A0=0x26F1`). That write legitimately turns the NOP sitting at `0x26F0`
+into a real, non-NOP opcode via genuine self-modifying-code semantics —
+and since `0x26F0` sat directly on the fall-through execution path, the
+CPU decoded and executed the corrupted opcode instead of ever reaching
+SBCD's code, hanging `INT-mid-SBCD` and cascading into every test after
+it (~48 failures). This exact hazard was already latent before the F8
+retarget (B-10's own ABCD test avoids it by using isolated scratch
+addresses far from any code — this test didn't), just newly exposed by
+the timing change. Fixed with a one-line explicit JMP from ABCD's tail
+straight to SBCD's start, matching this file's own established
+convention. (2) That fix alone still left one failure: `WS-PMOVE64`'s
+own `elapsedX > elapsed0` timing check inverted (155 > 143) because
+retargeting the WS-MOVE16 JMP to land directly on `0x3E34` made
+`WS-PMOVE64-1`'s own timed run the very first fetch of that I-cache line
+(EI=1/IBE=0 degraded single-beat mode has been active since ~0x2DA0) — a
+cold-miss penalty that used to be masked by ambient-readahead getting a
+head start while falling through WS-MOVE16's own longer instruction
+stream. Fixed by restoring a short, collision-free NOP runway
+(`0x3E04`-`0x3E33`) between the JMP landing and the real code, giving
+readahead the same head start the old flow provided incidentally. Full
+mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+28/28, `dat-synth` 50/50), Harte bit-identical to baseline (MOVE16 has
+zero Tom Harte coverage — 68000-captured corpus, MOVE16 is 68040-only).
+See `docs/stalls.md` for the corresponding count corrections (Category F
+18→17, Category H 14→13, back-to-back FSM pairs 9→8).
 
 **F9/F10** — low-priority (STOP+trace timing nuance; STATUS pin's
 double-bus-fault sub-case), not yet actioned.

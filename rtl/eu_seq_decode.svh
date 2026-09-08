@@ -120,9 +120,6 @@
     logic        dec_is_movep;      // MOVEP instruction
     logic        dec_movep_load;    // 1=mem→Dn (load), 0=Dn→mem (store)
     logic        dec_movep_long;    // 1=longword (4 bytes), 0=word (2 bytes)
-    // MOVE16
-    logic        dec_is_move16;     // MOVE16 instruction
-    logic [1:0]  dec_move16_form;   // 00=(An)+/(Am)+, 01=(An)+/abs, 10=abs/(An)+, 11=(An)/(An)
     // FPU coprocessor dispatch stub
     logic        dec_is_fpu;        // Group F FPU instruction (cpid=1)
     logic        dec_is_cpsave;     // cpSAVE (Phase 157 Stage 4)
@@ -169,7 +166,7 @@
     logic        dec_is_trace;     // trace exception fires after this instruction retires
     logic        dec_is_priv;      // privilege violation (supervisor-only opcode in user mode)
     logic        dec_is_linea;     // Line-A opcode (Group A) → vector 10
-    logic        dec_is_linef;     // Line-F non-FPU/MMU/MOVE16 (Group F) → vector 11
+    logic        dec_is_linef;     // Line-F non-FPU/MMU (Group F) → vector 11
     // Forward declaration — needed by dec_is_flow_chg (assigned below BRA/Bcc section)
     logic        dec_branch_taken;
 
@@ -416,7 +413,7 @@
         dec_cas2_dc2_reg = 3'b0;
         dec_cas2_du2_reg = 3'b0;
 
-        // ── TAS / CHK / CMP2 / MOVEP / MOVE16 ─────────────────────────────────
+        // ── TAS / CHK / CMP2 / MOVEP ───────────────────────────────────────────
         dec_is_tas       = 1'b0;
         dec_is_scc_dn    = 1'b0;
         dec_is_chk       = 1'b0;
@@ -425,8 +422,6 @@
         dec_is_movep     = 1'b0;
         dec_movep_load   = 1'b0;
         dec_movep_long   = 1'b0;
-        dec_is_move16    = 1'b0;
-        dec_move16_form  = 2'b0;
 
         // ── MOVEC / MOVES / USP / SR / CCR ────────────────────────────────────
         dec_is_movec     = 1'b0;
@@ -6029,40 +6024,24 @@
                 end
 
                 // ----------------------------------------------------------------
-                // Group 1111: MOVE16 and FPU coprocessor (cpid=1)
-                // cpid=1 (f_dn=001) is shared; disambiguate by f_mode and ppp.
-                // MOVE16 uses ppp=000 with EA mode 0-3 (!f_mode[2]).
-                // FPU uses cpid=1 with EA mode 4-7 (f_mode[2]=1) OR ppp != 000.
+                // Group 1111: FPU coprocessor (cpid=1)
+                // docs/*.md review (Phase 250 F8): this opcode range ($F600-
+                // $F7FF, ppp=000, EA modes 0-3) previously decoded as MOVE16 --
+                // exhaustive search of MC68030UM.pdf (all ~27,800 lines) found
+                // zero occurrences of "MOVE16" anywhere, and Appendix A's own
+                // complete MC68020/68030 instruction-extension table (which
+                // correctly lists CAS/CAS2/CHK2/CMP2/PACK/UNPK etc., and
+                // correctly flags CALLM/RTM as MC68020-only) does not include
+                // it -- MOVE16 is real, but belongs to the MC68040 (cache-line
+                // burst move), not this chip. Removed; this opcode range now
+                // correctly falls through to the generic cpid=1 FPU coprocessor
+                // arm below (real 68030 silicon would attempt genuine
+                // coprocessor communication here, not a memory-to-memory burst
+                // move) -- confirmed via tb/special_instr_tb.sv's own FPU-06,
+                // rewritten to prove this opcode now dispatches as FPU.
                 // ----------------------------------------------------------------
                 4'hf: begin
-                    if (f_dn == 3'b001 && !f_dir && f_ss == 2'b00 && !f_mode[2]) begin
-                        // MOVE16: ppp=000, EA modes 0-3 (modes 4-7 would be FPU)
-                        dec_valid     = 1'b1;
-                        dec_is_move16 = 1'b1;
-                        dec_unit      = UNIT_NONE;
-                        dec_needs_ext = 1'b1;
-                        dec_src_reg   = {1'b1, f_reg};   // Ax → rd_a (src An or dst An)
-                        dec_reads_src = 1'b1;
-                        case (f_mode)
-                            3'b001: begin  // (An)+,(Am)+
-                                dec_move16_form = 2'b00;
-                                dec_dst_reg     = {1'b1, ext_data[14:12]};
-                                dec_reads_dst   = 1'b1;
-                            end
-                            3'b010: begin  // (An)+,(xxx).L
-                                dec_move16_form = 2'b01;
-                            end
-                            3'b011: begin  // (xxx).L,(An)+
-                                dec_move16_form = 2'b10;
-                            end
-                            3'b000: begin  // (An),(An)  — no postincrement
-                                dec_move16_form = 2'b11;
-                                dec_dst_reg     = {1'b1, ext_data[14:12]};
-                                dec_reads_dst   = 1'b1;
-                            end
-                            default: ;
-                        endcase
-                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b100) begin
+                    if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b100) begin
                         // cpSAVE: cpid=1, TYPE=100 (manual Figure 10-15). Privileged.
                         // EA field is bits[5:0] (f_mode/f_reg, same positions as any
                         // ordinary EA). Open-items backlog Stage 14 (plan.md): the
@@ -6275,7 +6254,7 @@
                         endcase
                         end
                     end else begin
-                        // Non-FPU, non-MMU, non-MOVE16 Group-F encoding → Line-F (vector 11)
+                        // Non-FPU, non-MMU Group-F encoding → Line-F (vector 11)
                         dec_valid    = 1'b1;
                         dec_is_linef = 1'b1;
                     end

@@ -1,8 +1,9 @@
 `default_nettype none
 `timescale 1ns/1ps
 
-// Data movement testbench: MOVEM, MOVEP, MOVE16, MOVE mem→mem
-// Sources: seq43 (MOVEM), seq49 (MOVEP), seq50 (MOVE16), seq67 (MOVE mem→mem)
+// Data movement testbench: MOVEM, MOVEP, MOVE mem→mem
+// Sources: seq43 (MOVEM), seq49 (MOVEP), seq67 (MOVE mem→mem)
+// (seq50/MOVE16 removed, Phase 250 F8 -- MOVE16 is not a real MC68030 instruction)
 
 `define DR(n)  dut.u_rf.d_reg[n]
 `define AR(n)  dut.u_rf.a_reg[n]
@@ -298,11 +299,6 @@ module data_move_tb;
         run_oneshot(op, {16'h0, disp}, n_bytes + 8);
     endtask
 
-    task automatic run_move16(input logic [15:0] op, input logic [31:0] imm,
-                               input int extra_cycles);
-        run_oneshot(op, imm, 1 + 8 + extra_cycles);
-    endtask
-
     task automatic set_dn(input int n, input logic [31:0] val);
         run_instr(16'h4280 | (16'(n) & 16'h7), 1'b0, 32'h0);
         run_instr(16'h0680 | (16'(n) & 16'h7), 1'b1, val);
@@ -492,77 +488,10 @@ module data_move_tb;
         chk("round-trip D4", `DR(4), 32'hCAFEBABE);
     endtask
 
-    // ─── MOVE16 tests (seq50) ─────────────────────────────────────────────────
-    task automatic test_move16();
-        $display("--- MOVE16 ---");
-        for (int i = 0; i < 2048; i++) ram[i] = 32'h0;
-
-        // Helper: load 4 longwords at byte address base
-        // Helper: verify 4 longwords at byte address base
-        // (inlined per test for clarity)
-
-        // Note: parentheses required — >> has lower precedence than + in SV.
-
-        // Test 1: MOVE16 (A0)+,(xxx).L  src=A0=0x100, dst=abs 0x200; A0+=16
-        // Opcode: f_mode=010, nnn=000 = 0xF210; ext_data=abs dst=0x200
-        ram[(32'h100>>2)+0] = 32'hAABBCCDD;
-        ram[(32'h100>>2)+1] = 32'h11223344;
-        ram[(32'h100>>2)+2] = 32'hDEADBEEF;
-        ram[(32'h100>>2)+3] = 32'hCAFEBABE;
-        set_an(3'd0, 32'h0000_0100);
-        run_move16(16'hF210, 32'h0000_0200, 8);
-        chk("M16-1 dst[0]", ram[(32'h200>>2)+0], 32'hAABBCCDD);
-        chk("M16-1 dst[1]", ram[(32'h200>>2)+1], 32'h11223344);
-        chk("M16-1 dst[2]", ram[(32'h200>>2)+2], 32'hDEADBEEF);
-        chk("M16-1 dst[3]", ram[(32'h200>>2)+3], 32'hCAFEBABE);
-        chk("M16-1 A0+=16", `AR(0),               32'h0000_0110);
-
-        // Test 2: MOVE16 (xxx).L,(A0)+  src=abs 0x300, dst=A0=0x400; A0+=16
-        // Opcode: f_mode=011, nnn=000 = 0xF218; ext_data=abs src=0x300
-        ram[(32'h300>>2)+0] = 32'h12345678;
-        ram[(32'h300>>2)+1] = 32'h9ABCDEF0;
-        ram[(32'h300>>2)+2] = 32'hFEDCBA98;
-        ram[(32'h300>>2)+3] = 32'h87654321;
-        set_an(3'd0, 32'h0000_0400);
-        run_move16(16'hF218, 32'h0000_0300, 8);
-        chk("M16-2 dst[0]", ram[(32'h400>>2)+0], 32'h12345678);
-        chk("M16-2 dst[1]", ram[(32'h400>>2)+1], 32'h9ABCDEF0);
-        chk("M16-2 dst[2]", ram[(32'h400>>2)+2], 32'hFEDCBA98);
-        chk("M16-2 dst[3]", ram[(32'h400>>2)+3], 32'h87654321);
-        chk("M16-2 A0+=16", `AR(0),               32'h0000_0410);
-
-        // Test 3: MOVE16 (A0)+,(A1)+  src=A0=0x500, dst=A1=0x600; both+=16
-        // Opcode: f_mode=001, nnn=000 = 0xF208; ext word Am=A1 → 0x9000
-        ram[(32'h500>>2)+0] = 32'hAAAA0000;
-        ram[(32'h500>>2)+1] = 32'hBBBB1111;
-        ram[(32'h500>>2)+2] = 32'hCCCC2222;
-        ram[(32'h500>>2)+3] = 32'hDDDD3333;
-        set_an(3'd0, 32'h0000_0500);
-        set_an(3'd1, 32'h0000_0600);
-        run_move16(16'hF208, 32'h0000_9000, 8);
-        chk("M16-3 dst[0]", ram[(32'h600>>2)+0], 32'hAAAA0000);
-        chk("M16-3 dst[1]", ram[(32'h600>>2)+1], 32'hBBBB1111);
-        chk("M16-3 dst[2]", ram[(32'h600>>2)+2], 32'hCCCC2222);
-        chk("M16-3 dst[3]", ram[(32'h600>>2)+3], 32'hDDDD3333);
-        chk("M16-3 A0+=16", `AR(0),               32'h0000_0510);
-        chk("M16-3 A1+=16", `AR(1),               32'h0000_0610);
-
-        // Test 4: MOVE16 (A0),(A1)  no postincrement
-        // Opcode: f_mode=000, nnn=000 = 0xF200; ext word Am=A1 → 0x9000
-        ram[(32'h700>>2)+0] = 32'h11112222;
-        ram[(32'h700>>2)+1] = 32'h33334444;
-        ram[(32'h700>>2)+2] = 32'h55556666;
-        ram[(32'h700>>2)+3] = 32'h77778888;
-        set_an(3'd0, 32'h0000_0700);
-        set_an(3'd1, 32'h0000_0780);
-        run_move16(16'hF200, 32'h0000_9000, 8);
-        chk("M16-4 dst[0]",       ram[(32'h780>>2)+0], 32'h11112222);
-        chk("M16-4 dst[1]",       ram[(32'h780>>2)+1], 32'h33334444);
-        chk("M16-4 dst[2]",       ram[(32'h780>>2)+2], 32'h55556666);
-        chk("M16-4 dst[3]",       ram[(32'h780>>2)+3], 32'h77778888);
-        chk("M16-4 A0 unchanged", `AR(0),               32'h0000_0700);
-        chk("M16-4 A1 unchanged", `AR(1),               32'h0000_0780);
-    endtask
+    // docs/*.md review (Phase 250 F8): the MOVE16 test task formerly here
+    // was removed -- MOVE16 does not exist on the real MC68030 (it's an
+    // MC68040 instruction), see eu_seq_decode.svh's own Group-1111 comment
+    // for the full derivation.
 
     // ─── MOVE mem→mem tests (seq67) ───────────────────────────────────────────
     task automatic test_move_mm();
@@ -655,7 +584,6 @@ module data_move_tb;
 
         test_movem();
         test_movep();
-        test_move16();
         test_move_mm();
 
         repeat(4) @(posedge clk);

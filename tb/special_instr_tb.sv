@@ -3,7 +3,7 @@
 
 // FPU coprocessor bus interface and MMU instruction tests
 //
-// FPU-01..06: eu_coproc_req handshake, ppp address encoding, BERR, MOVE16 guard
+// FPU-01..06: eu_coproc_req handshake, ppp address encoding, BERR, former-MOVE16-opcode-space regression
 // MMU-01..07: PFLUSH (all / selective), PTEST, PMOVE TC/TT0 read/write
 
 module special_instr_tb;
@@ -179,8 +179,8 @@ module special_instr_tb;
         .exc_isp_wr_data (32'h0)
     );
 
-    // Immediate ack; reads return DEAD_BEEF by default (PMOVE and MOVE16
-    // mostly only care that mem_ack fires, not about specific data
+    // Immediate ack; reads return DEAD_BEEF by default (PMOVE mostly only
+    // cares that mem_ack fires, not about specific data
     // values) -- MMU-08+ (docs/*.md review: MMU Configuration Exception
     // validation) override this per-test via rdata_override to drive
     // specific TC/CRP/SRP field patterns.
@@ -347,24 +347,31 @@ module special_instr_tb;
         chk("FPU-05b: req clears after berr", !eu_coproc_req);
         fpu_drain;
 
-        // FPU-06: MOVE16 uses mem_req, NOT eu_coproc_req (FPU guard must not fire)
-        // MOVE16 (A0)+,(A1)+: opcode 0xF208, ext A[14:12]=001(A1)
-        $display("--- FPU-06: MOVE16 — no coproc_req, mem_req fires ---");
+        // FPU-06 (docs/*.md review, Phase 250 F8 — REWRITTEN): this exact
+        // opcode (0xF208, cpid=1/ppp=000/EA mode=001) used to decode as
+        // MOVE16 (using mem_req, not eu_coproc_req) — the original point
+        // of this test was proving MOVE16 doesn't accidentally trip the
+        // FPU guard. MOVE16 does not exist on the real MC68030 (confirmed
+        // via exhaustive MC68030UM.pdf search — it's an MC68040
+        // instruction) and its decode/execute implementation was removed
+        // (eu_seq_decode.svh's own Group-1111 case) — this opcode range
+        // now correctly falls through to the generic cpid=1 FPU
+        // coprocessor arm, exactly like FPU-01's own -(A0) form. The
+        // assertion inverts completely: this opcode must NOW trigger
+        // eu_coproc_req and must NOT use mem_req.
+        $display("--- FPU-06: former MOVE16 opcode space is now correctly treated as FPU ---");
         dut.u_rf.a_reg[0] = 32'h0000_0100;
         dut.u_rf.a_reg[1] = 32'h0000_0200;
-        @(posedge clk); #1;
-        instr_word = 16'hF208; instr_valid = 1'b1;
-        ext_data   = 32'h0000_9000; ext_valid = 1'b1;
+        send_fpu(16'hF208, 32'h0000_9000);
         saw_coproc = 0; saw_mem = 0;
-        repeat(20) begin
+        repeat(10) begin
             @(posedge clk);
             if (eu_coproc_req) saw_coproc = 1;
             if (mem_req)       saw_mem    = 1;
         end
-        @(posedge clk); #1; instr_valid = 1'b0; ext_valid = 1'b0;
-        repeat(4) @(posedge clk);
-        chk("FPU-06a: no coproc_req for MOVE16", !saw_coproc);
-        chk("FPU-06b: mem_req fires for MOVE16",  saw_mem);
+        chk("FPU-06a: coproc_req fires now that this opcode is real FPU space", saw_coproc);
+        chk("FPU-06b: mem_req does NOT fire", !saw_mem);
+        fpu_drain;
 
         // ──────────────────────────────────────────────────────────────────
         // MMU instructions

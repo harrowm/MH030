@@ -302,10 +302,6 @@ module stall_fsm_tb;
     // eu_seq.sv's dec_is_movep block. f_dn=D1(001), f_dir=1(fixed for
     // MOVEP), f_ss=11(store=1,long=1), f_mode=001(fixed), f_reg=A0(000).
     localparam MOVEP_L_D1_A0  = 16'h03C8;
-    // MOVE16 (A0)+,(A1)+ form 00: group 1111, f_dn=001(cpid), f_mode=001
-    // (form-00 selector), f_reg=A0(src). Ext word [14:12]=Am(dst)=A1.
-    localparam MOVE16_A0P_A1P = 16'hF208;
-    localparam MOVE16_EXT     = 16'h1000;  // Am=A1 at ext[14:12]
     // Predecrement-memory-form FSM instructions, all "1<grp> Ax 1 <ss> 001 Ay":
     // ADDX.L -(A1),-(A0): group=1101, Ax=A0(000), ss=10(long), Ay=A1(001).
     localparam ADDX_L_A1_A0   = 16'hD189;
@@ -758,24 +754,9 @@ module stall_fsm_tb;
         rom[16'h0A14/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h0A18/4] = {16'd777, NOP_OP};
 
-        // -----------------------------------------------------------------
-        // B-8: MOVE16 (A0)+,(A1)+ — 16-byte STERM burst block move.
-        // -----------------------------------------------------------------
-        // 0x0B00: MOVEA.L #0x2900,A0 ; MOVEA.L #0x2A00,A1
-        rom[16'h0B00/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h0B04/4] = {16'h2900, MOVEA_L_IMM_A1};
-        rom[16'h0B08/4] = {16'h0000, 16'h2A00};
-        // 0x0B0C: MOVE16 opcode ; ext (Am=A1)
-        rom[16'h0B0C/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
-        // 0x0B10: CLR.L D5 ; ADDI.L D5 opcode
-        rom[16'h0B10/4] = {CLR_L_D5, ADDI_L_D5};
-        // 0x0B14: ext MSW=0 ; ext LSW=888 (unrelated dependent instr)
-        rom[16'h0B14/4] = {16'h0000, 16'd888};
-        // Source data for the 16-byte block.
-        rom[16'h2900/4] = 32'h1111_1111;
-        rom[16'h2904/4] = 32'h2222_2222;
-        rom[16'h2908/4] = 32'h3333_3333;
-        rom[16'h290C/4] = 32'h4444_4444;
+        // B-8 was MOVE16 (A0)+,(A1)+ -- removed, Phase 250 F8 (MOVE16 is
+        // not a real MC68030 instruction). Numbering gap left as-is
+        // (B-7 -> B-9), matching this file's own precedent elsewhere.
 
         // -----------------------------------------------------------------
         // B-9/B-10/B-11: predecrement-memory-form FSMs — ADDX.L, ABCD, PACK
@@ -1079,14 +1060,6 @@ module stall_fsm_tb;
         check8("B-7: MOVEP byte1 (D1[23:16]) at A0+18",   rom[16'h2810/4][15:8],  8'hBB);
         check8("B-7: MOVEP byte2 (D1[15:8]) at A0+20",    rom[16'h2814/4][31:24], 8'hCC);
         check8("B-7: MOVEP byte3 (D1[7:0]) at A0+22",     rom[16'h2814/4][15:8],  8'hDD);
-
-        run_and_check("B-8: MOVE16 dependent instr ran (D5=888)", 5, 32'd888, 3000);
-        check32("B-8: MOVE16 beat0 copied", rom[16'h2A00/4], 32'h1111_1111);
-        check32("B-8: MOVE16 beat1 copied", rom[16'h2A04/4], 32'h2222_2222);
-        check32("B-8: MOVE16 beat2 copied", rom[16'h2A08/4], 32'h3333_3333);
-        check32("B-8: MOVE16 beat3 copied", rom[16'h2A0C/4], 32'h4444_4444);
-        check32("B-8: MOVE16 A0 post-increment (+16)", u_top.u_eu.u_rf.a_reg[0], 32'h0000_2910);
-        check32("B-8: MOVE16 A1 post-increment (+16)", u_top.u_eu.u_rf.a_reg[1], 32'h0000_2A10);
 
         begin
             int c0, c1;
@@ -1854,15 +1827,10 @@ module stall_fsm_tb;
         rom[16'h1E4C/4] = {ADDI_L_D1, 16'hAABB};
         rom[16'h1E50/4] = {16'hCCDD, MOVEP_L_D1_A0};
         rom[16'h1E54/4] = {16'h0010, NOP_OP};
-        run_berr_mid_test("BERR-mid-MOVEP", 32'h0000_1E40, .next_addr(32'h0000_1E80));
-
-        // MOVE16 (A0)+,(A1)+ -- reuses B-8's exact source data (0x2900).
-        rom[16'h1E80/4] = {NOP_OP, CLR_L_D5};
-        rom[16'h1E84/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h1E88/4] = {16'h2900, MOVEA_L_IMM_A1};
-        rom[16'h1E8C/4] = {16'h0000, 16'h2A00};
-        rom[16'h1E90/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
-        run_berr_mid_test("BERR-mid-MOVE16", 32'h0000_1E80, .next_addr(32'h0000_1EC0));
+        // BERR-mid-MOVE16 removed, Phase 250 F8 (MOVE16 is not a real
+        // MC68030 instruction) -- next_addr above now points directly at
+        // BERR-mid-ADDX below, skipping the abandoned 0x1E80-0x1EBF slot.
+        run_berr_mid_test("BERR-mid-MOVEP", 32'h0000_1E40, .next_addr(32'h0000_1EC0));
 
         // ADDX.L -(A1),-(A0) -- reuses B-9's exact scratch addresses.
         rom[16'h1EC0/4] = {NOP_OP, CLR_L_D5};
@@ -2830,8 +2798,12 @@ module stall_fsm_tb;
         // permanently here -- same "explicit JMP, isolated address"
         // convention this file has used throughout (Stage 4/5/6 of the
         // closed open-items backlog, etc).
+        // docs/*.md review (Phase 250 F8): was 0x2604 (INT-mid-MOVE16's
+        // own start) -- retargeted directly to 0x26C4 (INT-mid-ABCD's own
+        // start) now that INT-mid-MOVE16 is removed (MOVE16 is not a real
+        // MC68030 instruction).
         rom[16'h3FCC/4] = {JMP_ABS_L_OP, 16'h0000};
-        rom[16'h3FD0/4] = {16'h2604, NOP_OP};
+        rom[16'h3FD0/4] = {16'h26C4, NOP_OP};
 
         begin
             int t;
@@ -3021,38 +2993,19 @@ module stall_fsm_tb;
 
         // ===================================================================
         // Pipeline-stall breadth extension plan (elegant-gliding-fog.md),
-        // Stage 1: INT-mid-MOVE16/ABCD/SBCD -- 3 more sources for Category F
-        // (interrupt-mid-FSM), reusing B-8's MOVE16 encoding and B-10's
-        // ABCD/-(Ay),-(Ax) shape (SBCD is the identical layout, group 1000
-        // instead of 1100). Reached via the JMP redirect at the tail of the
-        // BKPT-live-substitution test above. No explicit BCD operand data is
-        // set for ABCD/SBCD (default-filled memory is fine, same convention
-        // B-10/B-11 already use) -- this stage is checking decode-holdoff/
+        // Stage 1: INT-mid-ABCD/SBCD -- 2 more sources for Category F
+        // (interrupt-mid-FSM), reusing B-10's ABCD/-(Ay),-(Ax) shape (SBCD
+        // is the identical layout, group 1000 instead of 1100). Reached
+        // via the JMP redirect at the tail of the BKPT-live-substitution
+        // test above. No explicit BCD operand data is set for ABCD/SBCD
+        // (default-filled memory is fine, same convention B-10/B-11
+        // already use) -- this stage is checking decode-holdoff/
         // interrupt-recognition timing, not BCD arithmetic correctness
-        // (already 100% Harte-proven).
+        // (already 100% Harte-proven). (INT-mid-MOVE16, originally the
+        // 3rd source here, was removed -- Phase 250 F8, MOVE16 is not a
+        // real MC68030 instruction -- the JMP above now targets
+        // INT-mid-ABCD directly.)
         // ===================================================================
-
-        // INT-mid-MOVE16: interrupt arrival mid-MOVE16 (16-byte SIZ=11
-        // burst block move -- a genuinely different FSM beat shape from
-        // every other INT-mid-* source so far).
-        rom[16'h2604/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h2608/4] = {16'h2630, MOVEA_L_IMM_A1};
-        rom[16'h260C/4] = {16'h0000, 16'h2650};
-        rom[16'h2610/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
-        rom[16'h2614/4] = {CLR_L_D5, ADDI_L_D5};
-        rom[16'h2618/4] = {16'h0000, 16'd9001};
-        rom[16'h2630/4] = 32'h1111_2222;
-        rom[16'h2634/4] = 32'h3333_4444;
-        rom[16'h2638/4] = 32'h5555_6666;
-        rom[16'h263C/4] = 32'h7777_8888;
-        // MOVE16's own real bus-cycle count (data_ds_count delta) isn't
-        // yet established anywhere else in this file -- measured
-        // empirically the first time this ran (per this file's own
-        // established "verify, don't guess" discipline, e.g. PACK's own
-        // 2-vs-3 correction in the open-items backlog Stage 5).
-        run_int_mid_test("INT-mid-MOVE16", 32'h0000_2604, 8, 5, 32'd9001, 32'h0000_008A);
-        check32("INT-mid-MOVE16: beat0 copied despite the interrupt", rom[16'h2650/4], 32'h1111_2222);
-        check32("INT-mid-MOVE16: beat3 copied despite the interrupt", rom[16'h265C/4], 32'h7777_8888);
 
         // INT-mid-ABCD: interrupt arrival mid-ABCD -(A1),-(A0) (the
         // predecrement-memory shape shared with ADDX/SBCD/PACK's own
@@ -3063,6 +3016,27 @@ module stall_fsm_tb;
         rom[16'h26D0/4] = {16'h26F5, ABCD_A1_A0};
         rom[16'h26D4/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h26D8/4] = {16'd9002, NOP_OP};
+        // Phase 250 F8 follow-up: explicit redirect straight to INT-mid-
+        // SBCD's own start, matching this file's own established
+        // "explicit JMP, isolated address" convention used everywhere
+        // else. Without this, execution fell through NOP-padding from
+        // here all the way to 0x2784 -- a span that includes 0x26F0,
+        // ABCD's OWN predecrement write destination (A0=0x26F1). That
+        // write legitimately turns the NOP sitting at 0x26F0 into a real
+        // (non-NOP) opcode via genuine self-modifying-code semantics --
+        // and since 0x26F0 sat directly on the fall-through execution
+        // path, the CPU then decoded and executed the corrupted opcode
+        // instead of ever reaching SBCD's code, hanging INT-mid-SBCD and
+        // every test after it. Not an RTL bug -- the same "operand
+        // address collides with a later code-fetch address" hazard this
+        // file's own history already documents elsewhere (B-10's ABCD
+        // test avoids it by using isolated scratch addresses far from any
+        // code). Exposed by this phase's own redirect-entry-point change
+        // (0x2604->0x26C4), which altered the timing enough to actually
+        // reach the corrupted word; the underlying address collision was
+        // latent before that too.
+        rom[16'h26DC/4] = {JMP_ABS_L_OP, 16'h0000};
+        rom[16'h26E0/4] = {16'h2784, NOP_OP};
         run_int_mid_test("INT-mid-ABCD", 32'h0000_26C4, 3, 5, 32'd9002, 32'h0000_008A);
 
         // INT-mid-SBCD: same shape, opposite BCD direction.
@@ -3321,41 +3295,62 @@ module stall_fsm_tb;
         rom[16'h3538/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h353C/4] = {16'd9115, NOP_OP};
 
-        // Stage 7 (elegant-gliding-fog.md): WS-MOVE16/WS-PMOVE64 -- the
-        // last 2 sources closing Category H's own DSACK wait-states-on-
-        // FSM-beats breadth (WS-PTEST is checked separately below, not
-        // assumed testable -- Stage 4 already found PTEST produces zero
-        // FC=101 bus activity under this file's own transparent-TT0 MMU
-        // setup, so the same absence of a real bus cycle may mean there's
-        // nothing for wait_states to stretch either; verified, not
-        // inferred, before deciding whether to include it). Reached via an
-        // explicit JMP (0x3544-0x39FF hosts the Memind pointer-chain tests'
-        // own dynamic read/write targets -- 0x3900/0x3910/0x3B00/0x3B44-
+        // Stage 7 (elegant-gliding-fog.md): WS-PMOVE64 -- the last source
+        // closing Category H's own DSACK wait-states-on-FSM-beats breadth
+        // (WS-PTEST is checked separately below, not assumed testable --
+        // Stage 4 already found PTEST produces zero FC=101 bus activity
+        // under this file's own transparent-TT0 MMU setup, so the same
+        // absence of a real bus cycle may mean there's nothing for
+        // wait_states to stretch either; verified, not inferred, before
+        // deciding whether to include it). Reached via an explicit JMP
+        // (0x3544-0x39FF hosts the Memind pointer-chain tests' own
+        // dynamic read/write targets -- 0x3900/0x3910/0x3B00/0x3B44-
         // 0x3B9C -- unsafe for fall-through even though the static rom[]
         // scanner doesn't flag them as literal collisions) to a genuinely
         // clear region confirmed via the same collision-checking script
         // this project's own memory (feedback_rom_write_ordering.md)
         // documents using. rom[] content written up front, before
         // run_int_mid_test("INT-mid-CHK2", ...) is called, matching every
-        // stage since Stage 3's own lesson.
+        // stage since Stage 3's own lesson. (WS-MOVE16-1/2, originally
+        // the first 2 of 3 sources here, were removed -- Phase 250 F8,
+        // MOVE16 is not a real MC68030 instruction -- the JMP below now
+        // lands at 0x3E04, a short NOP runway, instead of jumping straight
+        // to WS-PMOVE64-1's own code at 0x3E34.)
+        //
+        // Follow-up fix (found while re-verifying this removal): landing
+        // directly on 0x3E34 made WS-PMOVE64-1's own timed measurement
+        // (elapsed0, wait_states=0) the FIRST-EVER fetch of that I-cache
+        // line (EI=1/IBE=0 degraded single-beat mode has been enabled
+        // since ~0x2DA0) -- a genuine cold-miss penalty that used to be
+        // masked because falling through WS-MOVE16's own longer
+        // instruction stream gave the IFU's ambient-readahead mechanism
+        // enough of a head start to already have that line cached by the
+        // time execution naturally arrived. With the direct jump, that
+        // cold-miss overhead landed entirely inside elapsed0, inverting
+        // the intended elapsed0 < elapsedX comparison (measured: 155 >
+        // 143 -- wait_states=10 looked FASTER than wait_states=0). Not an
+        // RTL bug -- a testbench measurement artifact, the same class
+        // this file's own history already documents (I-cache warm/cold
+        // asymmetry between back-to-back timed runs). Fixed by restoring
+        // an inert NOP runway between the JMP landing and 0x3E34 (0x3E04-
+        // 0x3E33, confirmed collision-free -- 0x3E00 alone is TAS's own
+        // data operand), giving readahead the same head start the old
+        // MOVE16-preceded flow provided incidentally.
         rom[16'h3540/4] = {JMP_ABS_L_OP, 16'h0000};
         rom[16'h3544/4] = {16'h3E04, NOP_OP};
+        rom[16'h3E04/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E08/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E0C/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E10/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E14/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E18/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E1C/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E20/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E24/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E28/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E2C/4] = {NOP_OP, NOP_OP};
+        rom[16'h3E30/4] = {NOP_OP, NOP_OP};
 
-        // WS-MOVE16-1 (wait_states=0): source at 0x3EA0, dest at 0x3EC0
-        // (default-fill, MOVE16's own write is what populates it).
-        rom[16'h3E04/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h3E08/4] = {16'h3EA0, MOVEA_L_IMM_A1};
-        rom[16'h3E0C/4] = {16'h0000, 16'h3EC0};
-        rom[16'h3E10/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
-        rom[16'h3E14/4] = {CLR_L_D5, ADDI_L_D5};
-        rom[16'h3E18/4] = {16'h0000, 16'd9200};
-        // WS-MOVE16-2 (wait_states=10): source at 0x3EE0, dest at 0x3F00.
-        rom[16'h3E1C/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h3E20/4] = {16'h3EE0, MOVEA_L_IMM_A1};
-        rom[16'h3E24/4] = {16'h0000, 16'h3F00};
-        rom[16'h3E28/4] = {MOVE16_A0P_A1P, MOVE16_EXT};
-        rom[16'h3E2C/4] = {CLR_L_D5, ADDI_L_D5};
-        rom[16'h3E30/4] = {16'h0000, 16'd9201};
         // WS-PMOVE64-1 (wait_states=0): CRP source at 0x3F20 (dummy,
         // all-zero -- timing test only, this CRP is never actually walked).
         rom[16'h3E34/4] = {MOVEA_L_IMM_A0, 16'h0000};
@@ -3370,43 +3365,20 @@ module stall_fsm_tb;
         rom[16'h3E54/4] = {ADDI_L_D5, 16'h0000};
         rom[16'h3E58/4] = {16'd9203, NOP_OP};
         // Stage 8 (elegant-gliding-fog.md, the last stage of this plan):
-        // 3 new back-to-back FSM composition pairs. Reached via an explicit
-        // JMP to a fresh region (0x3D28-0x3DB7, confirmed clear via the
-        // same collision-checking script used throughout this plan), since
-        // fall-through here would walk into WS-PTEST's own reverted
-        // scratch space. Data buffers live separately at 0x3920-0x3984
-        // (within the Memind pointer-chain's own free gap, 0x3914-0x3AFF,
-        // confirmed clear of that family's own dynamic 0x3900/0x3910/
-        // 0x3B00/0x3B44-0x3B9C targets), keeping the code region itself
-        // small and free of data-vs-code overlap risk.
+        // 3 new back-to-back FSM composition pairs, originally including
+        // Pair #1 (T4f): CAS2 -> MOVE16 -- removed, Phase 250 F8 (MOVE16
+        // is not a real MC68030 instruction); the JMP below now targets
+        // T4g directly. Reached via an explicit JMP to a fresh region
+        // (confirmed clear via the same collision-checking script used
+        // throughout this plan), since fall-through here would walk into
+        // WS-PTEST's own reverted scratch space. Data buffers live
+        // separately at 0x3920-0x3984 (within the Memind pointer-chain's
+        // own free gap, 0x3914-0x3AFF, confirmed clear of that family's
+        // own dynamic 0x3900/0x3910/0x3B00/0x3B44-0x3B9C targets), keeping
+        // the code region itself small and free of data-vs-code overlap
+        // risk.
         rom[16'h3E5C/4] = {JMP_ABS_L_OP, 16'h0000};
-        rom[16'h3E60/4] = {16'h3D28, NOP_OP};
-
-        // Pair #1 (T4f): CAS2 -> MOVE16, a genuine match (not WS-CAS2's
-        // own deliberate-mismatch shortcut) so CAS2 really writes, then
-        // MOVE16 immediately reads that fresh write as its own 16-byte
-        // burst source. D1/D3 (Dc1/Dc2) pre-loaded to match memory at
-        // A0/A1 exactly; D2/D4 (Du1/Du2) are the values CAS2 writes on
-        // match. A1 is deliberately reused as MOVE16's own destination
-        // (legal -- CAS2 never modifies address registers), the same
-        // "adjacent register reuse" cross-check shape T4c/T4d already
-        // established.
-        rom[16'h3920/4] = 32'h0000_1234;  // A0 pre-load, matches D1 (Dc1)
-        rom[16'h3940/4] = 32'h0000_9ABC;  // A1 pre-load, matches D3 (Dc2)
-        rom[16'h3D28/4] = {MOVE_L_IMM_D1, 16'h0000};
-        rom[16'h3D2C/4] = {16'h1234, MOVE_L_IMM_D2};
-        rom[16'h3D30/4] = {16'h0000, 16'h5678};
-        rom[16'h3D34/4] = {MOVE_L_IMM_D3, 16'h0000};
-        rom[16'h3D38/4] = {16'h9ABC, MOVE_L_IMM_D4};
-        rom[16'h3D3C/4] = {16'h0000, 16'hDEF0};
-        rom[16'h3D40/4] = {MOVEA_L_IMM_A0, 16'h0000};
-        rom[16'h3D44/4] = {16'h3920, MOVEA_L_IMM_A1};
-        rom[16'h3D48/4] = {16'h0000, 16'h3940};
-        rom[16'h3D4C/4] = {CAS2_L, CAS2_EXT1};
-        rom[16'h3D50/4] = {CAS2_EXT2, MOVE16_A0P_A1P};
-        rom[16'h3D54/4] = {MOVE16_EXT, CLR_L_D5};
-        rom[16'h3D58/4] = {ADDI_L_D5, 16'h0000};
-        rom[16'h3D5C/4] = {16'd7100, NOP_OP};
+        rom[16'h3E60/4] = {16'h3D60, NOP_OP};
 
         // Pair #2 (T4g): BFINS -> CAS2, a genuine match too. D1=0x12121212
         // (also BFINS's own field-insert source register); memory at A0
@@ -3704,22 +3676,8 @@ module stall_fsm_tb;
                   elapsedX > elapsed0);
         end
 
-        // WS-MOVE16: DSACK wait-states composing with MOVE16's own 16-byte
-        // SIZ=11 burst block-move beat shape.
-        begin
-            int elapsed0, elapsedX, t;
-            wait_states = 0;
-            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3E04; t++)
-                @(posedge clk_4x);
-            run_and_check_timed("WS-MOVE16-1: wait_states=0, D5=9200", 5, 32'd9200, 4000, elapsed0);
-            wait_states = 10;
-            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3E1C; t++)
-                @(posedge clk_4x);
-            run_and_check_timed("WS-MOVE16-2: wait_states=10, D5=9201", 5, 32'd9201, 4000, elapsedX);
-            wait_states = 0;
-            check("WS-MOVE16: wait states measurably lengthen MOVE16's own burst bus cycles too",
-                  elapsedX > elapsed0);
-        end
+        // WS-MOVE16 removed, Phase 250 F8 (MOVE16 is not a real MC68030
+        // instruction).
 
         // WS-PMOVE64: DSACK wait-states composing with PMOVE (A0),CRP's own
         // 64-bit (2-longword) load beat shape.
@@ -3738,33 +3696,10 @@ module stall_fsm_tb;
                   elapsedX > elapsed0);
         end
 
-        // T4f: back-to-back FSM composition, pair #4 -- CAS2 -> MOVE16.
-        // First pairing combining two different multi-beat burst-adjacent
-        // mechanisms back to back. Check code positioned HERE (immediately
-        // after WS-PMOVE64's own check block), matching this test's own
-        // real DUT execution order -- rom[] writes for T4f/T4g/T4h are
-        // staged earlier (right after WS-PMOVE64's own rom[] setup, before
-        // its own test block consumes real simulated time), the same
-        // "SV program order must match real DUT execution order" lesson
-        // this file has learned repeatedly (T4c/T4e, INT-mid-PACK/BFINS) --
-        // a first attempt placed this whole block right after WS-MOVE16's
-        // own check instead, which put it BEFORE WS-PMOVE64's own check in
-        // program order despite WS-PMOVE64 executing on real hardware
-        // first; caught immediately via WS-PMOVE64-1/2 both timing out
-        // (their own D5 marker had already been overwritten by T4f/g/h's
-        // own markers by the time WS-PMOVE64's delayed check started
-        // polling for it).
-        begin
-            int c0, c1, t;
-            for (t = 0; t < 20000 && u_top.ifu_decode_pc < 32'h0000_3D28; t++)
-                @(posedge clk_4x);
-            c0 = data_ds_count;
-            run_and_check("T4f: back-to-back CAS2->MOVE16 dependent instr ran (D5=7100)", 5, 32'd7100, 4000);
-            c1 = data_ds_count;
-            check32("T4f: CAS2(4)+MOVE16(8)=12 data-space bus cycles", c1 - c0, 32'd12);
-            check32("T4f: MOVE16 read fresh CAS2-written data, not a stale pre-load",
-                    rom[16'h3940/4], 32'h0000_5678);
-        end
+        // T4f (CAS2 -> MOVE16) removed, Phase 250 F8 (MOVE16 is not a
+        // real MC68030 instruction). The back-to-back-FSM-composition
+        // pair count referenced elsewhere in this project's docs drops
+        // from 9 to 8 accordingly (see docs/stalls.md).
 
         // T4g: back-to-back FSM composition, pair #5 -- BFINS -> CAS2.
         // First pairing where the producer's own FSM shape (a same-address

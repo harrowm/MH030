@@ -675,7 +675,7 @@ module m68030_seq (
 
     // cpSAVE/cpRESTORE (Phase 157 Stage 4) — same EA-field shape as PEA
     // (f_mode/f_reg at bits[5:0]), but F-line (f_group=4'hf), cpid=1
-    // (f_dn=001), disambiguated from FPU/MOVE16 by TYPE={f_dir,f_ss}.
+    // (f_dn=001), disambiguated from FPU by TYPE={f_dir,f_ss}.
     // 0 ext words for An/predec/postinc, 1 for d16An/d8AnXn/absW/d16PC/
     // d8PCXn, 2 for abs.L — same table shape as is_pea's own below.
     logic is_cpsave, is_cprestore;

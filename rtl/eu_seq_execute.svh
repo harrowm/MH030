@@ -5,7 +5,7 @@
 //
 // "Execute" here covers everything after decode: stall/hazard logic, the
 // EX-stage latch, the WB-stage latch, and every per-instruction-family FSM
-// (RTR, TAS, mem_rmw, ADDX-mem, MOVEP, MOVE16, FPU, BKPT, CPSR, MMU/
+// (RTR, TAS, mem_rmw, ADDX-mem, MOVEP, FPU, BKPT, CPSR, MMU/
 // PFLUSH/PTEST/PLOAD, memind, CAS/CAS2, BF, PACK/UNPK, BCD, STOP, ...) --
 // not just the ALU. See the "WB stage signal declarations" banner
 // immediately below for where the original text began.
@@ -119,8 +119,6 @@
     logic        ex_pmove_to_mem;
     logic        ex_movep_load;    // 1=load, 0=store
     logic        ex_movep_long;    // 1=longword, 0=word
-    logic        ex_is_move16;     // MOVE16 in EX stage
-    logic [1:0]  ex_move16_form;
     // OS control / exception instructions
     logic        ex_is_rte;
     logic        ex_is_stop;
@@ -511,27 +509,6 @@
     assign movep_wr_data = movep_rd_acc_w;
     assign movep_wr_sel  = {1'b0, movep_dn_r};
 
-    // MOVE16 16-byte block move FSM — declared early for ex_mem_stall
-    logic        move16_start_r;
-    logic        move16_run_r;
-    logic        move16_phase_r;       // 0=read from src, 1=write to dst
-    logic [1:0]  move16_beat_r;
-    logic [31:0] move16_src_r;         // current read address
-    logic [31:0] move16_dst_r;         // current write address
-    logic [31:0] move16_src_base_r;    // captured src base for postinc calc
-    logic [31:0] move16_dst_base_r;    // captured dst base for postinc calc
-    logic [31:0] move16_data_r [0:3];  // read data buffer
-    logic [1:0]  move16_form_r;
-    logic        move16_src_postinc_r;
-    logic        move16_dst_postinc_r;
-    logic [2:0]  move16_src_an_r;
-    logic [2:0]  move16_dst_an_r;
-    logic        move16_an2_wr_r;      // deferred dst An postinc write
-
-    logic        move16_last;
-    logic [31:0] move16_wdata_w;
-    assign move16_last = move16_run_r && move16_phase_r && (move16_beat_r == 2'd3) && mem_ack;
-
     // FPU dispatch FSM state — declared early for ex_mem_stall
     logic        fpu_start_r;      // one-cycle setup after instr_ack
     logic        fpu_run_r;        // eu_coproc_req active, waiting for ack
@@ -672,14 +649,6 @@
     // return PC, not the resolved EA -- the resolved EA becomes the jump
     // target instead, once the outer write itself completes.
     logic        memind_is_jsr_r;
-    always_comb begin
-        case (move16_beat_r)
-            2'd0: move16_wdata_w = move16_data_r[0];
-            2'd1: move16_wdata_w = move16_data_r[1];
-            2'd2: move16_wdata_w = move16_data_r[2];
-            2'd3: move16_wdata_w = move16_data_r[3];
-        endcase
-    end
 
     // CMP2/CHK2 two-read FSM state — declared early for ex_mem_stall
     logic        cmp2_run_r;        // second read in progress
@@ -826,7 +795,6 @@
     wire mem_abort = mem_berr || exc_active;
     assign ex_mem_stall = tas_run_r || tas_read_ack || tas_memind_pending_r || movem_start_r || movem_run_r ||
                           movep_start_r || movep_pre_r || movep_run_r ||
-                          move16_start_r || move16_run_r ||
                           fpu_start_r || fpu_run_r ||
                           bkpt_start_r || bkpt_run_r || bkpt_wait_replacement_r ||
                           // open-items backlog Stage 13 (plan.md): a raw,
@@ -1802,8 +1770,6 @@
             ex_is_movep       <= 1'b0;
             ex_movep_load     <= 1'b0;
             ex_movep_long     <= 1'b0;
-            ex_is_move16      <= 1'b0;
-            ex_move16_form    <= 2'b0;
             ex_is_fpu         <= 1'b0;
             ex_is_memind      <= 1'b0;
             ex_memind_is_post <= 1'b0;
@@ -1926,8 +1892,6 @@
             ex_is_movep       <= 1'b0;
             ex_movep_load     <= 1'b0;
             ex_movep_long     <= 1'b0;
-            ex_is_move16      <= 1'b0;
-            ex_move16_form    <= 2'b0;
             ex_is_fpu         <= 1'b0;
             ex_is_memind      <= 1'b0;
             ex_memind_is_post <= 1'b0;
@@ -2081,8 +2045,6 @@
             ex_is_movep       <= dec_is_movep;
             ex_movep_load     <= dec_movep_load;
             ex_movep_long     <= dec_movep_long;
-            ex_is_move16      <= dec_is_move16;
-            ex_move16_form    <= dec_move16_form;
             ex_is_fpu         <= dec_is_fpu;
             ex_is_memind      <= dec_is_memind;
             ex_memind_is_post <= dec_memind_is_post;
@@ -2801,100 +2763,10 @@
         end
     end
 
-    // -----------------------------------------------------------------------
-    // MOVE16 16-byte block move FSM
-    // start_r (1 cycle): capture src/dst base addresses from rd_a/rd_b/ex_imm.
-    // run_r phase 0: 4 longword reads from src, accumulate in move16_data_r.
-    // run_r phase 1: 4 longword writes to dst from move16_data_r.
-    // An postinc (if needed): src An fires on move16_last; dst An fires next cycle.
-    // -----------------------------------------------------------------------
-    always_ff @(posedge clk_4x or negedge rst_n) begin
-        if (!rst_n) begin
-            move16_start_r       <= 1'b0;
-            move16_run_r         <= 1'b0;
-            move16_phase_r       <= 1'b0;
-            move16_beat_r        <= 2'd0;
-            move16_src_r         <= 32'h0;
-            move16_dst_r         <= 32'h0;
-            move16_src_base_r    <= 32'h0;
-            move16_dst_base_r    <= 32'h0;
-            move16_data_r[0]     <= 32'h0; move16_data_r[1] <= 32'h0;
-            move16_data_r[2]     <= 32'h0; move16_data_r[3] <= 32'h0;
-            move16_form_r        <= 2'b0;
-            move16_src_postinc_r <= 1'b0;
-            move16_dst_postinc_r <= 1'b0;
-            move16_src_an_r      <= 3'h0;
-            move16_dst_an_r      <= 3'h0;
-            move16_an2_wr_r      <= 1'b0;
-        end else begin
-            // Deferred dst An postinc: fire cycle after move16_last when dst needs postinc
-            move16_an2_wr_r <= move16_last && move16_dst_postinc_r;
-
-            if (!move16_start_r && !move16_run_r && instr_ack && dec_is_move16) begin
-                move16_start_r       <= 1'b1;
-                move16_form_r        <= dec_move16_form;
-                move16_src_an_r      <= f_reg;
-                move16_dst_an_r      <= ext_data[14:12];
-                // src postinc for forms 00 (post/post) and 01 (An+/abs)
-                move16_src_postinc_r <= (dec_move16_form == 2'b00) || (dec_move16_form == 2'b01);
-                // dst postinc for forms 00 (post/post) and 10 (abs/An+)
-                move16_dst_postinc_r <= (dec_move16_form == 2'b00) || (dec_move16_form == 2'b10);
-            end else if (move16_start_r) begin
-                move16_start_r <= 1'b0;
-                move16_run_r   <= 1'b1;
-                move16_phase_r <= 1'b0;
-                move16_beat_r  <= 2'd0;
-                case (move16_form_r)
-                    2'b00: begin  // (An)+,(Am)+: src=rd_a, dst=rd_b
-                        move16_src_r      <= rd_a_data; move16_src_base_r <= rd_a_data;
-                        move16_dst_r      <= rd_b_data; move16_dst_base_r <= rd_b_data;
-                    end
-                    2'b01: begin  // (An)+,(xxx).L: src=rd_a (An), dst=ex_imm (abs)
-                        move16_src_r      <= rd_a_data; move16_src_base_r <= rd_a_data;
-                        move16_dst_r      <= ex_imm;    move16_dst_base_r <= ex_imm;
-                    end
-                    2'b10: begin  // (xxx).L,(An)+: src=ex_imm (abs), dst=rd_a (An)
-                        move16_src_r      <= ex_imm;    move16_src_base_r <= ex_imm;
-                        move16_dst_r      <= rd_a_data; move16_dst_base_r <= rd_a_data;
-                    end
-                    2'b11: begin  // (An),(An): src=rd_a, dst=rd_b, no postinc
-                        move16_src_r      <= rd_a_data; move16_src_base_r <= rd_a_data;
-                        move16_dst_r      <= rd_b_data; move16_dst_base_r <= rd_b_data;
-                    end
-                endcase
-            end else if (move16_run_r && mem_ack) begin
-                if (!move16_phase_r) begin
-                    // Read phase: capture longword, advance src address
-                    case (move16_beat_r)
-                        2'd0: move16_data_r[0] <= mem_rdata;
-                        2'd1: move16_data_r[1] <= mem_rdata;
-                        2'd2: move16_data_r[2] <= mem_rdata;
-                        2'd3: move16_data_r[3] <= mem_rdata;
-                    endcase
-                    if (move16_beat_r == 2'd3) begin
-                        move16_phase_r <= 1'b1;
-                        move16_beat_r  <= 2'd0;
-                        move16_dst_r   <= move16_dst_base_r;  // reset dst to base for writes
-                    end else begin
-                        move16_beat_r <= move16_beat_r + 2'd1;
-                        move16_src_r  <= move16_src_r + 32'd4;
-                    end
-                end else begin
-                    // Write phase
-                    if (move16_beat_r == 2'd3) begin
-                        move16_run_r <= 1'b0;
-                    end else begin
-                        move16_beat_r <= move16_beat_r + 2'd1;
-                        move16_dst_r  <= move16_dst_r + 32'd4;
-                    end
-                end
-            end else if (move16_run_r && mem_abort) begin
-                // A fault on any of the 8 beats (4 reads + 4 writes) aborts
-                // the whole block move — real 68030 doesn't partially copy.
-                move16_run_r <= 1'b0;
-            end
-        end
-    end
+    // docs/*.md review (Phase 250 F8): the MOVE16 16-byte block move FSM
+    // formerly here was removed -- MOVE16 does not exist on the real
+    // MC68030 (it's an MC68040 instruction), see the decode-side comment
+    // in eu_seq_decode.svh's own Group-1111 case for the full derivation.
 
     // -----------------------------------------------------------------------
     // FPU coprocessor dispatch FSM
@@ -4515,10 +4387,6 @@
     logic        movem_an_wr_en;
     assign movem_an_wr_en = movem_last && (movem_predec_r || movem_postinc_r);
 
-    // MOVE16 postincrement — src An on move16_last, dst An one cycle later
-    logic move16_an1_wr_en;
-    assign move16_an1_wr_en = move16_last && move16_src_postinc_r;
-
     // CMPM postincrement — Ay fires at phase 1 ack, Ax fires at phase 2 ack.
     logic cmpm_ay_wr_en, cmpm_ax_wr_en;
     assign cmpm_ay_wr_en = ex_valid && ex_is_cmpm && !cmpm_phase_r && mem_ack;
@@ -4538,7 +4406,6 @@
     assign pack_ax_wr_en = pack_mem_run_r &&  pack_mem_phase_r && mem_ack;
 
     assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en || rte_an_wr_en ||
-                       move16_an1_wr_en || move16_an2_wr_r ||
                        addx_ay_wr_en || addx_ax_wr_en ||
                        pack_ay_wr_en || pack_ax_wr_en ||
                        cmpm_ay_wr_en || cmpm_ax_wr_en ||
@@ -4553,8 +4420,6 @@
         if      (movem_an_wr_en)       begin an_wr_sel = movem_an_r;           an_wr_data = movem_an_final;                              end
         else if (rtr_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rtr_an_wr_data;                              end
         else if (rte_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rte_a7_next_r + 32'd4 + {24'h0, rte_fmt_skip_r}; end
-        else if (move16_an1_wr_en)     begin an_wr_sel = move16_src_an_r;      an_wr_data = move16_src_base_r + 32'd16;                  end
-        else if (move16_an2_wr_r)      begin an_wr_sel = move16_dst_an_r;      an_wr_data = move16_dst_base_r + 32'd16;                  end
         else if (addx_ay_wr_en)        begin an_wr_sel = addx_ay_reg_r;        an_wr_data = addx_ay_addr_r;                              end
         else if (addx_ax_wr_en)        begin an_wr_sel = addx_ax_reg_r;        an_wr_data = addx_ax_addr_r;                              end
         else if (pack_ay_wr_en)        begin an_wr_sel = pack_mem_ay_reg_r;    an_wr_data = pack_mem_ay_addr_r;                          end
@@ -4847,7 +4712,6 @@
     // tas_run_r drives the TAS write phase (second bus cycle).
     // cmp2_run_r drives the CMP2/CHK2 second read (upper bound at EA+size).
     // movep_run_r drives byte bus cycles for MOVEP.
-    // move16_run_r drives 4 longword reads then 4 longword writes.
     // True when no multi-cycle bus op is active or cooling down; gate for the normal EU mem path.
     logic no_special_bus_op;
     assign no_special_bus_op = !tas_after_write_r && !tas_memind_pending_r && !cmp2_run_r   && !cmp2_after_r   &&
@@ -4859,7 +4723,7 @@
                                 !cas2_get_du2_r   && !cas2_wr2_r  && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
                                 !cas2_after_r     && !ex_cas2_done_r;
 
-    assign mem_req   = movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r || move16_run_r ||
+    assign mem_req   = movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
                        memind_inner_r || memind_outer_r || mem_rmw_run_r || move_mm_run_r ||
                        addx_mem_run_r || bf_mem_run_r || pack_mem_run_r || pmove64_run_r ||
                        cas_write_r || bcds_run_r ||
@@ -4871,7 +4735,6 @@
                      : tas_memind_pending_r ? 1'b1   // genuine-indirect TAS: RMW-locked read phase
                      : cmp2_run_r     ? 1'b1
                      : movep_run_r    ? movep_load_r
-                     : move16_run_r   ? !move16_phase_r
                      : memind_inner_r ? 1'b1        // inner: always longword read
                      : memind_outer_r ? memind_is_rd_r
                      : mem_rmw_run_r  ? 1'b0        // write phase of RMW
@@ -4892,7 +4755,6 @@
     assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
                        movep_run_r    ? 2'b01 :
-                       move16_run_r   ? 2'b00 :
                        memind_inner_r ? 2'b00 :
                        memind_outer_r ? memind_siz_r :
                        mem_rmw_run_r  ? ex_siz :
@@ -4917,7 +4779,6 @@
                        (ex_is_tas && ex_is_memind && (tas_run_r || tas_memind_pending_r)) ? tas_memind_addr_r :
                        cmp2_run_r     ? cmp2_addr2_r :
                        movep_run_r    ? movep_addr_r :
-                       move16_run_r   ? (!move16_phase_r ? move16_src_r : move16_dst_r) :
                        memind_inner_r ? memind_inner_addr_r :
                        memind_outer_r ? ((memind_is_pea_r || memind_is_jsr_r) ? memind_pea_wr_addr_r : memind_outer_addr_w) :
                        mem_rmw_run_r  ? mem_rmw_addr_r :
@@ -4939,7 +4800,6 @@
     // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
     // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
     // For MOVEP store: drive the appropriate byte of Dn.
-    // For MOVE16 write phase: drive the buffered longword for the current beat.
     assign mem_wdata = cas2_wr1_r               ? cas2_du1_val_r
                      : cas2_wr2_r              ? cas2_du2_val_r
                      : cas_write_r             ? cas_du_val_r
@@ -4959,7 +4819,6 @@
                      : (pack_mem_run_r && pack_mem_phase_r) ? pack_mem_wdata_w
                      : tas_run_r               ? {tas_wdata_r, 24'h0}
                      : movep_run_r             ? {movep_wr_byte_r, 24'h0}
-                     : move16_run_r            ? move16_wdata_w
                      : (ex_is_pmove && ex_pmove_to_mem) ? pmove_wr_data_w
                      : (ex_is_pmove64 && ex_pmove_to_mem) ? pmove64_wr_data_w
                      : (pmove64_run_r && pmove64_to_mem_r) ? pmove64_wr_data_w
