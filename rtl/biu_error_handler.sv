@@ -19,21 +19,23 @@
 // combined signal) to avoid the combinational loop:
 //   terminated = dsack0_s | dsack1_s | sterm_s | berr_s_ext | bus_idle
 //
-// halt_out: asserts when any BERR (external or timeout) fires during a
-// retry cycle — this is the CONDITION the MC68030 calls double bus fault.
-// The signal should be held by the EU/top-level to stop execution.
-//
-// Phase 248 item #10 (docs/*.md review): this is an internal control
-// signal only, NOT a drive for the real HALT pin. MC68030UM.pdf Table 5-1/
-// §5.10.2 lists HALT as Input-only (unlike the 68000, which does drive
-// HALT out on double bus fault) -- confirmed directly against the manual
-// text. Real 68030 silicon signals double bus fault by continuously
-// asserting STATUS instead (§7.5.4/§8.1.2), an emulator-support pin this
-// project deliberately deferred (Phase 248 item #5) since its semantics
-// tie to real silicon's own internal microsequencer staging with no
-// faithful analogue here. halt_out's own job -- stopping EU execution --
-// is correct and unaffected by this; only the name/pin association in
-// this comment was previously misleading.
+// retry_exhausted (renamed from halt_out, Phase 250 Part B): asserts when
+// any BERR (external or timeout) fires during a retry cycle. This is a
+// real, useful, simulation-only escape hatch for an otherwise-infinite
+// BERR+HALT retry -- but it is NOT the MC68030's own "double bus fault"
+// condition, despite this signal's own former name and comment here once
+// claiming that association. MC68030UM.pdf §7.5.4 is explicit that a
+// retried bus cycle "does not constitute a bus error or contribute to a
+// double bus fault" -- genuine double bus fault (a bus/address error
+// occurring WHILE the exception controller is already dispatching a prior
+// one, confirmed and implemented in `m68030_exc.sv`'s own new
+// `EXC_DBLFAULT` state/`double_fault` output) is an entirely separate,
+// unrelated condition from this signal. `status_n` (Phase 250 F10) is
+// wired to THAT signal now, not this one. Kept as its own internal
+// control signal (the EU/top-level should still stop execution while it's
+// asserted, since real hardware would legitimately retry forever here,
+// which isn't testable in a finite harness) -- just correctly named and
+// documented.
 
 module biu_error_handler #(
     parameter int TIMEOUT_CLKS = 128   // 4x-clock ticks before timeout
@@ -56,7 +58,11 @@ module biu_error_handler #(
 
     // Outputs
     output logic       berr_timeout,  // latch: 1 from threshold until bus_idle
-    output logic       halt_out       // 1 = double bus fault (BERR during retry)
+    output logic       retry_exhausted // 1 = BERR fired during a retry cycle
+                                         // (renamed from halt_out, Phase 250
+                                         // Part B -- NOT the same thing as a
+                                         // genuine double bus fault; see
+                                         // header comment above)
 );
 
     // -----------------------------------------------------------------------
@@ -106,12 +112,12 @@ module biu_error_handler #(
     assign berr_timeout = berr_timeout_r;
 
     // -----------------------------------------------------------------------
-    // Double bus fault detection
+    // Retry-exhausted detection (NOT double bus fault -- see header comment)
     // Any BERR (external or internal timeout) during a retry cycle.
-    // halt_out is combinational — the top-level should register it to avoid
-    // glitches propagating to the halt pin.
+    // retry_exhausted is combinational — the top-level should register it
+    // to avoid glitches propagating to whatever consumes it.
     // -----------------------------------------------------------------------
-    assign halt_out = (berr_s | berr_timeout_r) & retry_pending;
+    assign retry_exhausted = (berr_s | berr_timeout_r) & retry_pending;
 
 endmodule
 

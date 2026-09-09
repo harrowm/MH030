@@ -66,6 +66,9 @@ module exc_tb;
     logic        new_sr_wr;
     logic        exc_active;
     logic [7:0]  exc_vector_num;
+    logic        dispatch_berr = 1'b0;  // Phase 250 Part B: genuine double
+                                          // bus fault detection input
+    logic        double_fault;          // sticky output, DUT-driven
 
     // Immediate-ack stub
     assign exc_ack = exc_req;
@@ -768,6 +771,85 @@ module exc_tb;
 
         chk32("EXC-16 fetch_addr (illegal, not interrupt autovector)",
               t_addr[2], 32'h0000_0010);  // vec=4 -> VBR+16=0x10, NOT VBR+108=0x6C
+
+        // ================================================================
+        // EXC-17 (Phase 250 Part B, B5): regression check -- an ordinary
+        // single bus-error dispatch (same shape as EXC-10) must complete
+        // normally and NEVER set double_fault, with dispatch_berr held low
+        // throughout (the default/only value any pre-existing test in this
+        // file ever drives it to). Confirms B2's new detection doesn't
+        // misfire on the common, non-double-fault case.
+        // ================================================================
+        $display("--- EXC-17: ordinary single bus error -- no false double-fault ---");
+        begin_test;
+        ssp_in      = 32'h0000_A000;
+        fault_pc    = 32'h0000_9100;
+        fault_sr    = 16'h2300;
+        fault_addr  = 32'h1234_5678;
+        fault_ssw   = 16'h8100;
+        fault_data  = 32'hBEEF_1234;
+        bus_err_fmt = 4'hA;
+        exc_rdata   = 32'h0000_C000;
+        bus_err_req = 1;
+        @(posedge clk_4x); #1;
+        bus_err_req = 0;
+        wait_idle;
+        chk_bit("EXC-17 double_fault stays clear on an ordinary single fault", double_fault, 1'b0);
+        if (trans_cnt !== 5'd9) begin
+            $display("FAIL EXC-17 trans_cnt=%0d (exp 9: 8 writes + 1 read)", trans_cnt);
+            fail = fail + 1;
+        end else $display("PASS EXC-17 trans_cnt=9");
+
+        // ================================================================
+        // EXC-18 (Phase 250 Part B, B5): genuine double bus fault. A
+        // second, independent bus-error signal (dispatch_berr) arriving
+        // WHILE this dispatch (itself a bus error, snap_is_berr_r=1) is
+        // already mid-EXC_PUSH must divert into EXC_DBLFAULT: no second
+        // frame attempted, double_fault asserts, exc_active never
+        // returns to idle (checked over a bounded window, not wait_idle --
+        // which would time out and fail here by design, since real
+        // forward progress genuinely never resumes), and only reset
+        // clears it.
+        // ================================================================
+        $display("--- EXC-18: genuine double bus fault ---");
+        begin_test;
+        ssp_in      = 32'h0000_A000;
+        fault_pc    = 32'h0000_9100;
+        fault_sr    = 16'h2300;
+        fault_addr  = 32'h1234_5678;
+        fault_ssw   = 16'h8100;
+        fault_data  = 32'hBEEF_1234;
+        bus_err_fmt = 4'hA;
+        exc_rdata   = 32'h0000_C000;
+        bus_err_req = 1;
+        @(posedge clk_4x); #1;        // dispatch begins (EXC_IDLE->EXC_PUSH)
+        bus_err_req = 0;
+        chk_bit("EXC-18 dispatch began as a bus-error (EXC_PUSH)", dut.state_r == 3'd2, 1'b1);
+        @(posedge clk_4x); #1;        // one push step in; still well before
+                                        // total_steps=8 writes complete
+        dispatch_berr = 1;
+        @(posedge clk_4x); #1;
+        dispatch_berr = 0;
+        chk_bit("EXC-18 diverted to EXC_DBLFAULT", dut.state_r == 3'd6, 1'b1);
+        chk_bit("EXC-18 double_fault asserted", double_fault, 1'b1);
+        begin
+            integer n;
+            logic   ever_left;
+            ever_left = 1'b0;
+            for (n = 0; n < 100; n = n + 1) begin
+                @(posedge clk_4x); #1;
+                if (dut.state_r != 3'd6) ever_left = 1'b1;
+            end
+            chk_bit("EXC-18 stays in EXC_DBLFAULT (no forward progress) over 100 cycles",
+                  ever_left, 1'b0);
+            chk_bit("EXC-18 exc_active never clears while double-faulted", exc_active, 1'b1);
+        end
+        rst_n = 0; cap_nrst = 0;
+        @(posedge clk_4x); @(posedge clk_4x); #1;
+        rst_n = 1; cap_nrst = 1;
+        @(posedge clk_4x); #1;
+        chk_bit("EXC-18 double_fault clears on reset", double_fault, 1'b0);
+        chk_bit("EXC-18 state returns to EXC_IDLE on reset", dut.state_r == 3'd0, 1'b1);
 
         // ================================================================
         if (fail == 0)

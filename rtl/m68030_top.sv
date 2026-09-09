@@ -81,8 +81,9 @@ module m68030_top #(
     input  logic        halt_n,
     // Phase 250 F10: real STATUS pin, active low, double-bus-fault
     // sub-case only -- see m68030_biu.sv's own status_r for the sticky
-    // latch (halt_out's own header comment already asked for this: "the
-    // top-level should register it to avoid glitches").
+    // latch, now correctly wired to m68030_exc.sv's own genuine
+    // double_fault output (Phase 250 Part B) rather than
+    // retry_exhausted/halt_out's own BERR+HALT-retry-exhaustion signal.
     output logic        status_n,
     input  logic        avec_n,
     input  logic [2:0]  ipl_n,
@@ -137,7 +138,7 @@ module m68030_top #(
     logic        fault_rw_biu;
     logic [1:0]  fault_siz_biu;
     logic        fault_valid_biu, fault_retry_biu, fault_is_rmw_biu;
-    logic        retry_pending, halt_out;
+    logic        retry_pending, retry_exhausted;
     logic [3:0]  exc_frame_format;
     logic        exc_frame_valid;
     logic [15:0] exc_ssw;
@@ -276,6 +277,7 @@ module m68030_top #(
     logic        exc_new_sr_wr;
     logic        exc_active;
     logic [7:0]  exc_vector_num;
+    logic        exc_double_fault_w;
 
     // EU memory bus signals (from m68030_eu)
     logic        eu_mem_req, eu_mem_rw;
@@ -705,13 +707,22 @@ module m68030_top #(
         // with a dedicated eu_iack_berr output threaded through
         // biu_cycle_gen.sv/m68030_biu.sv.
         .iack_berr    (eu_iack_berr),
+        // Genuine double bus fault (docs/*.md review, Phase 250 Part B):
+        // eu_berr already fires as a clean one-shot pulse per fault on
+        // biu_cache_if's own CI_BERR->CI_IDLE cycle (Phase 108/109/113/114's
+        // own multi-fault-in-one-session fix) -- gated here to only the
+        // exception controller's own bus requests (exc_active), so an
+        // ordinary EU-instruction-side fault (unrelated to dispatch) never
+        // reaches this port.
+        .dispatch_berr (eu_berr && exc_active),
         // Outputs to EU
         .new_pc       (exc_new_pc),
         .new_pc_wr    (exc_new_pc_wr),
         .new_sr       (exc_new_sr),
         .new_sr_wr    (exc_new_sr_wr),
         .exc_active   (exc_active),
-        .exc_vector_num(exc_vector_num)
+        .exc_vector_num(exc_vector_num),
+        .double_fault (exc_double_fault_w)
     );
 
     // ───────────────────────────────────────────────────────────────────────
@@ -958,8 +969,9 @@ module m68030_top #(
         .fault_retry     (fault_retry_biu),
         .fault_is_rmw    (fault_is_rmw_biu),
         .retry_pending   (retry_pending),
-        .halt_out        (halt_out),
+        .retry_exhausted (retry_exhausted),
         .status_n        (status_n),
+        .double_fault    (exc_double_fault_w),
         .exc_frame_format(exc_frame_format),
         .exc_frame_valid (exc_frame_valid),
         .exc_ssw         (exc_ssw),

@@ -73,7 +73,9 @@ module biu_tb;
 
     // biu_error_handler outputs
     logic berr_timeout_tb;    // pulsed by watchdog when bus hangs
-    logic halt_out_tb;        // double bus fault indicator
+    logic halt_out_tb;        // retry-exhausted indicator (renamed from
+                                // halt_out, Phase 250 Part B -- NOT the same
+                                // thing as a genuine double bus fault)
     logic berr_combined_tb;   // berr_tb | berr_timeout_tb → biu_cycle_gen.berr_s
     assign berr_combined_tb = berr_tb | berr_timeout_tb;
 
@@ -881,7 +883,7 @@ module biu_tb;
         .sterm_s       (sterm_tb),
         .berr_s        (berr_tb),        // external BERR only, not combined
         .berr_timeout  (berr_timeout_tb),
-        .halt_out      (halt_out_tb)
+        .retry_exhausted (halt_out_tb)
     );
 
     // -----------------------------------------------------------------------
@@ -3231,14 +3233,20 @@ module biu_tb;
             check("timeout cleared on idle", !berr_timeout_tb);
         end
 
-        // --- Double bus fault — BERR during retry → halt_out ---
+        // --- Retry exhausted — BERR during retry → retry_exhausted ---
+        // (renamed from "Double bus fault" -- Phase 250 Part B corrected
+        // this: retry_exhausted is a real, useful BERR+HALT-retry-
+        // exhaustion signal, but NOT the same condition as a genuine
+        // double bus fault, which m68030_exc.sv now detects/reports
+        // independently. This module-level test only exercises the
+        // retry-exhaustion path, unrelated to that.)
         // First cycle: no DSACK + HALT asserted → BERR+HALT → retry_pending=1.
         // Retry cycle: also no DSACK → second timeout fires while
-        //              retry_pending=1 → halt_out asserts.
+        //              retry_pending=1 → retry_exhausted asserts.
         begin
             logic saw_halt;
             saw_halt      = 1'b0;
-            $display("--- Double bus fault → halt_out ---");
+            $display("--- Retry exhausted → retry_exhausted ---");
             halt_tb       = 1'b0;   // assert HALT# (active-low: 0 = asserted)
             test_mem_sel  = MUX_NOSACK;
             sterm_tb      = 1'b0;
@@ -3247,17 +3255,17 @@ module biu_tb;
             eu_rw_tb      = 1'b1;
             eu_siz_tb     = 2'b00;
             eu_req_tb     = 1'b1;
-            // Watch for halt_out over both the original and retry cycles
+            // Watch for retry_exhausted over both the original and retry cycles
             for (int t = 0; t < 500; t++) begin
                 @(posedge clk_4x);
                 if (halt_out_tb) saw_halt = 1'b1;
-                // eu_berr signals the end of the retry (double-fault exception)
+                // eu_berr signals the end of the retry (recoverable Bus Error)
                 if (eu_berr) break;
             end
             eu_req_tb    = 1'b0;
             halt_tb      = 1'b1;   // restore HALT# deasserted
             test_mem_sel = MUX_FAST;
-            check("halt_out on double fault", saw_halt);
+            check("retry_exhausted on retry-exhaustion", saw_halt);
             while (!bus_idle) @(posedge clk_4x);
             repeat(4) @(posedge clk_4x);
         end

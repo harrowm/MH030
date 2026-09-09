@@ -45,6 +45,31 @@
 //
 // SR after exception: T1=0, T0=0, S=1, M=0, I=preserved (or updated for
 // interrupt); CCR preserved.  Interrupt updates I[2:0] to the level taken.
+//
+// Genuine double bus fault (docs/*.md review, Phase 250 Part B): a bus or
+// address error occurring while this controller is already dispatching a
+// PRIOR bus or address error is a double bus fault (MC68030UM.pdf
+// §7.5.4/§8.1.2/§8.1.3) -- NOT the same thing as `biu_error_handler.sv`'s
+// own `halt_out`/BERR+HALT retry-exhaustion mechanism (a real, useful,
+// simulation-only escape hatch for an otherwise-infinite HALT-driven
+// retry, but a condition the manual explicitly excludes: "a bus cycle
+// that is retried does not constitute a bus error or contribute to a
+// double bus fault"). Confirmed empirically before implementing (not just
+// predicted from reading): with no detection at all, a persistent fault
+// landing on this controller's OWN frame-push write causes an infinite,
+// silent retry -- `push_step_r` never advances and `exc_active` never
+// clears, for as long as the fault persists, with zero reported condition
+// -- because `exc_req`/`exc_addr`/`exc_wdata` are purely combinational off
+// `state_r`/`push_step_r` (no explicit reaction to any berr signal
+// anywhere in EXC_PUSH/EXC_FETCH/EXC_PUSH2), so `biu_cache_if`'s own
+// CI_BERR->CI_IDLE->re-dispatch cycle just keeps re-accepting the still-
+// asserted request forever. New `snap_is_berr_r` (captured at EXC_IDLE
+// dispatch, mirrors `snap_is_int_r`) plus the new `dispatch_berr` input
+// (fed from the top level's own already-clean one-shot-per-fault `eu_berr`,
+// gated to only this module's own bus requests) detect the real condition
+// and divert into a new terminal `EXC_DBLFAULT` state instead of retrying
+// forever -- no second frame is attempted (real silicon doesn't either),
+// and the new sticky `double_fault` output stays asserted until reset.
 
 module m68030_exc (
     input  logic        clk_4x,
@@ -129,13 +154,33 @@ module m68030_exc (
                                          // when AVEC/VPA terminated the cycle)
     input  logic        iack_berr,      // BERR during IACK -> Spurious Interrupt
 
+    // ── Genuine double bus fault (MC68030UM.pdf §7.5.4/§8.1.2/§8.1.3) ────
+    // A bus/address error occurring WHILE ALREADY DISPATCHING a prior
+    // bus/address error (this project has no reset-exception source, so
+    // that third trigger case doesn't apply here). Fed from m68030_top's
+    // own `eu_berr` -- the already-clean, one-shot-per-fault escalation
+    // signal biu_cache_if's CI_BERR state produces -- gated there to only
+    // the exception controller's own EXC_PUSH/EXC_FETCH/EXC_PUSH2 bus
+    // requests (the ones this module drives via exc_req/exc_addr/exc_wdata
+    // while exc_active). Confirmed empirically (not just predicted) before
+    // this port was added: with no double-fault detection, a persistent
+    // fault landing on the frame-push write causes an INFINITE SILENT
+    // RETRY -- push_step_r never advances, exc_active never clears -- not
+    // a classic stuck-FSM hang, but zero forward progress with no
+    // reported/latched condition, which is exactly what real silicon's
+    // double-bus-fault detection exists to catch and convert into a clean,
+    // reset-only halt instead.
+    input  logic        dispatch_berr,
+
     // ── Outputs to EU ─────────────────────────────────────────────────────
     output logic [31:0] new_pc,
     output logic        new_pc_wr,
     output logic [15:0] new_sr,
     output logic        new_sr_wr,
     output logic        exc_active,
-    output logic [7:0]  exc_vector_num  // for logging / IACK cycle
+    output logic [7:0]  exc_vector_num, // for logging / IACK cycle
+    output logic        double_fault    // sticky; set on genuine double bus
+                                          // fault, cleared only by reset
 );
 
     // -----------------------------------------------------------------------
@@ -288,7 +333,8 @@ module m68030_exc (
         EXC_PUSH  = 3'd2,
         EXC_FETCH = 3'd3,
         EXC_PUSH2 = 3'd5,   // throwaway Format $1 frame on ISP, M=1 interrupts only
-        EXC_LOAD  = 3'd4
+        EXC_LOAD  = 3'd4,
+        EXC_DBLFAULT = 3'd6 // genuine double bus fault -- terminal, reset only
     } exc_state_t;
 
     exc_state_t state_r;
@@ -301,6 +347,10 @@ module m68030_exc (
     logic [2:0]  snap_ipl_r;    // captured IPL for interrupt SR update
     logic [31:0] snap_dob_r;    // Data Output Buffer snapshot (fault_data at entry)
     logic        snap_is_int_r; // captured pend_is_int (docs/*.md review fix)
+    logic        snap_is_berr_r; // captured (addr_err_req||bus_err_req) at
+                                   // dispatch -- double-bus-fault detection
+                                   // only applies while dispatching one of
+                                   // these two exception types, per §7.5.4
     logic [4:0]  push_step_r;
     logic [31:0] vec_data_r;
     logic [4:0]  push2_step_r;  // throwaway frame's own 2-step push counter
@@ -458,9 +508,20 @@ module m68030_exc (
             snap_ipl_r    <= 3'b0;
             snap_dob_r    <= 32'h0;
             snap_is_int_r <= 1'b0;
+            snap_is_berr_r <= 1'b0;
             push_step_r   <= 5'd0;
             push2_step_r  <= 5'd0;
             vec_data_r    <= 32'h0;
+        end else if (state_r != EXC_IDLE && state_r != EXC_DBLFAULT &&
+                      dispatch_berr && snap_is_berr_r) begin
+            // Genuine double bus fault: a fresh bus error landed on the
+            // exception controller's OWN dispatch access (frame push or
+            // vector fetch) while the exception being dispatched was
+            // itself a bus or address error. Preempts whatever the
+            // current state's own case arm below would have done --
+            // real silicon does not attempt to build a second frame here,
+            // it stops entirely (§7.5.4). Terminal: only reset clears it.
+            state_r <= EXC_DBLFAULT;
         end else begin
             case (state_r)
                 EXC_IDLE: begin
@@ -474,6 +535,7 @@ module m68030_exc (
                         snap_ipl_r    <= int_pending ? ipl_sync_l : fault_sr[10:8];
                         snap_dob_r    <= fault_data;
                         snap_is_int_r <= pend_is_int;
+                        snap_is_berr_r <= addr_err_req || bus_err_req;
                         push_step_r   <= 5'd0;
                         if (pend_is_int) state_r <= EXC_IACK;
                         else             state_r <= EXC_PUSH;
@@ -545,6 +607,12 @@ module m68030_exc (
                 EXC_LOAD: begin
                     state_r <= EXC_IDLE;
                 end
+
+                EXC_DBLFAULT: begin
+                    // Terminal -- no transition, no bus activity (see the
+                    // exc_req/iack_req comb blocks below, neither of which
+                    // lists this state). Only !rst_n leaves it.
+                end
             endcase
         end
     end
@@ -615,6 +683,12 @@ module m68030_exc (
 
     assign exc_active     = (state_r != EXC_IDLE);
     assign exc_vector_num = snap_vec_r;
+    // exc_active already stays permanently asserted once state_r reaches
+    // EXC_DBLFAULT (it never returns to EXC_IDLE) -- the existing
+    // exc_active-gates-EU-dispatch mechanism every other exception already
+    // relies on therefore ALSO halts new instruction issue for free here;
+    // no separate freeze signal was needed.
+    assign double_fault   = (state_r == EXC_DBLFAULT);
 
 endmodule
 

@@ -1123,6 +1123,16 @@ fix — `git diff` confirmed zero non-comment lines changed in either file — s
 `make test` (37/37, sanity only) was sufficient; no Harte re-run needed. **This
 closes the Phase 248 10-item compliance-review list in full.**
 
+**Superseded by Phase 250 Part B** (see below): this item's own framing —
+"`halt_out` is the MC68030 double bus fault condition" — turned out to be
+the actual bug, not just a misleading doc comment. `halt_out` (renamed
+`retry_exhausted`) models BERR+HALT retry exhaustion, which
+MC68030UM.pdf §7.5.4 explicitly excludes from double bus fault ("a bus
+cycle that is retried does not constitute a bus error or contribute to a
+double bus fault"). Real double bus fault is a materially different,
+previously entirely undetected condition — see Phase 250 Part B for the
+full fix.
+
 **Phase 249 (code-review pass over Phase 248's own items #5/#1 — IMPLEMENTED AND
 VERIFIED, two real bugs found)**: a general code-review pass over the item #5/#1
 diffs (not itself one of the numbered items) found two real, previously-
@@ -1465,6 +1475,18 @@ either. Full mandatory gate clean: `make test` 37/37, `cosim_grp` 8/8,
 `cosim_memind` 28/28, `dat-synth` 50/50, full 124-suite Harte sweep
 bit-identical to baseline.
 
+**Superseded by Phase 250 Part B** (see below, a later session):
+`status_n` here was wired to `halt_out`/a genuine BERR+HALT retry, which
+is explicitly NOT what MC68030UM.pdf §7.5.4 calls double bus fault (a
+retried cycle "does not constitute a bus error or contribute to a double
+bus fault"). This item's own "proves `status_n` asserts on a real double
+bus fault" claim above was wrong — it proved `status_n` asserts on
+*retry exhaustion*, a different, real, but differently-named condition.
+Part B rewires `status_n` to a genuine new `double_fault` signal from
+`m68030_exc.sv` and renames `halt_out` to `retry_exhausted` to stop
+conflating the two. This test (`tb/biu_int_tb.sv`) was split into two
+accordingly.
+
 **This closes the entire Phase 250 10-item findings list** except F6
 (investigated, deferred, documented above) — the last one to remain
 open, by explicit choice given its own real risk to RTE's delicate FSM.
@@ -1540,6 +1562,91 @@ existing pattern exactly). Full mandatory gate clean: `make test`
 124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2`
 — the documented ASL.b corpus anomaly — `SKIP 281221 TIMEOUT 0`),
 including the previously-broken RTE suite now at a clean 4011/4011.
+
+**Phase 250 Part B (genuine double-bus-fault detection — IMPLEMENTED AND
+VERIFIED, a later session, `~/.claude/plans/wobbly-honking-cascade.md`)**:
+closes out the second side finding from the same F9 investigation that
+led to the frame layout fix above. §7.5.4/§8.1.2/§8.1.3 are explicit that
+double bus fault is a bus or address error occurring WHILE the exception
+controller is already dispatching a PRIOR bus or address error (or a
+reset) — a materially different, narrower condition than `halt_out`
+(BERR+HALT retry exhaustion, wired to the Phase 250 F10 `status_n` pin),
+which the manual explicitly excludes ("a bus cycle that is retried does
+not constitute a bus error or contribute to a double bus fault").
+**B1 (empirical confirmation, not just code-reading)**: built a
+throwaway test injecting a genuine, persistent BERR onto the exception
+controller's own frame-push write specifically (not just the original
+faulting access). Found the real mechanism is subtler than a classic
+"stuck FSM waiting for an ack that never comes": `m68030_exc.sv`'s own
+`exc_req`/`exc_addr`/`exc_wdata` are purely combinational off
+`state_r`/`push_step_r`, with zero reaction to any berr signal anywhere
+in `EXC_PUSH`/`EXC_FETCH`/`EXC_PUSH2` — so when `biu_cache_if.sv`'s own
+`CI_BERR` state aborts and returns to `CI_IDLE`, the still-unconditionally-
+asserted request causes an immediate, silent redispatch of the identical
+write. A transient fault therefore self-heals (retries until it
+succeeds) with zero reported condition; a *persistent* fault retries
+forever with zero forward progress and zero reported condition — the
+real, confirmed gap, just via infinite silent retry rather than a
+classic deadlock. **B2 (implementation)**: new `snap_is_berr_r` (captures
+`addr_err_req||bus_err_req` at dispatch, mirrors `snap_is_int_r`'s own
+pattern) plus a new `dispatch_berr` input (fed from the top level's own
+`eu_berr` — already a clean one-shot-per-fault signal from Phase
+108/109/113/114's own earlier fix — gated to `exc_active` so only this
+module's own bus requests trigger it) detect the real condition and
+divert into a new terminal `EXC_DBLFAULT` state (reachable from
+`EXC_PUSH`/`EXC_FETCH`/`EXC_PUSH2`/`EXC_IACK`, though the last two are
+structurally unreachable in practice since `snap_is_berr_r` and
+`EXC_IACK`/`EXC_PUSH2` are mutually exclusive by construction — an
+interrupt dispatch is never a bus/address-error dispatch). No second
+frame is attempted (real silicon doesn't either); a new sticky
+`double_fault` output stays asserted until reset. Confirmed
+`exc_active`'s own existing "gates new EU instruction issue" behavior
+already halts forward progress for free once `state_r` never returns to
+`EXC_IDLE` — no separate freeze mechanism was needed. **Found and fixed a
+real, previously-undiscovered PRE-EXISTING bug while verifying this**:
+the full mandatory gate's own `mmu_xlate_tb.sv` Phase 4 test (a
+write-protect violation) started failing — traced (not guessed at) to
+`biu_mmu_arb.sv`'s own `d_wp = mmu_wp`, a raw, ENTIRELY UNGATED broadcast
+of the MMU's own WP-status register (unlike `d_hit`/`d_walk_done`, which
+already ARE gated on `owner_r==OWN_D`) — sourced from `biu_mmu_if.sv`'s
+own `wp_r`, a register that only updates when a request genuinely
+completes, exactly the same shape Phase 228's own `xl_ci_r` fix already
+guards `xl_ci` against, but never extended to WP at the time. Checking
+it unconditionally every `CI_XLATE` cycle (as `biu_cache_if.sv` used to)
+reads the PREVIOUS request's own stale WP result for however many cycles
+the NEW request's own translation takes to complete — confirmed via
+direct trace: a supervisor frame-push immediately following an unrelated
+WP-faulting user access spuriously re-faulted 3 times (each
+indistinguishable from a genuine, independent WP violation to anything
+watching for a second fault, exactly matching B2's own new detection)
+before a 4th, genuinely-completed lookup finally returned the correct
+non-WP result. This bug was harmless before B2 (nothing ever reacted to
+a spurious, self-resolving WP re-fault); B2's own new detection was
+simply the first thing to ever notice it. Fixed by gating the WP check
+on `(xl_hit||xl_walk_done)` — the same condition the success branch
+already requires — mirroring `xl_ci_r`'s own "captured at completion"
+discipline instead of reading a raw live broadcast. `xl_fault` itself was
+left unchanged (Phase 3's own fault+RTE-retry test already exercises it
+back-to-back with other translated accesses and passes both before and
+after this fix). **B3 (rewiring)**: renamed `halt_out`→`retry_exhausted`
+throughout (`biu_error_handler.sv`/`m68030_biu.sv`/`m68030_top.sv`) and
+corrected every doc comment that used to call it the double-bus-fault
+condition; `status_n` now registers off the new `double_fault` signal
+instead (threaded `m68030_exc.sv`→`m68030_top.sv`→`m68030_biu.sv` as a
+new input port, alongside `m68030_biu.sv`'s own existing `retry_exhausted`
+output — siblings under `m68030_top`, not nested). `tb/biu_int_tb.sv`'s
+own Phase 250 F10 test (the only file instantiating real `m68030_biu`
+directly) was split into two: one exercising `retry_exhausted` via a
+genuine BERR+HALT retry (proving it's no longer wired to `status_n`),
+and one exercising `status_n` via a new testbench-driven `double_fault_tb`
+input directly (this module has no real `m68030_exc` to produce a
+genuine one — `tb/exc_tb.sv`'s own EXC-* tests cover the detection logic
+itself). `tb/biu_tb.sv`'s own standalone `biu_error_handler` test and
+`tb/exc_tb.sv` both updated for the renamed port. Full mandatory gate
+clean: `make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 28/28,
+`dat-synth` 50/50, full 124-suite Harte sweep bit-identical to baseline
+(`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`). **This closes the 2-part
+plan (`~/.claude/plans/wobbly-honking-cascade.md`) in full.**
 
 ## Verification Commands
 

@@ -523,18 +523,51 @@ module biu_cache_if (
                 // safe. A write to a write-protected page aborts exactly
                 // like a genuine translation fault.
                 CI_XLATE: begin
-                    if (xl_fault || (xl_wp && !rw_r)) begin
+                    // docs/*.md review (Phase 250 Part B, found while
+                    // verifying double-bus-fault detection): xl_wp is a raw,
+                    // ungated broadcast (biu_mmu_arb.sv's own `d_wp = mmu_wp`,
+                    // completely unlike d_hit/d_walk_done, which ARE gated on
+                    // `owner_r==OWN_D`) sourced from biu_mmu_if.sv's own
+                    // wp_r -- a register that only updates when a request
+                    // ACTUALLY completes (ATC hit or walk done), exactly the
+                    // same shape xl_ci_r was already built to guard xl_ci
+                    // against (10-item backlog Stage 2/Phase 228). Checking
+                    // it unconditionally every CI_XLATE cycle (as this used
+                    // to) reads the PREVIOUS request's own stale WP result
+                    // for however many cycles this request's own translation
+                    // takes to complete -- confirmed via direct trace: a
+                    // supervisor push immediately following an unrelated
+                    // WP-faulting user access spuriously re-faulted 3 times
+                    // (each one indistinguishable from a genuine, independent
+                    // WP violation to anything watching for a second fault)
+                    // before a 4th, genuinely-completed lookup finally
+                    // returned the correct (non-WP) result. Gating on
+                    // (xl_hit||xl_walk_done) -- the same condition the
+                    // success branch below already requires -- fixes it: WP
+                    // is only meaningful once THIS request's own translation
+                    // has actually finished, mirroring xl_ci_r's own
+                    // "captured at completion" discipline instead of a raw
+                    // live broadcast. xl_fault is left as-is (unaffected by
+                    // this finding -- Phase 3's own fault+RTE-retry test
+                    // already exercises it back-to-back with other
+                    // translated accesses and passes both before and after
+                    // this fix).
+                    if (xl_fault) begin
+                        // xl_fault might be a real bus error during the walk
+                        // (biu_cycle_gen's own fault_valid_r already
+                        // captured it independently) or a purely logical one
+                        // (invalid descriptor) -- only the logical case
+                        // needs our own synthetic capture pulse; firing it
+                        // for the real-BERR case too would double-capture
+                        // and stomp the correct first capture with a later,
+                        // stale one.
+                        xlate_fault_r <= !xl_fault_is_berr;
+                        state         <= CI_BERR;
+                    end else if ((xl_hit || xl_walk_done) && xl_wp && !rw_r) begin
                         // A WP violation is always a purely logical fault
                         // (checked before any real access, no bus cycle
-                        // involved). xl_fault might be a real bus error
-                        // during the walk (biu_cycle_gen's own
-                        // fault_valid_r already captured it independently)
-                        // or a purely logical one (invalid descriptor) --
-                        // only the logical case needs our own synthetic
-                        // capture pulse; firing it for the real-BERR case
-                        // too would double-capture and stomp the correct
-                        // first capture with a later, stale one.
-                        xlate_fault_r <= xl_fault ? !xl_fault_is_berr : 1'b1;
+                        // involved).
+                        xlate_fault_r <= 1'b1;
                         state         <= CI_BERR;
                     end else if (xl_hit || xl_walk_done) begin
                         // Overwrite the logical address with the translated

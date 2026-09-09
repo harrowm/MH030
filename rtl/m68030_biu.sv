@@ -237,8 +237,15 @@ module m68030_biu #(
     output logic        fault_retry,
     output logic        fault_is_rmw,
     output logic        retry_pending,
-    output logic        halt_out,
+    output logic        retry_exhausted, // renamed from halt_out, Phase 250
+                                           // Part B -- see biu_error_handler.sv's
+                                           // own header comment; NOT the same
+                                           // thing as double_fault below
     output logic        status_n,      // Phase 250 F10: STATUS pin, double-bus-fault sub-case only
+    // Phase 250 Part B: genuine double bus fault (m68030_exc.sv's own new
+    // EXC_DBLFAULT state/double_fault output) -- status_n is wired to
+    // THIS now, not retry_exhausted above.
+    input  logic        double_fault,
 
     output logic [3:0]  exc_frame_format,
     output logic        exc_frame_valid,
@@ -338,7 +345,7 @@ module m68030_biu #(
         .sterm_s      (sterm_s),
         .berr_s       (berr_s_ext),
         .berr_timeout (berr_timeout),
-        .halt_out     (halt_out)
+        .retry_exhausted (retry_exhausted)
     );
 
     assign berr_combined = berr_s_ext | berr_timeout;
@@ -352,23 +359,24 @@ module m68030_biu #(
     // REFILL#/STATUS# deferral reasoning exactly -- deliberately still not
     // implemented. The 4th -- continuously asserted = processor halted due
     // to double bus fault -- is NOT microsequencer-timing-dependent at
-    // all, just a sticky bit, and this project already computes exactly
-    // that condition (halt_out, above) but never latched or wired it to
-    // any output pin. halt_out's own header comment already says "the
-    // top-level should register it to avoid glitches" -- this is that
-    // registration. Real silicon's own double bus fault halts permanently
-    // until RESET; this RTL instead lets the retry escalate into an
-    // ordinary, software-recoverable Bus Error exception (eu_berr, tested
-    // directly in tb/biu_tb.sv's own "Double bus fault" test) rather than
-    // a hard, unrecoverable halt -- a deliberate, pre-existing design
-    // choice (Phase 248 item #10) this pin doesn't change; it only makes
-    // the already-computed diagnostic condition observable on a real pin,
-    // matching the manual's own "asserted continuously until reset" text
-    // for this one sub-case.
+    // all, just a sticky bit.
+    //
+    // Phase 250 Part B (corrects this pin's own original wiring): this used
+    // to register straight off `halt_out` (now `retry_exhausted`) -- a
+    // real, useful BERR+HALT-retry-exhaustion signal, but NOT what the
+    // manual calls double bus fault (§7.5.4 explicitly excludes a retried
+    // cycle from contributing to double bus fault). Genuine double bus
+    // fault is `m68030_exc.sv`'s own new `double_fault` output (a bus/
+    // address error occurring while already dispatching a prior one) --
+    // status_r now registers off that instead. `retry_exhausted` keeps its
+    // own separate job (the EU/top-level still stops execution while it's
+    // asserted -- real hardware would legitimately retry forever here,
+    // untestable in a finite harness) but is no longer conflated with this
+    // pin.
     logic status_r;
     always_ff @(posedge clk_4x or negedge rst_n) begin
-        if (!rst_n)       status_r <= 1'b0;
-        else if (halt_out) status_r <= 1'b1;
+        if (!rst_n)          status_r <= 1'b0;
+        else if (double_fault) status_r <= 1'b1;
     end
     assign status_n = ~status_r;
 

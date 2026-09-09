@@ -90,6 +90,13 @@ module biu_int_tb;
     logic [1:0]  fault_siz_out;
     logic        fault_valid, fault_retry, fault_is_rmw;
     logic        retry_pending, halt_out, status_n;
+    // Phase 250 Part B: status_n is now wired to a genuine double_fault
+    // input (m68030_exc.sv's own new detection, no real m68030_exc here
+    // since this file tests m68030_biu standalone) -- testbench-driven
+    // directly for the dedicated double-fault test below. halt_out itself
+    // was renamed retry_exhausted at the port; this tb-local variable name
+    // is kept for minimal diff (still holds the same signal).
+    logic        double_fault_tb = 1'b0;
     logic [3:0]  exc_frame_format;
     logic        exc_frame_valid;
     logic [15:0] exc_ssw;
@@ -235,8 +242,9 @@ module biu_int_tb;
         .fault_retry     (fault_retry),
         .fault_is_rmw    (fault_is_rmw),
         .retry_pending   (retry_pending),
-        .halt_out        (halt_out),
+        .retry_exhausted (halt_out),
         .status_n        (status_n),
+        .double_fault    (double_fault_tb),
         .exc_frame_format(exc_frame_format),
         .exc_frame_valid (exc_frame_valid),
         .exc_ssw         (exc_ssw),
@@ -404,34 +412,22 @@ module biu_int_tb;
         end
 
         // ===================================================================
-        // Phase 250 F10: STATUS pin, double-bus-fault sub-case. A real
-        // STATUS pin (MC68030UM.pdf Table 12-4/§7.5.4/§8.1.2) has 4
-        // distinct meanings; this project deliberately implements only
-        // the one that isn't microsequencer-timing-dependent --
-        // continuously asserted (active low here, matching the manual's
-        // own "Output, Low" polarity) = processor halted due to double
-        // bus fault. Reached via the same shape this project's own
-        // biu_error_handler.sv/tb/biu_tb.sv already prove works for
-        // halt_out itself: HALT# asserted + no DSACK/STERM response
-        // produces a BERR+HALT retry (retry_pending=1); a fault condition
-        // overlapping that retry is the real double-bus-fault condition.
-        // (Confirmed via direct trace: retry_pending and halt_out assert
-        // the SAME cycle here, since berr_timeout is a sticky latch held
-        // until bus_idle, not a one-cycle pulse -- a pre-existing nuance
-        // of halt_out's own formula, unrelated to and not fixed by this
-        // pin addition; tb/biu_tb.sv's own existing test never
-        // distinguishes same-cycle from later either.) Run LAST
-        // (permanent park, matching this project's own established
-        // precedent) -- a genuine double bus fault escalates into a Bus
-        // Error exception with no installed handler, not something
-        // sensible to test anything after.
+        // Phase 250 Part B: retry_exhausted (renamed from halt_out) is a
+        // real, useful BERR+HALT-retry-exhaustion signal, but §7.5.4 is
+        // explicit that a retried bus cycle "does not constitute a bus
+        // error or contribute to a double bus fault" -- this is NOT the
+        // same condition status_n reports (see below). Reached via the
+        // same BERR+HALT shape tb/biu_tb.sv's own standalone
+        // biu_error_handler test already proves: HALT# asserted + no
+        // DSACK/STERM response produces a BERR+HALT retry
+        // (retry_pending=1), and a fault condition overlapping that retry
+        // asserts retry_exhausted.
         // ===================================================================
-        $display("--- Double bus fault -> status_n (sticky) ---");
+        $display("--- Retry exhausted -> retry_exhausted (halt_out) ---");
         begin
-            logic saw_retry, saw_status;
-            saw_retry  = 1'b0;
-            saw_status = 1'b0;
-            check("status_n deasserted before any fault", status_n);
+            logic saw_retry, saw_exhausted;
+            saw_retry     = 1'b0;
+            saw_exhausted = 1'b0;
             // Real HALT# gates bus-cycle *initiation* itself (bus_halted's
             // own !halt_s term keeps the FSM parked in ST_IDLE while
             // HALT# is asserted) -- asserting it before/alongside eu_req
@@ -450,21 +446,52 @@ module biu_int_tb;
             eu_req  = 1'b1;
             repeat(10) @(posedge clk_4x);
             halt_n  = 1'b0;   // assert HALT# (active-low: 0 = asserted)
-            for (int t = 0; t < 2000 && !saw_status; t++) begin
+            for (int t = 0; t < 2000 && !saw_exhausted; t++) begin
                 @(posedge clk_4x);
                 if (retry_pending) saw_retry = 1'b1;
-                if (!status_n)     saw_status = 1'b1;
+                if (halt_out)      saw_exhausted = 1'b1;
             end
             eu_req         = 1'b0;
             halt_n         = 1'b1;   // restore HALT# deasserted
             suppress_dsack = 1'b0;   // restore normal DSACK response
             check("BERR+HALT genuinely produced a retry", saw_retry);
-            check("status_n asserts on double bus fault", saw_status);
+            check("retry_exhausted asserts on retry exhaustion", saw_exhausted);
+            // Not wired to status_n anymore (Phase 250 Part B) -- confirm
+            // that directly, since this exact scenario used to (wrongly)
+            // assert it.
+            check("status_n NOT affected by retry_exhausted alone", status_n);
+            while (!bus_idle) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+        end
+
+        // ===================================================================
+        // Phase 250 F10/Part B: STATUS pin, genuine double-bus-fault
+        // sub-case. A real STATUS pin (MC68030UM.pdf Table 12-4/§7.5.4/
+        // §8.1.2) has 4 distinct meanings; this project deliberately
+        // implements only the one that isn't microsequencer-timing-
+        // dependent -- continuously asserted (active low here, matching
+        // the manual's own "Output, Low" polarity) = processor halted due
+        // to double bus fault. This module tests m68030_biu standalone
+        // (no real m68030_exc instantiated here), so the genuine
+        // double_fault condition is driven directly via the new
+        // double_fault_tb input rather than reconstructed from a real
+        // exception-dispatch race -- m68030_exc.sv's own EXC-* tests
+        // (tb/exc_tb.sv) cover the detection logic itself; this test only
+        // proves status_n's own sticky-latch wiring reacts correctly to
+        // whatever double_fault says. Run LAST (permanent park, matching
+        // this project's own established precedent).
+        // ===================================================================
+        $display("--- Double bus fault -> status_n (sticky) ---");
+        begin
+            check("status_n deasserted before any fault", status_n);
+            double_fault_tb = 1'b1;
+            repeat(4) @(posedge clk_4x);
+            check("status_n asserts on double bus fault", !status_n);
+            double_fault_tb = 1'b0;
             // Sticky: real STATUS stays asserted "continuously... until
             // the processor is reset" (MC68030UM.pdf) -- confirm it
-            // doesn't clear on its own once the underlying halt_out
-            // pulse (combinational, momentary) has long since passed and
-            // the bus has genuinely gone back to responding normally.
+            // doesn't clear on its own once the underlying double_fault
+            // pulse has long since passed.
             repeat(200) @(posedge clk_4x);
             check("status_n stays asserted (sticky, not a momentary pulse)", !status_n);
             rst_n = 1'b0;

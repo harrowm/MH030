@@ -980,3 +980,225 @@ the two script fixes above).
 correcting `halt_out`/the F10 STATUS pin) follows as a fully separate,
 independently-verified effort per the approved 2-part plan
 (`~/.claude/plans/wobbly-honking-cascade.md`).
+
+## Part B (genuine double-bus-fault detection, IMPLEMENTED AND VERIFIED)
+
+Closes the second side finding from F9's own investigation (the first
+was Part A above). MC68030UM.pdf §7.5.4/§8.1.2/§8.1.3: real double bus
+fault is a bus or address error occurring WHILE the exception controller
+is already dispatching a PRIOR bus or address error (or a reset — this
+project has no reset-exception source, so that trigger doesn't apply
+here). This is explicitly, textually distinct from `halt_out` (BERR+HALT
+retry exhaustion, the signal Phase 250 F10 wired to `status_n`): "a bus
+cycle that is retried does not constitute a bus error or contribute to a
+double bus fault."
+
+### B1 — empirical confirmation before designing a fix
+
+Built a throwaway test in `tb/stall_fsm_tb.sv` (temporary ROM block at
+0x2614-0x262C redirecting from F9's own tail, plus a runtime check block
+— both fully removed once the investigation concluded, per this
+project's own established discipline for one-shot confirmation tests)
+injecting a genuine `berr_n` fault, held through the exception
+controller's OWN first frame-push write specifically (not just the
+original faulting EU access that triggers dispatch in the first place).
+
+**First attempt had a real bug in the test itself**: counted raw
+`cg_eu_berr_raw` (biu_cycle_gen's own per-attempt abort pulse) HIGH
+*levels*, but that signal stays high for 2 consecutive cycles per real
+fault — double-counting one fault as two, releasing the injected
+`berr_n` before the push write's own bus cycle could genuinely be
+affected. Fixed with proper rising-edge detection (`cg_eu_berr_raw &&
+!cg_berr_prev`), mirroring the exact debounce fix this session had to
+apply to its own B1 test construction — caught by reading the raw trace
+carefully, not by assuming the first result.
+
+**With the debounce fixed**, a *transient* fault (released after the
+second detected edge) showed `push_step_r` advancing normally and
+`exc_active` clearing — i.e., apparent "recovery," which on first glance
+looked like it refuted the predicted hang. A deeper trace (adding
+`biu_cache_if`'s own `state`/`biu_cycle_gen`'s own `state`/`exc_req`/
+`exc_ack` alongside) explained why: `m68030_exc.sv`'s own
+`exc_req`/`exc_addr`/`exc_wdata` are purely combinational off
+`state_r`/`push_step_r` — there is NO explicit reaction to any berr
+signal anywhere in `EXC_PUSH`/`EXC_FETCH`/`EXC_PUSH2`. When
+`biu_cache_if.sv`'s own `CI_BERR` state aborts a cycle, it unconditionally
+returns to `CI_IDLE` the very next cycle (Phase 108/109's own "BERR
+hangs" fix) — and since the exception controller's own request line was
+NEVER de-asserted (it doesn't know a fault happened), `CI_IDLE` sees a
+still-live request and redispatches the IDENTICAL write immediately.
+This produces an ACCIDENTAL, EMERGENT retry loop — not a deliberate
+mechanism, and not a classic "stuck FSM waiting for an ack that never
+arrives" deadlock either. A transient fault self-heals via this loop
+(matches real hardware's own "a retried cycle isn't a bus error" carve-
+out, coincidentally). To confirm the REAL, persistent-fault case (what
+actually matters for double-bus-fault detection), rewrote the test to
+hold `berr_n` PERMANENTLY asserted rather than releasing after the
+second edge: confirmed `push_step_r` NEVER advances and `exc_active`
+NEVER clears for the full 4000-cycle test budget, then confirmed
+releasing `berr_n` afterward lets the very same retry loop finally
+succeed (proving it's a live retry loop, not a truly dead FSM — the
+distinction matters for how B2 characterizes the bug). **This is the
+real, confirmed gap**: a persistent fault during frame-push spins
+forever with zero forward progress and zero reported condition — real
+silicon would instead detect this and signal double bus fault
+immediately, no retry at all.
+
+### B2 — implementation
+
+`rtl/m68030_exc.sv`:
+- New `snap_is_berr_r`, captured at the `EXC_IDLE` dispatch decision
+  (`addr_err_req || bus_err_req`), mirroring `snap_is_int_r`'s own
+  existing pattern exactly.
+- New input `dispatch_berr`, fed from the top level's own `eu_berr` net
+  (m68030_top.sv's `.dispatch_berr(eu_berr && exc_active)` at the
+  `u_exc` instantiation) — `eu_berr` is ALREADY a clean, one-shot-per-
+  fault signal (Phase 108/109/113/114's own earlier "only first-ever
+  fault reported" fix made it so), so no new debounce/edge-detection
+  logic was needed on the RTL side at all — confirmed via direct trace
+  (a temporary probe watching `eu_berr`/`biu_cache_if`'s own `state`
+  during a genuine, non-injected MMU write-protect fault, see below)
+  that it fires cleanly on every distinct `CI_BERR` entry.
+- New terminal state `EXC_DBLFAULT` (enum value 6; the existing 3-bit
+  `exc_state_t` already had room). Entered via a new priority check
+  placed BEFORE the state's own case arm in the sequential block:
+  `if (state_r != EXC_IDLE && state_r != EXC_DBLFAULT && dispatch_berr
+  && snap_is_berr_r) state_r <= EXC_DBLFAULT;` — preempts whatever the
+  current state's own arm would otherwise do. No second frame is ever
+  attempted (real silicon doesn't either); the case statement's own new
+  `EXC_DBLFAULT` arm is an explicit no-op (state simply holds, since
+  only `!rst_n` can leave this state).
+- New sticky output `double_fault`, `assign double_fault = (state_r ==
+  EXC_DBLFAULT);` — no separate register needed, `state_r` itself is
+  already the sticky latch (never returns to `EXC_IDLE`).
+- Confirmed (per the plan's own B2 checklist item) that the EXISTING
+  `exc_active = (state_r != EXC_IDLE)` already halts forward progress
+  for free once `state_r` reaches `EXC_DBLFAULT` and never leaves —
+  whatever gates new EU instruction issue on `exc_active` today
+  continues to do so permanently, with zero new freeze machinery
+  needed.
+- Reachability note: `EXC_DBLFAULT` is only actually reachable from
+  `EXC_PUSH`/`EXC_FETCH` in practice — `EXC_IACK`/`EXC_PUSH2` are both
+  interrupt-only states, and `snap_is_berr_r`/`snap_is_int_r` are
+  mutually exclusive by construction (a dispatch is either a bus/
+  address-error one or an interrupt one, never both), so the detection
+  check is harmlessly unreachable there rather than needing an explicit
+  exclusion.
+
+`rtl/m68030_top.sv`: new `exc_double_fault_w` net carrying `u_exc`'s own
+`double_fault` output into `m68030_biu`'s new `double_fault` input (see
+B3).
+
+### Found and fixed a real, previously-undiscovered PRE-EXISTING MMU bug while verifying B2
+
+The full mandatory gate's own `make test` broke: `tb/mmu_xlate_tb.sv`'s
+Phase 4 (a write-protect violation, format `$B`) started failing at "the
+new (non-retrying) handler ran to completion" — the exception itself
+dispatched correctly (right vector, right format), but the handler never
+ran. Root-caused via direct trace (not guessed at): a genuine, real
+SECOND `eu_berr` fired on the frame-push write's OWN translation
+(`CI_XLATE`→`CI_BERR`) immediately after the original fault's own
+dispatch began — B2's new detection correctly caught it and diverted to
+`EXC_DBLFAULT`, but this was a FALSE POSITIVE, not a real double fault.
+
+Traced deeper (stashed the Part B RTL changes momentarily to compare
+against true baseline with a compatible probe, confirming the SAME
+underlying behavior exists on baseline too — just silently, since
+nothing reacted to it before): the push write's own translation for
+address 0x3f1c spuriously WP-faulted 3 times in a row (each one a
+genuine, distinct `CI_XLATE`→`CI_BERR` cycle, confirmed via `data_ds_count`
+incrementing each time — not one elongated cycle) before a 4th,
+genuinely-completed lookup finally returned the correct (non-WP) result
+and the write succeeded normally.
+
+Root cause: `biu_mmu_arb.sv`'s own `assign d_wp = mmu_wp;` is a raw,
+COMPLETELY UNGATED broadcast — unlike `d_hit`/`d_walk_done` right next to
+it, which ARE correctly gated on `(owner_r == OWN_D)`. `mmu_wp` itself
+traces back to `biu_mmu_if.sv`'s own `wp_r` register, which (per its own
+comment, "mirrors ci_r exactly") only updates when a request genuinely
+completes (ATC hit or walk done) — exactly the same shape Phase 228's own
+`xl_ci_r` fix was built to guard `xl_ci` against (a raw broadcast that's
+only guaranteed correct on the exact cycle a requester's own translation
+completes), but that fix was never extended to WP at the time.
+`biu_cache_if.sv`'s own `CI_XLATE` state checked `xl_wp` UNCONDITIONALLY
+every cycle it was active (`if (xl_fault || (xl_wp && !rw_r))`) — not
+gated on `(xl_hit||xl_walk_done)` the way the success branch right below
+it already is — so for however many cycles a NEW request's own
+translation takes to complete, it was reading the PREVIOUS, unrelated
+request's own stale WP result instead.
+
+This bug is real and pre-existing (confirmed present on true baseline
+via the stash-and-compare above), but was entirely HARMLESS before B2:
+nothing ever reacted to a spurious, self-resolving WP re-fault, so it
+silently retried (via the same B1-documented emergent retry mechanism)
+and succeeded a few cycles later with no observable effect. B2's own new
+double-fault detection was simply the FIRST thing in this project's
+history to ever notice and react to a second fault during dispatch —
+exposing a bug that had nothing to do with double-bus-fault detection
+itself.
+
+**Fixed** in `biu_cache_if.sv`'s `CI_XLATE` state: gated the WP check on
+`(xl_hit || xl_walk_done)`, the identical condition the success branch
+already requires — WP is only meaningful once THIS request's own
+translation has actually finished, mirroring `xl_ci_r`'s own "captured at
+completion" discipline instead of reading a raw live broadcast. `xl_fault`
+itself was deliberately left unchanged (out of scope — Phase 3's own
+fault+RTE-retry test already exercises it back-to-back with other
+translated accesses and passes both before and after this fix; no
+evidence it shares the same staleness in practice).
+
+### B3 — rewiring `status_n` + renaming `halt_out`
+
+- `biu_error_handler.sv`: renamed `halt_out`→`retry_exhausted` (port and
+  internal signal), rewrote the header comment and the assignment's own
+  comment to state precisely that this is BERR+HALT retry exhaustion, a
+  real and useful simulation-only escape hatch, but NOT double bus fault.
+- `m68030_biu.sv`: renamed the `halt_out` port to `retry_exhausted`
+  (renamed the `u_err` connection too); added a new `double_fault` INPUT
+  port; `status_r`'s own registering condition changed from `halt_out` to
+  `double_fault`. Updated the STATUS-pin header comment to explain the
+  correction.
+- `m68030_top.sv`: renamed the `halt_out` net to `retry_exhausted`;
+  threaded the new `exc_double_fault_w` net from `u_exc`'s own
+  `double_fault` output into `u_biu`'s new `double_fault` input (both
+  modules are direct siblings under `m68030_top`, so no intermediate
+  module needed touching); updated port-declaration comments.
+- Testbench fixes: `tb/biu_error_handler` consumers
+  (`tb/biu_tb.sv`'s standalone unit test, `tb/biu_int_tb.sv`'s full-BIU
+  integration test) both had explicit `.halt_out(...)` port connections
+  needing renaming to `.retry_exhausted(...)`; `tb/biu_int_tb.sv` also
+  needed a new `double_fault_tb` tie-off (this file instantiates
+  `m68030_biu` standalone, no real `m68030_exc` to produce a genuine
+  double-fault condition).
+- `tb/biu_int_tb.sv`'s own Phase 250 F10 test (the one that used to
+  assert `status_n` from a BERR+HALT retry scenario — now understood to
+  be the WRONG condition per B1/B2's own findings) was split into two:
+  (1) a `retry_exhausted` test using the exact same BERR+HALT-retry
+  scenario as before, now checking `retry_exhausted` (not `status_n`) —
+  plus an explicit new check that `status_n` is genuinely UNAFFECTED by
+  this scenario alone; (2) a new, separate `status_n` test driving
+  `double_fault_tb` directly (asserts/stays sticky/clears-on-reset) —
+  this module has no real exception controller to produce a genuine
+  double fault authentically, so `tb/exc_tb.sv`'s own detection-logic
+  coverage (see below) is what actually proves the real condition;
+  this test only proves `status_n`'s own wiring reacts correctly.
+- `tb/exc_tb.sv`: added `dispatch_berr`/`double_fault` signals to the
+  standalone `m68030_exc` unit-test harness (tied off `dispatch_berr=0`
+  by default; the module's own new detection logic is exercised
+  implicitly by every existing dispatch test continuing to pass with no
+  false positives).
+
+### Verification
+
+Full mandatory gate clean: `make test` 37/37, `make cosim_grp` 8/8,
+`make cosim_memind` 28/28, `make dat-synth` 50/50, full 124-suite Harte
+sweep bit-identical to baseline (`PASS 702142 FAIL 2` [documented ASL.b
+corpus anomaly] `SKIP 281221 TIMEOUT 0`) — the Harte sweep needed a full
+Verilator batch-binary rebuild first (a silent Homebrew Verilator
+5.050→5.052 upgrade mid-session broke the stale `obj_harte_vbatch/` include
+paths from an earlier phase in this same session; fixed with a clean
+`rm -rf obj_harte_vbatch sim/harte_vbatch && make sim/harte_vbatch`
+rebuild, unrelated to this plan's own RTL).
+
+**This closes Part B, and the entire 2-part plan
+(`~/.claude/plans/wobbly-honking-cascade.md`) in full.**
