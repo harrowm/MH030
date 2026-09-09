@@ -300,10 +300,13 @@ across every instruction family that needed it — MOVE, ALU-mem-src, dynamic bi
 CHK/ADDQ-SUBQ/MOVE-SR-CCR, LEA/JMP/JSR/PEA, MOVEM, CMP2/CHK2 — plus long (32-bit)
 displacements and a 5th/6th IFU prefetch-queue word (`q5`/`q6`) to support them. Found the
 one genuine case in the whole project that needed a 3rd register-file read port
-(`MOVE Dn/An,(d8,An,Xn)`'s phantom-read quirk — added `rd_c`, Phases 148-149). Two items
-remain deliberately out of scope for a future dedicated plan: genuine two-level
-memory-indirect EA extended beyond `MOVE <ea>,dst`, and MOVEM's own genuine
-memory-indirect (needs a 7th IFU queue word).
+(`MOVE Dn/An,(d8,An,Xn)`'s phantom-read quirk — added `rd_c`, Phases 148-149). One item
+remained deliberately out of scope at the time: MOVEM's own genuine memory-indirect EA
+(needed a 7th IFU queue word, added later at Phase 234 — see Phase 251 item 2 for the
+EA-value resolution itself). ("Genuine two-level memory-indirect EA extended beyond
+`MOVE <ea>,dst`" was also listed here as a second deferred item for many phases — Phase
+251's own investigation confirmed this was never a real 68020+ capability at all; see the
+Phase 251 entry below for the correction and citation. Removed here as a stale claim.)
 
 **Pipeline stall/hazard coverage (Phases 103-136, 201-208)**: built the first inter-
 instruction pipeline test coverage in the project — bus arbitration contention, RAW/CCR/
@@ -1647,6 +1650,35 @@ clean: `make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 28/28,
 `dat-synth` 50/50, full 124-suite Harte sweep bit-identical to baseline
 (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`). **This closes the 2-part
 plan (`~/.claude/plans/wobbly-honking-cascade.md`) in full.**
+
+**Phase 251 (standing-gaps survey, findings list — see `plan.md §Phase
+251` for full detail)**: a full accounting of every documented-but-not-
+done item in the project as of Phase 250 Part B. Real gaps with a
+documented proposal: (1) F6, RTE's own Format $B version-number check
+(§8.1.8) — deferred at Phase 250, needs a new conditional read step in
+RTE's delicate FSM; (2) MOVEM's own genuine memory-indirect EA *value*
+resolution (word-count sizing already fixed, Phase 234) — needs the same
+FSM-merge shape Phase 244 proved for CMP2/CHK2. Item (3), "genuine
+two-level memory-indirect EA beyond `MOVE <ea>,dst`" (carried in this
+file since the Phases 115-149 era), was investigated via direct manual
+citation and **found not to be real**: MC68030UM.pdf Table 2-1 (p. 2-22,
+the IS/I-IS memory-indirection encoding table), Figure 2-4 (p. 2-23),
+and §2.4.9/§2.4.10's own EA-generation diagrams (pp. 2-14/2-15) are
+unambiguous that every "memory indirect" encoding does exactly ONE
+dereference — fetch a 32-bit pointer, then arithmetically combine it
+with an optional scaled index and/or outer displacement — never a second
+dereference. This project's own `ex_is_memind` FSM (`rtl/
+eu_seq_execute.svh`) already implements exactly this one-dereference
+model and has already been extended to MOVE, LEA, PEA, JMP, JSR, general
+ALU-EA ops, CMP2/CHK2, TAS, and Scc — it is architecturally complete.
+"Two-level indirect" was a documentation error, not a missing feature;
+corrected here and at line ~304 above (the item's own original home).
+Work is proceeding on the 2 real items (F6, MOVEM). Permanently out of
+scope by design, not started: coprocessor conditional instructions +
+Coprocessor Protocol Violation (Phase 248 item #7); STATUS's other 3
+sub-cases + REFILL# (Phase 248 item #5); PTEST's DSACK-breadth exclusion
++ I-cache CEI's per-line-only limitation (both pre-existing architecture
+boundaries, not bugs).
 
 ## Verification Commands
 

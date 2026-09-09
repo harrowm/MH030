@@ -1202,3 +1202,103 @@ rebuild, unrelated to this plan's own RTL).
 
 **This closes Part B, and the entire 2-part plan
 (`~/.claude/plans/wobbly-honking-cascade.md`) in full.**
+
+## Phase 251 (standing-gaps survey — findings list, work starting on the first 3)
+
+User asked "what's outstanding" after Part B closed; this is the full
+list of every documented-but-not-done item in the project's history as
+of Phase 250 Part B, split into two categories. Recorded here as a
+findings list before starting work, matching this project's own
+established convention (Phase 248/250's own opening sections).
+
+### Real gaps, deferred with a documented proposal (work starting on these 3)
+
+1. **F6 — RTE should check the Format $B version-number field
+   (MC68030UM.pdf §8.1.8).** Deferred at Phase 250 (see F6 above):
+   `rte_phase_r`'s own FSM only ever reads 2 words (format/vector+SR,
+   then PC) and determines the extra byte count to SKIP via
+   `rte_frame_extra()`, never actually reading back any of the rest of
+   the frame's own content (SSW, fault address, DOB, internal registers,
+   or the version-number word at SP+$36 specifically). A correct fix
+   needs a new conditional read step in RTE's own FSM, specific to
+   Format $B. Real-world value is genuinely low (the check exists "for
+   a multiprocessor system," per §8.1.8 — not applicable to this
+   single-CPU project, which only ever constructs and pops its own
+   frames) but it's a real, precisely-scoped gap worth closing for
+   completeness now that Part A's own frame-layout fix makes the
+   byte positions trustworthy.
+
+2. **MOVEM's own genuine memory-indirect EA.** Word-count sizing was
+   fixed at Phase 234 (7th IFU prefetch-queue word, `q[6]`/
+   `ext7_valid`) — `movem_ext_count` already sizes the drain correctly
+   for a genuinely-indirect encoding. The EA arm in
+   `eu_seq_decode.svh` still falls back to brief-format addressing for
+   genuine indirection, though (`fi_iis` never checked for MOVEM).
+   Phase 234 itself scoped this as needing "a real extra bus read
+   merged with the project's own existing `ex_is_memind` 3-phase FSM
+   ... resolving the EA once per MOVEM instruction, then handing it to
+   MOVEM's own existing register-iteration logic as its starting
+   address" — the same shape of FSM merge Phase 244 later proved out
+   for CMP2/CHK2 (shared memind FSM resolves one address, hands off to
+   the family's own pre-existing multi-step FSM unchanged).
+
+3. ~~Genuine two-level memory-indirect EA beyond `MOVE <ea>,dst`.~~
+   **INVESTIGATED, NOT A REAL GAP — corrected below.** This item's
+   original framing (written at the Phases 115-149 era: "real 68020+
+   full-format addressing supports a SECOND level of indirection... vs.
+   this project's existing `ex_is_memind` FSM, which only ever resolves
+   ONE level") was checked directly against MC68030UM.pdf rather than
+   taken on trust, and found to be a documentation error. **Table 2-1**
+   ("IS-I/IS Memory Indirection Encodings," p. 2-22) exhaustively
+   enumerates all 16 combinations of the 1-bit `IS` field crossed with
+   the 3-bit `I/IS` field (this project's own RTL calls the latter
+   `fi_iis`) — every non-reserved, non-"No Memory Indirection" row is
+   exactly one of: preindexed-indirect, postindexed-indirect, or (PC-
+   relative) memory-indirect, each varying only in its outer
+   displacement's size (null/word/long). None chains a second
+   dereference. **Figure 2-4** (p. 2-23) confirms the field widths (1-bit
+   `IS`, 3-bit `I/IS`) directly from the extension-word layout diagram.
+   **§2.4.9 "Memory Indirect Postindexed Mode"** (p. 2-14) and **§2.4.10
+   "Memory Indirect Preindexed Mode"** (p. 2-15) give the actual EA-
+   generation diagrams and formulas — `EA = (bd+An) + Xn.SIZE*SCALE + od`
+   (postindexed) and `EA = (bd+An+Xn.SIZE*SCALE) + od` (preindexed) — both
+   diagrams show one memory access ("accesses a long word at this
+   address," the manual's own words) fetching a pointer, which is then
+   *arithmetically combined* (not dereferenced again) with the index/
+   outer-displacement to yield the final EA. §2.4.14/§2.4.15 (PC-relative
+   variants, pp. 2-18/2-19) are structurally identical. This project's
+   own `ex_is_memind` FSM (`rtl/eu_seq_execute.svh:3110-3214`) already
+   matches this exactly (`memind_inner_r` performs the one pointer fetch;
+   `memind_outer_r`'s address is `mem_rdata + memind_post_xn_r +
+   memind_od_r` — arithmetic, not a second read of `mem_rdata` as an
+   address) and has already been extended to MOVE, LEA, PEA, JMP, JSR,
+   general ALU-EA ops, CMP2/CHK2, TAS, and Scc (Phases 236-245) — i.e. it
+   is already architecturally complete for the real addressing mode.
+   **Corrected in `CLAUDE.md`** (both its original ~line 304 mention and
+   this Phase's own findings-list entry) to remove the "real, deferred
+   feature" framing. No RTL/testbench change — this was a doc-only fix.
+
+### Permanently out of scope by design (documented boundaries, not started)
+
+4. **Coprocessor conditional instructions** (cpBcc/cpDBcc/cpScc/
+   cpTRAPcc) + **Coprocessor Protocol Violation** (vector 13) — need a
+   real attached coprocessor model (a real or emulated FPU) exercising
+   genuine condition-evaluation semantics, which this project has never
+   built and has no current plan to (documented at Phase 248 item #7).
+5. **STATUS pin's other 3 sub-cases** (instruction-boundary/trace-
+   interrupt/MMU-dispatch pulses) and **REFILL#** — tied to real
+   silicon's own internal microsequencer staging with no faithful
+   analogue in this project's structurally different microarchitecture
+   (documented at Phase 248 item #5; only the 4th STATUS sub-case,
+   double bus fault, has a faithful analogue and was implemented at
+   Phase 250 F10/Part B).
+6. **PTEST excluded from the DSACK wait-state breadth catalog**, and
+   **I-cache CEI stays per-line-only** (unlike CED's now-correct
+   per-longword fix, Phase 248 item #4) — both are pre-existing
+   architecture-boundary limitations (`docs/stalls.md`'s own PTEST
+   exclusion; the I-cache's own per-LINE `valid_i` array structurally
+   can't support per-word CEI without a bigger redesign), not bugs.
+
+Items 1-3 are picked up next, in order, each independently verified per
+this project's own established discipline (confirm scope/design first,
+implement, full mandatory gate, commit) before moving to the next.
