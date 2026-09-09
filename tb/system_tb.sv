@@ -653,7 +653,12 @@ module system_tb;
 
         // ====================================================================
         // RTE: pops SR+PC from stack, asserts branch_taken
-        // Pre-load stack frame at SSP=0x1000 (Format $0: SR then PC)
+        // Pre-load stack frame at SSP=0x1000 (Format $0: real byte layout,
+        // docs/*.md review Phase 250 frame layout fix -- SR alone at SP+0,
+        // PC (32-bit) at SP+2, fmtvec alone at SP+6, as two longwords
+        // {SR,PC hi} then {PC lo,fmtvec} -- not {fmtvec,SR} then PC as this
+        // file previously encoded by hand, matching the RTL's own prior
+        // (wrong) convention).
         // ====================================================================
         $display("--- RTE-01/02/03: RTE reads stack frame ---");
         begin
@@ -662,8 +667,8 @@ module system_tb;
             ssp_wr_en = 1'b1; ssp_wr_data = 32'h0000_1000;
             @(posedge clk); ssp_wr_en = 1'b0;
             repeat(2) @(posedge clk);
-            ram[32'h1000>>2] = 32'h0000_2700;   // SR at SSP
-            ram[32'h1004>>2] = 32'h0000_2000;   // PC at SSP+4
+            ram[32'h1000>>2] = 32'h2700_0000;   // {SR,PC hi} at SSP
+            ram[32'h1004>>2] = 32'h2000_0000;   // {PC lo,fmtvec} at SSP+4
             @(posedge clk); #1;
             instr_word = 16'h4E73; instr_valid = 1'b1;
             repeat(300) begin

@@ -16,11 +16,31 @@
 // address = new_ssp + step_rem * 4.  Format $0 needs 2 writes; format $B
 // needs 23 writes.
 //
-// Formats $0/$2/$3 are fully populated.
-// Formats $9/$A/$B: steps 0-3 carry the core fault snapshot; step 4 carries
-// the Data Output Buffer (DOB) captured from the BIU at fault time; steps 5+
-// are zero (internal pipeline state — FPU not implemented).
-// The bus-error frame format code ($9/$A/$B) is determined by biu_exc_capture
+// docs/*.md review (Phase 250, frame layout fix): the real byte layout
+// (confirmed directly against MC68030UM.pdf Table 8-6/Figure 4-1, identical
+// across every format) is SR alone at SP+0, PC (32-bit) at SP+2, the
+// format/vector word alone at SP+6 -- packed as two longword writes,
+// {SR,PC[31:16]} then {PC[15:0],fmtvec}, NOT {fmtvec,SR} then PC as this
+// file previously implemented (an RTE-consistent but real-silicon-wrong
+// layout no test had ever independently verified against raw frame bytes).
+// "Format $3" (FMT_ADDR, 8 words) never existed on real 68030 silicon either
+// -- confirmed via Table 8-6 (no $3 entry in either sheet) and 8.1.3's own
+// text ("Either a short or long bus fault stack frame may be generated" for
+// Address Error) -- removed; address errors now select $A the same way an
+// instruction-fetch bus error does (this project's own addr_err_req is fed
+// only from instruction-fetch address errors, never EU-side data address
+// errors, which aren't wired into this controller at all -- a separate,
+// pre-existing, out-of-scope gap).
+//
+// Formats $0/$1/$2/$9 are fully populated (SR/PC/fmtvec prefix, then
+// Instruction Address for $2/$9 at SP+8 -- unaffected by the prefix fix,
+// already longword-aligned).
+// Formats $A/$B: SP+8=reserved(0), SP+$A=Special Status Word, SP+$C/E=
+// Instruction Pipe Stage C/B (not modeled, real silicon internal state --
+// left zero, same "FPU not implemented" treatment as steps 5+ elsewhere),
+// SP+$10=Data Cycle Fault Address (fault_addr), SP+$14=reserved(0),
+// SP+$18=Data Output Buffer, SP+$1C+=reserved(0).
+// The bus-error frame format code ($A/$B) is determined by biu_exc_capture
 // and passed in via bus_err_fmt; the EU/EXC module just consumes it.
 //
 // SR after exception: T1=0, T0=0, S=1, M=0, I=preserved (or updated for
@@ -139,7 +159,10 @@ module m68030_exc (
     // Frame format codes
     localparam [3:0] FMT_SHORT   = 4'h0;  //  4 words  (2 LW writes)
     localparam [3:0] FMT_INST    = 4'h2;  //  6 words  (3 LW writes)
-    localparam [3:0] FMT_ADDR    = 4'h3;  //  8 words  (4 LW writes)
+    // FMT_ADDR ("$3", 8 words) removed -- docs/*.md review (Phase 250 frame
+    // layout fix): does not exist on real 68030 silicon (confirmed via
+    // Table 8-6 -- no $3 entry -- and 8.1.3's own text). Address errors now
+    // select FMT_BUS_INS directly, same as an instruction-fetch bus error.
     localparam [3:0] FMT_FPU_PI  = 4'h4;  //  8 words  (4 LW writes)
     localparam [3:0] FMT_FPU_PR  = 4'h8;  // 29 words (15 LW + 1 word — stub)
     // docs/*.md review (Phase 250 F5): was FMT_MMU, "12 words, MMU short
@@ -211,7 +234,15 @@ module m68030_exc (
         pend_fmt    = FMT_SHORT;
         pend_is_int = 1'b0;
         if (addr_err_req) begin
-            exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_ADDR;
+            // docs/*.md review (Phase 250 frame layout fix): FMT_ADDR ("$3")
+            // never existed on real silicon -- address errors select the
+            // same $A/$B shape a bus error does. This project's own
+            // addr_err_req is fed only from instruction-fetch address
+            // errors (never EU-side data address errors, not currently
+            // wired into this controller at all), so FMT_BUS_INS (the same
+            // format an instruction-fetch bus error selects) applies
+            // unconditionally here.
+            exc_pending = 1'b1; pend_vec = VEC_ADDR_ERR; pend_fmt = FMT_BUS_INS;
         end else if (bus_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_BUS_ERR;  pend_fmt = bus_err_fmt;
         end else if (illegal_req) begin
@@ -284,7 +315,6 @@ module m68030_exc (
         case (snap_fmt_r)
             FMT_SHORT:   begin total_steps = 5'd2;  ssp_delta = 8'd8;  end
             FMT_INST:    begin total_steps = 5'd3;  ssp_delta = 8'd12; end
-            FMT_ADDR:    begin total_steps = 5'd4;  ssp_delta = 8'd16; end
             FMT_FPU_PI:  begin total_steps = 5'd4;  ssp_delta = 8'd16; end
             FMT_FPU_PR:  begin total_steps = 5'd15; ssp_delta = 8'd58; end  // 29 words → 14 LW + 1 word; use 15 LW (round up)
             FMT_CPMID:   begin total_steps = 5'd5;  ssp_delta = 8'd20; end
@@ -318,15 +348,32 @@ module m68030_exc (
     assign push_addr = new_ssp + {25'd0, step_rem, 2'b00};
 
     // -----------------------------------------------------------------------
-    // Push data for each step:
-    //   step 0: fault_pc  (PC; highest address = snap_ssp_r - 4)
-    //   step 1: {fmtvec, fault_sr}  (format/SR pair just below PC)
-    //   step 2: fault_addr  (instruction address for $2/$3; fault addr for others)
-    //   step 3: {fault_ssw, 16'h0}  (SSW + reserved; used by $3/$A/$B)
-    //   step 4: snap_dob_r (Data Output Buffer; formats $A/$B only -- real
-    //           Format $9/Coprocessor Mid-Instruction has no DOB field at
-    //           all, docs/*.md review Phase 250 F5, so it's excluded below)
-    //   step 5+: zeros (internal pipeline state; FPU not implemented)
+    // Push data for each step -- byte-correct layout (docs/*.md review,
+    // Phase 250 frame layout fix), confirmed directly against MC68030UM.pdf
+    // Table 8-6/Figure 4-1: SR alone at SP+0, PC (32-bit) at SP+2, the
+    // format/vector word alone at SP+6, identical across every format shown.
+    // As two longword bus writes: {SR,PC[31:16]} then {PC[15:0],fmtvec} --
+    // NOT {fmtvec,SR} then PC, which is what this file previously
+    // implemented (an RTE-consistent but real-silicon-wrong layout no test
+    // had ever independently checked against raw frame bytes).
+    //   step 0: {snap_sr_r, snap_pc_r[31:16]}  (SP+0: SR; SP+2: PC hi)
+    //   step 1: {snap_pc_r[15:0], fmtvec}      (SP+4: PC lo; SP+6: fmtvec)
+    //   step 2: fault_addr for $2/$9 (Instruction Address, SP+8 -- already
+    //           correctly longword-aligned, unaffected by the prefix fix);
+    //           {16'h0,fault_ssw} for $A/$B (Special Status Word, SP+$A --
+    //           SP+8 itself is reserved/zero, matching the real diagram)
+    //   step 3: zero for every format (Instruction Pipe Stage C/B for $A/$B,
+    //           SP+$C/$E -- real silicon internal state this project
+    //           doesn't track, same "FPU not implemented" treatment as
+    //           steps 5+; reserved for $9)
+    //   step 4: fault_addr for $A/$B only (Data Cycle Fault Address, SP+$10
+    //           -- moved from step 2, which is now SSW's own position)
+    //   step 5: zero (reserved, SP+$14)
+    //   step 6: snap_dob_r for $A/$B only (Data Output Buffer, SP+$18 --
+    //           moved from step 4; real Format $9/Coprocessor Mid-
+    //           Instruction has no DOB field at all, docs/*.md review Phase
+    //           250 F5, so it's excluded the same as before)
+    //   step 7+: zeros (internal pipeline state; FPU not implemented)
     // -----------------------------------------------------------------------
     logic [31:0] push_data;
     logic        fmt_is_fault;
@@ -335,15 +382,13 @@ module m68030_exc (
 
     // push_data is indexed by step_rem (= distance from lowest stack address).
     // step_rem=0 → lowest address (first word read by RTE), step_rem=N-1 → highest.
-    // This is format-agnostic: each slot always carries the same semantic field
-    // regardless of total frame length, so FMT_SHORT/FMT_INST/FMT_ADDR all work.
     always_comb begin
         case (step_rem)
-            5'd0:    push_data = {fmtvec, snap_sr_r};          // {format/vec, SR} — RTE phase 1
-            5'd1:    push_data = snap_pc_r;                    // return PC         — RTE phase 2
-            5'd2:    push_data = fault_addr;                   // instr/fault addr  — frame slot 2
-            5'd3:    push_data = {fault_ssw, 16'h0};           // fault SSW         — frame slot 3
-            5'd4:    push_data = fmt_is_fault ? snap_dob_r : 32'h0;
+            5'd0:    push_data = {snap_sr_r, snap_pc_r[31:16]};
+            5'd1:    push_data = {snap_pc_r[15:0], fmtvec};
+            5'd2:    push_data = fmt_is_fault ? {16'h0, fault_ssw} : fault_addr;
+            5'd4:    push_data = fmt_is_fault ? fault_addr : 32'h0;
+            5'd6:    push_data = fmt_is_fault ? snap_dob_r : 32'h0;
             default: push_data = 32'h0;
         endcase
     end
@@ -375,7 +420,12 @@ module m68030_exc (
     assign fmtvec1       = {4'h1, 2'b00, snap_vec_r, 2'b00};
     assign throwaway_sr  = snap_sr_r | 16'h2000;  // force S bit (bit 13) set
     assign push2_addr    = (push2_step_r == 5'd0) ? (new_isp_calc + 32'd4) : new_isp_calc;
-    assign push2_data    = (push2_step_r == 5'd0) ? snap_pc_r : {fmtvec1, throwaway_sr};
+    // docs/*.md review (Phase 250 frame layout fix): same byte-correct
+    // {SR,PC hi} then {PC lo,fmtvec} layout as the main frame's own push_data
+    // above -- this throwaway frame had the identical bug (SR+fmtvec packed
+    // at the low address, PC at the high address).
+    assign push2_data    = (push2_step_r == 5'd0) ? {snap_pc_r[15:0], fmtvec1}
+                                                   : {throwaway_sr, snap_pc_r[31:16]};
 
     // -----------------------------------------------------------------------
     // New SR: T1=0, T0=0, S=1, I=preserved (updated for interrupt). M is

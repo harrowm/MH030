@@ -486,9 +486,11 @@ module exception_tb;
         @(posedge clk); #1; ssp_wr_en = 0;
         repeat(2) @(posedge clk);
 
-        // FMTERR-01: format=0x1 (invalid) fires eu_fmt_err_req
-        ram[32'h100>>2] = 32'h1000_2700;  // format nibble=1, SR=0x2700
-        ram[32'h104>>2] = 32'h0000_5000;
+        // FMTERR-01: format=0x1 (invalid) fires eu_fmt_err_req. docs/*.md
+        // review (Phase 250 frame layout fix): real byte layout is
+        // {SR,PC hi} then {PC lo,fmtvec}, not {fmtvec,SR} then PC.
+        ram[32'h100>>2] = 32'h2700_0000;  // {SR,PC hi}
+        ram[32'h104>>2] = 32'h5000_1000;  // {PC lo, fmtvec(format nibble=1)}
         fmt_err_seen = 0;
         @(posedge clk); #1;
         instr_word = 16'h4E73; instr_valid = 1;
@@ -507,8 +509,10 @@ module exception_tb;
         ssp_wr_data = 32'h100; ssp_wr_en = 1;
         @(posedge clk); #1; ssp_wr_en = 0;
         repeat(2) @(posedge clk);
-        ram[32'h100>>2] = 32'h0000_2700;  // format nibble=0, SR=0x2700
-        ram[32'h104>>2] = 32'h0000_5000;  // new PC
+        // docs/*.md review (Phase 250 frame layout fix): real byte layout,
+        // same as FMTERR-01 above.
+        ram[32'h100>>2] = 32'h2700_0000;  // {SR,PC hi}
+        ram[32'h104>>2] = 32'h5000_0000;  // {PC lo(new PC), fmtvec(format nibble=0)}
         saw_branch = 0; saw_fmt_err = 0;
         @(posedge clk); #1;
         instr_word = 16'h4E73; instr_valid = 1;

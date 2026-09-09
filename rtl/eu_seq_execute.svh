@@ -208,8 +208,14 @@
     // RTE two-phase read state (mirrors RTR; declared early for stall/an_wr assigns)
     logic        rte_phase_r;
     logic [15:0] rte_sr_r;
+    logic [15:0] rte_pc_hi_r;      // docs/*.md review (Phase 250 frame layout
+                                    // fix): PC's own high half now arrives in
+                                    // phase 0's own read (real layout has PC
+                                    // spanning both longwords, not confined
+                                    // to phase 1 the way the old {fmtvec,SR}+
+                                    // PC packing allowed) -- latched here,
+                                    // combined with phase 1's low half.
     logic [31:0] rte_a7_next_r;
-    logic  [7:0] rte_fmt_skip_r;  // extra bytes beyond base 8 determined by frame format
     logic        rte_sr_wr_en;    // combinational: fire full-SR write when phase-2 acks
     logic        rte_an_wr_en;    // combinational: update A7 when phase-2 acks
 
@@ -2488,20 +2494,36 @@
         end
     end
 
-    // RTE two-phase read FSM (mirrors RTR pattern)
+    // RTE two-phase read FSM (mirrors RTR pattern). docs/*.md review
+    // (Phase 250 frame layout fix): phase 0's own read at A7 now returns
+    // {SR, PC[31:16]} (real Format $0's own SR-then-PC-high longword, not
+    // the old {format_word,SR} packing) -- SR moves to the upper half, and
+    // PC's own high half is latched here (rte_pc_hi_r) since it's no
+    // longer available in a single phase-1 read. The format nibble itself
+    // (needed for rte_frame_extra's own byte-skip sizing) has moved to
+    // phase 1's own read (real fmtvec sits at SP+6, in the SAME longword as
+    // PC's low half) -- computed directly from the live mem_rdata at the
+    // point of use (an_wr_data, below) instead of through a registered
+    // rte_fmt_skip_r: a first attempt registered it here, but since its own
+    // consumer (rte_an_wr_en/ex_rte_taken) fires the SAME cycle as this
+    // phase-1 transition, a non-blocking capture on this edge is still the
+    // OLD value when an_wr_data reads it that same cycle -- a real
+    // same-cycle read-before-write hazard, caught via a live regression
+    // (JSR-01/02 in tb/system_tb.sv corrupted ISP after an intervening RTE
+    // test) before it shipped, not guessed at.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             rte_phase_r   <= 1'b0;
             rte_sr_r      <= 16'h0;
+            rte_pc_hi_r   <= 16'h0;
             rte_a7_next_r <= 32'h0;
-            rte_fmt_skip_r <= 8'h0;
-        end else if (ex_valid && ex_is_rte && !rte_phase_r && mem_ack && !eu_fmt_err_req) begin
+        end else if (ex_valid && ex_is_rte && !rte_phase_r && mem_ack) begin
             rte_phase_r    <= 1'b1;
-            rte_sr_r       <= mem_rdata[15:0];   // SR from {format_word, SR} longword at A7
+            rte_sr_r       <= mem_rdata[31:16];  // SR from {SR, PC hi} longword at A7
+            rte_pc_hi_r    <= mem_rdata[15:0];   // PC[31:16], same longword
             rte_a7_next_r  <= ex_ea + 32'd4;     // A7+4; phase 2 will add 4 + skip
-            rte_fmt_skip_r <= rte_frame_extra(mem_rdata[31:28]);
         end else if (ex_valid && ex_is_rte && rte_phase_r && mem_ack) begin
-            rte_phase_r   <= 1'b0;
+            rte_phase_r    <= 1'b0;
         end else if (ex_valid && ex_is_rte && rte_phase_r && mem_abort) begin
             // A fault on the second (PC) read aborts RTE — must explicitly
             // reset here or this stays stuck for the next RTE instruction.
@@ -4419,7 +4441,11 @@
         an_wr_data = wb_an_upd_new;
         if      (movem_an_wr_en)       begin an_wr_sel = movem_an_r;           an_wr_data = movem_an_final;                              end
         else if (rtr_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rtr_an_wr_data;                              end
-        else if (rte_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rte_a7_next_r + 32'd4 + {24'h0, rte_fmt_skip_r}; end
+        // docs/*.md review (Phase 250 frame layout fix): skip amount now
+        // computed directly from the live phase-1 read (mem_rdata[15:12],
+        // the format nibble in {PC lo,fmtvec}) rather than a registered
+        // rte_fmt_skip_r -- see the RTE FSM's own comment above for why.
+        else if (rte_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rte_a7_next_r + 32'd4 + {24'h0, rte_frame_extra(mem_rdata[15:12])}; end
         else if (addx_ay_wr_en)        begin an_wr_sel = addx_ay_reg_r;        an_wr_data = addx_ay_addr_r;                              end
         else if (addx_ax_wr_en)        begin an_wr_sel = addx_ax_reg_r;        an_wr_data = addx_ax_addr_r;                              end
         else if (pack_ay_wr_en)        begin an_wr_sel = pack_mem_ay_reg_r;    an_wr_data = pack_mem_ay_addr_r;                          end
@@ -4638,7 +4664,16 @@
     assign branch_target = dec_branch_taken                         ? (decode_pc    + 32'd2 + dec_branch_disp)
                          : ex_dbcc_taken                            ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
                          : ex_bsr_taken                             ? ex_bsr_target
-                         : (ex_rts_taken || ex_rtr_taken || ex_rte_taken) ? mem_rdata
+                         // docs/*.md review (Phase 250 frame layout fix):
+                         // RTE's own phase-1 read is now {PC lo, fmtvec}
+                         // (real Format $0's own layout), not the whole PC
+                         // the old {fmtvec,SR}+PC packing allowed -- combine
+                         // with rte_pc_hi_r (latched at phase 0). RTS/RTR
+                         // are unaffected -- neither uses the real exception
+                         // frame layout at all (RTS pops a bare PC; RTR
+                         // pops its own separate CCR+PC pseudo-frame).
+                         : (ex_rts_taken || ex_rtr_taken)  ? mem_rdata
+                         : ex_rte_taken                    ? {rte_pc_hi_r, mem_rdata[31:16]}
                          // 10-item backlog Stage 9b (plan.md): JMP's own
                          // genuine memory-indirect target -- same resolved-
                          // address formula as LEA's own memind_addr_wr_data.
@@ -4669,20 +4704,25 @@
     // Format Error — RTE with unrecognised frame format code fires vector 14.
     // The first RTE longword at A7 is {format_word, SR}; format code in mem_rdata[31:28].
     // Valid codes: $0, $2, $3, $4, $8, $9, $A, $B.  All others raise Format Error.
+    // docs/*.md review (Phase 250 frame layout fix): "$3" removed -- does
+    // not exist on real 68030 silicon (Table 8-6 has no $3 entry; 8.1.3's
+    // own text says Address Error uses the same $A/$B shape Bus Error
+    // does). A real RTE encountering format nibble 3 correctly rejects it
+    // as Format Error now, matching every other unrecognized code.
     function automatic logic rte_fmt_valid(input logic [3:0] code);
         case (code)
-            4'h0, 4'h2, 4'h3, 4'h4, 4'h8, 4'h9, 4'hA, 4'hB: return 1'b1;
+            4'h0, 4'h2, 4'h4, 4'h8, 4'h9, 4'hA, 4'hB: return 1'b1;
             default: return 1'b0;
         endcase
     endfunction
 
-    // Extra bytes to pop beyond the base 8 (2 LW: {fmtvec,SR} + PC) already consumed.
-    // Frame sizes: $0=2LW $2=3LW $3=4LW $4=8LW $8=29LW $9=12LW $A=16LW $B=46LW
+    // Extra bytes to pop beyond the base 8 (2 LW: {SR,PC hi} + {PC lo,fmtvec})
+    // already consumed. Frame sizes: $0=2LW $2=3LW $4=8LW $8=29LW $9=12LW
+    // $A=16LW $B=46LW
     function automatic logic [7:0] rte_frame_extra(input logic [3:0] code);
         case (code)
             4'h0:    return 8'd0;    // 8 bytes total
             4'h2:    return 8'd4;    // 12 bytes total (TRAPV, CHK)
-            4'h3:    return 8'd8;    // 16 bytes total
             4'h4:    return 8'd24;   // 32 bytes total
             4'h8:    return 8'd108;  // 116 bytes total
             4'h9:    return 8'd40;   // 48 bytes total
@@ -4696,8 +4736,13 @@
     // state-frame format word (Section 10.5.1.5) -- architecturally the same
     // Format Error exception RTE's own bad stack-frame format triggers, just a
     // different trigger source.
-    assign eu_fmt_err_req = (ex_valid && ex_is_rte && !rte_phase_r && mem_ack &&
-                             !rte_fmt_valid(mem_rdata[31:28])) ||
+    //
+    // docs/*.md review (Phase 250 frame layout fix): the format nibble now
+    // arrives in phase 1's own read (real fmtvec sits at SP+6, packed with
+    // PC's low half, not phase 0's own {format_word,SR} the old layout
+    // packed it into) -- moved from !rte_phase_r to rte_phase_r accordingly.
+    assign eu_fmt_err_req = (ex_valid && ex_is_rte && rte_phase_r && mem_ack &&
+                             !rte_fmt_valid(mem_rdata[15:12])) ||
                             cpsr_fmt_err_w;
 
     // STOP — SR write fires first cycle STOP is in EX (before stop_r is set)
@@ -4768,7 +4813,7 @@
                        (cas2_rd2_r || cas2_wr1_r || cas2_wr2_r) ? cas2_siz_r :
                        (cpsr_mem_fmt_r || cpsr_xfer_mem_r) ? 2'b00 :  // always longword
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
-                       (ex_is_rte && !rte_phase_r) ? 2'b00 :  // longword: reads {format_word,SR} together
+                       (ex_is_rte && !rte_phase_r) ? 2'b00 :  // longword: reads {SR, PC hi} together (real Format $0's own SP+0 layout)
                        (ex_mem_rd_siz != 2'b00)    ? ex_mem_rd_siz :
                        ex_siz;
     // MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)

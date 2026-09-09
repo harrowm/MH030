@@ -158,26 +158,34 @@ def build_patches(test):
     # Active A7: SSP in supervisor mode, USP in user mode
     a7_val = ini['ssp'] if (ini['sr'] & 0x2000) else ini['usp']
 
-    # RTE (0x4E73) needs a synthesized frame-format word ahead of the Harte
-    # test's own stack data. The Harte corpus is captured on 68000 hardware,
-    # whose RTE frame is just {SR, PC} (3 words, no format field — a 68010+
-    # concept). Our 68030 RTL's RTE unconditionally reads a leading longword
-    # as {format/vector nibble, SR} first (m68030_exc.sv / eu_seq.sv's
-    # eu_is_rte handling), so replaying 68000 stack bytes as-is would have the
-    # 68030 misinterpret the top SR byte as a format code and misparse
-    # everything after. Since we control the initial stack contents entirely
-    # (via build_patches(), not the reference), we can make this replayable:
-    # place a format-$0 word (0x0000 — valid, 0 extra bytes per
-    # rte_frame_extra()) immediately below the test's own {SR,PC} bytes, and
-    # start the CPU's SSP 2 bytes lower so RTE reads {0x0000, SR} as its first
-    # longword exactly where the format word now lives, then continues into
-    # the unmodified SR/PC bytes already placed by the "test data" patch pass
-    # below. Final SSP naturally comes out matching the reference's
-    # ini_ssp+6 (68000: SR+PC popped) once shifted by this same 2-byte offset,
-    # since our frame is 2 bytes longer (format word + SR + PC = 8 bytes vs.
-    # the reference's SR + PC = 6) — no extra final-SSP adjustment needed.
+    # RTE (0x4E73) needs a synthesized frame-format word. The Harte corpus is
+    # captured on 68000 hardware, whose RTE frame is just {SR, PC} (3 words,
+    # no format field — a 68010+ concept). Our 68030 RTL's RTE genuinely
+    # requires a real format/vector word (m68030_exc.sv / eu_seq.sv's
+    # eu_is_rte handling), so replaying 68000 stack bytes as-is is
+    # incomplete — the RTL would read past the reference's own 6 bytes into
+    # whatever memory happens to sit there.
+    #
+    # docs/*.md review (Phase 250 frame layout fix): the real byte layout is
+    # SR alone at SP+0, PC (32-bit) at SP+2, format/vector alone at SP+6 —
+    # read as two longwords {SR,PC hi} then {PC lo,fmtvec}. This lines up
+    # with the reference's own {SR,PC} bytes with NO initial-SSP shift at
+    # all (a7_init_val = a7_val exactly): {SR,PC hi} is precisely Harte's
+    # own first longword, and PC lo is precisely the upper half of Harte's
+    # own second word — only the format word (the LOWER half of that second
+    # longword, immediately past the reference's own 6 bytes) needs
+    # synthesizing, at a7_val+6. (An earlier version of this fix shifted
+    # a7_init_val by -2 to align with this RTL's own OLD, since-corrected
+    # {fmtvec,SR}+PC layout — that shift does not apply here, since SR and
+    # fmtvec have swapped which word of which longword they occupy.)
+    #
+    # Since our frame is 8 bytes (format word + SR + PC) vs. the reference's
+    # 6 (SR + PC), the final SSP comes out 2 bytes higher than the
+    # reference's own ini_ssp+6 — compensated in run_harte.compare() instead
+    # of via an initial-SSP trick this time, since there's no shift left to
+    # absorb it into.
     is_rte = ini['prefetch'][0] == 0x4E73
-    a7_init_val = (a7_val - 2) & 0xFFFFFFFF if is_rte else a7_val
+    a7_init_val = a7_val
 
     # RTS/RTE/RTR (is_ret_taken, see can_run()'s matching definition): these
     # can restore an odd PC, which a real 68030 correctly Address-Error-traps
@@ -257,6 +265,25 @@ def build_patches(test):
     if priv_drop:
         patch(RELOC_VBR + PRIV_VEC_OFFSET, _long(PRIV_HANDLER_ADDR))
         patch(PRIV_HANDLER_ADDR, _word(0x4E72) + _word(0x2700))  # STOP #$2700
+
+    # ── Vector-9 (Trace) table entry, relocated ───────────────────────────────
+    # docs/*.md review (Phase 250 frame layout fix): RTE can restore a T1=1
+    # (or T0=1 with the next instruction a flow-change) SR, which correctly
+    # forces a real Trace exception once the very next instruction retires --
+    # confirmed via direct signal tracing, not guessed at (decode_pc genuinely
+    # advanced past the restored PC's own first instruction before exc_active
+    # asserted). The old, since-fixed RTL frame layout never exposed this: its
+    # own wrong SR/PC reconstruction essentially never landed on real,
+    # executable code with a genuine T1=1 SR, so this gap was never
+    # triggered. Same shape as vector-3 above: point straight at the STOP+NOP
+    # runway (instr_src+instr_len) rather than a separate handler stub --
+    # the traced instruction has already retired for real by the time trace
+    # fires, so its own side effects are already reflected in DUT state;
+    # landing on the runway just lets the test terminate normally afterward.
+    # Installed unconditionally for every RTE test (not just ones with a
+    # T1=1 restored SR) since an unused vector entry is harmless.
+    if is_rte:
+        patch(RELOC_VBR + 36, _long(instr_src + instr_len))  # vector 9 = VBR+9*4
 
     patch(RESET_PC, bytes(code))
 
@@ -363,11 +390,12 @@ def build_patches(test):
             patches[dst_ext_msk_addr] = dst_hi & 0xF8  # clear bit8 + scale[1:0]
 
     # ── RTE synthesized format word (see a7_init_val comment above) ──────────
-    # Placed after the ini['ram'] test-data pass so it always wins; a7_val-2
+    # Placed after the ini['ram'] test-data pass so it always wins; a7_val+6
     # is outside the range the reference test itself ever populates (its own
-    # stack data starts at a7_val), so this can't collide with real test bytes.
+    # stack data is only 6 bytes, a7_val through a7_val+5), so this can't
+    # collide with real test bytes.
     if is_rte:
-        patch(a7_init_val, _word(0x0000))
+        patch(a7_val + 6, _word(0x0000))
 
     # ── STOP + NOP runway (placed last so they always win over ini['ram'] data) ─
     stop_addr = instr_src + instr_len

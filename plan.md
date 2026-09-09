@@ -821,3 +821,162 @@ list except F6 (investigated, deferred, documented above — the only
 item left open, by explicit choice given its own real risk to RTE's
 delicate FSM). See `CLAUDE.md`'s own Phase 250 F10 summary for the
 condensed version of this writeup.
+
+## Exception frame layout fix (Part A of a 2-part plan, IMPLEMENTED AND VERIFIED)
+
+A side finding from F9's own investigation (not one of the original
+10-item findings list): every exception frame format packed
+`{format/vector, SR}` as the first longword and PC as the second.
+Confirmed real via direct inspection of MC68030UM.pdf Table 8-6 (both
+sheets) and Figure 4-1 — identical across every format shown — real
+silicon's layout is genuinely different in kind, not just reordered: SR
+alone at SP+0, PC (32-bit) at SP+2, the format/vector word alone at
+SP+6. Internally self-consistent (the same code both pushes and later
+pops its own frames via RTE), so it never surfaced as an observable
+failure across 250 prior phases — confirmed via grep that no existing
+test ever inspected raw frame memory.
+
+A second, closely related fabrication was found and removed while
+re-deriving the layout: "Format $3, 8 words, Address Error" never
+existed on real silicon either. Table 8-6 has no $3 entry in either
+sheet, and §8.1.3 states plainly that Address Error uses "either a short
+or long bus fault stack frame" — the same $A/$B selection Bus Error
+already uses. The same shape as the already-fixed old "$9, MMU short bus
+fault" fabrication (Phase 250 F5). Address errors now select $A
+unconditionally, since this project's own `addr_err_req` is fed only
+from instruction-fetch address errors (`ifu_addr_err_int`) — EU-side
+data address errors are computed (`eu_addr_err`) but never wired into
+the exception controller at all, a separate, pre-existing, out-of-scope
+gap confirmed via grep, not touched here.
+
+**Implementation**: `rtl/m68030_exc.sv`'s `push_data` table reshaped to
+the byte-correct longword pairs (`{SR,PC[31:16]}` then
+`{PC[15:0],fmtvec}`); `$A`/`$B`'s own longer tail remapped to its real
+offsets (SSW moved from its old step-3 position to step 2/SP+$A; Data
+Cycle Fault Address — this project's own `fault_addr` — moved from step
+2/SP+8 to its real step 4/SP+$10; Data Output Buffer moved from step
+4/SP+$10 to its real step 6/SP+$18; Instruction Pipe Stage C/B, SP+$C/E,
+have no real content this project tracks and stay zero, same "FPU not
+implemented" treatment as steps 5+/7+ elsewhere); `$9`'s own stray
+unconditional SSW write at the old step 3 — a third, small, adjacent bug
+found during this same re-derivation, since real Format $9 has no SSW
+field at all there — fixed with the same `fmt_is_fault` exclusion step 4
+(DOB) already had. `$2`/`$9`'s own Instruction Address field (step
+2/SP+8) needed no change — already correctly longword-aligned regardless
+of the prefix fix. `FMT_ADDR` removed entirely (localparam, its
+`total_steps`/`ssp_delta` case entry, its `pend_fmt` assignment). The
+throwaway Format $1 frame (`push2_data`/`push2_addr`, pushed to ISP on
+an M=1 interrupt) had the identical bug shape and got the identical fix.
+
+`rtl/eu_seq_execute.svh`'s RTE two-phase read reshaped to match: phase 0
+(read at `ex_ea`=A7) now captures `mem_rdata[31:16]` as SR (was
+`mem_rdata[15:0]`) and a new `rte_pc_hi_r` register captures
+`mem_rdata[15:0]` as PC's own high half (previously unnecessary — the
+whole PC arrived in one phase-1 read under the old layout). Phase 1
+(read at `rte_a7_next_r`=A7+4) now supplies PC's low half
+(`mem_rdata[31:16]`, combined with `rte_pc_hi_r` in `branch_target`'s own
+`ex_rte_taken` branch) and the format nibble (`mem_rdata[15:12]`, moved
+from phase 0's own top nibble) for both `eu_fmt_err_req`'s format-
+validity check and `rte_frame_extra`'s own byte-skip sizing — both
+functions had their own `4'h3` case removed too, matching the `FMT_ADDR`
+removal (a real RTE now correctly rejects format nibble 3 as Format
+Error, same as any other unrecognized code).
+
+**Found and fixed one real, previously-latent bug in the RTE fix's own
+first attempt, caught via a live regression (not guessed at)**: a new
+`rte_fmt_skip_r` register, introduced to hold the format-derived skip
+amount from phase 1's read for use in the final A7 write, created a
+genuine same-cycle read-before-write hazard — its own consumer
+(`rte_an_wr_en`/`ex_rte_taken`, `an_wr_data`'s own formula) fires the
+IDENTICAL cycle the register's own non-blocking update lands, reading
+the stale (pre-update) value. First symptom: `tb/system_tb.sv`'s
+JSR-01/JSR-02 corrupted ISP after an intervening RTE test (RTE's own
+final A7 write used a stale skip amount, later silently overwriting
+JSR's own explicit `set_isp` call after a pipeline delay). Root-caused
+via direct comparison against a git-stashed true baseline (which showed
+these tests passing silently, confirming a real regression, not a
+pre-existing gap) and fixed by computing the skip amount combinationally
+from the live `mem_rdata` at the point of use (`an_wr_data`'s own
+formula calls `rte_frame_extra(mem_rdata[15:12])` directly) instead of
+through a register — `rte_fmt_skip_r` removed entirely.
+
+**Testbench fixes**: roughly a dozen hand-crafted RTE/format-error test
+frames across `tb/stall_fsm_tb.sv` (B-16's own shared frame at
+0x3400/0x3404, reused by BERR-mid-RTE; INT-mid-RTE's own frame at
+0x2950/0x2954; T4h's own frame at 0x3970/0x3974; this session's own F9
+trace-handler ANDI, which needs to revert from `(2,A7)` back to plain
+`(A7)` now that SR genuinely lives at the frame's own lowest address),
+`tb/system_tb.sv` (RTE-01/02/03's own hand-loaded `ram[]` frame),
+`tb/exception_tb.sv` (FMTERR-01/02's own hand-loaded format-nibble
+bytes), and `tb/exc_tb.sv` (every EXC-N test's own detailed push-data
+expected values, re-derived by hand and cross-checked against the RTL's
+own actual output before committing to new expected constants) all
+encoded the old (now-wrong) layout and needed updating. `tb/exc_tb.sv`'s
+own detailed push-data checks (every implemented format, every step
+position) are now the closest thing this project has to independent
+frame-content verification, since no test anywhere dumps raw frame bytes
+end-to-end through the full pipeline.
+
+**A genuine full Harte-sweep regression surfaced during verification,
+root-caused to test-harness scripts, not this project's own RTL, and
+fixed at its source** — the most involved part of this whole fix.
+Initial full-sweep runs showed the RTE suite (4011 runnable vectors)
+mostly FAIL/TIMEOUT. Direct investigation (comparing a git-stashed true
+baseline against the fixed code through the SAME freshly-rebuilt
+`sim/harte_batch` binary — the tool CLAUDE.md documents as what
+verification gates actually use, `sim/harte_dat`/`run_harte.py`'s own
+single-process tool turned out to be independently stale/broken and
+unrelated to this investigation, a dead end not worth chasing further)
+confirmed: baseline was genuinely clean (4011/4011), the fixed code
+genuinely regressed. Root cause: `scripts/gen_harte_hex.py` has a
+long-standing, hand-built workaround for RTE specifically, since the
+Harte corpus is captured on real 68000 hardware, whose native RTE frame
+is just {SR,PC} (3 words, no format field at all — a 68010+ concept).
+The script synthesizes a format word and shifts the test's own initial
+SSP by -2 bytes so the synthetic-plus-real bytes line up with whatever
+this RTL's own RTE actually reads — a shift hand-tuned specifically for
+the OLD `{fmtvec,SR}`+`PC` layout. Fixed: no initial shift needed at all
+for the new layout (Harte's own real SR/PC bytes already sit exactly
+where phase 0/1 expect them), the synthesized format word instead goes
+at `a7_val+6` (immediately past the reference's own 6 real bytes, still
+provably collision-free), and `scripts/run_harte.py`'s own `compare()`
+gained a matching `+2` final-SSP compensation (the old version absorbed
+this into the shift itself; the new layout has no shift left to absorb
+it into).
+
+A second, deeper, previously-latent gap surfaced during this SAME
+investigation, independent of the frame-layout fix itself: some RTE test
+vectors restore a `T1=1` (or `T0=1` with a flow-change next instruction)
+SR. Direct signal tracing (`u_top.ifu_decode_pc`, `u_top.exc_active`,
+temporary and since removed) confirmed this project's own trace
+mechanism handles it correctly — decode_pc genuinely advanced past the
+restored PC's own first instruction (its side effects already retired)
+before a real Trace exception dispatched, exactly matching real
+architecture (and exactly matching this same session's own F9
+investigation of STOP+trace interaction). But `gen_harte_hex.py` never
+installed a vector-9 (Trace) handler for RTE tests — only vector-3
+(Address Error, for `is_ret_taken`'s own odd-restored-PC case) and
+vector-8 (Privilege Violation) ever got real handler installations. With
+no real vector-9 entry, the CPU fetched a garbage PC from VBR+36 and the
+test hung. The OLD (wrong) RTL frame layout apparently never triggered
+this in 250 prior phases of Harte sweeps: its own garbled reconstruction
+essentially never produced a genuinely valid, directly-executable
+restored PC with a real `T1=1` SR at the same time, so the gap sat
+latent until the layout fix made RTE's own reconstruction correct enough
+to actually reach it. Fixed by installing vector 9 unconditionally for
+every RTE test, pointing at the same STOP+NOP runway vector-3 already
+uses (`instr_src + instr_len`) — mirrors the existing pattern exactly,
+verified harmless when trace never actually fires.
+
+**Verification**: `tb/exc_tb.sv` ALL EXC TESTS PASSED (29 individually
+re-derived checks); full mandatory gate clean (`make test` 37/37,
+`cosim_grp` 8/8, `cosim_memind` 28/28, `dat-synth` 50/50); full 124-suite
+Harte sweep bit-identical to true baseline (`PASS 702142 FAIL 2`
+[documented ASL.b corpus anomaly] `SKIP 281221 TIMEOUT 0`), including
+the RTE suite specifically now at a clean 4011/4011 (was failing before
+the two script fixes above).
+
+**This closes Part A.** Part B (genuine double-bus-fault detection,
+correcting `halt_out`/the F10 STATUS pin) follows as a fully separate,
+independently-verified effort per the approved 2-part plan
+(`~/.claude/plans/wobbly-honking-cascade.md`).

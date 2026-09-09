@@ -338,28 +338,22 @@ module stall_fsm_tb;
     // F9 (STOP + trace interaction, plan.md's Phase 250 findings list):
     // STOP_OP takes a 16-bit immediate SR extension word. MOVE_W_IMM_SR
     // (0000_oo0_0_ss_mmm_rrr with oo=6=MOVE-to-SR special opcode 0100_0110
-    // 11_111_100) loads SR from an immediate. ANDI_W_A7_D16 (0000_001_0_01_
-    // 101_111, ANDI ooo=001, size=01=word, mode=101=(d16,An), reg=111=A7,
-    // displacement=+2) is used by the trace handler to clear the stacked
-    // frame's own T1 bit before RTE, mirroring how real trace-handling
-    // software must behave to stop re-tracing every subsequent instruction
-    // -- confirmed against eu_seq_tb.sv's own documented immediate-opcode
-    // format comment ("ooo=001(ANDI)"). The +2 displacement is real, not
-    // an off-by-one guess: a direct rom[] dump (F9's own debug trace) found
-    // this RTL's own Format $0 frame packs {fmtvec, SR} together as ONE
-    // longword at the frame's LOW address (fmtvec upper 16 bits, SR lower
-    // 16 bits) with PC at the frame's HIGH address instead -- a genuinely
-    // different physical layout than the real 68030's own documented SR/
-    // PC/format-vector ordering (SR lowest, PC middle, format/vector
-    // highest), though internally self-consistent (the same RTL constructs
-    // and later pops its own frames, and no existing test independently
-    // dumps raw frame memory to have ever caught this either way -- see
-    // this session's own writeup for the full flag; not investigated
-    // further here, out of scope for F9 itself). (A7) alone addresses the
-    // fmtvec half; (2,A7) is the actual SR half.
+    // 11_111_100) loads SR from an immediate. ANDI_W_A7 (0000_001_0_01_
+    // 010_111, ANDI ooo=001, size=01=word, mode=010=(An), reg=111=A7) is
+    // used by the trace handler to clear the stacked frame's own T1 bit
+    // before RTE, mirroring how real trace-handling software must behave
+    // to stop re-tracing every subsequent instruction -- confirmed against
+    // eu_seq_tb.sv's own documented immediate-opcode format comment
+    // ("ooo=001(ANDI)"). Plain (A7), no displacement: F9's own original
+    // investigation found the RTL's Format $0 frame packed {fmtvec,SR} at
+    // the LOW address with PC at the HIGH address (needing a +2
+    // displacement to reach SR specifically) -- that was a real, confirmed
+    // compliance bug, since fixed (see the frame layout fix elsewhere in
+    // this session's own history/plan.md): SR now lives alone at the
+    // frame's own lowest address, exactly (A7), matching real silicon.
     localparam STOP_OP          = 16'h4E72;
     localparam MOVE_W_IMM_SR    = 16'h46FC;
-    localparam ANDI_W_A7_D16    = 16'h026F;
+    localparam ANDI_W_A7        = 16'h0257;
     // MOVEM.L D0/D1,-(A0): store form, mask bit15=D0,bit14=D1 (predecrement
     // mask order is reversed from the increment form used in B-2).
     localparam MOVEM_L_PREDEC_A0 = 16'h48E0;
@@ -889,10 +883,14 @@ module stall_fsm_tb;
         // -----------------------------------------------------------------
         rom[16'h1300/4] = {MOVEA_L_IMM_A7, 16'h0000};
         rom[16'h1304/4] = {16'h3400, RTE_OP};
-        // Frame at 0x3400: {format=0,vector=0}/SR=0x2000 longword, then PC
-        // longword (4-byte aligned, no misalignment this time).
-        rom[16'h3400/4] = {16'h0000, 16'h2000};
-        rom[16'h3404/4] = 32'h0000_1308;
+        // Frame at 0x3400: byte-correct real Format $0 layout (docs/*.md
+        // review, Phase 250 frame layout fix -- confirmed against
+        // MC68030UM.pdf Table 8-6/Figure 4-1: SR at SP+0, PC at SP+2,
+        // format/vector word at SP+6, as two longwords {SR,PC hi} then
+        // {PC lo,fmtvec} -- NOT {fmtvec,SR} then PC as this file previously
+        // encoded by hand, matching the RTL's own prior (wrong) convention).
+        rom[16'h3400/4] = {16'h2000, 16'h0000};   // SR=0x2000, PC hi=0x0000
+        rom[16'h3404/4] = {16'h1308, 16'h0000};   // PC lo=0x1308, fmtvec=0 (format 0, vector 0)
         // 0x1308: dependent instruction
         rom[16'h1308/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h130C/4] = {16'h0000, 16'd908};
@@ -3176,8 +3174,11 @@ module stall_fsm_tb;
         // above (0x2940's own tail, at 0x2948).
         rom[16'h2948/4] = {MOVEA_L_IMM_A7, 16'h0000};
         rom[16'h294C/4] = {16'h2950, RTE_OP};
-        rom[16'h2950/4] = {16'h0000, 16'h2000};   // fmt/vec=0, SR=0x2000 (S=1)
-        rom[16'h2954/4] = 32'h0000_2960;          // PC -> dependent instr
+        // Byte-correct real Format $0 layout (docs/*.md review, Phase 250
+        // frame layout fix) -- see B-16's own comment above for the full
+        // derivation.
+        rom[16'h2950/4] = {16'h2000, 16'h0000};   // SR=0x2000 (S=1), PC hi=0
+        rom[16'h2954/4] = {16'h2960, 16'h0000};   // PC lo -> dependent instr, fmt/vec=0
         rom[16'h2960/4] = {CLR_L_D5, ADDI_L_D5};
         rom[16'h2964/4] = {16'h0000, 16'd9008};
 
@@ -3437,8 +3438,10 @@ module stall_fsm_tb;
         // unambiguous proof TAS genuinely executed right where RTE's
         // redirect landed, matching INT-mid-RTR/RTE's own established
         // frame layout (format-$0, SR restored with S=1).
-        rom[16'h3970/4] = {16'h0000, 16'h2000};  // fmt/vec=0, SR=0x2000 (S=1)
-        rom[16'h3974/4] = 32'h0000_3DA8;         // PC -> TAS, right after the redirect
+        // Byte-correct real layout (docs/*.md review, Phase 250 frame
+        // layout fix) -- see B-16's own comment for the full derivation.
+        rom[16'h3970/4] = {16'h2000, 16'h0000};  // SR=0x2000 (S=1), PC hi=0
+        rom[16'h3974/4] = {16'h3DA8, 16'h0000};  // PC lo -> TAS, right after the redirect; fmt/vec=0
         rom[16'h3980/4] = 32'h0011_2233;         // TAS target; top byte 0 -> TAS sets bit7 -> 0x80
         rom[16'h3D98/4] = {MOVEA_L_IMM_A0, 16'h0000};
         rom[16'h3D9C/4] = {16'h3980, MOVEA_L_IMM_A7};
@@ -3575,10 +3578,10 @@ module stall_fsm_tb;
         // exceptions instead of genuinely quiescent going into
         // SPURIOUS-INT. D6=54321 proves the handler itself ran (and, via
         // the dependent-marker check below, ran exactly once).
-        rom[16'h00B0/4] = {ANDI_W_A7_D16, 16'h7FFF};
-        rom[16'h00B4/4] = {16'h0002, CLR_L_D6};
-        rom[16'h00B8/4] = {ADDI_L_D6, 16'h0000};
-        rom[16'h00BC/4] = {16'd54321, RTE_OP};
+        rom[16'h00B0/4] = {ANDI_W_A7, 16'h7FFF};
+        rom[16'h00B4/4] = {CLR_L_D6, ADDI_L_D6};
+        rom[16'h00B8/4] = {16'h0000, 16'd54321};
+        rom[16'h00BC/4] = {RTE_OP, NOP_OP};
 
         rom[16'h2604/4] = {MOVE_W_IMM_SR, 16'hA000};  // T1=1, S=1, IPL=0
         rom[16'h2608/4] = {STOP_OP, 16'h2000};         // STOP #$2000 (new SR: S=1, T=0)

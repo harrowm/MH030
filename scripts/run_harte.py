@@ -123,6 +123,15 @@ def compare(test, regs, writes, verbose):
     # directly and this same STOP's own M=0 write is a no-op for the alias).
     # Confirmed via direct trace (regfile a7_current mux) before landing.
     exp_a7 = final['ssp'] if (ini['sr'] & 0x2000) else final['usp']
+    # RTE (0x4E73): docs/*.md review (Phase 250 frame layout fix) --
+    # gen_harte_hex.py's own synthesized-format-word frame is 8 bytes (real
+    # SR+PC+fmtvec) vs. the 68000 reference's own native 6-byte {SR,PC} pop,
+    # so our RTE genuinely leaves SSP 2 bytes higher than the reference's
+    # own final ssp -- see gen_harte_hex.py's own a7_init_val comment for
+    # the full derivation (no initial-SSP shift this time, so the
+    # compensation has to live here instead).
+    if ini['prefetch'][0] == 0x4E73:
+        exp_a7 = (exp_a7 + 2) & 0xFFFFFFFF
     chk('A7', regs['A7'], exp_a7)
 
     # CCR (X N Z V C only)

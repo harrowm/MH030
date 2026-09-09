@@ -218,10 +218,13 @@ module exc_tb;
         //   exc_rdata=0xCAFE0001 (handler address)
         //
         //   new_ssp = 0x2000 - 8 = 0x1FF8
-        //   push[0]: addr=0x1FFC, data=fault_pc=0x00001000
-        //   push[1]: addr=0x1FF8, data={fmtvec,sr}
+        //   docs/*.md review (Phase 250 frame layout fix): real byte layout
+        //   is SR@SP+0, PC@SP+2, fmtvec@SP+6 -- as two longwords
+        //   {SR,PC hi} then {PC lo,fmtvec}, not {fmtvec,SR} then PC.
+        //   push[0]: addr=0x1FFC (step_rem=1, high), data={PC lo,fmtvec}
         //     fmtvec={4'h0,2'b00,8'd32,2'b00}=0x0080
-        //     data = 0x0080_A700
+        //     data = 0x1000_0080
+        //   push[1]: addr=0x1FF8 (step_rem=0, low), data={SR,PC hi}=0xA700_0000
         //   fetch:   addr=VBR+32*4=0x80 (rw=1)
         //   ssp_out = 0x1FF8
         //   new_pc  = 0xCAFE0001
@@ -240,9 +243,9 @@ module exc_tb;
         wait_idle;
 
         chk32("EXC-1 push0_addr",  t_addr[0],  32'h0000_1FFC);
-        chk32("EXC-1 push0_data",  t_wdata[0], 32'h0000_1000);
+        chk32("EXC-1 push0_data",  t_wdata[0], 32'h1000_0080);
         chk32("EXC-1 push1_addr",  t_addr[1],  32'h0000_1FF8);
-        chk32("EXC-1 push1_data",  t_wdata[1], 32'h0080_A700);
+        chk32("EXC-1 push1_data",  t_wdata[1], 32'hA700_0000);
         chk32("EXC-1 fetch_addr",  t_addr[2],  32'h0000_0080);
         chk_bit("EXC-1 fetch_rw",  t_rw[2],    1'b1);
         chk32("EXC-1 ssp_out",     last_ssp,   32'h0000_1FF8);
@@ -253,6 +256,8 @@ module exc_tb;
         // EXC-2: Illegal instruction, vec=4, VBR=0
         //   fmtvec = {4'h0,2'b00,8'd4,2'b00} = 0x0010
         //   fetch_addr = 4*4 = 0x10
+        //   docs/*.md review (Phase 250 frame layout fix): push1 (step_rem=0,
+        //   lowest address) is now {SR,PC hi}, not {fmtvec,SR}.
         // ================================================================
         $display("--- EXC-2: Illegal instruction ---");
         begin_test;
@@ -265,7 +270,7 @@ module exc_tb;
         illegal_req = 0;
         wait_idle;
 
-        chk32("EXC-2 push1_data",  t_wdata[1], 32'h0010_2700);
+        chk32("EXC-2 push1_data",  t_wdata[1], 32'h2700_0000);
         chk32("EXC-2 fetch_addr",  t_addr[2],  32'h0000_0010);
         chk32("EXC-2 new_pc",      last_new_pc, 32'h0000_5000);
 
@@ -274,7 +279,9 @@ module exc_tb;
         //   bus_err → vec=2, fmt=$A (FMT_BUS_INS), 8 LW writes + 1 read = 9 trans
         //   fmtvec = {4'hA,2'b00,8'd2,2'b00} = 0xA008
         //   ssp_delta = 32, new_ssp = 0x4000-32 = 0x3FE0
-        //   push1_data = {0xA008, 0x2700} = 0xA008_2700
+        //   docs/*.md review (Phase 250 frame layout fix): step_rem=0
+        //   (lowest address, push7) is now {SR,PC hi}, not {fmtvec,SR}.
+        //   push7_data = {SR=0x2700, PC hi=0x0000} = 0x2700_0000
         // ================================================================
         $display("--- EXC-3: Priority bus_err > illegal ---");
         begin_test;
@@ -287,7 +294,7 @@ module exc_tb;
         bus_err_req = 0; illegal_req = 0;
         wait_idle;
 
-        chk32("EXC-3 push7_data",  t_wdata[7], 32'hA008_2700);  // vec=2, fmt=$A at step_rem=0
+        chk32("EXC-3 push7_data",  t_wdata[7], 32'h2700_0000);  // vec=2, fmt=$A at step_rem=0
         if (trans_cnt !== 5'd9) begin
             $display("FAIL EXC-3 trans_cnt=%0d (exp 9)", trans_cnt);
             fail = fail + 1;
@@ -298,9 +305,13 @@ module exc_tb;
         // EXC-4: CHK → format $2, vec=6, 3 LW writes + 1 read = 4 trans
         //   ssp=0x3000, ssp_delta=12, new_ssp=0x2FF4
         //   fmtvec = {4'h2,2'b00,8'd6,2'b00} = 0x2018
-        //   push[0]: addr=0x2FFC  data=fault_addr  (step_rem=2)
-        //   push[1]: addr=0x2FF8  data=snap_pc_r   (step_rem=1)
-        //   push[2]: addr=0x2FF4  data={fmtvec,SR} (step_rem=0)
+        //   docs/*.md review (Phase 250 frame layout fix): step_rem=1 is now
+        //   {PC lo,fmtvec} and step_rem=0 is now {SR,PC hi} -- step_rem=2
+        //   (Instruction Address) is unaffected, already correctly
+        //   longword-aligned regardless of the prefix fix.
+        //   push[0]: addr=0x2FFC  data=fault_addr        (step_rem=2)
+        //   push[1]: addr=0x2FF8  data={PC lo,fmtvec}     (step_rem=1)
+        //   push[2]: addr=0x2FF4  data={SR,PC hi}          (step_rem=0)
         // ================================================================
         $display("--- EXC-4: CHK format $2 ---");
         begin_test;
@@ -317,9 +328,9 @@ module exc_tb;
         chk32("EXC-4 push0_addr",  t_addr[0],  32'h0000_2FFC);
         chk32("EXC-4 push0_data",  t_wdata[0], 32'hDEAD_BEEF);   // fault_addr (step_rem=2)
         chk32("EXC-4 push1_addr",  t_addr[1],  32'h0000_2FF8);
-        chk32("EXC-4 push1_data",  t_wdata[1], 32'h0000_2500);   // snap_pc_r  (step_rem=1)
+        chk32("EXC-4 push1_data",  t_wdata[1], 32'h2500_2018);   // {PC lo,fmtvec}(step_rem=1)
         chk32("EXC-4 push2_addr",  t_addr[2],  32'h0000_2FF4);
-        chk32("EXC-4 push2_data",  t_wdata[2], 32'h2018_2700);   // {fmtvec,SR}(step_rem=0)
+        chk32("EXC-4 push2_data",  t_wdata[2], 32'h2700_0000);   // {SR,PC hi}(step_rem=0)
         chk32("EXC-4 ssp_out",     last_ssp,   32'h0000_2FF4);
         if (trans_cnt !== 5'd4) begin
             $display("FAIL EXC-4 trans_cnt=%0d (exp 4)", trans_cnt);
@@ -357,6 +368,8 @@ module exc_tb;
         // shape as EXC-4's own CHK test).
         //   fetch_addr = 0x10000 + 5*4 = 0x10014
         //   fault_sr=0x2014 → T=0, S=1, IPL=0, CCR=0x14 → new_sr=0x2014
+        //   docs/*.md review (Phase 250 frame layout fix): same {PC lo,
+        //   fmtvec}/{SR,PC hi} reshape as EXC-4 above.
         // ================================================================
         $display("--- EXC-6: Divide-by-zero, non-zero VBR ---");
         begin_test;
@@ -374,9 +387,9 @@ module exc_tb;
         chk32("EXC-6 push0_addr", t_addr[0],  32'h0000_5FFC);
         chk32("EXC-6 push0_data", t_wdata[0], 32'h0001_00F0);  // fault_addr (step_rem=2)
         chk32("EXC-6 push1_addr", t_addr[1],  32'h0000_5FF8);
-        chk32("EXC-6 push1_data", t_wdata[1], 32'h0001_0100);  // snap_pc_r  (step_rem=1)
+        chk32("EXC-6 push1_data", t_wdata[1], 32'h0100_2014);  // {PC lo,fmtvec}(step_rem=1)
         chk32("EXC-6 push2_addr", t_addr[2],  32'h0000_5FF4);
-        chk32("EXC-6 push2_data", t_wdata[2], 32'h2014_2014);  // {fmtvec,SR} (step_rem=0)
+        chk32("EXC-6 push2_data", t_wdata[2], 32'h2014_0001);  // {SR,PC hi}(step_rem=0)
         chk32("EXC-6 fetch_addr",  t_addr[3],  32'h0001_0014);
         chk32("EXC-6 new_pc",      last_new_pc, 32'hFFFF_0000);
         chk16("EXC-6 new_sr",      last_new_sr, 16'h2014);  // T already 0, S=1
@@ -401,26 +414,42 @@ module exc_tb;
         wait_idle;
 
         // fmtvec={4'h0,2'b00,8'd8,2'b00}=0x0020
-        chk32("EXC-7 push1_data",  t_wdata[1], 32'h0020_0000);  // {fmtvec,sr}
+        // docs/*.md review (Phase 250 frame layout fix): push1 (step_rem=0)
+        // is {SR,PC hi}, not {fmtvec,SR} -- SR=0, PC hi=0 here.
+        chk32("EXC-7 push1_data",  t_wdata[1], 32'h0000_0000);  // {sr,pc hi}
         // fetch_addr = 8*4 = 0x20
         chk32("EXC-7 fetch_addr",  t_addr[2],  32'h0000_0020);
         // new_sr: T=0, S=1, M=0, IPL=0, CCR=0x00 → 0x2000
         chk16("EXC-7 new_sr",      last_new_sr, 16'h2000);
 
         // ================================================================
-        // EXC-8: Address error → format $3, vec=3, 4 LW writes
-        //   ssp=0x8000, ssp_delta=16, new_ssp=0x7FF0
-        //   push[0]: 0x7FFC  data={fault_ssw,0}  (step_rem=3)
-        //   push[1]: 0x7FF8  data=fault_addr      (step_rem=2)
-        //   push[2]: 0x7FF4  data=snap_pc_r       (step_rem=1)
-        //   push[3]: 0x7FF0  data={fmtvec,sr}     (step_rem=0)  fmtvec=0x300C
+        // EXC-8: Address error -- docs/*.md review (Phase 250 frame layout
+        // fix): "Format $3" never existed on real 68030 silicon (no $3
+        // entry anywhere in Table 8-6; 8.1.3's own text says Address Error
+        // uses the same short/long bus fault frame Bus Error does) --
+        // removed. Address errors now select FMT_BUS_INS ($A) directly,
+        // same as an instruction-fetch bus error, matching this project's
+        // own addr_err_req being fed only from instruction-fetch address
+        // errors.
+        //   ssp=0x8000, ssp_delta=32 (format $A, was 16 for the fabricated
+        //   $3), new_ssp=0x7FE0
+        //   fmtvec = {4'hA,2'b00,8'd3,2'b00} = 0xA00C
+        //   8 LW writes + 1 read = 9 trans (was 5 for the fabricated $3)
+        //   push[0] 0x7FFC (step_rem=7): reserved/0
+        //   push[1] 0x7FF8 (step_rem=6): DOB (fault_data, unset here -> 0)
+        //   push[2] 0x7FF4 (step_rem=5): reserved/0
+        //   push[3] 0x7FF0 (step_rem=4): fault_addr (Data Cycle Fault Addr)
+        //   push[4] 0x7FEC (step_rem=3): reserved/0 (Pipe Stage C/B)
+        //   push[5] 0x7FE8 (step_rem=2): {0,fault_ssw} (Special Status Word)
+        //   push[6] 0x7FE4 (step_rem=1): {PC lo,fmtvec}
+        //   push[7] 0x7FE0 (step_rem=0): {SR,PC hi}
         // ================================================================
-        $display("--- EXC-8: Address error format $3 ---");
+        $display("--- EXC-8: Address error (now format $A, real silicon shape) ---");
         begin_test;
         ssp_in     = 32'h0000_8000;
         fault_pc   = 32'h0000_7500;
         fault_sr   = 16'h2000;
-        fault_addr = 32'h0000_0001;  // odd address
+        fault_addr = 32'h0000_0001;  // odd address (Data Cycle Fault Address)
         fault_ssw  = 16'h0041;       // example SSW value
         exc_rdata  = 32'h0000_B000;
         addr_err_req = 1;
@@ -428,15 +457,15 @@ module exc_tb;
         addr_err_req = 0;
         wait_idle;
 
-        // fmtvec = {4'h3,2'b00,8'd3,2'b00} = {0011_00_00000011_00} = 0x300C
-        chk32("EXC-8 push1_data",  t_wdata[1], 32'h0000_0001);  // fault_addr (step_rem=2)
-        chk32("EXC-8 push2_data",  t_wdata[2], 32'h0000_7500);  // snap_pc_r  (step_rem=1)
-        chk32("EXC-8 push3_data",  t_wdata[3], 32'h300C_2000);  // {fmtvec,SR}(step_rem=0)
-        chk32("EXC-8 ssp_out",     last_ssp,   32'h0000_7FF0);
-        if (trans_cnt !== 5'd5) begin
-            $display("FAIL EXC-8 trans_cnt=%0d (exp 5)", trans_cnt);
+        chk32("EXC-8 push3_data",  t_wdata[3], 32'h0000_0001);  // fault_addr/DCFA (step_rem=4)
+        chk32("EXC-8 push5_data",  t_wdata[5], 32'h0000_0041);  // {0,SSW}         (step_rem=2)
+        chk32("EXC-8 push6_data",  t_wdata[6], 32'h7500_A00C);  // {PC lo,fmtvec}  (step_rem=1)
+        chk32("EXC-8 push7_data",  t_wdata[7], 32'h2000_0000);  // {SR,PC hi}      (step_rem=0)
+        chk32("EXC-8 ssp_out",     last_ssp,   32'h0000_7FE0);
+        if (trans_cnt !== 5'd9) begin
+            $display("FAIL EXC-8 trans_cnt=%0d (exp 9)", trans_cnt);
             fail = fail + 1;
-        end else $display("PASS EXC-8 trans_cnt=5 (4 writes + 1 read)");
+        end else $display("PASS EXC-8 trans_cnt=9 (8 writes + 1 read)");
 
         // ================================================================
         // EXC-9 (docs/*.md review, Phase 250 F5): format $9 is no longer
@@ -454,12 +483,19 @@ module exc_tb;
         //   bus_err_fmt=$9, ssp_in=0x9000, ssp_delta=20, new_ssp=0x8FEC
         //   fault_ssw  = 0x9ABC
         //
+        //   docs/*.md review (Phase 250 frame layout fix): step_rem=3 (SSW
+        //   position for $A/$B) has no meaning for $9 either -- also
+        //   reserved/0, not {fault_ssw,0} (a second, adjacent bug found and
+        //   fixed during the same re-derivation: the old code applied
+        //   {fault_ssw,16'h0} unconditionally at that step, not just for
+        //   $A/$B). step_rem=1/0 reshaped to {PC lo,fmtvec}/{SR,PC hi} same
+        //   as every other format.
         //   step 0 @ 0x8FFC: reserved/0 (unpopulated -- real Coprocessor
         //           Mid-Instruction frame has no DOB field)  (step_rem=4)
-        //   step 1 @ 0x8FF8: {fault_ssw,0}        (step_rem=3) = 0x9ABC_0000
+        //   step 1 @ 0x8FF8: reserved/0            (step_rem=3)
         //   step 2 @ 0x8FF4: fault_addr            (step_rem=2)
-        //   step 3 @ 0x8FF0: snap_pc_r             (step_rem=1)
-        //   step 4 @ 0x8FEC: {fmtvec,SR}           (step_rem=0) fmtvec=0x9008
+        //   step 3 @ 0x8FF0: {PC lo,fmtvec}        (step_rem=1) fmtvec=0x9008
+        //   step 4 @ 0x8FEC: {SR,PC hi}            (step_rem=0)
         //   fetch  @ vec_addr = 2*4 = 0x8 (rw=1)
         //   ssp_out = 0x8FEC
         // ================================================================
@@ -481,11 +517,11 @@ module exc_tb;
         chk32("EXC-9 push0_addr",  t_addr[0],  32'h0000_8FFC);
         chk32("EXC-9 push0_data",  t_wdata[0], 32'h0000_0000);   // unpopulated (step_rem=4)
         chk32("EXC-9 push1_addr",  t_addr[1],  32'h0000_8FF8);
-        chk32("EXC-9 push1_data",  t_wdata[1], 32'h9ABC_0000);   // {fault_ssw,0}(step_rem=3)
+        chk32("EXC-9 push1_data",  t_wdata[1], 32'h0000_0000);   // reserved (step_rem=3)
         chk32("EXC-9 push2_data",  t_wdata[2], 32'hAABB_CCDD);   // fault_addr(step_rem=2)
         chk32("EXC-9 push3_addr",  t_addr[3],  32'h0000_8FF0);
-        chk32("EXC-9 push3_data",  t_wdata[3], 32'h0000_8800);   // snap_pc_r (step_rem=1)
-        chk32("EXC-9 push4_data",  t_wdata[4], 32'h9008_2700);   // {fmtvec,SR}(step_rem=0)
+        chk32("EXC-9 push3_data",  t_wdata[3], 32'h8800_9008);   // {PC lo,fmtvec}(step_rem=1)
+        chk32("EXC-9 push4_data",  t_wdata[4], 32'h2700_0000);   // {SR,PC hi}(step_rem=0)
         chk32("EXC-9 fetch_addr",  t_addr[5],  32'h0000_0008);  // vec 2 @ 2*4
         chk_bit("EXC-9 fetch_rw", t_rw[5],    1'b1);
         chk32("EXC-9 ssp_out",    last_ssp,    32'h0000_8FEC);  // 0x9000-20
@@ -497,9 +533,15 @@ module exc_tb;
 
         // ================================================================
         // EXC-10: Bus error during read → format $A, 8 LW writes + 1 read = 9 trans
-        //   Verifies DOB appears at step 4.
+        //   docs/*.md review (Phase 250 frame layout fix): the real $A/$B
+        //   layout is SP+8=reserved, SP+$A=SSW, SP+$C/E=Pipe Stage C/B
+        //   (not modeled, left 0), SP+$10=Data Cycle Fault Address
+        //   (fault_addr), SP+$14=reserved, SP+$18=DOB, SP+$1C=reserved --
+        //   DCFA and DOB have swapped step_rem positions from the old
+        //   (wrong) layout (DCFA was at step_rem=2/SP+8, DOB at step_rem=4/
+        //   SP+$10 -- now DCFA is step_rem=4/SP+$10, DOB is step_rem=6/
+        //   SP+$18, matching the real diagram).
         //   ssp_in=0xA000, ssp_delta=32, new_ssp=0x9FE0
-        //   step 4 addr = new_ssp + (8-1-4)*4 = 0x9FE0 + 12 = 0x9FEC
         //   fmtvec = {4'hA,2'b00,8'd2,2'b00} = 0xA008
         // ================================================================
         $display("--- EXC-10: Bus read error format $A with DOB ---");
@@ -517,11 +559,13 @@ module exc_tb;
         bus_err_req = 0;
         wait_idle;
 
-        chk32("EXC-10 push1_data", t_wdata[1], 32'h0000_0000);   // reserved   (step_rem=6)
-        chk32("EXC-10 push3_data", t_wdata[3], 32'hBEEF_1234);  // fault_data (step_rem=4)
+        chk32("EXC-10 push1_data", t_wdata[1], 32'hBEEF_1234);  // fault_data/DOB (step_rem=6)
+        chk32("EXC-10 push3_data", t_wdata[3], 32'h1234_5678);  // fault_addr/DCFA(step_rem=4)
         chk32("EXC-10 push4_addr", t_addr[4],  32'h0000_9FEC);  // 0x9FE0 + 12 (unchanged)
-        chk32("EXC-10 push4_data", t_wdata[4], 32'h8100_0000);  // {fault_ssw,0}(step_rem=3)
-        chk32("EXC-10 push7_data", t_wdata[7], 32'hA008_2300);  // {fmtvec,SR}(step_rem=0)
+        chk32("EXC-10 push4_data", t_wdata[4], 32'h0000_0000);  // reserved (Pipe C/B)(step_rem=3)
+        chk32("EXC-10 push5_data", t_wdata[5], 32'h0000_8100);  // {0,SSW}       (step_rem=2)
+        chk32("EXC-10 push6_data", t_wdata[6], 32'h9100_A008);  // {PC lo,fmtvec}(step_rem=1)
+        chk32("EXC-10 push7_data", t_wdata[7], 32'h2300_0000);  // {SR,PC hi}    (step_rem=0)
         chk32("EXC-10 ssp_out",    last_ssp,   32'h0000_9FE0);  // 0xA000-32
         if (trans_cnt !== 5'd9) begin
             $display("FAIL EXC-10 trans_cnt=%0d (exp 9: 8 writes + 1 read)", trans_cnt);
@@ -533,6 +577,9 @@ module exc_tb;
         //   ssp_in=0xB000, ssp_delta=92, new_ssp=0xAFA4
         //   step 4 addr = new_ssp + (23-1-4)*4 = 0xAFA4 + 72 = 0xAFEC
         //   fmtvec = {4'hB,2'b00,8'd2,2'b00} = 0xB008
+        //   docs/*.md review (Phase 250 frame layout fix): same DCFA/SSW/
+        //   DOB reshape as EXC-10 above -- DCFA now step_rem=4, SSW now
+        //   step_rem=2, DOB now step_rem=6 (unaffected here, not checked).
         // ================================================================
         $display("--- EXC-11: Bus write error format $B ---");
         begin_test;
@@ -553,11 +600,11 @@ module exc_tb;
         // Data at step_rem=0..4 is in the LAST push transactions (high push_step_r)
         chk32("EXC-11 push1_data",  t_wdata[1],  32'h0000_0000);  // reserved  (step_rem=21)
         chk32("EXC-11 push5_data",  t_wdata[5],  32'h0000_0000);  // reserved  (step_rem=17)
-        chk32("EXC-11 push18_data", t_wdata[18], 32'h1234_ABCD);  // fault_data(step_rem=4)
-        chk32("EXC-11 push19_data", t_wdata[19], 32'h0041_0000);  // {ssw,0}   (step_rem=3)
-        chk32("EXC-11 push20_data", t_wdata[20], 32'hDEAD_C0DE);  // fault_addr(step_rem=2)
-        chk32("EXC-11 push21_data", t_wdata[21], 32'h0000_A100);  // snap_pc_r (step_rem=1)
-        chk32("EXC-11 push22_data", t_wdata[22], 32'hB008_2700);  // {fmtvec,SR}(step_rem=0)
+        chk32("EXC-11 push18_data", t_wdata[18], 32'hDEAD_C0DE);  // fault_addr/DCFA(step_rem=4)
+        chk32("EXC-11 push19_data", t_wdata[19], 32'h0000_0000);  // reserved (Pipe C/B)(step_rem=3)
+        chk32("EXC-11 push20_data", t_wdata[20], 32'h0000_0041);  // {0,SSW}   (step_rem=2)
+        chk32("EXC-11 push21_data", t_wdata[21], 32'hA100_B008);  // {PC lo,fmtvec}(step_rem=1)
+        chk32("EXC-11 push22_data", t_wdata[22], 32'h2700_0000);  // {SR,PC hi}(step_rem=0)
         chk32("EXC-11 ssp_out",    last_ssp,   32'h0000_AFA4);  // 0xB000-92
         chk32("EXC-11 new_pc",     last_new_pc, 32'h0000_D000);
         if (trans_cnt !== 5'd24) begin
@@ -656,8 +703,12 @@ module exc_tb;
         //   ssp_in=0x9000 (MSP), isp_in=0xA000 (separate ISP)
         //   fault_sr=0x1100 (S=0, M=1, IPL=1)
         //   level=3 -> vec=27 (autovector stub default), fmtvec=$006C
-        //   real frame (MSP):   new_ssp=0x8FF8; [0x8FFC]=PC=$3000; [0x8FF8]={$006C,$1100}
-        //   throwaway (ISP):    new_isp=0x9FF8; [0x9FFC]=PC=$3000; [0x9FF8]={$106C,$3100}
+        //   docs/*.md review (Phase 250 frame layout fix): both frames
+        //   reshaped to real byte layout -- {PC lo,fmtvec} then {SR,PC hi}
+        //   (real frame) / {PC lo,fmtvec1} then {throwaway_sr,PC hi}
+        //   (throwaway), not {fmtvec,SR} then PC as before.
+        //   real frame (MSP):   new_ssp=0x8FF8; [0x8FFC]={$3000,$006C}; [0x8FF8]={$1100,$0000}
+        //   throwaway (ISP):    new_isp=0x9FF8; [0x9FFC]={$3000,$106C}; [0x9FF8]={$3100,$0000}
         //     (fmtvec1=$106C: format=1 not 0; throwaway_sr=$1100|$2000=$3100: S forced set)
         //   final new_sr = 0x2300 (S=1,M=0 cleared,IPL=3,CCR=0)
         // ================================================================
@@ -675,11 +726,11 @@ module exc_tb;
         wait_idle;
 
         chk32("EXC-15 real_pc",    t_addr[0],   32'h0000_8FFC);
-        chk32("EXC-15 real_data",  t_wdata[1],  32'h006C_1100);  // {fmtvec($006C),fault_sr}
+        chk32("EXC-15 real_data",  t_wdata[1],  32'h1100_0000);  // {SR(fault_sr),PC hi}
         chk32("EXC-15 tw_pcaddr",  t_addr[3],   32'h0000_9FFC);
-        chk32("EXC-15 tw_pcdata",  t_wdata[3],  32'h0000_3000);  // same PC as real frame
+        chk32("EXC-15 tw_pcdata",  t_wdata[3],  32'h3000_106C);  // {PC lo,fmtvec1($106C)}
         chk32("EXC-15 tw_sraddr", t_addr[4],   32'h0000_9FF8);
-        chk32("EXC-15 tw_srdata", t_wdata[4],  32'h106C_3100);  // fmt=1, S forced set
+        chk32("EXC-15 tw_srdata", t_wdata[4],  32'h3100_0000);  // {throwaway_sr,PC hi}, S forced set
         chk32("EXC-15 last_isp",  last_isp,    32'h0000_9FF8);  // new_isp = isp_in-8
         chk16("EXC-15 new_sr",    last_new_sr, 16'h2300);       // S=1, M=0 (interrupt clears it)
         if (trans_cnt !== 5'd5) begin

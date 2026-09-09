@@ -198,15 +198,17 @@ FC must transition at the same time as the address, never mid-cycle.
 
 ## Exception Stack Frame Formats
 
-The EU + BIU together must produce all 9 68030 frame formats:
+The EU + BIU together must produce all 8 real 68030 frame formats (a 9th,
+"Format $3," was previously documented here too — see the removal note
+below):
 
 | Format | Size | Trigger |
 |--------|------|---------|
 | $0 | 4 words | Most exceptions |
-| $2 | 6 words | TRAPV, CHK, CHK2 |
-| $3 | 8 words | Address error |
-| $4 | 8 words | FPU post-instruction |
-| $8 | 29 words | FPU pre-instruction |
+| $1 | 4 words | Throwaway frame pushed to ISP when an interrupt is taken with M=1 (§8.1.9) |
+| $2 | 6 words | TRAPV, CHK, CHK2, Zero Divide, MMU Configuration |
+| $4 | 8 words | FPU post-instruction (not implemented — unreachable) |
+| $8 | 29 words | FPU pre-instruction (not implemented — unreachable) |
 | $9 | 10 words | Coprocessor Mid-Instruction (not implemented — see Coprocessor conditional instructions note below) |
 | $A | 16 words | Bus error/address error at instruction boundary (incl. MMU faults) |
 | $B | 46 words | Bus error/address error mid-instruction-execution (incl. MMU faults) |
@@ -216,6 +218,41 @@ bus fault" — confirmed against MC68030UM.pdf Table 8-6 this format doesn't
 exist; real Format $9 is the unrelated Coprocessor Mid-Instruction frame.
 MMU-detected bus faults correctly use the ordinary $A/$B like any other
 bus error, distinguished by R/W, not a dedicated format code.)
+
+**"Format $3" removed (Phase 250, frame layout fix)**: this file used to
+list "$3, 8 words, Address Error" as a 9th format. Confirmed against
+MC68030UM.pdf this never existed on real silicon — Table 8-6 has no $3
+entry in either sheet, and §8.1.3 states plainly that Address Error uses
+"either a short or long bus fault stack frame" — the same $A/$B selection
+Bus Error already uses. The same fabrication shape already found once for
+the old "$9, MMU short bus fault" claim above. Address errors now select
+$A directly (this project's own address-error detection is instruction-
+fetch-only; EU-side data address errors are computed but never wired into
+the exception controller at all — a separate, pre-existing, out-of-scope
+gap).
+
+**Byte layout (Phase 250, frame layout fix)**: every format's own first 8
+bytes follow the same real layout, confirmed directly against Table 8-6/
+Figure 4-1 (identical across every format shown, not previously
+independently verified — no existing test inspected raw frame memory):
+SR alone at SP+0, PC (32-bit) at SP+2, the format/vector word alone at
+SP+6. As two longword bus writes (this RTL's own `exc_siz` is fixed at
+longword): `{SR,PC[31:16]}` then `{PC[15:0],fmtvec}` — **not**
+`{fmtvec,SR}` then `PC`, which every frame format previously implemented
+(an RTE-consistent but real-silicon-wrong layout, since the same code
+both pushes and later pops its own frames — internally self-consistent,
+so it never surfaced as an observable failure). `$A`/`$B`'s own longer
+tail also needed remapping to match the real diagram: Special Status Word
+moved from its old (wrong) position to SP+$A, Data Cycle Fault Address
+(this project's own `fault_addr`) moved from SP+8 to its real SP+$10, and
+Data Output Buffer moved from SP+$10 to its real SP+$18 — Instruction
+Pipe Stage C/B (SP+$C/$E) have no real content this project tracks and
+stay zero, matching the existing "FPU not implemented, internal pipeline
+state left zero" precedent. `$2`/`$9`'s own Instruction Address field
+(SP+8) was already correctly positioned and needed no change (naturally
+longword-aligned regardless of the prefix fix). RTE's own two-phase read
+(`eu_seq_execute.svh`) reads the identical new longword pairs back in the
+same new order.
 
 The BIU must capture and hold (fault address, data, FC, R/W, internal pipeline state) at the moment of fault to populate these frames.
 
@@ -1431,6 +1468,78 @@ bit-identical to baseline.
 **This closes the entire Phase 250 10-item findings list** except F6
 (investigated, deferred, documented above) — the last one to remain
 open, by explicit choice given its own real risk to RTE's delicate FSM.
+
+**Exception frame layout fix (Phase 250, IMPLEMENTED AND VERIFIED) — a
+side finding from F9's own investigation, not one of the original 10
+items**: every exception frame format packed `{format/vector, SR}` as
+the first longword and PC as the second — confirmed via direct
+inspection of MC68030UM.pdf Table 8-6/Figure 4-1 that real silicon's own
+layout is different in kind, not just order (SR alone at SP+0, PC at
+SP+2, format/vector alone at SP+6). Internally self-consistent (the same
+code both pushes and later pops its own frames via RTE), so it never
+surfaced as an observable failure in 250 prior phases — no existing test
+ever inspected raw frame memory. Also found and removed a second,
+closely related fabrication while re-deriving the layout: "Format $3, 8
+words, Address Error" never existed either (Table 8-6 has no $3 entry;
+§8.1.3 says Address Error uses the same $A/$B shape Bus Error does) —
+the same shape as the already-fixed old "$9, MMU short bus fault" claim
+(Phase 250 F5). Fixed `rtl/m68030_exc.sv`'s own `push_data` table (byte-
+correct longword pairs; `$A`/`$B`'s own SSW/DCFA/DOB remapped to their
+real offsets; `$9`'s own stray unconditional SSW write at step 3, a
+third small adjacent bug, also fixed) and `rtl/eu_seq_execute.svh`'s own
+RTE two-phase read to match. **Found and fixed one real, previously-
+latent bug in the RTE fix's own first attempt**, caught via a live
+regression (not guessed at): a same-cycle read-before-write hazard on a
+new `rte_fmt_skip_r` register (needed to size RTE's own final A7 write,
+now computed from phase 1's read instead of phase 0's, since fmtvec
+moved) — its own consumer fires the identical cycle the register would
+have updated, reading the stale value. Fixed by computing the skip
+combinationally from the live `mem_rdata` at the point of use instead of
+through a register. Also found and fixed roughly a dozen hand-crafted
+test frames across `tb/stall_fsm_tb.sv`/`tb/system_tb.sv`/
+`tb/exception_tb.sv`/`tb/exc_tb.sv` that encoded the old (now-wrong)
+layout by hand — `tb/exc_tb.sv`'s own detailed push-data checks (every
+implemented format, every step position) now directly verify the
+byte-exact new layout, the closest thing this project has to independent
+frame-content verification.
+
+**Found a genuine full-Harte-sweep regression this time (RTE suite:
+4011 runnable, most FAIL/TIMEOUT) — root-caused to the SCRIPT, not the
+RTL, and fixed at its source.** `scripts/gen_harte_hex.py` has its own
+long-standing, hand-built workaround for RTE specifically: the Harte
+corpus is 68000-captured, whose native RTE frame is just {SR,PC} (3
+words, no format field — a 68010+ concept), so the script synthesizes a
+format word and shifts the test's own initial SSP by -2 bytes to line
+those synthetic+real bytes up with whatever this RTL's RTE actually
+reads. That shift was hand-tuned for the OLD (now-fixed) `{fmtvec,SR}`+
+`PC` layout specifically — updated to match the new layout (no initial
+shift needed; the synthesized format word instead goes at `a7_val+6`,
+past the reference's own 6 real bytes) and `scripts/run_harte.py`'s own
+`compare()` gained a matching `+2` final-SSP compensation (the old
+version absorbed this into the shift itself; the new layout has no
+shift left to absorb it into). **A second, deeper, previously-latent gap
+surfaced during this same investigation, independent of the frame-layout
+fix**: some RTE test vectors restore a `T1=1` (or `T0=1` with a
+flow-change next instruction) SR — real, architecturally-correct
+behavior this project's own trace mechanism (already hardened during
+this same session's F9 investigation) handles correctly, confirmed via
+direct signal tracing (`decode_pc` genuinely advanced past the restored
+PC's own first instruction, side effects already retired, before a real
+Trace exception dispatched) — but `gen_harte_hex.py` never installed a
+vector-9 (Trace) handler for RTE tests, only vector-3 (Address Error,
+for `is_ret_taken`'s own odd-PC case) and vector-8 (Privilege
+Violation). The OLD, wrong RTL frame layout apparently never triggered
+this in practice (its own garbled reconstruction essentially never
+produced a genuinely valid, directly-executable restored PC with a real
+`T1=1` SR at the same time), so the gap was invisible until the layout
+fix made RTE's own reconstruction correct enough to actually reach it.
+Fixed by installing vector 9 unconditionally for every RTE test,
+pointing at the same STOP+NOP runway vector-3 already uses (mirrors the
+existing pattern exactly). Full mandatory gate clean: `make test`
+37/37, `cosim_grp` 8/8, `cosim_memind` 28/28, `dat-synth` 50/50, full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2`
+— the documented ASL.b corpus anomaly — `SKIP 281221 TIMEOUT 0`),
+including the previously-broken RTE suite now at a clean 4011/4011.
 
 ## Verification Commands
 
