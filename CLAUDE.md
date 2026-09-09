@@ -1673,7 +1673,29 @@ model and has already been extended to MOVE, LEA, PEA, JMP, JSR, general
 ALU-EA ops, CMP2/CHK2, TAS, and Scc — it is architecturally complete.
 "Two-level indirect" was a documentation error, not a missing feature;
 corrected here and at line ~304 above (the item's own original home).
-Work is proceeding on the 2 real items (F6, MOVEM). Permanently out of
+
+**Item 1 (F6, RTE Format $B version-number check) — IMPLEMENTED AND
+VERIFIED.** Investigation found the scope needed to grow: beyond the new
+read (version nibble at SP+$36, `rtl/eu_seq_execute.svh`'s `rte_phase_r`
+widened from a 1-bit 2-phase FSM to a 2-bit, up-to-3-phase one), two
+ADJACENT, pre-existing bugs in the already-shipped bad-format-code path
+needed closing too: `ex_rte_taken` fired from the identical
+`rte_phase_r&&mem_ack` condition as `eu_fmt_err_req` with no validity
+gate of its own (an invalid-but-non-$B format code today would both
+commit the bad frame's SR/A7/PC AND request Format Error the same
+cycle, contradicting §8.1.13's "the faulty stack frame remains intact"
+— confirmed via a live before/after test, not guessed at); and
+`fault_pc` for `fmt_err_req` used `ifu_decode_pc` instead of
+`eu_ex_decode_pc` (`m68030_top.sv`), the same stale-PC race
+`bus_err_req_w` was already fixed for, since RTE stalls in EX across
+multiple bus phases. Both fixed as part of this same change. New
+`tb/exception_tb.sv` coverage (FMTERR-01 extended, FMTERR-03/04 new)
+confirmed to fail on the pre-fix `ex_rte_taken` formula and pass after.
+Full mandatory gate clean, Harte bit-identical to baseline (68000-
+captured corpus has no format/version field at all). See `plan.md
+§Phase 251` for the full writeup.
+
+Work proceeding to the last real item (MOVEM). Permanently out of
 scope by design, not started: coprocessor conditional instructions +
 Coprocessor Protocol Violation (Phase 248 item #7); STATUS's other 3
 sub-cases + REFILL# (Phase 248 item #5); PTEST's DSACK-breadth exclusion

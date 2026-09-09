@@ -1302,3 +1302,73 @@ established convention (Phase 248/250's own opening sections).
 Items 1-3 are picked up next, in order, each independently verified per
 this project's own established discipline (confirm scope/design first,
 implement, full mandatory gate, commit) before moving to the next.
+
+### Item 1 (F6) — IMPLEMENTED AND VERIFIED
+
+Full plan in `~/.claude/plans/wobbly-honking-cascade.md` (Part A); this
+entry is the closing writeup.
+
+Investigation (a dedicated Explore agent reading MC68030UM.pdf §8.1.8/
+§8.1.13/Table 8-6 directly, and the current `rtl/eu_seq_execute.svh` RTE
+FSM) confirmed the version-number field lives at SP+$36, bits[15:12],
+Format $B only, and — while tracing the exact commit-ordering needed to
+implement it safely — found the scope needed to grow to include **two
+adjacent, pre-existing bugs** in the *already-shipped* bad-format-code
+path, both closed as part of this same fix:
+
+1. `ex_rte_taken` fired from the identical `rte_phase_r && mem_ack`
+   condition as `eu_fmt_err_req`, with no format-validity gate of its
+   own — an invalid (but non-$B) format code today would BOTH commit
+   the bad frame's SR/A7/PC-redirect AND request Format Error the same
+   cycle, contradicting §8.1.13's "the faulty stack frame remains
+   intact." Confirmed via a live before/after test (see below) — this
+   was a real, previously-undiscovered, already-shipped bug, not
+   something F6 introduced.
+2. `fault_pc` for `fmt_err_req` used `ifu_decode_pc`, not
+   `eu_ex_decode_pc` (`m68030_top.sv`) — RTE stalls in EX across its
+   multi-cycle bus phases exactly like the file's own pre-existing "Bug
+   2" comment already documents, so `ifu_decode_pc` likely raced ahead
+   by the time `fmt_err_req` fires. Fixed to match `bus_err_req_w`'s
+   own already-proven precedent for the identical race.
+
+**Implementation** (`rtl/eu_seq_execute.svh`): widened `rte_phase_r`
+from a 1-bit 2-phase FSM to a 2-bit, up-to-3-phase one (0=await
+{SR,PC hi}, 1=await {PC lo,fmtvec}, 2=await the version-check word,
+Format $B only). New `rte_pc_lo_r` register captures PC's low half ONLY
+at the phase-1→2 transition (needed one cycle later at phase 2's own
+completion, when `mem_rdata` no longer holds it — the phase-1-direct-
+complete case still reads it live, unaffected, avoiding the exact
+same-cycle read-before-write hazard this file's own header comment
+already documents from the earlier `rte_fmt_skip_r` mistake). New
+`rte_ver_valid()` function (valid = `4'h0`, matching this RTL's own
+constructed frames, which always emit $0 there as an emergent property
+of unpopulated fields defaulting to zero). `ex_rte_taken`/`rte_stall`
+both now require a GENUINE completion (phase 1 acking with a non-$B
+format, or phase 2 acking at all) AND `!eu_fmt_err_req`, closing bug #1
+above as a direct byproduct (real silicon must never commit from a
+frame it's simultaneously rejecting). `an_wr_data`'s own byte-skip
+lookup hardcodes `8'd176` (Format $B's own known size) when completing
+via phase 2, rather than re-reading `mem_rdata[15:12]` (which by then
+holds the version-check word, not the format nibble). `m68030_top.sv`:
+`fault_pc` ORs `eu_fmt_err_req_w` into the existing `bus_err_req_w`
+condition selecting `eu_ex_decode_pc`, closing bug #2.
+
+**Verification**: `tb/exception_tb.sv`'s existing FMTERR-01 (bad format
+code) gained a new check that `branch_taken` never asserts; new
+FMTERR-03 (Format $B, version=$0, valid — regression, confirms RTE
+completes normally through all 3 phases, checked `branch_target`
+directly) and FMTERR-04 (Format $B, bad version — confirms Format Error
+fires and no branch/commit occurs). Confirmed both new checks
+(FMTERR-01's new one and FMTERR-04) FAIL on a temporarily-reverted
+`ex_rte_taken` (the pre-fix formula) and PASS once restored, per this
+project's own "prove it fails first" discipline. The A3.2 fix
+(`fault_pc` source) is a small, structurally-identical mux change to
+`bus_err_req_w`'s own already-proven precedent — not independently
+re-verified with a dedicated full-chip decode-race test, given real
+ROM-address-collision risk in `tb/stall_fsm_tb.sv`'s own already-dense
+shared address map; the full regression suite below would catch any
+resulting misbehavior. Full mandatory gate clean: `make test` 37/37,
+`cosim_grp` 8/8, `cosim_memind` 28/28, `dat-synth` 50/50, full 124-suite
+Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221
+TIMEOUT 0` — Harte's own 68000-captured corpus has no format/version
+field at all).

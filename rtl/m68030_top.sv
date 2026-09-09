@@ -652,7 +652,19 @@ module m68030_top #(
         // reached), which IS ifu_decode_pc; eu_ex_decode_pc would instead
         // point at whatever instruction had *just* finished (e.g. the FSM
         // that just retired), making RTE silently re-execute it.
-        .fault_pc     (bus_err_req_w ? eu_ex_decode_pc : ifu_decode_pc),
+        //
+        // docs/*.md review (Phase 250 Part A F6): eu_fmt_err_req_w joins
+        // bus_err_req_w here for the identical reason -- its own sources
+        // (RTE's own multi-phase bus reads; cpRESTORE's analogous
+        // cpsr_fmt_err_w) stall in EX across multiple bus cycles the same
+        // way a mid-instruction bus fault does, so ifu_decode_pc has
+        // likely already raced ahead to a later instruction by the time
+        // the format/version check actually fires. Previously used
+        // ifu_decode_pc unconditionally, silently pushing the WRONG PC
+        // into a Format Error frame -- undiscovered until this item's own
+        // investigation, since no prior test exercised RTE-with-invalid-
+        // format/version at all.
+        .fault_pc     ((bus_err_req_w || eu_fmt_err_req_w) ? eu_ex_decode_pc : ifu_decode_pc),
         .fault_sr     (eu_sr_out),
         // docs/*.md review: fault_addr also feeds FMT_INST's ($2) own
         // "instruction address" field (CHK/CHK2/TRAPcc/TRAPV/Trace/Zero

@@ -491,15 +491,22 @@ module exception_tb;
         // {SR,PC hi} then {PC lo,fmtvec}, not {fmtvec,SR} then PC.
         ram[32'h100>>2] = 32'h2700_0000;  // {SR,PC hi}
         ram[32'h104>>2] = 32'h5000_1000;  // {PC lo, fmtvec(format nibble=1)}
-        fmt_err_seen = 0;
+        fmt_err_seen = 0; saw_branch = 0;
         @(posedge clk); #1;
         instr_word = 16'h4E73; instr_valid = 1;
         @(posedge clk); #1; instr_valid = 0;
         for (i = 0; i < 20; i++) begin
             @(posedge clk);
             if (eu_fmt_err_req) fmt_err_seen = 1'b1;
+            if (branch_taken)   saw_branch   = 1'b1;
         end
         chk1("FMTERR-01:fires", fmt_err_seen, 1'b1);
+        // Phase 250 Part A F6: an invalid frame must NOT also commit a
+        // branch/SR-restore the same cycle it's rejected -- this used to
+        // be a real, previously-undiscovered bug (ex_rte_taken fired from
+        // the identical rte_phase_r&&mem_ack condition as eu_fmt_err_req,
+        // with no format-validity gate of its own).
+        chk1("FMTERR-01:no_branch_on_invalid_frame", saw_branch, 1'b0);
 
         // FMTERR-02: format=0x0 (valid) — no fmt_err, branch taken
         @(posedge clk); #1;
@@ -524,6 +531,72 @@ module exception_tb;
         end
         chk1("FMTERR-02:no_fmt_err",   saw_fmt_err, 1'b0);
         chk1("FMTERR-02:branch_taken", saw_branch,  1'b1);
+
+        // ====================================================================
+        // FMTERR-03/04 (Phase 250 Part A F6): Format $B's own version-number
+        // check (MC68030UM.pdf SS8.1.8/8.1.13). Format $B needs a 3rd read
+        // (word, at SP+$36) beyond the 2 every other format completes with --
+        // ram[] entries below are placed at the exact truncated address this
+        // testbench's own flat (non-lane-steering) memory model computes for
+        // that read (mem_addr[14:2]); the version nibble is bits[15:12] of
+        // whatever raw longword sits there, matching how the RTL itself reads
+        // it (this harness has no BIU/byte-lane logic to shift a genuinely
+        // misaligned word read into place -- exercising the RTL's own check
+        // logic doesn't depend on that, only the bus-timing side would).
+        // ====================================================================
+        begin
+            logic [31:0] target_snap;
+
+            // FMTERR-03: Format $B, version=$0 (valid) -- regression check,
+            // RTE must complete normally through all 3 phases.
+            @(posedge clk); #1;
+            exc_sr_wr_data = 16'h2700; exc_sr_wr_en = 1;
+            @(posedge clk); #1; exc_sr_wr_en = 0;
+            @(posedge clk); #1;
+            ssp_wr_data = 32'h100; ssp_wr_en = 1;
+            @(posedge clk); #1; ssp_wr_en = 0;
+            repeat(2) @(posedge clk);
+            ram[32'h100>>2] = 32'h2700_0000;  // {SR,PC hi}
+            ram[32'h104>>2] = 32'h6000_B008;  // {PC lo=0x6000, fmtvec(format=$B,vec=2)}
+            ram[32'h136>>2] = 32'h0000_0000;  // version-check word: bits[15:12]=0 (valid)
+            saw_branch = 0; saw_fmt_err = 0; target_snap = 32'h0;
+            @(posedge clk); #1;
+            instr_word = 16'h4E73; instr_valid = 1;
+            @(posedge clk); #1; instr_valid = 0;
+            for (i = 0; i < 20; i++) begin
+                @(posedge clk);
+                if (branch_taken)   begin saw_branch = 1'b1; target_snap = branch_target; end
+                if (eu_fmt_err_req) saw_fmt_err  = 1'b1;
+            end
+            chk1("FMTERR-03:no_fmt_err",   saw_fmt_err, 1'b0);
+            chk1("FMTERR-03:branch_taken", saw_branch,  1'b1);
+            chk("FMTERR-03:target",       target_snap, 32'h0000_6000);
+
+            // FMTERR-04: Format $B, version=$1 (invalid) -- must fire Format
+            // Error and must NOT commit/branch, exactly like FMTERR-01's own
+            // already-bad-format-code case.
+            @(posedge clk); #1;
+            exc_sr_wr_data = 16'h2700; exc_sr_wr_en = 1;
+            @(posedge clk); #1; exc_sr_wr_en = 0;
+            @(posedge clk); #1;
+            ssp_wr_data = 32'h100; ssp_wr_en = 1;
+            @(posedge clk); #1; ssp_wr_en = 0;
+            repeat(2) @(posedge clk);
+            ram[32'h100>>2] = 32'h2700_0000;  // {SR,PC hi}
+            ram[32'h104>>2] = 32'h6000_B008;  // {PC lo=0x6000, fmtvec(format=$B,vec=2)}
+            ram[32'h136>>2] = 32'h0000_1000;  // version-check word: bits[15:12]=1 (invalid)
+            saw_branch = 0; fmt_err_seen = 0;
+            @(posedge clk); #1;
+            instr_word = 16'h4E73; instr_valid = 1;
+            @(posedge clk); #1; instr_valid = 0;
+            for (i = 0; i < 20; i++) begin
+                @(posedge clk);
+                if (eu_fmt_err_req) fmt_err_seen = 1'b1;
+                if (branch_taken)   saw_branch   = 1'b1;
+            end
+            chk1("FMTERR-04:fires",                    fmt_err_seen, 1'b1);
+            chk1("FMTERR-04:no_branch_on_bad_version", saw_branch,   1'b0);
+        end
 
         // ====================================================================
         // RESET duration: eu_reset_req stays asserted >= 2047 internal clock ticks

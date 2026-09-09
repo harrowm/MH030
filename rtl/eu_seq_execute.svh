@@ -205,8 +205,16 @@
     logic        rtr_an_wr_en;
     logic [31:0] rtr_an_wr_data;
 
-    // RTE two-phase read state (mirrors RTR; declared early for stall/an_wr assigns)
-    logic        rte_phase_r;
+    // RTE read state (mirrors RTR; declared early for stall/an_wr assigns).
+    // docs/*.md review (Phase 250 Part A F6): widened from a 1-bit 2-phase
+    // FSM to a 2-bit, up-to-3-phase one -- Format $B carries a version-
+    // number nibble at SP+$36 (MC68030UM.pdf SS8.1.8/8.1.13) that RTE must
+    // validate before trusting the rest of the frame; every other format
+    // has no such field and completes after 2 phases exactly as before.
+    // rte_phase_r: 0=awaiting the {SR,PC hi} read, 1=awaiting the
+    // {PC lo,fmtvec} read, 2=awaiting the version-check word read
+    // (Format $B only).
+    logic [1:0]  rte_phase_r;
     logic [15:0] rte_sr_r;
     logic [15:0] rte_pc_hi_r;      // docs/*.md review (Phase 250 frame layout
                                     // fix): PC's own high half now arrives in
@@ -215,9 +223,20 @@
                                     // to phase 1 the way the old {fmtvec,SR}+
                                     // PC packing allowed) -- latched here,
                                     // combined with phase 1's low half.
+    logic [15:0] rte_pc_lo_r;      // Phase 250 Part A F6: PC's own low half,
+                                    // captured ONLY when advancing from phase
+                                    // 1 to phase 2 (Format $B) -- phase 2's
+                                    // own completion cycle can no longer read
+                                    // it live off mem_rdata (that slot now
+                                    // holds the version-check word instead).
+                                    // Phase-1-direct completion still reads
+                                    // mem_rdata live, same as before (using
+                                    // this register there instead would be
+                                    // the exact same-cycle read-before-write
+                                    // hazard already documented below).
     logic [31:0] rte_a7_next_r;
-    logic        rte_sr_wr_en;    // combinational: fire full-SR write when phase-2 acks
-    logic        rte_an_wr_en;    // combinational: update A7 when phase-2 acks
+    logic        rte_sr_wr_en;    // combinational: fire full-SR write on genuine completion
+    logic        rte_an_wr_en;    // combinational: update A7 on genuine completion
 
     // STOP state (CPU halted until interrupt)
     logic        stop_r;          // 1 = CPU stopped, waiting for interrupt
@@ -719,7 +738,17 @@
     // comment further down for why (forward-reference / must include
     // exc_active, not just mem_berr).
     assign rtr_stall    = ex_is_rtr && !(mem_berr || exc_active) && !(rtr_phase_r && mem_ack);
-    assign rte_stall    = ex_is_rte && !(mem_berr || exc_active) && !(rte_phase_r && mem_ack) && !eu_fmt_err_req;
+    // Phase 250 Part A F6: release the stall only on a GENUINE completion
+    // (phase 1 acking with a non-$B format, or phase 2 acking at all --
+    // phase 1 acking WITH a $B format means "advance to phase 2," not
+    // "done," so must NOT release yet). !eu_fmt_err_req still independently
+    // releases the stall on a bad frame either way, letting the pipeline
+    // proceed to dispatch the Format Error exception instead of hanging.
+    assign rte_stall    = ex_is_rte && !(mem_berr || exc_active) &&
+                          !(ex_valid && mem_ack &&
+                            ((rte_phase_r == 2'd1 && mem_rdata[15:12] != 4'hB) ||
+                             (rte_phase_r == 2'd2))) &&
+                          !eu_fmt_err_req;
 
     // open-items backlog Stage 13 (plan.md), Bug 2 fix: JSR/BSR/RTS/RTR/RTE
     // all occupy EX for one or more cycles WAITING on their own push/pop
@@ -2513,23 +2542,38 @@
     // test) before it shipped, not guessed at.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            rte_phase_r   <= 1'b0;
+            rte_phase_r   <= 2'd0;
             rte_sr_r      <= 16'h0;
             rte_pc_hi_r   <= 16'h0;
+            rte_pc_lo_r   <= 16'h0;
             rte_a7_next_r <= 32'h0;
-        end else if (ex_valid && ex_is_rte && !rte_phase_r && mem_ack) begin
-            rte_phase_r    <= 1'b1;
+        end else if (ex_valid && ex_is_rte && rte_phase_r == 2'd0 && mem_ack) begin
+            rte_phase_r    <= 2'd1;
             rte_sr_r       <= mem_rdata[31:16];  // SR from {SR, PC hi} longword at A7
             rte_pc_hi_r    <= mem_rdata[15:0];   // PC[31:16], same longword
             rte_a7_next_r  <= ex_ea + 32'd4;     // A7+4; phase 2 will add 4 + skip
-        end else if (ex_valid && ex_is_rte && rte_phase_r && mem_ack) begin
-            rte_phase_r    <= 1'b0;
-        end else if (ex_valid && ex_is_rte && rte_phase_r && mem_abort) begin
-            // A fault on the second (PC) read aborts RTE — must explicitly
+        end else if (ex_valid && ex_is_rte && rte_phase_r == 2'd1 && mem_ack) begin
+            // Format $B needs a 3rd read (the version-check word at
+            // SP+$36 = rte_a7_next_r+50) before RTE can trust the rest of
+            // the frame; every other format is done right here, as before.
+            // rte_pc_lo_r is captured ONLY on this transition (needed one
+            // cycle later, at phase 2's own completion, when mem_rdata no
+            // longer holds it) -- the phase-1-direct-complete case below
+            // still reads mem_rdata live the same cycle, unaffected.
+            if (mem_rdata[15:12] == 4'hB) begin
+                rte_phase_r <= 2'd2;
+                rte_pc_lo_r <= mem_rdata[31:16];
+            end else begin
+                rte_phase_r <= 2'd0;
+            end
+        end else if (ex_valid && ex_is_rte && rte_phase_r == 2'd2 && mem_ack) begin
+            rte_phase_r    <= 2'd0;
+        end else if (ex_valid && ex_is_rte && rte_phase_r != 2'd0 && mem_abort) begin
+            // A fault on the 2nd or 3rd read aborts RTE — must explicitly
             // reset here or this stays stuck for the next RTE instruction.
             // The first (format/SR) read's own fault needs no reset:
             // rte_phase_r is still 0 at that point, its correct idle value.
-            rte_phase_r   <= 1'b0;
+            rte_phase_r   <= 2'd0;
         end
     end
 
@@ -4445,7 +4489,12 @@
         // computed directly from the live phase-1 read (mem_rdata[15:12],
         // the format nibble in {PC lo,fmtvec}) rather than a registered
         // rte_fmt_skip_r -- see the RTE FSM's own comment above for why.
-        else if (rte_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rte_a7_next_r + 32'd4 + {24'h0, rte_frame_extra(mem_rdata[15:12])}; end
+        // Phase 250 Part A F6: reaching rte_an_wr_en via phase 2 means the
+        // frame is DEFINITELY Format $B (that's the only format that ever
+        // advances there) -- mem_rdata at that cycle is the version-check
+        // word, not the format nibble, so the skip is hardcoded rather
+        // than re-derived from now-stale data.
+        else if (rte_an_wr_en)         begin an_wr_sel = 3'b111;               an_wr_data = rte_a7_next_r + 32'd4 + {24'h0, (rte_phase_r == 2'd2) ? 8'd176 : rte_frame_extra(mem_rdata[15:12])}; end
         else if (addx_ay_wr_en)        begin an_wr_sel = addx_ay_reg_r;        an_wr_data = addx_ay_addr_r;                              end
         else if (addx_ax_wr_en)        begin an_wr_sel = addx_ax_reg_r;        an_wr_data = addx_ax_addr_r;                              end
         else if (pack_ay_wr_en)        begin an_wr_sel = pack_mem_ay_reg_r;    an_wr_data = pack_mem_ay_addr_r;                          end
@@ -4655,7 +4704,19 @@
     assign ex_bsr_taken = ex_valid && ex_is_bsr && mem_ack;
     assign ex_rts_taken = ex_valid && ex_is_rts && mem_ack;
     assign ex_rtr_taken = ex_valid && ex_is_rtr && rtr_phase_r && mem_ack;
-    assign ex_rte_taken = ex_valid && ex_is_rte && rte_phase_r && mem_ack;
+    // Phase 250 Part A F6: only a GENUINE completion (phase 1 acking with a
+    // non-$B format, or phase 2 acking at all) counts, AND only if
+    // eu_fmt_err_req isn't ALSO true that same cycle. Without the latter
+    // exclusion, an invalid-but-non-$B format code (e.g. $5) would satisfy
+    // the phase-1 completion condition below AND simultaneously request a
+    // Format Error -- the pre-existing bug this fix closes: real silicon
+    // must never commit SR/A7/PC or redirect the IFU (both gated on
+    // ex_rte_taken, via rte_sr_wr_en/rte_an_wr_en/branch_taken below) from
+    // a frame it's simultaneously rejecting as invalid.
+    assign ex_rte_taken = ex_valid && ex_is_rte && mem_ack &&
+                          ((rte_phase_r == 2'd1 && mem_rdata[15:12] != 4'hB) ||
+                           (rte_phase_r == 2'd2)) &&
+                          !eu_fmt_err_req;
 
     assign branch_taken  = dec_branch_taken | ex_dbcc_taken |
                            ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
@@ -4673,7 +4734,13 @@
                          // frame layout at all (RTS pops a bare PC; RTR
                          // pops its own separate CCR+PC pseudo-frame).
                          : (ex_rts_taken || ex_rtr_taken)  ? mem_rdata
-                         : ex_rte_taken                    ? {rte_pc_hi_r, mem_rdata[31:16]}
+                         // Phase 250 Part A F6: completing via phase 2
+                         // (Format $B) means mem_rdata now holds the
+                         // version-check word, not {PC lo,fmtvec} -- use
+                         // the value captured at the phase-1->2 transition
+                         // instead. Completing directly from phase 1 still
+                         // reads mem_rdata live (unaffected, same as before).
+                         : ex_rte_taken                    ? {rte_pc_hi_r, (rte_phase_r == 2'd2) ? rte_pc_lo_r : mem_rdata[31:16]}
                          // 10-item backlog Stage 9b (plan.md): JMP's own
                          // genuine memory-indirect target -- same resolved-
                          // address formula as LEA's own memind_addr_wr_data.
@@ -4702,8 +4769,9 @@
     assign rte_an_wr_en  = ex_rte_taken;
 
     // Format Error — RTE with unrecognised frame format code fires vector 14.
-    // The first RTE longword at A7 is {format_word, SR}; format code in mem_rdata[31:28].
-    // Valid codes: $0, $2, $3, $4, $8, $9, $A, $B.  All others raise Format Error.
+    // The format nibble arrives in phase 1's own read (real fmtvec sits at
+    // SP+6, packed with PC's low half in mem_rdata[15:12] at that point).
+    // Valid codes: $0, $2, $4, $8, $9, $A, $B.  All others raise Format Error.
     // docs/*.md review (Phase 250 frame layout fix): "$3" removed -- does
     // not exist on real 68030 silicon (Table 8-6 has no $3 entry; 8.1.3's
     // own text says Address Error uses the same $A/$B shape Bus Error
@@ -4731,6 +4799,17 @@
             default: return 8'd0;
         endcase
     endfunction
+
+    // Phase 250 Part A F6: Format $B's own version-number check
+    // (MC68030UM.pdf SS8.1.8/8.1.13) -- the version nibble lives in bits
+    // [15:12] of the word at SP+$36, read during rte_phase_r==2'd2. This
+    // RTL's own constructed Format $B frames always emit $0 there (an
+    // emergent property of unpopulated internal-register fields defaulting
+    // to zero, matching this processor's own real version number) -- $0 is
+    // therefore the only value RTE should accept.
+    function automatic logic rte_ver_valid(input logic [3:0] ver);
+        return (ver == 4'h0);
+    endfunction
     // Open-items backlog Stage 14 (plan.md): cpsr_fmt_err_w widens this same
     // vector-14 dispatch to also cover cpSAVE/cpRESTORE's own invalid coprocessor
     // state-frame format word (Section 10.5.1.5) -- architecturally the same
@@ -4741,8 +4820,14 @@
     // arrives in phase 1's own read (real fmtvec sits at SP+6, packed with
     // PC's low half, not phase 0's own {format_word,SR} the old layout
     // packed it into) -- moved from !rte_phase_r to rte_phase_r accordingly.
-    assign eu_fmt_err_req = (ex_valid && ex_is_rte && rte_phase_r && mem_ack &&
+    assign eu_fmt_err_req = (ex_valid && ex_is_rte && rte_phase_r == 2'd1 && mem_ack &&
                              !rte_fmt_valid(mem_rdata[15:12])) ||
+                            // Phase 250 Part A F6: bad version number in a
+                            // Format $B frame, checked at phase 2's own
+                            // completion (only ever reached when the format
+                            // nibble was already confirmed $B at phase 1).
+                            (ex_valid && ex_is_rte && rte_phase_r == 2'd2 && mem_ack &&
+                             !rte_ver_valid(mem_rdata[15:12])) ||
                             cpsr_fmt_err_w;
 
     // STOP — SR write fires first cycle STOP is in EX (before stop_r is set)
@@ -4813,7 +4898,8 @@
                        (cas2_rd2_r || cas2_wr1_r || cas2_wr2_r) ? cas2_siz_r :
                        (cpsr_mem_fmt_r || cpsr_xfer_mem_r) ? 2'b00 :  // always longword
                        (ex_is_rtr && !rtr_phase_r) ? 2'b10 :
-                       (ex_is_rte && !rte_phase_r) ? 2'b00 :  // longword: reads {SR, PC hi} together (real Format $0's own SP+0 layout)
+                       (ex_is_rte && rte_phase_r == 2'd0) ? 2'b00 :  // longword: reads {SR, PC hi} together (real Format $0's own SP+0 layout)
+                       (ex_is_rte && rte_phase_r == 2'd2) ? 2'b10 :  // word: version-check read at SP+$36 (Phase 250 Part A F6)
                        (ex_mem_rd_siz != 2'b00)    ? ex_mem_rd_siz :
                        ex_siz;
     // MOVES uses SFC for loads (ea→Rn) and DFC for stores (Rn→ea)
@@ -4840,7 +4926,10 @@
                        cpsr_mem_fmt_r ? cpsr_ea_r :           // format word always at EA itself
                        cpsr_xfer_mem_r ? cpsr_xfer_addr_r :
                        (ex_is_rtr && rtr_phase_r)            ? rtr_a7_next_r :
-                       (ex_is_rte && rte_phase_r)            ? rte_a7_next_r :
+                       (ex_is_rte && rte_phase_r == 2'd1)    ? rte_a7_next_r :
+                       // Phase 250 Part A F6: version-check word at SP+$36
+                       // = rte_a7_next_r (already SP+4) + 50.
+                       (ex_is_rte && rte_phase_r == 2'd2)    ? (rte_a7_next_r + 32'd50) :
                        (ex_is_cmpm && cmpm_phase_r)          ? cmpm_ax_addr_r : ex_ea;
     // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
     // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
