@@ -195,6 +195,19 @@
     logic        tas_memind_pending_r;
     logic [31:0] tas_memind_addr_r;
 
+    // MOVEM genuine memory-indirect EA (Phase 251 item 2): MOVEM is closer
+    // to LEA/JMP/TAS's own "address-only" completion than to CMP2/CHK2's
+    // "outer read produces a value" one -- it wants the resolved STARTING
+    // address for its own pre-existing movem_run_r register-iteration loop,
+    // not an operand. The memind FSM's own inner-read completion resolves
+    // that address directly into movem_memind_addr_r (same live mem_rdata
+    // formula as memind_addr_wr_data/tas_memind_addr_r above);
+    // movem_memind_pending_r then hands off to movem_run_r's own FSM
+    // (a new start branch there, parallel to its existing instr_ack-
+    // triggered one) exactly as tas_memind_pending_r hands off to tas_run_r.
+    logic        movem_memind_pending_r;
+    logic [31:0] movem_memind_addr_r;
+
     // RTR two-phase read state (module-level registers; declared here for stall)
     logic        rtr_phase_r;
     logic [7:0]  rtr_ccr_r;
@@ -828,7 +841,16 @@
     // itself is the correct, independent "give up now" signal regardless
     // of which path detected the fault.
     wire mem_abort = mem_berr || exc_active;
-    assign ex_mem_stall = tas_run_r || tas_read_ack || tas_memind_pending_r || movem_start_r || movem_run_r ||
+    assign ex_mem_stall = tas_run_r || tas_read_ack || tas_memind_pending_r ||
+                          // Phase 251 item 2: genuine one-cycle gap between
+                          // the memind FSM's own inner-read completion and
+                          // movem_run_r actually starting (mirrors
+                          // tas_memind_pending_r/cmp2_memind_first_ack's
+                          // own identical reasoning) -- without this, the
+                          // pipeline would accept a new instruction one
+                          // cycle early.
+                          movem_memind_pending_r ||
+                          movem_start_r || movem_run_r ||
                           movep_start_r || movep_pre_r || movep_run_r ||
                           fpu_start_r || fpu_run_r ||
                           bkpt_start_r || bkpt_run_r || bkpt_wait_replacement_r ||
@@ -2605,8 +2627,14 @@
             movem_long_r    <= 1'b0;
             movem_mask_hi_r <= 1'b0;
         end else if (!movem_start_r && !movem_run_r && instr_ack && dec_is_movem) begin
-            // DECODE accepted MOVEM: capture control bits; stall for one cycle (movem_start_r).
-            movem_start_r   <= 1'b1;
+            // DECODE accepted MOVEM: capture control bits unconditionally
+            // (needed either way) -- stall for one cycle (movem_start_r)
+            // ONLY for the ordinary, non-indirect case. Phase 251 item 2:
+            // genuine memory-indirect (dec_is_memind) instead waits for the
+            // memind FSM's own inner-pointer-read hand-off below
+            // (movem_memind_pending_r) rather than computing its own
+            // starting address from rd_b_data/ex_ea directly.
+            movem_start_r   <= !dec_is_memind;
             // for 2-ext-word modes mask is in ext_data[31:16]; else [15:0]
             movem_mask_r    <= dec_movem_mask_hi ? ext_data[31:16] : ext_data[15:0];
             movem_mask_hi_r <= dec_movem_mask_hi;
@@ -2615,6 +2643,16 @@
             movem_postinc_r <= dec_movem_postinc;
             movem_long_r    <= dec_movem_long;
             movem_an_r      <= f_reg;           // base An register number
+        end else if (!movem_start_r && !movem_run_r && movem_memind_pending_r) begin
+            // Phase 251 item 2: the memind FSM's own inner-pointer read has
+            // resolved the real starting address -- movem_mask_r/load_r/
+            // predec_r/postinc_r/long_r/an_r were already captured above at
+            // the original instr_ack cycle, unaffected. Skips movem_start_r
+            // entirely (no rd_b_data/ex_ea dependency to wait out here,
+            // unlike the ordinary case) and enters the loop directly, same
+            // shape as tas_memind_pending_r handing off to tas_run_r.
+            movem_run_r  <= 1'b1;
+            movem_addr_r <= movem_memind_addr_r;
         end else if (movem_start_r) begin
             // MOVEM entered EX: rd_b_data = base An (standard) or ex_ea valid.
             // Compute initial bus address and start MOVEM bus-cycle loop (movem_run_r).
@@ -3176,6 +3214,8 @@
             memind_is_jsr_r    <= 1'b0;
             tas_memind_pending_r <= 1'b0;
             tas_memind_addr_r    <= 32'h0;
+            movem_memind_pending_r <= 1'b0;
+            movem_memind_addr_r    <= 32'h0;
         end else if (!memind_start_r && !memind_inner_r && !memind_outer_r
                      && instr_ack && dec_is_memind) begin
             memind_start_r     <= 1'b1;
@@ -3202,7 +3242,11 @@
             // its own outer phase must be the RMW-LOCKED read+write, not a
             // plain discardable one, so it hands off to tas_memind_pending_r
             // below instead of completing directly the way LEA/JMP do.
-            memind_addr_only_r <= dec_is_lea || dec_is_jmp || dec_is_tas;
+            // MOVEM (Phase 251 item 2) shares LEA/JMP's own shape: it wants
+            // the resolved address as movem_run_r's own starting point, not
+            // a dereferenced value -- hands off via movem_memind_pending_r
+            // below instead, mirroring TAS's own hand-off shape.
+            memind_addr_only_r <= dec_is_lea || dec_is_jmp || dec_is_tas || dec_is_movem;
             memind_is_pea_r    <= dec_is_pea;
             memind_is_jsr_r    <= dec_is_jsr;
         end else if (memind_start_r) begin
@@ -3237,6 +3281,13 @@
                 tas_memind_pending_r <= 1'b1;
                 tas_memind_addr_r    <= mem_rdata + memind_post_xn_r + memind_od_r;
             end
+            // MOVEM genuine memory-indirect EA (Phase 251 item 2): same
+            // live-mem_rdata formula, but movem_memind_addr_r is a starting
+            // address for movem_run_r's own loop, not a dereference target.
+            if (ex_is_movem) begin
+                movem_memind_pending_r <= 1'b1;
+                movem_memind_addr_r    <= mem_rdata + memind_post_xn_r + memind_od_r;
+            end
         end else if (memind_outer_r && mem_ack) begin
             memind_outer_r <= 1'b0;
         end else if (memind_inner_r && mem_abort) begin
@@ -3254,6 +3305,14 @@
             // (tas_run_r's own start condition requires mem_ack specifically,
             // so it never starts on an aborted read).
             tas_memind_pending_r <= 1'b0;
+        end else if (movem_memind_pending_r) begin
+            // Phase 251 item 2: a pure one-cycle hand-off pulse (unlike
+            // tas_memind_pending_r, this never drives a bus request of its
+            // own) -- MOVEM's own FSM (a separate always_ff) reads it this
+            // exact same cycle to start movem_run_r; clearing it here
+            // (the sole driver of this register) is unconditional, not
+            // gated on mem_ack/mem_abort.
+            movem_memind_pending_r <= 1'b0;
         end
     end
 
@@ -4398,7 +4457,12 @@
     // (TAS never sets a meaningful destination register).
     logic        memind_addr_wr_en;
     logic [31:0] memind_addr_wr_data;
-    assign memind_addr_wr_en   = memind_inner_r && mem_ack && memind_addr_only_r && !ex_is_tas;
+    // Phase 251 item 2: !ex_is_movem excludes MOVEM the same way !ex_is_tas
+    // already excludes TAS -- without it, MOVEM's own resolved address
+    // would ALSO commit as a plain register write to memind_dest_r, and
+    // since MOVEM never sets dec_dest_reg (defaults to 0), that would
+    // silently corrupt D0 on every genuine-indirect MOVEM.
+    assign memind_addr_wr_en   = memind_inner_r && mem_ack && memind_addr_only_r && !ex_is_tas && !ex_is_movem;
     assign memind_addr_wr_data = mem_rdata + memind_post_xn_r + memind_od_r;
 
     // BF memory Dn write — non-mutating ops write extracted result to Dn at read ack.

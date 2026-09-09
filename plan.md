@@ -1372,3 +1372,92 @@ resulting misbehavior. Full mandatory gate clean: `make test` 37/37,
 Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221
 TIMEOUT 0` — Harte's own 68000-captured corpus has no format/version
 field at all).
+
+### Item 2 (MOVEM genuine memory-indirect EA) — IMPLEMENTED AND VERIFIED
+
+Full plan detail in `~/.claude/plans/wobbly-honking-cascade.md` (Part
+B); this entry is the closing writeup. Closes this project's own
+memory-indirect-EA rollout in full — MOVEM was the one remaining family
+without genuine `([bd,An],Xn,od)`/`([bd,An,Xn],od)` support (word-count
+sizing was already fixed at Phase 234).
+
+**Decode** (`rtl/eu_seq_decode.svh`, MOVEM's `f_mode==3'b110` arm): new
+`fi_iis != 3'b000` branch reusing CMP2/CHK2's own shifted bd/od
+extraction verbatim (Phase 244) — MOVEM's leading register-mask word
+shifts bd/od one q-slot later than the generic single-word-baseline
+formulas assume, identically to CMP2/CHK2's own leading Rn+flag word.
+`movem_ext_count` (`m68030_seq.sv`) needed zero changes — it already
+sized bd/od's own extra words generically, even before the EA *value*
+itself was resolved correctly.
+
+**Execute hand-off** (`rtl/eu_seq_execute.svh`): MOVEM is closer to
+LEA/JMP/TAS's own "address-only" completion than to CMP2/CHK2's "outer
+read produces a value" one — it wants the resolved address as
+`movem_run_r`'s own starting point, not an operand. New
+`movem_memind_pending_r`/`movem_memind_addr_r` registers (mirroring
+`tas_memind_pending_r`) hand off from the memind FSM's own inner-read
+completion to a new start branch in `movem_run_r`'s own FSM.
+`memind_addr_only_r` extended to include `dec_is_movem`.
+`movem_start_r`'s own original dispatch gains `&& !dec_is_memind`
+(mask/load/predec/etc. capture stays unconditional — only the
+`movem_start_r<=1` transition is gated). Two required exclusions, both
+load-bearing: `memind_addr_wr_en` needs `&& !ex_is_movem` (else MOVEM's
+resolved address would ALSO commit as a plain register write to
+`memind_dest_r`, which defaults to 0/D0 since MOVEM never sets
+`dec_dest_reg` — silent D0 corruption); `ex_mem_stall` needs
+`movem_memind_pending_r` added (a genuine one-cycle gap between the
+inner read's ack and `movem_run_r` actually starting, the same bug
+class already found and fixed for `tas_memind_pending_r`/
+`cmp2_memind_first_ack`).
+
+**Found and fixed a real bug via a genuine cosim mismatch while building
+the test, not guessed at**: the first decode implementation moved
+Xn's own capture (`dec_dst_reg`/`dec_reads_dst`/`dec_xn_wl`/
+`dec_xn_scale`, Xn → rd_b) into the non-indirect-only `else` branch,
+mirroring the ORIGINAL code's own structure too literally. This broke
+pre-indexed genuine-indirect MOVEM specifically (pre-indexed adds Xn
+BEFORE the dereference, at the same `ex_ea` computation the inner
+pointer read uses) — the inner read computed a wildly wrong address
+(confirmed via a real buscmp mismatch: DUT read from `0x00004322`
+instead of the expected `0x00002108`, since Xn's own register value was
+never routed to `rd_b` for the indirect case). Root-caused via direct
+opcode-encoding decode (not guessed) and fixed by hoisting Xn's capture
+to be unconditional, matching CMP2/CHK2's own exact shared-prefix-then-
+branch structure — only `dec_is_idx`'s own value (whether Xn is added
+at THIS `ex_ea` specifically, vs. deferred to the memind FSM's own
+`memind_post_xn_r` for post-indexed) actually differs between the two
+cases, not whether Xn is read into `rd_b` at all.
+
+**Test-construction findings** (neither an RTL bug): a genuine
+single-register MOVEM list (`movem.w ...,a2`) is silently rewritten by
+`vasmm68k_mot` into the equivalent plain `MOVEA.W` instruction — a real,
+different opcode, confirmed via direct disassembly listing (`0x3470`,
+not a MOVEM encoding at all) after a trace showed `dec_is_movem=0`
+where `dec_is_memind=1` was expected together. Separately, two ADJACENT
+word-sized MOVEM register transfers hit an already-known, pre-existing
+benign Musashi-side quirk (coalescing them into one 32-bit reference
+read where real 68030 silicon, and this DUT correctly, issues two
+separate word-sized bus cycles) — the same "prefetch/read-granularity"
+divergence class already documented for several earlier memind test
+files in this project's history. `tests/memind42.s` was designed around
+both: 2 registers each (forces genuine MOVEM encoding) and long size
+(sidesteps the word-coalescing quirk entirely) — covers store+pre-
+indexed and load+post-indexed. Confirmed an exact 37-cycle bus-trace
+match against Musashi (`make cosim_memind`, wired in as
+`buscmp-memind42`) — this exact match is itself strong evidence for
+both B3 exclusions (a missing `memind_addr_wr_en` exclusion would have
+shown up as a wrong stored value at Part 1's own target address; a
+missing `ex_mem_stall` term would have shown up as a misplaced/extra
+bus cycle in the trace — neither occurred).
+
+Full mandatory gate clean: `make test` 37/37, `cosim_grp` 8/8,
+`cosim_memind` 29/29 (28 existing + new memind42), `dat-synth` 50/50,
+full 124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL
+2 SKIP 281221 TIMEOUT 0` — MOVEM's own genuine-indirect EA is
+68020+-only, zero Harte coverage in the 68000-captured corpus).
+
+**This closes Phase 251 in full** (item 1/F6 and item 2/MOVEM
+implemented and verified; item 3/two-level-indirect corrected as a
+documentation fix, see above) — and with it, the entire
+`~/.claude/plans/wobbly-honking-cascade.md` plan the user approved for
+this session's work.

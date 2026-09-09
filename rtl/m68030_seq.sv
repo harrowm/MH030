@@ -228,15 +228,13 @@ module m68030_seq (
     // descriptor's). ext_count is additive on top of MOVEM's 2-word
     // baseline (mask + descriptor), not a wholesale override like
     // is_memind_full's, since that baseline is what non-null bd/od needs
-    // *more than*, not a value to replace. Only the word-bd, non-indirect
-    // sub-case (fi_iis==000, fi_bdsz==10) is actually decoded correctly
-    // (eu_seq.sv's own MOVEM (d8,An,Xn) block, using q3_word for the bd
-    // value); every other full-format sub-case (genuine indirect, long bd)
-    // still degrades to the brief interpretation for dec_ea_offset, same
-    // "least-wrong fallback" every other family in this rollout uses for
-    // memory-indirect -- but movem_ext_count still accounts for their words
-    // to avoid desyncing the IFU stream even where the resulting EA value
-    // itself is wrong, mirroring memind_ext_count's own reasoning above.
+    // *more than*, not a value to replace. Phase 251 item 2: genuine
+    // memory-indirect (fi_iis!=000) is now decoded correctly too (see
+    // eu_seq_decode.svh's own MOVEM f_mode==110 arm) -- this word-count
+    // formula needed no change at all, since it already accounted for
+    // bd/od's own words generically (to avoid desyncing the IFU stream)
+    // even back when the resulting EA *value* for the indirect case was
+    // still wrong, mirroring memind_ext_count's own reasoning above.
     // Same shared eaf_* extraction as peek_fi_full/etc above (rtl/opcode_fields.sv).
     logic        peek_fi_full_movem;  assign peek_fi_full_movem = eaf_is_full(ifu_ext_data[15:0]);
     logic [1:0]  peek_fi_bdsz_movem;  assign peek_fi_bdsz_movem = eaf_bdsz(ifu_ext_data[15:0]);

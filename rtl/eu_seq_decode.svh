@@ -3780,12 +3780,29 @@
                         // which already sizes movem_ext_count correctly for
                         // long bd; only this value extraction was missing,
                         // fixed Phase 138 -- see plan.md).
-                        // Genuine memory-indirect (fi_iis!=000) is still NOT
-                        // decoded correctly here -- same "least-wrong fallback
-                        // to brief" boundary every other family in this rollout
-                        // draws around memory-indirect; worst case (mask+
-                        // descriptor+long-bd+long-od) needs 6 ext words, beyond
-                        // what the IFU can drain today (plan.md Phase 138 §8).
+                        // Phase 251 item 2 (was: "genuine memory-indirect
+                        // (fi_iis!=000) is still NOT decoded correctly here
+                        // -- same least-wrong fallback to brief every other
+                        // family in this rollout used to draw around memory-
+                        // indirect"). Now implemented: MOVEM's own leading
+                        // mask word (like CMP2/CHK2's own leading Rn+flag
+                        // word, Phase 244) shifts bd/od one q-slot later than
+                        // the generic single-word-baseline fi_bd/fi_od
+                        // formulas assume -- reuses CMP2/CHK2's own exact
+                        // shifted extraction verbatim (both share the
+                        // identical 2-word baseline shape; the existing
+                        // non-indirect branch below already special-cases
+                        // this shift for bd alone via q3_word/ext34_data).
+                        // Xn is read into rd_b unconditionally (needed either
+                        // way -- pre-indexed adds it BEFORE the dereference,
+                        // at the inner-read stage via dec_is_idx below;
+                        // post-indexed adds it AFTER, captured separately by
+                        // the memind FSM's own memind_post_xn_r once inner_r
+                        // acks). Only dec_is_idx's own value (whether Xn is
+                        // added at THIS ex_ea computation specifically)
+                        // differs between the two cases -- exact same shared-
+                        // prefix-then-branch shape CMP2/CHK2 already
+                        // established above.
                         end else if (f_mode == 3'b110) begin
                             dec_valid         = 1'b1;
                             dec_movem_mask_hi = 1'b1;
@@ -3793,14 +3810,37 @@
                             dec_reads_src     = 1'b1;
                             dec_dst_reg       = {ext_data[15], ext_data[14:12]};  // Xn → rd_b
                             dec_reads_dst     = 1'b1;
-                            dec_is_idx        = 1'b1;
                             dec_xn_wl         = ext_data[11];
                             dec_xn_scale      = ext_data[10:9];
-                            dec_ea_offset     = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
-                                              ? {{16{q3_word[15]}}, q3_word}
-                                              : (fi_is_full && fi_bdsz == 2'b11 && fi_iis == 3'b000)
-                                              ? {q3_word, ext34_data[15:0]}
-                                              : {{24{ext_data[7]}}, ext_data[7:0]};
+                            if (fi_is_full && fi_iis != 3'b000) begin
+                                dec_is_memind      = 1'b1;
+                                dec_memind_is_post = fi_iis[2];
+                                dec_is_idx         = !fi_is_s && !fi_iis[2];
+                                dec_ea_offset      = (fi_bdsz == 2'b10) ? {{16{q3_word[15]}}, q3_word}
+                                                   : (fi_bdsz == 2'b11) ? {q3_word, ext34_data[15:0]}
+                                                                        : 32'h0;
+                                // fi_iis[1:0] od-size encoding: 01=null,
+                                // 10=word, 11=long (00 never occurs here,
+                                // excluded by this branch's own outer
+                                // condition) -- see CMP2/CHK2's own identical
+                                // derivation above for the full citation.
+                                dec_memind_od      =
+                                    (fi_iis[1:0] == 2'b01) ? 32'h0 :
+                                    (fi_iis[1:0] == 2'b10) ?
+                                        ((fi_bdsz == 2'b10) ? {{16{ext34_data[15]}}, ext34_data[15:0]}
+                                       : (fi_bdsz == 2'b11) ? {{16{q5_word[15]}}, q5_word}
+                                                            : {{16{q3_word[15]}}, q3_word}) :
+                                        ((fi_bdsz == 2'b10) ? {ext34_data[15:0], q5_word}
+                                       : (fi_bdsz == 2'b11) ? {q5_word, q6_word}
+                                                            : {q3_word, ext34_data[15:0]});
+                            end else begin
+                                dec_is_idx        = 1'b1;
+                                dec_ea_offset     = (fi_is_full && fi_bdsz == 2'b10 && fi_iis == 3'b000)
+                                                  ? {{16{q3_word[15]}}, q3_word}
+                                                  : (fi_is_full && fi_bdsz == 2'b11 && fi_iis == 3'b000)
+                                                  ? {q3_word, ext34_data[15:0]}
+                                                  : {{24{ext_data[7]}}, ext_data[7:0]};
+                            end
                         end else if (f_mode == 3'b111) begin
                             case (f_reg)
                                 3'b000: begin  // (xxx).W: 2 ext words — mask=[31:16], abs16=[15:0]

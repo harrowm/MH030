@@ -738,13 +738,27 @@ buscmp-memind41: $(SIM)/cosim_grp winuae/tests/memind41_ref.log tests/memind41.h
 	    | grep "^BUS" > /tmp/_dut_memind41.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind41.log winuae/tests/memind41_ref.log \
 	    --dut-may-continue
+# memind42 (Phase 251 item 2): MOVEM's own genuine memory-indirect EA
+# ([bd,An],Xn,od)/([bd,An,Xn],od) -- the last originally-deferred memind
+# family (word-count sizing was already fixed at Phase 234; only the EA
+# *value* resolution was missing). Covers store+pre-indexed and
+# load+post-indexed, both long-sized (2 registers each -- a genuine
+# single-register MOVEM list is silently rewritten by vasm into the
+# equivalent plain MOVEA instruction, and word-sized 2-register transfers
+# hit a known, pre-existing benign Musashi coalescing quirk unrelated to
+# this feature, documented in the test's own header).
+buscmp-memind42: $(SIM)/cosim_grp winuae/tests/memind42_ref.log tests/memind42.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind42.hex +grp=memind42 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_memind42.log || true
+	python3 tools/buscmp.py /tmp/_dut_memind42.log winuae/tests/memind42_ref.log \
+	    --dut-may-continue
 
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
               buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
               buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 buscmp-memind40 \
-              buscmp-memind41 \
+              buscmp-memind41 buscmp-memind42 \
               buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)

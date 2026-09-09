@@ -1695,12 +1695,44 @@ Full mandatory gate clean, Harte bit-identical to baseline (68000-
 captured corpus has no format/version field at all). See `plan.md
 §Phase 251` for the full writeup.
 
-Work proceeding to the last real item (MOVEM). Permanently out of
-scope by design, not started: coprocessor conditional instructions +
-Coprocessor Protocol Violation (Phase 248 item #7); STATUS's other 3
-sub-cases + REFILL# (Phase 248 item #5); PTEST's DSACK-breadth exclusion
-+ I-cache CEI's per-line-only limitation (both pre-existing architecture
-boundaries, not bugs).
+**Item 2 (MOVEM genuine memory-indirect EA) — IMPLEMENTED AND VERIFIED,
+closes the memory-indirect-EA rollout in full.** MOVEM was the last
+family without genuine `([bd,An],Xn,od)` support (word-count sizing
+already fixed at Phase 234). Decode reuses CMP2/CHK2's own shifted bd/od
+extraction verbatim (identical leading-word-shift shape); execute-side
+hand-off mirrors TAS's own `tas_memind_pending_r` shape (new
+`movem_memind_pending_r`/`movem_memind_addr_r`, since MOVEM wants the
+resolved address as `movem_run_r`'s own starting point, not an operand
+to dereference). Two required exclusions, both load-bearing:
+`memind_addr_wr_en` needs `!ex_is_movem` (else silently corrupts D0, the
+default `dec_dest_reg` MOVEM never sets); `ex_mem_stall` needs
+`movem_memind_pending_r` added (the same one-cycle-gap bug class already
+fixed for TAS/CMP2/CHK2). **Found and fixed a real bug via a genuine
+cosim mismatch, not guessed at**: a first decode attempt moved Xn's own
+`rd_b` capture into the non-indirect-only branch, breaking pre-indexed
+address resolution (Xn is added BEFORE the dereference for pre-indexed,
+at the same `ex_ea` the inner pointer read uses) — caught via a real
+buscmp mismatch (DUT read the wrong address entirely), fixed by hoisting
+Xn's capture to be unconditional, matching CMP2/CHK2's own exact
+shared-prefix-then-branch structure. New `tests/memind42.s` (2 registers
+each, long-sized — sidesteps two orthogonal, unrelated test-construction
+quirks found along the way: vasm silently rewrites a genuine single-
+register MOVEM list into a plain MOVEA instruction, and Musashi
+coalesces two adjacent word-sized register reads into one 32-bit
+reference read where real silicon issues two separate word-sized bus
+cycles) gets an exact 37-cycle bus-trace match against Musashi,
+covering both store+pre-indexed and load+post-indexed. Full mandatory
+gate clean, Harte bit-identical to baseline (68020+-only, zero Harte
+coverage). See `plan.md §Phase 251` for the full writeup.
+
+**This closes Phase 251, and the entire `~/.claude/plans/
+wobbly-honking-cascade.md` plan, in full.**
+
+Permanently out of scope by design, not started: coprocessor conditional
+instructions + Coprocessor Protocol Violation (Phase 248 item #7);
+STATUS's other 3 sub-cases + REFILL# (Phase 248 item #5); PTEST's
+DSACK-breadth exclusion + I-cache CEI's per-line-only limitation (both
+pre-existing architecture boundaries, not bugs).
 
 ## Verification Commands
 
