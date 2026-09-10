@@ -1,20 +1,31 @@
 `default_nettype none
 `timescale 1ns / 1ps
 
-// Timing-diagram source testbench: one isolated word read, 32-bit port,
-// zero wait states.
+// Timing-diagram source testbench: the full three-cycle chain from
+// MC68030UM.pdf Figure 7-21 ("Asynchronous Byte and Word Read Cycles --
+// 32-Bit Port", p.7-33) -- a word read, then two byte reads, all inside
+// the same longword, all zero-wait-state, all back-to-back with no
+// idle gap deliberately inserted between them (the BIU dispatches the
+// next cycle's S0 the instant the prior one's ST_IDLE tick sees a fresh
+// eu_req -- the only gap that can appear is the project's own already-
+// documented structural one-tick ST_IDLE dispatch floor, not an
+// artifact of this testbench).
 //
 // This is NOT a pass/fail regression test (there is no `make test` target
 // for it) -- it exists purely to produce a VCD that
 // scripts/vcd_to_wavedrom.py turns into a WaveDrom timing diagram for
-// comparison against MC68030UM.pdf Figure 7-21 ("Asynchronous Byte and
-// Word Read Cycles -- 32-Bit Port", p.7-33) -- specifically the leftmost
-// of that figure's own three chained cycles (a single word read).
+// comparison against Figure 7-21 directly, cycle for cycle:
+//   1. word read  @ 0x10, SIZ=10 (word)  -> bytes 0-1 (D31-D16)
+//   2. byte read  @ 0x12, SIZ=01 (byte)  -> byte 2   (D15-D8)
+//   3. byte read  @ 0x13, SIZ=01 (byte)  -> byte 3   (D7-D0)
+// all within the same test longword at address 0x10 (0x1234_5678),
+// matching the figure's own WORD/BYTE/BYTE region layout and the A1/A0
+// transitions it shows (00 -> 10 -> 11).
 //
 // Structure mirrors tb/biu_int_tb.sv's own m68030_biu integration harness
-// (reset -> power-on init -> one eu_req cycle), trimmed to the minimum
-// needed for one clean read; reuses tb/mem_model.sv directly rather than
-// reinventing a memory model.
+// (reset -> power-on init -> eu_req cycles), trimmed to the minimum
+// needed for these three back-to-back reads; reuses tb/mem_model.sv
+// directly rather than reinventing a memory model.
 
 module read_cycle_tb;
 
@@ -286,18 +297,41 @@ module read_cycle_tb;
     assign ext_d_in = mem_ext_d_in;
 
     // -----------------------------------------------------------------------
-    // Test sequence: reset -> power-on init -> ONE word read at 0x0010,
-    // pre-loaded with a recognisable value so the diagram's own data lanes
-    // show something legible (mirrors Figure 7-21's own "OPn" convention).
+    // Test sequence: reset -> power-on init -> three back-to-back reads
+    // matching Figure 7-21's own word/byte/byte chain exactly, pre-loaded
+    // with a recognisable value so the diagram's own data lanes show
+    // something legible (mirrors the figure's own "OPn" convention).
     // -----------------------------------------------------------------------
     initial begin
         // Wait for memory to initialise, then pre-load the vector table
-        // (SSP/PC, consumed by power-on init) and the test word itself.
+        // (SSP/PC, consumed by power-on init) and the test longword itself.
         #1;
         u_mem.mem[0] = 32'h0000_2000;  // SSP
         u_mem.mem[1] = 32'h0000_0100;  // PC
-        u_mem.mem[4] = 32'h1234_5678;  // test word at 0x10 (word read target)
+        u_mem.mem[4] = 32'h1234_5678;  // test longword at 0x10: byte0=$12 byte1=$34 byte2=$56 byte3=$78
     end
+
+    // One request/wait-for-ack/report step, reused for all three cycles.
+    // eu_req is left asserted across cycles (never dropped between them) so
+    // the BIU's own ST_IDLE dispatch sees a fresh request the instant the
+    // prior cycle's S7 returns to ST_IDLE -- the only gap that can appear
+    // is that single already-documented structural dispatch tick, not
+    // anything this testbench inserts deliberately.
+    task automatic do_read(input [31:0] addr, input [1:0] siz, input string label);
+        logic got_ack;
+        got_ack = 1'b0;
+        eu_addr = addr;
+        eu_siz  = siz;
+        for (int t = 0; t < 40; t++) begin
+            @(posedge clk_4x);
+            if (eu_ack)  begin got_ack = 1'b1; break; end
+            if (eu_berr) break;
+        end
+        if (got_ack)
+            $display("PASS: %s read acked, eu_rdata=%08h", label, eu_rdata);
+        else
+            $display("FAIL: %s read never acked", label);
+    endtask
 
     initial begin
         $dumpfile("read_cycle.vcd");
@@ -315,28 +349,15 @@ module read_cycle_tb;
         // idle bus, not the tail of the init fetches.
         repeat(8) @(posedge clk_4x);
 
-        // The one read this whole testbench exists to capture: a single
-        // word read, 32-bit port, zero wait states, at address 0x0010.
-        eu_addr = 32'h0000_0010;
-        eu_fc   = 3'b101;   // supervisor data
-        eu_rw   = 1'b1;     // read
-        eu_siz  = 2'b10;    // word
-        eu_req  = 1'b1;
+        eu_fc  = 3'b101;   // supervisor data, throughout
+        eu_rw  = 1'b1;     // read, throughout
+        eu_req = 1'b1;     // stays asserted across all three chained cycles
 
-        begin
-            logic got_ack;
-            got_ack = 1'b0;
-            for (int t = 0; t < 40; t++) begin
-                @(posedge clk_4x);
-                if (eu_ack)  begin got_ack = 1'b1; break; end
-                if (eu_berr) break;
-            end
-            eu_req = 1'b0;
-            if (got_ack)
-                $display("PASS: word read acked, eu_rdata=%08h (expect 0000_1234 in the low word, big-endian byte-lane placement per SIZ/A[1:0])", eu_rdata);
-            else
-                $display("FAIL: word read never acked");
-        end
+        do_read(32'h0000_0010, 2'b10, "word ");   // WORD  @0x10 -> D31-D16 = $1234
+        do_read(32'h0000_0012, 2'b01, "byte1");   // BYTE  @0x12 -> D15-D8  = $56
+        do_read(32'h0000_0013, 2'b01, "byte2");   // BYTE  @0x13 -> D7-D0   = $78
+
+        eu_req = 1'b0;
 
         // A few idle cycles after, so the diagram shows the bus genuinely
         // returning to idle (matching the manual's own "back-to-back or

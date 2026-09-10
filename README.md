@@ -148,16 +148,28 @@ places it next to the manual's own diagram for the same cycle:
 Left: a crop of *Figure 7-21, "Asynchronous Byte and Word Read Cycles —
 32-Bit Port"* (`docs/MC68030UM.pdf`, PDF page 194 / printed page 7-33) —
 copyright NXP/Motorola, included here for direct visual comparison.
-Right: a single word read (`eu_addr=0x10`, `SIZ=10`, `FC=101`) driven
-through `m68030_biu` and rendered from the resulting VCD — the manual's
-own leftmost cycle only; the other two chained byte reads aren't
-reproduced yet. `/AS` and `/DS` assert together, matching this project's
-own S-state model above, not the manual's own staggered legacy timing
-notation.
+Right: the same three chained cycles the figure shows — a word read
+followed by two byte reads, all within one test longword — driven
+through `m68030_biu` and rendered from the resulting VCD, with the
+address bus, byte-lane data split, `/ECS`/`/OCS`, and an S-state lane
+all reproduced alongside `/AS`/`/DS`/`/DSACK`/`/DBEN`. `/AS` and `/DS`
+assert together, matching this project's own S-state model above, not
+the manual's own staggered legacy timing notation.
+
+The two diagrams still differ in a few ways worth knowing about before
+comparing them pixel-for-pixel: the `CLK` lane on the right is this
+project's internal 4× clock, not the external bus clock the manual's
+`CLK` shows; a small idle gap appears between the RTL's three chained
+cycles that the manual's own back-to-back timing doesn't have (a real,
+already-documented "structural per-cycle dispatch floor," not a
+testbench artifact — see `timing_diagrams/README.md`'s own "Known
+differences" section); and `/OCS` doesn't visibly assert in this render
+despite the RTL appearing to compute it correctly on paper — observed,
+not yet investigated further.
 
 See `timing_diagrams/README.md` for the full pipeline (testbench → VCD →
 WaveDrom spec → PNG) and `timing_diagrams/diagrams.md` for the manifest
-of what's been generated so far — currently just this one cycle, with
+of what's been generated so far — currently just this one figure, with
 the rest of the manual's own timing figures as a future extension.
 
 ---

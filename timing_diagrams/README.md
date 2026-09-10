@@ -28,17 +28,43 @@ display server needed) — no local install required beyond Node/npm.
    `eu_req`/`eu_addr`/`eu_siz`/`eu_rw` directly for exactly the cycle(s)
    the target diagram needs) and dumps a VCD (`$dumpfile`/`$dumpvars`,
    the same mechanism `tb/biu_tb.sv`/`tb/biu_int_tb.sv` already use).
+   `read_cycle_tb.sv` drives three back-to-back reads (word then two
+   bytes, all within the same test longword), keeping `eu_req` asserted
+   continuously across all three so the BIU dispatches each one the
+   instant its predecessor's `ST_IDLE` tick sees a fresh request.
 2. **`scripts/vcd_to_wavedrom.py`** parses the VCD (stdlib only — no
    pip install needed; this machine's system Python is externally
    managed (PEP 668), and this project's own Python tooling has never
    needed a third-party dependency either) and emits a WaveDrom JSON
-   spec. It samples one column per rising edge of `clk_4x` within the
-   *last* assertion window of a chosen "start signal" (default `/AS`) —
-   the last one, not the first, because most testbenches' own power-on
+   spec. It samples one column per rising edge of `clk_4x` within a
+   window spanning the *last* `--cycles N` (default 3) back-to-back
+   assert/deassert windows of a chosen "start signal" (default `/AS`) —
+   the last N, not the first, because most testbenches' own power-on
    boot sequence (SSP/PC fetch) asserts `/AS` earlier in the trace too;
-   the diagram-worthy cycle is the one the test explicitly drives via
-   `eu_req`/`eu_ack`, which is always the final bus activity before
-   `$finish`.
+   the diagram-worthy cycles are always the final bus activity before
+   `$finish`, since that's what the test explicitly drives via
+   `eu_req`/`eu_ack`.
+   - Address is split into `A2-A31` (low 2 bits masked off, so it reads
+     as constant across a same-longword chain, matching the manual)
+     plus separate `A1`/`A0` single-bit lanes.
+   - The data bus is split into the manual's own four byte-lane rows
+     (`D24-D31`/`D16-D23`/`D8-D15`/`D0-D7`); each column only shows a
+     value in the lane(s) actually selected by `SIZ`+`A[1:0]` for that
+     access (mirroring `biu_byte_lane_ctrl.sv`'s own real steering rule,
+     re-derived here for display rather than read off an RTL signal),
+     gated on `/DBEN` so a lane's box appears only once the bus cycle
+     has actually reached the point real hardware would call the data
+     valid — this project's own `mem_model.sv` drives the full stored
+     longword continuously regardless of `SIZ`, unlike real silicon,
+     where an unselected lane may not be driven by anything at all.
+   - A synthetic `S-STATE (RTL)` lane reports the BIU's own `s_state`
+     output, relabeled sequentially (`S0`, `S1`, ...) each time it
+     leaves `ST_IDLE` — an honest report of how many distinct internal
+     states this RTL actually visits per cycle, not a claim that it
+     matches the manual's own `S0`/`S2`/`S4` numbering label-for-label
+     (the manual labels only every other real S-state; this RTL's own
+     `state` enum skips two *different* named states for an ordinary
+     read — see `CLAUDE.md`'s own "S-State Signal Timing" section).
 3. **`wavedrom-cli`** renders the JSON spec to a PNG.
 4. **`scripts/crop_manual_page.sh`** extracts and crops the corresponding
    manual page (via `pdftoppm`/`imagemagick`) to just the diagram +
@@ -49,20 +75,48 @@ display server needed) — no local install required beyond Node/npm.
 testbench — and the place to look before adding a new diagram (it also
 documents the PDF-page-vs-printed-page-number gotcha).
 
-## Known simplifications (this first diagram, `read_cycle`)
+## Known differences from the manual (`read_cycle`)
 
-- Only ONE bus cycle is rendered (a single word read), not the manual's
-  own Figure 7-21's full three chained cycles (word + 2 byte reads).
-  Extending the testbench to drive all three back-to-back, matching the
-  figure exactly, is a natural next step, not yet done.
-- The data bus is shown as one merged 32-bit lane (`D0-D31`), not split
-  into the manual's own four separate byte-lane rows (`D24-D31`,
-  `D16-D23`, `D8-D15`, `D0-D7`) with only the actually-used lane
-  populated. Splitting this out is a refinement for a later pass, not
-  required to prove the pipeline works.
-- `/ECS` and `/OCS` (shown in the manual's own figure) aren't rendered —
-  this project's own `m68030_biu` doesn't expose them as distinct
-  top-level testbench-observable signals the way `/AS`/`/DS` are.
+What's now matched: all 3 chained cycles (word + 2 byte reads), the
+A2-A31/A1/A0 split, `/ECS`/`/OCS`, and the 4-way byte-lane data split
+with values landing in the same lanes at the same cycles as the
+manual's own `OP2`/`OP3`/`OP3`/`OP3` boxes. What's still different, and
+why it's left alone rather than "fixed":
+
+- **The `CLK` lane is a different clock.** The manual's `CLK` is the
+  external bus clock (one period per `S0`/`S2`/`S4` label group). Ours
+  is the RTL's own internal 4× clock (`clk_4x`) — 4 ticks per external
+  bus cycle — since that's what this project's FSM actually runs on.
+  This is the single biggest *visual* difference, but it doesn't affect
+  the actual protocol timing being compared.
+- **A small idle gap appears between the 3 chained cycles that the
+  manual doesn't show.** The manual's own Figure 7-25 shows chained
+  reads with zero idle time between them; this RTL measurably takes
+  ~4 extra internal states (`S6`→`S7`→`ST_IDLE`→`S0` before the next
+  cycle's `/AS` can reassert) between one cycle's negation and the
+  next's. This is not a testbench artifact — the testbench keeps
+  `eu_req` asserted continuously and never inserts a deliberate gap —
+  it's the project's own already-documented "structural per-cycle
+  dispatch floor" (`CLAUDE.md`'s S-State Signal Timing section: "a
+  small, structural per-cycle dispatch floor (the `ST_IDLE`-to-`S0`
+  hand-off)... investigated and found genuinely load-bearing, not
+  implementation overhead"). This diagram is, incidentally, the first
+  direct visual demonstration of that gap.
+- **`/OCS` never asserts in this render**, while the manual shows it
+  toggling identically to `/ECS`. `biu_cycle_gen.sv` does compute
+  `ext_ocs_n = !cyc_is_op` for an ordinary operand read (and this
+  testbench sets `eu_is_operand=1`), so on paper it should assert —
+  this was *observed*, not investigated further (out of scope for a
+  diagram-generation pass), and is flagged here rather than silently
+  left unmentioned in case it's worth a real look in a future session.
+- **`SIZ1`/`SIZ0` are one combined 2-bit lane**, not two separate rows
+  like the manual. The combined decimal value (`2`=word, `1`=byte)
+  already conveys the same information; splitting it further is a
+  cosmetic refinement, not attempted here.
+- **Rendering style.** The manual is a hand-drafted datasheet diagram
+  (crosshatched "don't care" address transitions, hexagonal data-value
+  boxes). WaveDrom renders a generic digital-waveform style — a tooling
+  difference, not a correctness one.
 
 ## One-time setup
 

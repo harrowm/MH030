@@ -7,7 +7,7 @@ full pipeline explanation).
 
 | Name | Manual figure | PDF page | Printed page | Crop geometry | Testbench |
 |------|---------------|----------|---------------|----------------|-----------|
-| `read_cycle` | Figure 7-21, "Asynchronous Byte and Word Read Cycles — 32-Bit Port" (leftmost cycle only — a single word read; the manual's own figure chains 3 cycles: word read, then 2 byte reads) | 194 | 7-33 | `1150x1400+0+190` | `tb/read_cycle_tb.sv` |
+| `read_cycle` | Figure 7-21, "Asynchronous Byte and Word Read Cycles — 32-Bit Port" — all 3 chained cycles reproduced (word read @0x10, then byte reads @0x12/@0x13, all within the same test longword, matching the figure's own WORD/BYTE/BYTE region layout and A1/A0 transitions) | 194 | 7-33 | `1150x1400+0+190` | `tb/read_cycle_tb.sv` |
 
 **Crop geometry** is an ImageMagick `WxH+X+Y` box, in pixels, against a
 `pdftoppm -r 200` render of the given PDF page (200 DPI). Figure it out by
