@@ -6,7 +6,7 @@ A pin-level, cycle-accurate implementation of the Motorola MC68030 32-bit proces
 
 ## Clock Strategy
 
-The design runs at **4× the external bus frequency** — 100 MHz internal for a 25 MHz external bus. This gives four clean internal ticks per external clock half-cycle, which maps directly onto the 68030's S-state machine (S0–S7) without needing negedge triggers or clock-domain crossings. All logic is fully synchronous; there are no asynchronous resets or latches anywhere.
+The design runs at **4× the external bus frequency** — 100 MHz internal for a 25 MHz external bus. This gives four clean internal ticks per external clock half-cycle, which maps directly onto the 68030's S-state machine (S0–S5) without needing negedge triggers or clock-domain crossings. All logic is fully synchronous; there are no asynchronous resets or latches anywhere.
 
 ---
 
@@ -20,14 +20,13 @@ m68030_top
 │   ├── biu_sizing_fsm      Dynamic bus-width negotiation via DSACK0/1
 │   ├── biu_pin_driver      Output pin control and tri-state management
 │   ├── biu_byte_lane_ctrl  Write-data steering from SIZ[1:0] + A[1:0]
-│   ├── biu_burst_ctrl      Burst linefill and MOVE16 burst sequencing
+│   ├── biu_burst_ctrl      Burst linefill
 │   ├── biu_multiop_fsm     MOVEM / MOVEP multi-transfer sequences
 │   ├── biu_error_handler   BERR detection, timeout, fault capture
 │   ├── biu_cache_if        D-cache: direct-mapped, per-word valid bits (Phase 133), write-through
 │   ├── biu_icache_if       I-cache: direct-mapped, genuine SIZ=11 pin-level burst linefill — see `docs/cache.md`
 │   ├── biu_mmu_if          MMU table-walk bus hijack port
 │   ├── biu_exc_capture     Fault snapshot for exception stack frames
-│   ├── biu_eclk_gen        E-clock generator (÷10 of bus clock)
 │   └── biu_config          Reset sequencing and tri-state release timing
 ├── m68030_ifu          Instruction Fetch Unit — 6-word prefetch queue (q[0]-q[5])
 ├── m68030_seq          Micro-sequencer — IFU→EU glue and extension-word counting
@@ -42,7 +41,7 @@ m68030_top
 │   ├── eu_agu              Address Generation Unit — all EA modes including memory-indirect
 │   └── eu_seq              Instruction decode, pipeline control, writeback
 ├── m68030_mmu          MMU — TLB, 3-level table walker, TT0/TT1, CRP/SRP
-└── m68030_exc          Exception controller — all 9 68030 stack frame formats
+└── m68030_exc          Exception controller — all 8 68030 stack frame formats
 ```
 
 The I-cache and D-cache each live inside `m68030_biu` as their own controller
@@ -57,16 +56,36 @@ The BIU is the most critical module. It owns every external pin and is the sole 
 
 ### S-State Signal Timing
 
+A real 68030 bus cycle is 6 states (S0–S5), 3 clocks, 0 wait states — confirmed
+directly against MC68030UM.pdf §7.3.1/7.3.2, not the staggered 8-state model an
+earlier design pass had assumed (see `CLAUDE.md`'s own "S-State Signal Timing"
+section for the full correction history).
+
+**Read** — /AS and /DS assert *together*:
+
 | S-State | Action |
 |---------|--------|
-| S0/S1 | Drive address bus, FC[2:0], SIZ[1:0], R/W |
-| S2 | Assert /AS |
-| S3 | Assert /DS |
-| S4/S5 | Sample DSACK0/1; insert wait states (repeat S4/S5) if not asserted |
-| S6 | Deassert /AS and /DS |
-| S7 | Cycle complete; pulse `bus_ack` to requesting unit |
+| S0 | Drive address, FC[2:0], SIZ[1:0], R/W; assert /ECS |
+| S1 | Assert /AS and /DS together; negate /ECS |
+| S2 | Assert /DBEN; device presents data + asserts DSACKx |
+| S3 | DSACKx recognized (by end of S2) → cycle terminates; else insert wait states |
+| S4 | Sample CIIN; data latched at end of S4 |
+| S5 | Negate /AS, /DS, /DBEN — next cycle's S0 begins immediately, zero idle time |
 
-Address is stable at least one S-state before /AS asserts. /AS and /DS never change in the same S-state.
+**Write** — /AS and /DS do *not* assert together (/DS only once data is actually stable on the bus):
+
+| S-State | Action |
+|---------|--------|
+| S0 | Drive address, FC[2:0], SIZ[1:0], R/W=write; assert /ECS, /OCS |
+| S1 | Assert /AS and /DBEN; negate /ECS |
+| S2 | Place write data on D0-D31; sample DSACKx at the end of S2 |
+| S3 | Assert /DS |
+| S4 | No new control signals |
+| S5 | Negate /AS and /DS — next cycle's S0 begins immediately |
+
+RMW/CAS/CAS2 genuinely negate /AS and /DS between their read and write phases,
+then reassert for the write (a real, manual-confirmed difference from an
+earlier design pass that held /AS continuously across the whole sequence).
 
 ### Dynamic Bus Sizing
 
@@ -83,16 +102,15 @@ For narrower ports, the BIU automatically issues repeated bus cycles to complete
 
 ### Asynchronous Input Synchronization
 
-`BERR`, `BR`, `IPL[2:0]`, `HALT`, `VPA`, `DSACK0`, `DSACK1`, and `STERM` are all external asynchronous inputs. Each passes through a 2-stage synchronizer flip-flop chain before any combinational logic touches them. This prevents metastability from propagating into the state machines.
+`BERR`, `BR`, `IPL[2:0]`, `HALT`, `DSACK0`, `DSACK1`, and `STERM` are all external asynchronous inputs. Each passes through a 2-stage synchronizer flip-flop chain before any combinational logic touches them. This prevents metastability from propagating into the state machines. (`VPA`/`VMA`/E-clock — the 68000/68010's own legacy 6800-style synchronous-peripheral mechanism — don't exist on the 68030 at all and were removed from the RTL entirely.)
 
 ### Bus Cycle Types
 
 `biu_cycle_gen` implements a distinct S-state sequence for each cycle type:
 
-- **Normal read / Normal write** — S0–S7, standard sequence
+- **Normal read / Normal write** — S0–S5, standard sequence (see the S-State Signal Timing tables above)
 - **Read-Modify-Write** — bus held locked between read and write phases; /AS does not deassert between them
 - **Burst read** — /AS asserts only on the first longword; subsequent longwords toggle /DS only, with the address incrementing at a specific S-state
-- **MOVE16 burst write** — 16-byte burst with its own four opcode variants
 - **Interrupt Acknowledge** — FC=111, address encodes interrupt level in A[3:1] with A[31:4]=all-ones; peripheral responds with vector on D[7:0]
 - **Coprocessor (FPU) cycles** — also FC=111 CPU Space, distinguished from IACK by A[19:16]=0010; A[15:13] encodes the primitive type (CPI/CPM/CPIR/CPCR)
 - **CAS2** — four consecutive bus cycles without releasing the bus; the most complex single instruction in the ISA
@@ -109,6 +127,38 @@ For narrower ports, the BIU automatically issues repeated bus cycles to complete
 | 111 | CPU Space (IACK or coprocessor) |
 
 FC transitions at the same time as the address, never mid-cycle.
+
+---
+
+## Timing Diagrams
+
+To sanity-check the S-state timing above against something outside this
+project's own test harness, `timing_diagrams/` generates a bus-cycle
+diagram straight from an Icarus Verilog simulation of `m68030_biu` and
+places it next to the manual's own diagram for the same cycle:
+
+<table>
+<tr><th>MC68030UM.pdf, Figure 7-21 (leftmost cycle)</th><th>This RTL, simulated</th></tr>
+<tr>
+<td><img src="timing_diagrams/generated/read_cycle_manual.png" width="420"></td>
+<td><img src="timing_diagrams/generated/read_cycle_sim.png" width="420"></td>
+</tr>
+</table>
+
+Left: a crop of *Figure 7-21, "Asynchronous Byte and Word Read Cycles —
+32-Bit Port"* (`docs/MC68030UM.pdf`, PDF page 194 / printed page 7-33) —
+copyright NXP/Motorola, included here for direct visual comparison.
+Right: a single word read (`eu_addr=0x10`, `SIZ=10`, `FC=101`) driven
+through `m68030_biu` and rendered from the resulting VCD — the manual's
+own leftmost cycle only; the other two chained byte reads aren't
+reproduced yet. `/AS` and `/DS` assert together, matching this project's
+own S-state model above, not the manual's own staggered legacy timing
+notation.
+
+See `timing_diagrams/README.md` for the full pipeline (testbench → VCD →
+WaveDrom spec → PNG) and `timing_diagrams/diagrams.md` for the manifest
+of what's been generated so far — currently just this one cycle, with
+the rest of the manual's own timing figures as a future extension.
 
 ---
 
@@ -168,18 +218,25 @@ mid-linefill, and combined-with-pipeline-stalls coverage).
 
 ## Exception Stack Frames
 
-The 68030 has nine distinct exception stack frame formats. `m68030_exc` generates all of them. `biu_exc_capture` snapshots the fault address, data, FC, R/W, and internal pipeline state at the exact moment of a bus fault so the larger frame formats ($9, $A, $B) can be populated accurately.
+The 68030 has eight distinct exception stack frame formats. `m68030_exc` generates all of them. `biu_exc_capture` snapshots the fault address, data, FC, R/W, and internal pipeline state at the exact moment of a bus fault so the larger frame formats ($A, $B) can be populated accurately.
 
 | Format | Size | Trigger |
 |--------|------|---------|
 | $0 | 4 words | Most exceptions |
-| $2 | 6 words | TRAPV, CHK, CHK2 |
-| $3 | 8 words | Address error |
-| $4 | 8 words | FPU post-instruction |
-| $8 | 29 words | FPU pre-instruction |
-| $9 | 12 words | MMU short bus fault |
-| $A | 16 words | Bus error during instruction fetch |
-| $B | 46 words | Bus error during data cycle |
+| $1 | 4 words | Throwaway frame pushed to ISP when an interrupt is taken with M=1 |
+| $2 | 6 words | TRAPV, CHK, CHK2, Zero Divide, MMU Configuration |
+| $4 | 8 words | FPU post-instruction (not implemented — unreachable) |
+| $8 | 29 words | FPU pre-instruction (not implemented — unreachable) |
+| $9 | 10 words | Coprocessor Mid-Instruction (not implemented — unreachable) |
+| $A | 16 words | Bus error/address error at instruction boundary (incl. MMU faults) |
+| $B | 46 words | Bus error/address error mid-instruction-execution (incl. MMU faults) |
+
+There is no Format $3 — an earlier design pass documented one ("Address
+Error, 8 words") that never existed on real silicon; address errors
+correctly select $A/$B like any other bus error. Format $9 is also not
+"MMU short bus fault" (another earlier misreading) — MMU-detected bus
+faults use the ordinary $A/$B, distinguished by R/W like any other bus
+error; real Format $9 is the unrelated Coprocessor Mid-Instruction frame.
 
 ---
 
@@ -198,7 +255,7 @@ The 68030 has nine distinct exception stack frame formats. `m68030_exc` generate
 
 ## Simulation and Verification
 
-**Tools**: Icarus Verilog (simulation), GTKWave (waveform debug), Python 3 (test harnesses).
+**Tools**: Icarus Verilog and Verilator (simulation), Python 3 (test harnesses), WaveDrom (rendering timing diagrams from simulation VCDs — see "Timing Diagrams" below). GTKWave was considered for waveform debug but isn't installed on the reference machine (Homebrew's own cask is deprecated/disabled upstream) and isn't part of this project's actual verification pipeline.
 
 **Test strategy**: Three independent verification layers:
 

@@ -1,0 +1,4 @@
+# Compiled sim binaries and raw VCD dumps -- regeneratable via `make`.
+# (*.vcd is also covered by the top-level .gitignore already.)
+sim_*
+*.vcd
