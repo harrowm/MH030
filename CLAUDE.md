@@ -1728,6 +1728,50 @@ coverage). See `plan.md §Phase 251` for the full writeup.
 **This closes Phase 251, and the entire `~/.claude/plans/
 wobbly-honking-cascade.md` plan, in full.**
 
+**Phase 252 (`/OCS` never asserted — IMPLEMENTED AND VERIFIED, found while
+building `timing_diagrams/`)**: the new RTL-vs-manual timing-diagram
+comparison pipeline (`timing_diagrams/`, a test/tooling addition, not
+itself part of this history) rendered `/OCS` as permanently flat where
+MC68030UM.pdf Figure 7-21 shows it toggling in lockstep with `/ECS`.
+Investigating the mismatch (rather than dismissing it as a rendering
+gap) found two real, previously-undiscovered bugs, both in shared BIU
+logic exercised by every ordinary bus cycle in the chip, not just the
+diagram's own testbench. **Bug A**: `biu_cache_if.sv`'s own `sf_is_op`
+output — the "is this a genuine operand transfer" classification that
+ultimately drives `/OCS` for any EU-initiated read/write routed through
+the normal cache-interface path (i.e. almost every ordinary access a
+running CPU makes) — was hardwired `1'b0` unconditionally, with no input
+port to derive a real value from at all. `biu_multiop_fsm.sv` (MOVEM/
+MOVEP's own separate dispatch path) already ties its own equivalent
+output to `1'b1` for the identical purpose, which is what made the
+wrong value here stand out — mirrored that same convention (every
+access reaching this module's own `eu_req` port is architecturally a
+genuine operand transfer; MOVEM/MOVEP bypass it entirely via their own
+port, and instruction fetch never reaches it at all via the separate
+`ifu_req` path). **Bug B**: independently of Bug A, `biu_cycle_gen.sv`'s
+own `/OCS` assert/negate window was two states later than the manual
+specifies — MC68030UM.pdf S5.6.10/S7.3.1 state `/OCS` is "asserted with
+ECS" (State 0) and negated at State 1, alongside it; the RTL instead
+asserted it at SP_S2 through SP_S5 and negated it at SP_S6. Fixed by
+moving the single `ext_ocs_n = !cyc_is_op` assignment into the SP_S0
+block (where it now falls back to the existing `always_comb` top-level
+default of 1 from S1 onward automatically, exactly mirroring how `/ECS`
+itself already works — no extra code needed) and removing it from
+SP_S2-S6. **Found a pre-existing test that had encoded Bug B's own wrong
+timing as its expected baseline**: `tb/biu_tb.sv`'s dedicated OCS timing
+check already existed from an earlier investigation (the bus-cycle
+round-trip overhead investigation, `plan.md`, follows Phase 160) whose
+own comment explicitly flagged OCS's timing as "a separate, out-of-scope
+question, documented but not acted on" — i.e. this was a real, already-
+suspected-but-deferred gap, not something this phase discovered cold.
+Updated to assert the corrected S0-asserted/S2-negated timing (that test
+drives `biu_cycle_gen` directly via a standalone testbench override, so
+it only ever exercised Bug B, not Bug A). Full mandatory gate clean
+(`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`/`dat-synth` all
+green), full 124-suite Harte sweep bit-identical to baseline (`PASS
+702142 FAIL 2` — the documented ASL.b corpus anomaly — `SKIP 281221
+TIMEOUT 0`).
+
 Permanently out of scope by design, not started: coprocessor conditional
 instructions + Coprocessor Protocol Violation (Phase 248 item #7);
 STATUS's other 3 sub-cases + REFILL# (Phase 248 item #5); PTEST's

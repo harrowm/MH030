@@ -1077,7 +1077,18 @@ module biu_cache_if (
         sf_rw    = rw_r;
         sf_siz   = siz_r;
         sf_wdata = wdata_r;
-        sf_is_op = 1'b0;
+        // MC68030UM.pdf S5.6.10: OCS distinguishes an instruction prefetch
+        // from a data operand transfer. This module's own eu_req port is
+        // the EU's generic data-access path -- MOVEM/MOVEP bypass it via
+        // biu_multiop_fsm.sv's own dedicated port (whose sf_eu_is_op is
+        // likewise hardwired 1'b1), and instruction fetch never reaches
+        // here at all (separate ifu_req path) -- so every access this
+        // module ever dispatches is architecturally a genuine operand
+        // transfer. Previously hardwired 1'b0, silently keeping OCS
+        // permanently deasserted for every ordinary EU read/write; found
+        // while investigating why timing_diagrams/ never showed OCS
+        // toggling like MC68030UM.pdf Figure 7-21 does.
+        sf_is_op = 1'b1;
         sf_req   = 1'b0;
 
         // Phase 158 Stage 7: CIOUT, reflecting the latched (dispatched)

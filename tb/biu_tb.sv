@@ -3443,10 +3443,20 @@ module biu_tb;
             check("ECS_n high at S2",  ext_ecs_n === 1'b1);
             check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 
-            // --- OCS# still asserts coincident with AS# at S2 (unchanged
-            // by this investigation -- OCS#'s own timing is a separate,
-            // out-of-scope question, documented but not acted on) ---
-            $display("--- OCS# asserts coincident with AS# at S2 ---");
+            // --- OCS# asserts coincident with ECS# at S0, negates by S2
+            // (MC68030UM.pdf S5.6.10: "the [OCS] signal is asserted with
+            // ECS"; S7.3.1 State 1 text: "the ECS...signal is negated
+            // during S1", and OCS negates alongside it). This investigation
+            // originally left OCS# unexamined ("a separate, out-of-scope
+            // question, documented but not acted on") -- found and fixed
+            // in a later session (biu_cycle_gen.sv's OCS window used to
+            // sit two states late, at S2-S5 instead of S0, and biu_cache_
+            // if.sv separately hardwired its own is-operand output to 0,
+            // permanently suppressing OCS for every real access reaching
+            // this module through the whole chip -- this standalone test
+            // drives eu_is_op_tb directly, bypassing that second bug, so
+            // it only ever exercised the first). ---
+            $display("--- OCS# asserts coincident with ECS# at S0 ---");
 
             eu_req_tb = 1'b0;
             wait_bus_idle;
@@ -3458,10 +3468,10 @@ module biu_tb;
             eu_req_tb   = 1'b1;
 
             wait_for_state(7'd18, 20);   // ST_READ_S0
-            check("OCS_n high at S0",  ext_ocs_n === 1'b1);
+            check("OCS_n low  at S0",  ext_ocs_n === 1'b0);
 
             wait_for_state(7'd20, 20);   // ST_READ_S2 (S1 skipped)
-            check("OCS_n low  at S2",  ext_ocs_n === 1'b0);
+            check("OCS_n high at S2",  ext_ocs_n === 1'b1);
             check("AS_n  low  at S2",  ext_as_n  === 1'b0);
 
             eu_req_tb = 1'b0;

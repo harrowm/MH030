@@ -1520,21 +1520,33 @@ module biu_cycle_gen #(
                     // real hardware requirement; see CLAUDE.md's own S-State
                     // Signal Timing section for the full correction).
                     ext_ecs_n = 1'b0;
+                    // MC68030UM.pdf S5.6.10: "the [OCS] signal is asserted
+                    // with ECS" and negated during S1 alongside it (S7.3.1/
+                    // 7.3.2 text quoted below) -- OCS shares ECS's own S0-only
+                    // window exactly (falls back to the always_comb top-level
+                    // default of 1 from S1 onward, same as ECS itself, with
+                    // no separate code needed). Previously asserted two
+                    // states late (S2-S5, this same cyc_is_op condition) and
+                    // negated at S6 instead -- found while investigating why
+                    // timing_diagrams/ never showed OCS toggling in step with
+                    // ECS the way MC68030UM.pdf Figure 7-21 does.
+                    ext_ocs_n = !cyc_is_op;
                     if (bc_cbreq_assert) ext_cbreq_n = 1'b0;
                 end
                 SP_S1: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
                     ext_rw = cyc_rw;
-                    // ECS# already negated by default here (matches real S1:
-                    // "the ECS...signal is negated during S1") -- only cycle
-                    // types that still visit S1 (WRITE/IACK/RMW/burst/init;
-                    // ordinary READ now skips straight from S0 to S2, see the
-                    // ST_READ_S0 transition below) reach this state at all.
+                    // ECS# (and OCS#, if it was asserted) already negated by
+                    // default here (matches real S1: "the ECS...signal is
+                    // negated during S1") -- only cycle types that still
+                    // visit S1 (WRITE/IACK/RMW/burst/init; ordinary READ now
+                    // skips straight from S0 to S2, see the ST_READ_S0
+                    // transition below) reach this state at all.
                     if (bc_cbreq_assert) ext_cbreq_n = 1'b0;
                 end
                 SP_S2: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
-                    ext_rw = cyc_rw; ext_ocs_n = !cyc_is_op; ext_as_n = 1'b0;
+                    ext_rw = cyc_rw; ext_as_n = 1'b0;
                     // MC68030UM.pdf 7.3.1 State 1: "the processor asserts
                     // AS...The processor also asserts DS also during S1" --
                     // real reads assert AS and DS together; real WRITES do
@@ -1547,21 +1559,21 @@ module biu_cycle_gen #(
                 end
                 SP_S3: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz; ext_rw = cyc_rw;
-                    ext_ocs_n = !cyc_is_op; ext_as_n = 1'b0;
+                    ext_as_n = 1'b0;
                     ext_ds_n  = 1'b0;   // DS asserts for all cycles incl. IACK
                     ext_d_oe  = !cyc_rw;
                     ext_d_out = cyc_rw ? 32'h0 : blc_wdata;
                 end
                 SP_S4, SP_S5: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz; ext_rw = cyc_rw;
-                    ext_ocs_n = !cyc_is_op; ext_as_n = 1'b0;
+                    ext_as_n = 1'b0;
                     ext_ds_n  = 1'b0;
                     ext_d_oe  = !cyc_rw;
                     ext_d_out = cyc_rw ? 32'h0 : blc_wdata;
                 end
                 SP_S6: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
-                    ext_rw = cyc_rw; ext_ocs_n = 1'b1;
+                    ext_rw = cyc_rw;
                     // Burst: hold AS and DS asserted until the final beat's
                     // S6 (MC68030UM.pdf 7.3.7: "the processor maintains AS,
                     // DS... in their current state throughout the burst

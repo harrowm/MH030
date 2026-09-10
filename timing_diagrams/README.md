@@ -75,13 +75,41 @@ display server needed) — no local install required beyond Node/npm.
 testbench — and the place to look before adding a new diagram (it also
 documents the PDF-page-vs-printed-page-number gotcha).
 
+## A real bug this diagram found: `/OCS` never asserted
+
+The first version of this diagram showed `/OCS` flat (never asserting)
+while the manual's Figure 7-21 shows it toggling in lockstep with
+`/ECS`. Investigating that visual mismatch (rather than just noting it)
+found two real, previously-undiscovered RTL bugs, both now fixed:
+
+1. **`biu_cache_if.sv`'s own `sf_is_op` output was hardwired `1'b0`**,
+   permanently telling the rest of the chip "this is never an operand
+   transfer" for every ordinary EU read/write routed through it (i.e.
+   almost everything a running CPU does) — `biu_multiop_fsm.sv` (MOVEM/
+   MOVEP's own dedicated path) already had the correct `1'b1` for the
+   identical purpose, which is what made the wrong value here stand out.
+2. **`biu_cycle_gen.sv`'s own `/OCS` assert/negate window was two states
+   later than the manual specifies.** MC68030UM.pdf S5.6.10/S7.3.1 state
+   `/OCS` is "asserted with `/ECS`" (State 0) and negated at State 1,
+   alongside it — the RTL instead asserted it at SP_S2 through SP_S5 and
+   negated it at SP_S6.
+
+Both are fixed in `rtl/biu_cache_if.sv` and `rtl/biu_cycle_gen.sv` (not
+just in this diagram's own testbench) — see `CLAUDE.md`'s own phase
+history for the full writeup and verification. `tb/biu_tb.sv`'s
+pre-existing OCS timing test had encoded the old, wrong timing as its
+expected result (with an explicit comment noting it as "a separate,
+out-of-scope question, documented but not acted on" from an earlier
+investigation) — that test now asserts the corrected timing instead.
+
 ## Known differences from the manual (`read_cycle`)
 
 What's now matched: all 3 chained cycles (word + 2 byte reads), the
-A2-A31/A1/A0 split, `/ECS`/`/OCS`, and the 4-way byte-lane data split
-with values landing in the same lanes at the same cycles as the
-manual's own `OP2`/`OP3`/`OP3`/`OP3` boxes. What's still different, and
-why it's left alone rather than "fixed":
+A2-A31/A1/A0 split, `/ECS`/`/OCS` (toggling together, matching the
+manual exactly — see below), and the 4-way byte-lane data split with
+values landing in the same lanes at the same cycles as the manual's own
+`OP2`/`OP3`/`OP3`/`OP3` boxes. What's still different, and why it's left
+alone rather than "fixed":
 
 - **The `CLK` lane is a different clock.** The manual's `CLK` is the
   external bus clock (one period per `S0`/`S2`/`S4` label group). Ours
@@ -102,13 +130,6 @@ why it's left alone rather than "fixed":
   hand-off)... investigated and found genuinely load-bearing, not
   implementation overhead"). This diagram is, incidentally, the first
   direct visual demonstration of that gap.
-- **`/OCS` never asserts in this render**, while the manual shows it
-  toggling identically to `/ECS`. `biu_cycle_gen.sv` does compute
-  `ext_ocs_n = !cyc_is_op` for an ordinary operand read (and this
-  testbench sets `eu_is_operand=1`), so on paper it should assert —
-  this was *observed*, not investigated further (out of scope for a
-  diagram-generation pass), and is flagged here rather than silently
-  left unmentioned in case it's worth a real look in a future session.
 - **`SIZ1`/`SIZ0` are one combined 2-bit lane**, not two separate rows
   like the manual. The combined decimal value (`2`=word, `1`=byte)
   already conveys the same information; splitting it further is a

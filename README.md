@@ -156,16 +156,20 @@ all reproduced alongside `/AS`/`/DS`/`/DSACK`/`/DBEN`. `/AS` and `/DS`
 assert together, matching this project's own S-state model above, not
 the manual's own staggered legacy timing notation.
 
-The two diagrams still differ in a few ways worth knowing about before
-comparing them pixel-for-pixel: the `CLK` lane on the right is this
-project's internal 4× clock, not the external bus clock the manual's
-`CLK` shows; a small idle gap appears between the RTL's three chained
-cycles that the manual's own back-to-back timing doesn't have (a real,
-already-documented "structural per-cycle dispatch floor," not a
-testbench artifact — see `timing_diagrams/README.md`'s own "Known
-differences" section); and `/OCS` doesn't visibly assert in this render
-despite the RTL appearing to compute it correctly on paper — observed,
-not yet investigated further.
+Building this diagram found and fixed a real, previously-undiscovered
+bug: `/OCS` never asserted anywhere in the chip (`biu_cache_if.sv` had
+its own "is this an operand transfer" output hardwired to 0, and
+separately `biu_cycle_gen.sv`'s own `/OCS` assert/negate window was two
+states later than MC68030UM.pdf specifies) — see `timing_diagrams/
+README.md`'s own "A real bug this diagram found" section for the full
+writeup. The two diagrams still differ in a couple of ways worth
+knowing about before comparing them pixel-for-pixel: the `CLK` lane on
+the right is this project's internal 4× clock, not the external bus
+clock the manual's `CLK` shows; and a small idle gap appears between
+the RTL's three chained cycles that the manual's own back-to-back
+timing doesn't have (a real, already-documented "structural per-cycle
+dispatch floor," not a testbench artifact — see `timing_diagrams/
+README.md`'s own "Known differences" section).
 
 See `timing_diagrams/README.md` for the full pipeline (testbench → VCD →
 WaveDrom spec → PNG) and `timing_diagrams/diagrams.md` for the manifest
