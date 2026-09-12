@@ -165,6 +165,11 @@ module read_cycle_tb;
         .eu_siz          (eu_siz),
         .eu_is_operand   (eu_is_operand),
         .eu_req          (eu_req),
+        // Phase 254 (CLAUDE.md): this testbench drives eu_req/eu_addr
+        // directly rather than through the real EU pipeline, so there is
+        // no genuine preview_ok-driven dispatch to report here -- tied
+        // off, matching tb/biu_tb.sv's own identical convention.
+        .eu_new_dispatch (1'b0),
         .eu_ack          (eu_ack),
         .eu_berr         (eu_berr),
         .eu_retry        (eu_retry),
