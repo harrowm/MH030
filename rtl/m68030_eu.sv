@@ -89,6 +89,7 @@ module m68030_eu (
 
     // ── Memory bus interface (to BIU via m68030_top) ─────────────────────
     output logic        mem_req,
+    output logic        mem_new_dispatch, // see eu_seq.sv's own port comment
     output logic        mem_rw,
     output logic [1:0]  mem_siz,
     output logic [2:0]  mem_fc,
@@ -355,6 +356,7 @@ module m68030_eu (
         .branch_taken (branch_taken),
         .branch_target(branch_target),
         .mem_req      (mem_req),
+        .mem_new_dispatch (mem_new_dispatch),
         .mem_rw       (mem_rw),
         .mem_siz      (mem_siz),
         .mem_fc       (mem_fc),

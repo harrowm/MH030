@@ -132,29 +132,49 @@ alone rather than "fixed":
   own `ST_IDLE` hand-off and `biu_sizing_fsm.sv`'s own `SS_DONE` state
   — both removed as genuinely unnecessary, full mandatory gate clean).
   The third, `biu_cache_if.sv`'s own `CI_IDLE` transit, is what's still
-  visible in this diagram. Two attempts at the same fix there were
-  reverted — the second time with the real root cause traced and
-  confirmed, not just guessed at: this module's own `eu_req` input is
-  the *raw, unmediated* top-level EU request, and the real EU needs at
-  least one clock edge to react to `eu_ack` before it can withdraw
-  `eu_req` — so `eu_req` is guaranteed to still read 1 the instant a
-  transfer completes, whether or not a genuinely new request follows. A
-  direct trace confirmed the fast path can't tell the difference: it
-  fired every single time, dispatching an unrequested phantom bus cycle
-  after every access, which corrupted `biu_sizing_fsm.sv`'s own state
-  from there on. The other two layers don't have this problem because
-  their own "is there a new request" check happens one layer removed
-  from the raw handshake (`biu_cycle_gen.sv` reads `biu_sizing_fsm.sv`'s
-  own mediated request; `biu_sizing_fsm.sv` reads the raw EU request,
-  but only the cycle *after* its own completion, by which point the EU
-  has already had its reaction cycle). `biu_cache_if.sv` is the one
-  layer with no such buffer — closing this gap for real would need the
-  EU's own interface to carry a distinct "this is a new request" signal
-  beyond "is `eu_req` asserted," a materially bigger change than this
-  investigation's scope. Since every ordinary EU access routes through
-  `biu_cache_if.sv` first, its one remaining tick is the binding
-  constraint on this gap regardless of how fast the two layers
-  underneath it are.
+  visible in *this* diagram specifically, because this diagram's own
+  testbench (`read_cycle_tb.sv`) drives `eu_addr`/`eu_rw` directly
+  rather than routing through the real EU pipeline, bypassing the
+  mechanism that eventually closed it for a narrow case (below) —
+  regenerating this particular diagram would still show the gap.
+  Two attempts to fix layer 3 the SAME way (skip `CI_IDLE` whenever
+  `eu_req` is already asserted) were reverted — the second time with the
+  real root cause traced and confirmed, not just guessed at: this
+  module's own `eu_req` input is the *raw, unmediated* top-level EU
+  request, and the real EU needs at least one clock edge to react to
+  `eu_ack` before it can withdraw `eu_req` — so `eu_req` is guaranteed
+  to still read 1 the instant a transfer completes, whether or not a
+  genuinely new request follows, with no way to tell the two apart from
+  `eu_req` alone.
+
+  **Phase 254 closed a narrow slice of this for real**, by changing the
+  EU side instead of trying to infer novelty at the BIU boundary: a new
+  EU-side "preview" fast path (`eu_seq_execute.svh`'s `preview_ok`)
+  computes the *next* instruction's own address one cycle early — but
+  only for the narrowest, safest case (a plain `(An)` register-indirect
+  read, no index/displacement, hazard-checked against the same logic
+  that already gates `dec_valid`) — and a new explicit `eu_new_dispatch`
+  signal (`eu_seq.sv` → `m68030_eu.sv` → `m68030_top.sv` →
+  `m68030_biu.sv` → `biu_cache_if.sv`) tells `CI_IDLE`'s own fast path
+  exactly when that preview is legitimately valid, rather than
+  inferring it from `eu_addr` changing. (A first attempt inferred
+  novelty from `eu_addr != addr_r` directly — it looked sound on paper
+  but was falsified by a real `cosim_memind`/`memind7` regression: a
+  separate, pre-existing mechanism, `dyn_bit_get_Dn`'s own deferred
+  register-port swap, already changes `mem_addr` on the *current*
+  instruction's own ack cycle for 5 unrelated instruction families,
+  harmless until this was the first thing to ever look at it right
+  then.) Measured via a dedicated test (`tests/timing_preview.s`,
+  since this project's own EA-computing datapath needs to be exercised
+  for real, unlike this diagram's direct-injection style): the
+  back-to-back-`(An)`-read gap shrinks from 8 ticks to 6. Every other
+  addressing mode, every write, and every `dyn_bit_get_Dn`-consuming
+  instruction (dynamic-bit ops, CMP2/CHK2, general ALU-EA indexed,
+  MOVE mem-to-mem indexed-dst, indexed CHK) still takes the unmodified
+  one-tick `CI_IDLE` detour — closing those would need the EU's own
+  interface to carry more information than this narrow signal, out of
+  scope for this investigation. See `CLAUDE.md`'s own Phase 254 entry
+  for the full writeup.
 - **`SIZ1`/`SIZ0` are one combined 2-bit lane**, not two separate rows
   like the manual. The combined decimal value (`2`=word, `1`=byte)
   already conveys the same information; splitting it further is a

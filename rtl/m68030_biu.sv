@@ -92,6 +92,7 @@ module m68030_biu #(
     input  logic [1:0]  eu_siz,
     input  logic        eu_is_operand,
     input  logic        eu_req,
+    input  logic        eu_new_dispatch, // see eu_seq.sv's own mem_new_dispatch comment
     output logic        eu_ack,
     output logic        eu_berr,
     output logic        eu_retry,
@@ -744,6 +745,7 @@ module m68030_biu #(
         .eu_siz      (eu_siz),
         .eu_wdata    (eu_wdata),
         .eu_req      (eu_req & !eu_mo_req),  // gate when multiop active
+        .eu_new_dispatch(eu_new_dispatch & !eu_mo_req),
         .mem_rmw_lookup(mem_rmw_lookup),  // Phase 158 Stage 3
         .eu_rdata    (ca_eu_rdata),
         .eu_ack      (ca_eu_ack),

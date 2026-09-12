@@ -1879,6 +1879,115 @@ STATUS's other 3 sub-cases + REFILL# (Phase 248 item #5); PTEST's
 DSACK-breadth exclusion + I-cache CEI's per-line-only limitation (both
 pre-existing architecture boundaries, not bugs).
 
+**Phase 254 (closing layer 3's own dispatch floor for a narrow slice —
+IMPLEMENTED AND VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**:
+Phase 253 confirmed `biu_cache_if.sv`'s own one-tick `CI_IDLE` floor was
+unfixable using the SAME technique as layers 1-2, since its `eu_req` is
+the raw, unmediated EU request with no buffering cycle. This phase asked
+a different question: can the EU's OWN side be changed so it genuinely
+has a new request ready one cycle earlier, rather than trying to infer
+novelty at the BIU boundary at all? Investigated as a staged, go/no-go
+plan rather than assumed. **Stage 1 (research only)**: confirmed the
+register file's `rd_c` port (added at Phase 148-149 for the one other
+genuine 3rd-port case) sits idle during an ordinary mem-stall, and that
+the existing hazard logic (`hazard_ex`'s own dedicated An-update clause)
+already blocks a hazardous next-instruction preview — verified against
+an existing passing test (`tb/stall_hazard_tb.sv`'s `A-P2-T0`) rather
+than assumed. **Stage 2a (implemented)**: a narrow, plain-`(An)`-only
+EU-side "preview" fast path in `eu_seq_execute.svh` — `preview_ok`
+combinationally previews the NEXT instruction's own trivial `(An)` read
+via `rd_c` (driven by `dec_src_reg`) the instant the CURRENT read's own
+`mem_ack` arrives, gated on the same `hazard_ex`/`hazard_wb`/
+`hazard_ccr` terms that already protect `dec_valid`'s own latch, plus
+explicit exclusions for every non-trivial EA shape (`dec_is_jsr_idx`/
+`dec_is_pea_idx`/`dec_abs_ea_en`/`dec_is_idx`/`dec_is_memind`,
+non-longword reads, MOVES, `ex_is_move_reg_idx_dst`). Full mandatory
+gate clean, Harte bit-identical to baseline. **Stage 2c (measured, then
+found invisible)**: re-measuring via a new isolated test
+(`tests/timing_preview.s` + `tb/timing_tb.sv`, since `timing_diagrams/`'s
+own testbenches drive `eu_addr` directly and bypass the EU entirely)
+showed the EU-side fix alone changed nothing — `biu_cache_if.sv`'s own
+downstream floor was still the exclusive bottleneck, so `mem_addr`
+being ready one cycle early was never actually visible anywhere.
+
+**`biu_cache_if.sv` retry, attempt 1 (implemented, found unsound, fixed
+via a redesign — not a revert)**: with the EU-side fix in place, first
+tried gating `CI_D_MISS`'s own fast path on `eu_addr != addr_r` directly
+— reasoning that since `mem_addr` is otherwise register-driven and
+cannot change before the next clock edge, seeing it differ from the
+address just serviced could only mean the new EU-side preview had
+legitimately provided it. **This reasoning was wrong, caught via a real
+`cosim_memind`/`memind7` mismatch** (a phantom bus cycle at `$303`,
+one byte off from the just-serviced `$304`), root-caused via direct
+signal tracing (not guessed at) rather than reverted on suspicion: a
+completely separate, pre-existing mechanism, `dyn_bit_get_Dn`
+(`eu_seq_execute.svh`'s own deferred register-port swap, used by 5
+existing instruction families — dynamic-bit ops, CMP2/CHK2, the general
+ALU-EA indexed family, MOVE mem-to-mem indexed-dst, indexed CHK) already
+deliberately overwrites `rd_b`'s own output — and therefore `ex_ea`/
+`mem_addr` — on the CURRENT instruction's own read-ack cycle (its own
+existing code comment: "corrupts ex_ea... changes xn_scaled"),
+completely independent of whether a new instruction follows. This was
+always harmless before, since nothing downstream ever read `mem_addr`
+again after that instruction's own ack — `biu_cache_if.sv`'s new fast
+path was the first consumer that ever did, for an unrelated purpose, and
+was fooled by it (`ADD.L ($100,A0,D1.L),D2`, one of the 5
+`dyn_bit_get_Dn`-consuming families, read `$304` correctly, then the
+guard read `eu_addr=$303` — D1's real value 4 transiently replaced by
+D2's own value 3 via exactly this swap — and dispatched a phantom read).
+**Fixed by trusting an explicit signal instead of inferring novelty from
+address inequality**: a new `mem_new_dispatch` output (`eu_seq.sv`,
+wired straight from `preview_ok` itself) threaded through
+`m68030_eu.sv`/`m68030_top.sv` (forced 0 whenever `exc_active` owns the
+port — a completely unrelated producer) into a new `eu_new_dispatch`
+input on `m68030_biu.sv`/`biu_cache_if.sv`, replacing the
+address-inequality guard with `eu_req && eu_new_dispatch && eu_rw && ...`.
+This degrades safely to the unmodified `CI_IDLE` path for every case
+without the EU-side fix (writes, every other addressing mode, all
+special sub-FSMs, and now also every `dyn_bit_get_Dn`-swapped read),
+since `eu_new_dispatch` is 0 there regardless of what `mem_addr` shows —
+sound by construction, not by an inference about register timing.
+
+**A full Harte sweep (mandatory before considering this closed) then
+found two FURTHER real regressions in `preview_ok` itself** — neither
+related to `biu_cache_if.sv` or `dyn_bit_get_Dn` at all, both invisible
+to `make test`/`cosim_grp`/`cosim_memind`/`dat-synth` since none of those
+exercise the specific suites affected (RTE/RTR/RTS), caught only because
+the sweep is genuinely mandatory, not a formality. **Bug 1**: `preview_ok`
+never checked `ex_mem_stall`, so it also fired on INTERMEDIATE acks of
+any multi-read instruction that keeps `ex_is_mem_rd` asserted across
+several `mem_ack` pulses via its own dedicated `_stall` signal rather
+than a `no_special_bus_op`-excluded `_run_r` flag (RTE/RTR/CMPM, and
+structurally ADDX/SUBX-mem, BF-mem, PACK/UNPK-mem, ABCD/SBCD-mem) —
+hijacking the bus mid-sequence with an unrelated preview read and
+corrupting the phase FSM's own synchronization (observed as widespread
+RTE/RTR TIMEOUT/FAIL). Fixed generally, without enumerating every family
+by name, by adding `!ex_mem_stall` — already 0 at the true final ack of
+an ordinary read (the existing convention this whole mechanism already
+relies on) and correctly 1 for every non-final ack of a multi-phase
+family via its own pre-existing `_stall` term. **Bug 2** (found
+immediately after, RTS specifically — a genuine one-shot single-beat
+read with no multi-phase mechanism at all, ruling Bug 1's own fix out as
+the cause): right after ANY flow-changing instruction's own read acks
+(JSR/BSR/RTS/RTR/RTE), `dec_*` still describes the STALE fall-through
+instruction fetched before the real branch redirect takes effect, not
+the genuine next instruction — the exact same hazard `ex_mem_stall`'s
+own BKPT term already had to guard against once before (`Bug 2 fix`
+comment, `ex_redirect_pending`'s own declaration). Fixed by reusing that
+existing signal directly (`!ex_redirect_pending`) rather than re-deriving
+the same exclusion list by hand. Full mandatory gate clean (`make test`
+37/37, `cosim_grp` 8/8, `cosim_memind` 29/29 including `memind7`,
+`dat-synth` 50/50), full 124-suite Harte sweep bit-identical to baseline
+(`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — the documented ASL.b
+corpus anomaly — including RTE/RTR/RTS/every other suite now clean).
+Re-measured via `tests/timing_preview.s`: the chained-`(An)`-read gap shrinks from 8
+ticks to 6 (`AS-fall` at tick 222 instead of 224) — a real, narrow,
+confirmed improvement for the one addressing-mode shape this closes;
+every other case (including every `dyn_bit_get_Dn` consumer, every
+non-trivial EA, every write) still takes the one-tick `CI_IDLE` detour
+exactly as before. This closes
+`~/.claude/plans/wobbly-honking-cascade.md` in full.
+
 ## Verification Commands
 
 ```bash

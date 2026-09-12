@@ -185,6 +185,22 @@ module eu_seq (
 
     // ── Memory bus interface (to BIU via m68030_eu/m68030_top) ──────────────
     output logic        mem_req,      // request bus cycle
+    // Stage 2 retry (wobbly-honking-cascade.md): true exactly on the cycle
+    // preview_ok's own narrow (An)-only fast path drives mem_req/mem_addr
+    // for a genuinely new, hazard-checked next instruction -- the one
+    // legitimate case biu_cache_if.sv's own CI_D_MISS may dispatch a fresh
+    // access without returning to CI_IDLE first. Deliberately NOT inferred
+    // from "mem_addr changed" at the BIU boundary: `dyn_bit_get_Dn`'s own
+    // pre-existing deferred register-port swap (5 existing consumer
+    // families incl. this general-ALU-EA-indexed shape) already corrupts
+    // mem_addr on the CURRENT instruction's own ack cycle today (documented
+    // at its own site, "corrupts ex_ea... changes xn_scaled") -- harmless
+    // until now since nothing ever read mem_addr after that instruction's
+    // ack, but it makes an address-inequality guard unsound in general
+    // (confirmed via a real cosim_memind/memind7 mismatch, root-caused to
+    // this exact mechanism, not the preview logic itself). This bit is the
+    // one signal that's actually safe to trust instead.
+    output logic        mem_new_dispatch,
     output logic        mem_rw,       // 1=read, 0=write
     output logic [1:0]  mem_siz,      // transfer size (matches ex_siz)
     output logic [2:0]  mem_fc,       // function code

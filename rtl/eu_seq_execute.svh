@@ -2330,7 +2330,15 @@
     // Read port C: MOVE Dn/An,(d8,An,Xn)'s own source register (Phase 149,
     // plan.md) -- the sole consumer today. Always full longword (like rd_a's
     // own ex_is_mem_wr case): eu_lane() sizes the write from d[7:0]/d[15:0].
-    assign rd_c_sel = ex_is_move_reg_idx_dst ? ex_c_reg : 4'd0;
+    // preview_ok (declared/assigned further below, near mem_req/mem_addr,
+    // where its own no_special_bus_op/mem_ack dependencies are already
+    // in scope) is a second consumer -- forward-declared here since
+    // Icarus requires a `logic`'s declaration to textually precede this
+    // use, even though all `assign`s in this file are concurrent.
+    logic preview_trivial_ea, preview_ok;
+    assign rd_c_sel = ex_is_move_reg_idx_dst ? ex_c_reg :
+                      preview_ok             ? dec_src_reg :
+                                                4'd0;
     assign rd_c_siz = 2'b00;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores) --
@@ -4917,14 +4925,93 @@
                                 !cas2_get_du2_r   && !cas2_wr2_r  && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
                                 !cas2_after_r     && !ex_cas2_done_r;
 
-    assign mem_req   = movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
+    // timing_diagrams/ investigation, EU-side pipeline-overlap experiment
+    // (`~/.claude/plans/wobbly-honking-cascade.md`): preview the NEXT
+    // instruction's own plain register-indirect read EA one cycle early,
+    // via the otherwise-idle rd_c port (its only other consumer,
+    // ex_is_move_reg_idx_dst, is excluded below), so mem_req/mem_addr can
+    // present it combinationally the SAME cycle the current instruction's
+    // own mem_ack arrives, instead of waiting the usual cycle for
+    // ex_valid<=dec_valid to latch it. Deliberately the narrowest
+    // possible slice: plain `(An)` reads only -- no index/displacement/
+    // abs/jsr-pea-idx forms, no MOVES (own FC source), no dec_mem_rd_siz
+    // override. Every other case (writes, every other addressing mode,
+    // all ~20 special multi-cycle sub-FSMs, which never set
+    // dec_is_mem_rd/dec_is_mem_wr at all) falls through to the existing,
+    // completely unchanged ex_valid-driven path below. Safety relies on
+    // the SAME hazard_ex/hazard_wb/hazard_ccr terms that already gate
+    // dec_valid's own latching today (verified via tb/stall_hazard_tb.sv's
+    // existing A-P2-T0 case before touching any RTL: producer `(A0)+`
+    // then consumer `MOVEA.L A0,A1` already proves hazard_ex's dedicated
+    // An-update clause holds the consumer back until the producer's own
+    // register write has genuinely retired).
+    // Found via cosim_memind's own memind7 mismatch (real regression,
+    // root-caused via a direct trace, not guessed at): a genuine
+    // memory-indirect instruction ALSO decodes with dec_is_mem_rd=1 and
+    // a superficially "trivial" EA shape (dec_ea_offset==0 etc, since
+    // its own real address only gets resolved by the dedicated memind
+    // FSM later, not by the ordinary ex_ea path at all) -- previewing
+    // it via a plain dec_src_reg register read produced a genuinely
+    // wrong address (An's own raw value, not the resolved indirect
+    // pointer), a real off-by-a-small-amount phantom bus cycle.
+    // dec_is_memind must be excluded explicitly; dec_is_idx alone
+    // doesn't cover it (memind is independent of ordinary indexing).
+    assign preview_trivial_ea = !dec_is_jsr_idx && !dec_is_pea_idx && !dec_abs_ea_en &&
+                                !dec_is_idx && !dec_is_memind && (dec_ea_offset == 32'h0);
+    // Found via a real full-Harte-sweep regression (RTE/RTR/CMPM suites,
+    // widespread FAIL/TIMEOUT), root-caused via direct inspection, not
+    // guessed at: RTE/RTR/CMPM (and structurally, ADDX/SUBX-mem, BF-mem,
+    // PACK/UNPK-mem, ABCD/SBCD-mem) issue MULTIPLE reads for a single
+    // instruction via the generic `ex_is_mem_rd` path -- `no_special_bus_op`
+    // only excludes families with a dedicated `_run_r` flag that's already
+    // set by the time a LATER read dispatches; these families instead keep
+    // `ex_is_mem_rd` asserted across every phase and gate continuation via
+    // their own `_stall` signal (`rte_stall`/`rtr_stall`/`cmpm_stall`/etc,
+    // already part of `ex_mem_stall`'s own OR chain). `preview_ok` never
+    // checked `ex_mem_stall` at all, so it fired on the FIRST (intermediate,
+    // not final) `mem_ack` of e.g. RTE's own 2-3 phase read sequence,
+    // hijacking the bus with an unrelated preview read and corrupting the
+    // phase FSM's own synchronization (observed as real hangs/timeouts).
+    // `!ex_mem_stall` is the general, already-correct fix: for an ORDINARY
+    // single-beat read (this fast path's only intended target), none of
+    // the special multi-phase `_stall` terms are asserted, so
+    // `ex_mem_stall` already reads 0 the same cycle `mem_ack` arrives (the
+    // project's own established convention) -- zero behavior change for
+    // that case. For every multi-phase family, its own `_stall` term holds
+    // `ex_mem_stall` at 1 for every non-final ack, correctly suppressing
+    // preview_ok there without needing to enumerate each family by name.
+    //
+    // Second, distinct regression found the same way (still failing after
+    // the !ex_mem_stall fix above -- RTS specifically, a genuine one-shot
+    // single-beat read with no multi-phase mechanism at all, ruling that
+    // fix out as the cause): right after ANY flow-changing instruction's
+    // own read acks (JSR/BSR/RTS/RTR/RTE -- popping/computing a new PC),
+    // `dec_*` still describes the STALE fall-through instruction fetched
+    // before the real branch redirect takes effect, not the genuine next
+    // instruction. This is the exact same hazard `ex_mem_stall`'s own BKPT
+    // term already had to guard against once before (see
+    // `ex_redirect_pending`'s own declaration/comment above) -- reusing
+    // that existing signal directly rather than re-deriving the same
+    // exclusion list by hand.
+    assign preview_ok = ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
+                        !ex_mem_stall && !ex_redirect_pending &&
+                        !ex_is_move_reg_idx_dst &&
+                        dec_valid && dec_is_mem_rd && !dec_is_mem_wr &&
+                        !dec_is_moves && preview_trivial_ea &&
+                        (dec_mem_rd_siz == 2'b00) &&
+                        !hazard_ex && !hazard_wb && !hazard_ccr && !need_ext;
+
+    assign mem_req   = preview_ok ||
+                       movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
                        memind_inner_r || memind_outer_r || mem_rmw_run_r || move_mm_run_r ||
                        addx_mem_run_r || bf_mem_run_r || pack_mem_run_r || pmove64_run_r ||
                        cas_write_r || bcds_run_r ||
                        cas2_rd2_r || cas2_wr1_r || cas2_wr2_r ||
                        cpsr_mem_fmt_r || cpsr_xfer_mem_r ||
                        (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
-    assign mem_rw    = movem_run_r    ? movem_load_r
+    assign mem_new_dispatch = preview_ok;
+    assign mem_rw    = preview_ok    ? 1'b1   // preview is read-only (Stage 2 scope)
+                     : movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
                      : tas_memind_pending_r ? 1'b1   // genuine-indirect TAS: RMW-locked read phase
                      : cmp2_run_r     ? 1'b1
@@ -4946,7 +5033,8 @@
                      // cpRESTORE reads (memory -> format word / transfer loop).
                      : (cpsr_mem_fmt_r || cpsr_xfer_mem_r) ? cpsr_is_restore_r
                      : ex_is_mem_rd;
-    assign mem_siz   = movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
+    assign mem_siz   = preview_ok     ? dec_siz :
+                       movem_run_r    ? (movem_long_r ? 2'b00 : 2'b10) :
                        cmp2_run_r     ? cmp2_siz_r :
                        movep_run_r    ? 2'b01 :
                        memind_inner_r ? 2'b00 :
@@ -4970,7 +5058,8 @@
     assign mem_fc    = (ex_is_moves && ex_moves_load)  ? sfc_in :
                        (ex_is_moves && !ex_moves_load) ? dfc_in :
                                                          {sr_live[13], 1'b0, 1'b1};
-    assign mem_addr  = movem_run_r    ? movem_addr_r :
+    assign mem_addr  = preview_ok     ? rd_c_data :
+                       movem_run_r    ? movem_addr_r :
                        (ex_is_tas && ex_is_memind && (tas_run_r || tas_memind_pending_r)) ? tas_memind_addr_r :
                        cmp2_run_r     ? cmp2_addr2_r :
                        movep_run_r    ? movep_addr_r :

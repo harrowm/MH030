@@ -659,6 +659,11 @@ module biu_tb;
         .eu_siz      (eu_siz_tb),
         .eu_wdata    (eu_wdata_tb),
         .eu_req      (use_cache ? eu_req_tb : 1'b0),
+        // Stage 2 retry (wobbly-honking-cascade.md): this testbench drives
+        // eu_req_tb directly, never through the EU's own preview_ok path,
+        // so there is no genuine "new dispatch" signal to provide here --
+        // tied off like every other EU-preview-only input.
+        .eu_new_dispatch(1'b0),
         // Phase 158 Stage 3: was left unconnected (pre-existing gap, found
         // and fixed while touching this same instantiation for Stage 4c) --
         // an unconnected input floats X, risking X-propagation into dhit's

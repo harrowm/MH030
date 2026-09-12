@@ -23,6 +23,14 @@ module biu_cache_if (
     input  logic [1:0]  eu_siz,
     input  logic [31:0] eu_wdata,
     input  logic        eu_req,
+    // Stage 2 retry (wobbly-honking-cascade.md): true exactly on the cycle
+    // eu_seq_execute.svh's own preview_ok fast path is driving eu_addr/
+    // eu_rw/eu_siz with a genuinely new, hazard-checked next instruction --
+    // see its own port comment on eu_seq.sv's mem_new_dispatch for why this
+    // is threaded as its own dedicated signal rather than inferred from
+    // `eu_addr != addr_r` (that comparison was tried and found unsound --
+    // see this module's own CI_D_MISS comment below).
+    input  logic        eu_new_dispatch,
     output logic [31:0] eu_rdata,
     output logic        eu_ack,
     output logic        eu_berr,
@@ -758,48 +766,79 @@ module biu_cache_if (
                         // module -- no intermediate FSM in between). The
                         // real EU takes at least one clock edge to REACT
                         // to `eu_ack` before it can withdraw `eu_req`, so
-                        // `eu_req` is *guaranteed* to still read 1 on this
-                        // exact cycle regardless of whether a genuinely
-                        // new, different request is coming next -- a
-                        // direct trace confirmed it: with the fast path
-                        // enabled, `eu_req` never once dropped between
-                        // transactions (continuously 1), where the
-                        // unmodified baseline shows real 1-2 tick gaps.
-                        // The fast path therefore always re-dispatches a
-                        // second, wholly unrequested bus cycle immediately
-                        // after every single access, using whatever
-                        // eu_addr/eu_rw happens to be presented -- a
-                        // genuine phantom transaction, not merely a
-                        // spurious wait. `biu_sizing_fsm.sv` (already past
-                        // this same access, having consumed its own single
-                        // expected ack and moved on to a real new request)
-                        // then receives this phantom's own unsolicited
-                        // second ack as if it were the answer to whatever
-                        // it's now doing instead, corrupting its assembled
-                        // read data / cache state from there on --
-                        // confirmed via a direct trace showing runaway,
-                        // ever-changing bus addresses and eu_req stuck at
-                        // 1 within a few cycles.
+                        // `eu_req` alone can never distinguish "still the
+                        // same request" from "a genuinely new one" on this
+                        // exact cycle -- a direct trace confirmed it stays
+                        // at 1 continuously, never dropping, regardless.
                         //
-                        // This is NOT the same situation as the other two
-                        // layers: `biu_cycle_gen.sv`'s own `eu_req` is
-                        // `biu_sizing_fsm.sv`'s `cyc_req` (already one
-                        // layer removed from the raw handshake), and
-                        // `biu_sizing_fsm.sv`'s own `eu_req` is read at
-                        // its `SS_IDLE` state -- reached only the cycle
-                        // *after* its own completion, by which point the
-                        // real EU has already had its one required cycle
-                        // to react. `biu_cache_if.sv` is the ONE layer
-                        // directly facing the raw protocol, where "request
-                        // still asserted the instant ack fires" is normal
-                        // and expected, not evidence of a new request --
-                        // there is no way to safely distinguish the two
-                        // from eu_req/eu_addr alone without giving the EU
-                        // that same one cycle to react first, which is
-                        // exactly what the existing CI_IDLE state already
-                        // provides. Left exactly as Track D Stage D1
-                        // established it.
-                        state <= CI_IDLE;
+                        // Third attempt: `eu_seq_execute.svh`'s own
+                        // `preview_ok` fast path (Stage 2,
+                        // `~/.claude/plans/wobbly-honking-cascade.md`) makes
+                        // `eu_addr` genuinely present the NEXT plain-`(An)`-
+                        // read instruction's own address combinationally on
+                        // this exact cycle, for that one narrow case --
+                        // something no layer could do before.
+                        //
+                        // First cut of this attempt gated on `eu_addr !=
+                        // addr_r` directly (the address this access just
+                        // serviced) reasoning that this is "structurally
+                        // impossible" to read true except when the EU-side
+                        // fix legitimately provides it, since every other
+                        // path's own `mem_addr` is register-driven and can't
+                        // change before the next edge. **That reasoning was
+                        // wrong, confirmed via a real cosim_memind/memind7
+                        // regression, root-caused via direct signal tracing,
+                        // not guessed at**: `eu_seq_execute.svh`'s own
+                        // `dyn_bit_get_Dn` (a pre-existing deferred register-
+                        // port swap used by 5 instruction families --
+                        // dynamic-bit ops, CMP2/CHK2, general ALU-EA
+                        // indexed ops, MOVE mem-to-mem indexed-dst, CHK
+                        // indexed) already, deliberately, corrupts `rd_b`'s
+                        // output -- and therefore `ex_ea`/`mem_addr` -- on
+                        // the CURRENT instruction's own read-ack cycle (its
+                        // own comment there: "corrupts ex_ea... changes
+                        // xn_scaled"), completely independent of whether a
+                        // new instruction is next. This was always harmless
+                        // before, since nothing downstream ever read
+                        // `mem_addr` again after that instruction's own ack
+                        // -- this module's new fast path was the first
+                        // consumer that ever did, for a different purpose,
+                        // and got fooled by it (observed directly:
+                        // `ADD.L ($100,A0,D1.L),D2` read $304 correctly, then
+                        // this guard read `eu_addr=$303` -- D1's own value 4
+                        // replaced transiently by D2's own value 3 via
+                        // exactly this swap -- and dispatched a phantom
+                        // read one byte off).
+                        //
+                        // Fixed by trusting an explicit signal instead of
+                        // inferring novelty from address inequality:
+                        // `eu_new_dispatch` is wired straight from
+                        // `preview_ok` itself (`eu_seq.sv`'s own port
+                        // comment) -- the one place that already knows,
+                        // for certain and only for the narrow hazard-
+                        // checked case, that `eu_addr` is a genuine new
+                        // request this cycle. Every case without the EU-side
+                        // fix (writes, every other addressing mode, all
+                        // special sub-FSMs, and now also every
+                        // `dyn_bit_get_Dn`-swapped read) degrades safely to
+                        // the unmodified CI_IDLE path, since `eu_new_dispatch`
+                        // is 0 there regardless of what `eu_addr` shows.
+                        if (eu_req && eu_new_dispatch && eu_rw && !dhit && !tc_e &&
+                            !(dcache_en && dburst_en && d_size_ok && !dfreeze_en)) begin
+                            addr_r      <= eu_addr;
+                            wdata_r     <= eu_wdata;
+                            fc_r        <= eu_fc;
+                            rw_r        <= eu_rw;
+                            siz_r       <= eu_siz;
+                            idx_r       <= idx;
+                            woff_r      <= woff;
+                            vtag_r      <= vtag;
+                            fill_base_r <= {eu_addr[31:4], 4'h0};
+                            xl_ci_r     <= 1'b0;
+                            state       <= CI_D_MISS;
+                        end else begin
+                            state <= CI_IDLE;
+                        end
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;

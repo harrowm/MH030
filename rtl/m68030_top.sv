@@ -281,6 +281,7 @@ module m68030_top #(
 
     // EU memory bus signals (from m68030_eu)
     logic        eu_mem_req, eu_mem_rw;
+    logic        eu_mem_new_dispatch; // see eu_seq.sv's own mem_new_dispatch comment
     logic [1:0]  eu_mem_siz;
     logic [2:0]  eu_mem_fc;
     logic [31:0] eu_mem_addr, eu_mem_wdata;
@@ -303,8 +304,12 @@ module m68030_top #(
     logic [2:0]  biu_eu_fc;
     logic        biu_eu_rw, biu_eu_req;
     logic [1:0]  biu_eu_siz;
+    logic        biu_eu_new_dispatch;
 
     assign biu_eu_req   = exc_active ? exc_req_w   : eu_mem_req;
+    // Never trust a "new dispatch" claim while EXC owns the port -- exc_req_w
+    // is a completely separate producer with no relationship to preview_ok.
+    assign biu_eu_new_dispatch = !exc_active && eu_mem_new_dispatch;
     assign biu_eu_addr  = exc_active ? exc_addr_w  : eu_mem_addr;
     assign biu_eu_wdata = exc_active ? exc_wdata_w : eu_mem_wdata;
     assign biu_eu_fc    = exc_active ? 3'b101      : eu_mem_fc;
@@ -510,6 +515,7 @@ module m68030_top #(
         .branch_taken  (eu_branch_taken),
         .branch_target (eu_branch_target),
         .mem_req       (eu_mem_req),
+        .mem_new_dispatch (eu_mem_new_dispatch),
         .mem_rw        (eu_mem_rw),
         .mem_siz       (eu_mem_siz),
         .mem_fc        (eu_mem_fc),
@@ -843,6 +849,7 @@ module m68030_top #(
         .eu_siz          (biu_eu_siz),
         .eu_is_operand   (exc_active),
         .eu_req          (biu_eu_req),
+        .eu_new_dispatch (biu_eu_new_dispatch),
         .eu_ack          (eu_ack),
         .eu_berr         (eu_berr),
         .eu_retry        (eu_retry),
