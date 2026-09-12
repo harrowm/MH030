@@ -184,6 +184,43 @@ alone rather than "fixed":
   boxes). WaveDrom renders a generic digital-waveform style — a tooling
   difference, not a correctness one.
 
+## `preview_dispatch`: seeing Phase 254's fix live
+
+`read_cycle` (above) can never show Phase 254's own EU-side dispatch-gap
+fix (`CLAUDE.md`), because its testbench (`tb/read_cycle_tb.sv`) drives
+`eu_req`/`eu_addr` directly into a standalone `m68030_biu` — there is no
+real EU/decode pipeline there for `preview_ok` to run in at all.
+
+`preview_dispatch` (`tb/preview_dispatch_tb.sv`) instantiates the full
+`m68030_top` instead — the real CPU, not just the BIU — and boots
+`tests/timing_preview.s` (the same program `tb/timing_tb.sv` uses to
+*measure* Phase 254's improvement numerically). It shows 3 consecutive
+bus cycles: the opcode fetch for `MOVE.L (A0),D0`, that instruction's own
+data read at `$3000`, and `MOVE.L (A1),D1`'s own data read at `$3010`
+immediately following it. The `S-STATE` row makes the effect directly
+visible: the ordinary opcode-fetch cycle is followed by a `--` idle tick
+before the next cycle starts (the usual `CI_IDLE` detour), while the two
+back-to-back `(An)` reads chain with **no** `--` at all — `S-STATE` runs
+straight from `S5` into `S6` with no gap, because `preview_ok`'s own
+`eu_new_dispatch` signal let `biu_cache_if.sv` skip `CI_IDLE` entirely
+for that one pair.
+
+**Why this is only sometimes true**: this is real, current RTL behavior,
+not a hypothetical — but it's also narrow. Every other back-to-back
+combination (a read followed by a write, indexed/indirect addressing,
+any of the ~20 special multi-cycle instruction FSMs, or even a plain
+`(An)` read that happens to belong to one of the 5 `dyn_bit_get_Dn`
+families) still takes the one-tick `CI_IDLE` detour real silicon's own
+chained-cycle timing (Figure 7-25) doesn't have. Closing that generally
+would mean threading `eu_new_dispatch`'s own "trust me, this is
+genuinely new" guarantee through every one of those cases individually —
+explicitly out of scope for Phase 254 (see its own plan's "Stage 3 —
+optional, only if worth generalizing," never pursued).
+
+Needs the same test hex `read_cycle` doesn't (`../tests/timing_preview.hex`,
+already assembled and committed) — see `Makefile`'s own `TOP_SRCS` for the
+fuller RTL file list a full-CPU diagram needs versus a standalone-BIU one.
+
 ## One-time setup
 
 - `npx` (bundled with Node.js) — fetches `wavedrom-cli` automatically on

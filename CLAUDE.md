@@ -1985,8 +1985,108 @@ ticks to 6 (`AS-fall` at tick 222 instead of 224) — a real, narrow,
 confirmed improvement for the one addressing-mode shape this closes;
 every other case (including every `dyn_bit_get_Dn` consumer, every
 non-trivial EA, every write) still takes the one-tick `CI_IDLE` detour
-exactly as before. This closes
-`~/.claude/plans/wobbly-honking-cascade.md` in full.
+exactly as before.
+
+**Superseded by Phase 255** (see below): the user pointed out, correctly,
+that closing this for exactly one addressing-mode shape isn't "mimicking
+real silicon" — it's tuned to the one case the diagram happened to test.
+Phase 255 generalizes `preview_ok` well beyond `(An)` alone.
+
+**Phase 255 (Track 1: generalizing `preview_ok` past `(An)`-only, using
+only already-free register-file bandwidth — IMPLEMENTED AND VERIFIED,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: a staged, no-new-hardware
+widening of the same `preview_ok` mechanism, following a plan the user
+explicitly asked for after reviewing Phase 254's own diagram and noting
+it only covered one narrow case. **Stage 1 (research only)**: direct
+code inspection (not assumed) confirmed exactly one of the ~20 special-
+FSM `mem_addr` arms reads a live register-file port during its own
+multi-cycle run (`cas2_rd2_r`'s own `rd_a_data` read) — irrelevant here
+since CAS2 always has `ex_is_mem_rd=0` as the current instruction, so it
+can never reach `preview_ok`'s own gate. Also confirmed `rd_b_data`'s
+only consumers (`ex_xn_val`→`ex_xn_scaled`, force-zeroed whenever
+`!ex_is_idx`; `memind_xn_sc_w`, only live during `ex_is_memind`, mutually
+exclusive with `ex_is_mem_rd` for the same instruction) mean `rd_b` is
+genuinely unconsumed whenever the current instruction is
+`ex_is_mem_rd && !ex_is_idx` — exactly the shape `preview_ok`'s own
+existing gate already requires. **Stage 2 (implemented): plain absolute
+EA preview.** `(xxx).W`/`(xxx).L` needs no register read at all
+(`dec_abs_ea_val` is a decode-time constant, confirmed mutually
+exclusive with `dec_is_idx` in decode) — added `preview_is_abs` as an
+independent, zero-port-cost sibling to the original `(An)` condition
+(renamed conceptually `preview_is_an`), with a new `preview_addr` mux
+selecting the right source. **Stage 3 (implemented): `(d16,An)`
+preview.** Dropped the original `dec_ea_offset==0` restriction from
+`preview_is_an` — a displacement is a decode-time sign-extended
+constant (`dec_ea_offset`), so `preview_addr`'s An-based arm now adds it
+to `rd_c_data` (a no-op add of zero for the original plain-`(An)` case,
+a strict backward-compatible generalization). **Stage 4 (implemented,
+highest care): indexed/full-format EA preview when CURRENT is provably
+non-indexing.** Added `preview_is_idx` (`(d8,An,Xn)`/`(bd,An,Xn)`),
+reusing `rd_b` for Xn (via a new `rd_b_sel`/`rd_b_siz` arm keyed on
+`preview_ok && preview_is_idx`) alongside `rd_c` for An — gated by a new,
+narrowly-scoped `(!preview_is_idx || !ex_is_idx)` term in `preview_ok`
+itself (current-side; NOT implied by the existing `ex_is_mem_rd` gate,
+since a current indexed read also has `ex_is_mem_rd=1`). Verified the
+existing `hazard_ex`/`hazard_wb` mechanism already covers this new case
+with zero changes needed, by direct inspection: both key off
+`dec_reads_dst && ex/wb_dest_reg==dec_dst_reg` generically (not
+`dec_src_reg` specifically), and every indexed-EA decode arm already
+sets `dec_reads_dst=1'b1` alongside `dec_dst_reg` as an established,
+consistent convention. Built a dedicated cosim hazard test
+(`tests/timing_preview_idx_hazard.s`: `MOVE.L (A2)+,D3` producer →
+`MOVE.L (A0),D0` current → `MOVE.L (0,A1,D3.L),D1` next, Xn=D3) proving
+the previewed address uses D3's real, correctly-produced value, not a
+stale one — bus trace matches Musashi's own reference exactly. **Found,
+not fixed (a pre-existing, orthogonal limitation, not introduced by this
+phase)**: `need_ext` (already-existing, required for every stage here
+since none of these EA shapes work without their own extension word(s)
+in hand) blocks the preview in every isolated-worst-case timing test
+constructed this phase (`tests/timing_preview_abs.s`,
+`timing_preview_d16.s`) — including with a NOP or `DIVU.W` runway added
+deliberately to test whether the IFU could prefetch far enough ahead
+first. Confirmed via direct trace (temporary, removed) that this is the
+project's own established, deliberately conservative ambient-readahead
+policy (`m68030_ifu.sv`'s own `q_cnt_d<=5` cap, Phase 234's own comment:
+widening it unconditionally previously broke `tb/cache_tb.sv`'s I-3 via
+"readahead reaches into unintended memory") interacting with this
+project's own "zero head start" isolated-timing test convention — not a
+gap in Stage 2-4's own logic, which correctly and safely declines to
+preview until the extension word(s) are genuinely available (proven via
+the cosim hazard test above, and via the unchanged Harte/mandatory-gate
+result). Visually demonstrating Stage 2-4's benefit needs a program
+where the IFU has already prefetched the target instruction's own
+extension word(s) ahead of time — real, non-adversarial code, not this
+project's own isolated worst-case convention. Full mandatory gate clean
+at every stage (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline after every stage (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` —
+the documented ASL.b corpus anomaly).
+
+**Track 2 (dedicated address-generation register-file ports) — designed,
+not implemented, by deliberate choice, matching this project's own
+precedent for correctly-scoped-but-not-yet-attempted work (F6, CAS
+bus-lock, TAS/Scc memind before they were eventually done)**: the honest
+general-purpose fix is to stop sharing `rd_a`/`rd_b` between address
+generation and the ALU/operand-read path at all — 2 new register-file
+read ports dedicated solely to `ex_an_base`/`ex_xn_val`, so EA
+computation never contends with whatever the current instruction's own
+`dyn_bit_get_Dn` swap or ALU operand read is doing. This would let
+`preview_ok` generalize to any addressing mode regardless of the current
+instruction's own indexing, and would structurally eliminate the whole
+`dyn_bit_get_Dn`-corrupts-`ex_ea` bug class as a side effect rather than
+working around it (see `feedback_post_ack_signal_reuse` memory) — but it
+does not, by itself, preview any of the ~20 special multi-cycle FSMs
+(they don't route through `ex_ea` at all; each would need its own
+bespoke preview entry point, the same shape of work Stage 9's
+memory-indirect-EA rollout took ~10 phases to complete for the
+*existing*, non-preview addressing paths). See
+`~/.claude/plans/wobbly-honking-cascade.md` for the full design sketch.
+**Honest overall status**: even after Track 1 (this phase) and a
+hypothetical Track 2, several of the highest-blast-radius mechanisms in
+the project (RMW/CAS/CAS2 bus locks, MOVEM, memory-indirect) would still
+show the dispatch gap unless individually revisited — genuine, literal
+parity with real silicon for every instruction combination remains a
+much larger, multi-phase program, not a single change.
 
 ## Verification Commands
 
