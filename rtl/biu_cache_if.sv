@@ -745,27 +745,60 @@ module biu_cache_if (
                         // remaining entry points (CI_D_BURST0/
                         // CI_D_FILL_3B) -- Track D's later stages.
                         //
-                        // timing_diagrams/ investigation: attempted the
-                        // same "skip the idle detour when the next request
-                        // would dispatch right back here anyway" fast path
-                        // biu_cycle_gen.sv/biu_sizing_fsm.sv now use, gated
-                        // on eu_req/eu_rw/dhit/tc_e/burst-eligibility
-                        // mirroring CI_IDLE's own dispatch decision
-                        // exactly. Reverted: broke `make test` broadly
-                        // (mmu_xlate Phases 1-5, cache D-1/D-8, several
-                        // stall_fsm MOVEM/memory-indirect/interrupt-mid-
-                        // sequence tests, multiple hard timeouts) --
-                        // something about re-evaluating these conditions
-                        // one cycle earlier than CI_IDLE normally would
-                        // is unsafe here in a way that wasn't true for the
-                        // other two FSMs (plausibly a stale-broadcast-
-                        // shaped issue akin to past mmu_ci/xl_ci_r bugs
-                        // in this same file, not run to ground). This
-                        // module's own extensive Track A-D history already
-                        // flags it as the most delicate in the project;
-                        // left exactly as Track D Stage D1 established it,
-                        // not pushed further without a dedicated
-                        // investigation of its own.
+                        // timing_diagrams/ investigation (Phase 253/254,
+                        // CLAUDE.md): attempted the identical "skip the
+                        // idle detour when the next request would
+                        // dispatch right back here anyway" fast path used
+                        // in biu_cycle_gen.sv/biu_sizing_fsm.sv, gated on
+                        // eu_req/eu_rw/dhit/tc_e/burst-eligibility. Traced
+                        // and root-caused this time (not just reverted on
+                        // suspicion): `eu_req` here is the RAW, unmediated
+                        // top-level EU request (`m68030_biu.sv`'s own
+                        // `.eu_req(eu_req & !eu_mo_req)` connection to this
+                        // module -- no intermediate FSM in between). The
+                        // real EU takes at least one clock edge to REACT
+                        // to `eu_ack` before it can withdraw `eu_req`, so
+                        // `eu_req` is *guaranteed* to still read 1 on this
+                        // exact cycle regardless of whether a genuinely
+                        // new, different request is coming next -- a
+                        // direct trace confirmed it: with the fast path
+                        // enabled, `eu_req` never once dropped between
+                        // transactions (continuously 1), where the
+                        // unmodified baseline shows real 1-2 tick gaps.
+                        // The fast path therefore always re-dispatches a
+                        // second, wholly unrequested bus cycle immediately
+                        // after every single access, using whatever
+                        // eu_addr/eu_rw happens to be presented -- a
+                        // genuine phantom transaction, not merely a
+                        // spurious wait. `biu_sizing_fsm.sv` (already past
+                        // this same access, having consumed its own single
+                        // expected ack and moved on to a real new request)
+                        // then receives this phantom's own unsolicited
+                        // second ack as if it were the answer to whatever
+                        // it's now doing instead, corrupting its assembled
+                        // read data / cache state from there on --
+                        // confirmed via a direct trace showing runaway,
+                        // ever-changing bus addresses and eu_req stuck at
+                        // 1 within a few cycles.
+                        //
+                        // This is NOT the same situation as the other two
+                        // layers: `biu_cycle_gen.sv`'s own `eu_req` is
+                        // `biu_sizing_fsm.sv`'s `cyc_req` (already one
+                        // layer removed from the raw handshake), and
+                        // `biu_sizing_fsm.sv`'s own `eu_req` is read at
+                        // its `SS_IDLE` state -- reached only the cycle
+                        // *after* its own completion, by which point the
+                        // real EU has already had its one required cycle
+                        // to react. `biu_cache_if.sv` is the ONE layer
+                        // directly facing the raw protocol, where "request
+                        // still asserted the instant ack fires" is normal
+                        // and expected, not evidence of a new request --
+                        // there is no way to safely distinguish the two
+                        // from eu_req/eu_addr alone without giving the EU
+                        // that same one cycle to react first, which is
+                        // exactly what the existing CI_IDLE state already
+                        // provides. Left exactly as Track D Stage D1
+                        // established it.
                         state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault

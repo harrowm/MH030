@@ -1810,28 +1810,68 @@ request was already known and pending:
    detour when the next request would dispatch right back here anyway"
    fast path for its own `CI_D_MISS`→`CI_IDLE`→`CI_D_MISS` round trip,
    mirroring `CI_IDLE`'s own dispatch decision (hit/translate/burst-
-   eligibility checks) exactly. **Reverted** — it broke `make test`
-   broadly (`mmu_xlate` Phases 1-5, `cache` D-1/D-8, several
-   `stall_fsm` MOVEM/memory-indirect/interrupt-mid-sequence tests,
-   multiple hard timeouts). Root cause not run to ground; plausibly a
-   stale-broadcast-shaped issue akin to this same file's own past
-   `mmu_ci`/`xl_ci_r` bugs (see [[feedback_stale_broadcast_signal]]),
-   surfaced by re-evaluating dispatch conditions one cycle earlier than
-   `CI_IDLE` normally would. This module's own extensive Track A-D
-   history already flags it as the most delicate in the project (see
-   Phase 228/246/250-Part-B and the bus-pipelining-overlap plan);
-   left exactly as Track D Stage D1 established it rather than pushed
-   further without a dedicated investigation of its own.
+   eligibility checks) exactly. **Attempted twice; reverted both times,
+   the second attempt with the real root cause traced and confirmed
+   (not guessed at).** First attempt broke `make test` broadly
+   (`mmu_xlate` Phases 1-5, `cache` D-1/D-8, several `stall_fsm` MOVEM/
+   memory-indirect/interrupt-mid-sequence tests, multiple hard
+   timeouts). A direct signal trace (temporary `$display` instrumentation,
+   since removed) comparing the broken run against the unmodified
+   baseline found the actual mechanism: **`eu_req` at this module's own
+   input is the raw, unmediated top-level EU request**
+   (`m68030_biu.sv`'s own `.eu_req(eu_req & !eu_mo_req)` connection —
+   no intermediate FSM in between, unlike the other two layers). The
+   real EU needs at least one clock edge to react to `eu_ack` before it
+   can withdraw `eu_req`, so `eu_req` is *guaranteed* to still read 1
+   the instant `sf_ack_rise` fires, regardless of whether a genuinely
+   new, different request follows — confirmed directly: with the fast
+   path enabled, the trace showed `eu_req` never dropping between
+   transactions at all (continuously 1), while the unmodified baseline
+   showed real 1-2 tick gaps in the identical spot. The fast path
+   therefore dispatches a second, wholly unrequested phantom bus cycle
+   after *every* access, using whatever `eu_addr`/`eu_rw` happens to be
+   presented — not merely a missed optimization but a genuine spurious
+   transaction. `biu_sizing_fsm.sv`, having already consumed its own
+   single expected ack and moved on to a real new request, then
+   receives this phantom's own unsolicited second ack as the answer to
+   whatever it's doing instead, corrupting assembled read data/cache
+   state from there on (matches the observed symptom exactly: runaway,
+   ever-changing bus addresses within a few cycles). **This is why
+   layers 1-2 are safe but layer 3 isn't**: `biu_cycle_gen.sv`'s own
+   `eu_req` is `biu_sizing_fsm.sv`'s `cyc_req` (already one layer
+   removed from the raw handshake), and `biu_sizing_fsm.sv`'s own
+   `eu_req` is read at its `SS_IDLE` state — reached only the cycle
+   *after* its own completion, by which point the real EU has already
+   had its one required cycle to react. `biu_cache_if.sv` is the one
+   layer directly facing the raw protocol, where "request still
+   asserted the instant ack fires" is normal and expected, not evidence
+   of a new request — there is no way to safely distinguish the two
+   from `eu_req`/`eu_addr` alone without giving the EU that same one
+   cycle to react first, which is exactly what the existing `CI_IDLE`
+   state already provides. Confirmed via a clean revert (`make test`
+   37/37 again) that this is a genuine, structural difference between
+   this layer and the other two, not a fixable bug of the same shape —
+   left exactly as Track D Stage D1 established it. This module's own
+   extensive Track A-D history already flagged it as the most delicate
+   in the project (Phase 228/246/250-Part-B, the bus-pipelining-overlap
+   plan); that reputation held up under direct investigation, not just
+   by reputation.
 
 Layers 1-2 are real, verified improvements (full mandatory gate clean:
 `make test` 37/37, `cosim_grp` 8/8, `cosim_memind`/`dat-synth` clean,
-Harte bit-identical to baseline). They do not yet visibly close the
-diagram's own gap, though, since layer 3 (`biu_cache_if.sv`, left
-unfixed) dominates it for an ordinary D-cache-bypassing EU read — every
-access routes through `biu_cache_if` first, so its own one-tick
-`CI_IDLE` floor is the binding constraint regardless of how fast the
-two layers underneath it now are. See `timing_diagrams/README.md`'s own
-"Known differences" section for how this reads in the rendered diagram.
+Harte bit-identical to baseline). They do not close the diagram's own
+gap, though, since layer 3 (`biu_cache_if.sv`, confirmed structurally
+unfixable by this technique, left unchanged) dominates it for an
+ordinary D-cache-bypassing EU read — every access routes through
+`biu_cache_if` first, so its own one-tick `CI_IDLE` floor is the
+binding constraint regardless of how fast the two layers underneath it
+now are. Genuinely closing it would need the EU's own request/ack
+interface to carry more information than "is `eu_req` currently
+asserted" (e.g. a distinct "this is a new request" strobe), which is a
+materially bigger, EU-side change than this investigation's own scope —
+documented here as a precise, evidence-backed stopping point, not an
+open question. See `timing_diagrams/README.md`'s own "Known
+differences" section for how this reads in the rendered diagram.
 
 Permanently out of scope by design, not started: coprocessor conditional
 instructions + Coprocessor Protocol Violation (Phase 248 item #7);
