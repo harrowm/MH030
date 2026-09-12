@@ -165,11 +165,15 @@ README.md`'s own "A real bug this diagram found" section for the full
 writeup. The two diagrams still differ in a couple of ways worth
 knowing about before comparing them pixel-for-pixel: the `CLK` lane on
 the right is this project's internal 4× clock, not the external bus
-clock the manual's `CLK` shows; and a small idle gap appears between
-the RTL's three chained cycles that the manual's own back-to-back
-timing doesn't have (a real, already-documented "structural per-cycle
-dispatch floor," not a testbench artifact — see `timing_diagrams/
-README.md`'s own "Known differences" section).
+clock the manual's `CLK` shows; and a small idle gap still appears
+between the RTL's three chained cycles that the manual's own
+back-to-back timing doesn't have — not a testbench artifact. Digging
+into it found three separate, stacked FSM layers between `eu_req` and
+the bus pins each contributing their own one-tick "return to idle";
+two are now fixed, the third (`biu_cache_if.sv`, the most delicate
+module in the project by its own history) was attempted and reverted
+after it broke MMU/cache correctness elsewhere — see `timing_diagrams/
+README.md`'s own "Known differences" section for the full account.
 
 See `timing_diagrams/README.md` for the full pipeline (testbench → VCD →
 WaveDrom spec → PNG) and `timing_diagrams/diagrams.md` for the manifest

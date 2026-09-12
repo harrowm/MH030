@@ -365,10 +365,33 @@ module biu_sizing_fsm (
                     if (needs_more(sf_siz, cyc_port_dsack))
                         sf_nxt = SS_ACTIVE;
                     else
-                        sf_nxt = SS_DONE;
+                        // timing_diagrams/ investigation: SS_DONE's own
+                        // role is already fully superseded on the output
+                        // side (eu_ack/eu_rdata are driven solely by
+                        // ss_active_fast_done below, never by sf==SS_DONE
+                        // -- see that wire's own comment) and its sf_accum
+                        // reset is redundant with SS_IDLE's own identical
+                        // reset on latching a fresh request. The ONE real
+                        // remaining effect of visiting SS_DONE was cyc_req
+                        // dropping to 0 for that one tick even when the
+                        // next eu_req was already asserted continuously --
+                        // a second, independent source of exactly the same
+                        // "extra idle tick between back-to-back EU cycles"
+                        // gap biu_cycle_gen.sv's own eu_continue_ok fast
+                        // path (this same investigation) closes at its
+                        // level. Going straight to SS_IDLE closes it here:
+                        // SS_IDLE's own existing "pass eu_req/eu_addr
+                        // through immediately, no extra latency" behavior
+                        // (see the always_comb below) already handles a
+                        // continuing request correctly with no other
+                        // change needed.
+                        sf_nxt = SS_IDLE;
                 end
             end
             SS_DONE: begin
+                // Still reachable only via reset-time default/stale state;
+                // kept as a safe fallback, not a normal transition target
+                // anymore (see above).
                 sf_nxt = SS_IDLE;
             end
             default: sf_nxt = SS_IDLE;

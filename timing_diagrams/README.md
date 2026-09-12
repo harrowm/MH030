@@ -119,17 +119,27 @@ alone rather than "fixed":
   the actual protocol timing being compared.
 - **A small idle gap appears between the 3 chained cycles that the
   manual doesn't show.** The manual's own Figure 7-25 shows chained
-  reads with zero idle time between them; this RTL measurably takes
-  ~4 extra internal states (`S6`→`S7`→`ST_IDLE`→`S0` before the next
-  cycle's `/AS` can reassert) between one cycle's negation and the
-  next's. This is not a testbench artifact — the testbench keeps
-  `eu_req` asserted continuously and never inserts a deliberate gap —
-  it's the project's own already-documented "structural per-cycle
-  dispatch floor" (`CLAUDE.md`'s S-State Signal Timing section: "a
-  small, structural per-cycle dispatch floor (the `ST_IDLE`-to-`S0`
-  hand-off)... investigated and found genuinely load-bearing, not
-  implementation overhead"). This diagram is, incidentally, the first
-  direct visual demonstration of that gap.
+  reads with zero idle time between them; this RTL takes a few extra
+  internal states between one cycle's negation and the next's. This is
+  not a testbench artifact — the testbench keeps `eu_req` asserted
+  continuously and never inserts a deliberate gap. Investigating this
+  directly (Phase 253, `CLAUDE.md`) found the real dispatch path is
+  actually **three separate FSM layers** stacked between the top-level
+  `eu_req` and the bus pins (`biu_cache_if.sv` → `biu_sizing_fsm.sv` →
+  `biu_cycle_gen.sv`), each of which used to insert its own one-tick
+  "return to idle" state regardless of whether the next request was
+  already pending. Two of the three are now fixed (`biu_cycle_gen.sv`'s
+  own `ST_IDLE` hand-off and `biu_sizing_fsm.sv`'s own `SS_DONE` state
+  — both removed as genuinely unnecessary, full mandatory gate clean).
+  The third, `biu_cache_if.sv`'s own `CI_IDLE` transit, is what's still
+  visible in this diagram: an attempted fix there broke `make test`
+  broadly (MMU translation, D-cache correctness, several pipeline-stall
+  tests) and was reverted rather than pushed through — that module's
+  own extensive prior optimization history already flags it as the most
+  delicate in the project. Since every ordinary EU access routes through
+  `biu_cache_if.sv` first, its one remaining tick is now the sole
+  binding constraint on this gap, regardless of how fast the two layers
+  underneath it are.
 - **`SIZ1`/`SIZ0` are one combined 2-bit lane**, not two separate rows
   like the manual. The combined decimal value (`2`=word, `1`=byte)
   already conveys the same information; splitting it further is a

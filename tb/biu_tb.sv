@@ -487,6 +487,7 @@ module biu_tb;
         .ipl_s        (3'b111),
         .bgack_s      (1'b1),
         .cback_s      (cback_s_tb),
+        .br_s         (1'b1),   // deasserted -- no external DMA request in this testbench
         .grant_mmu    (grant_mmu),
         .grant_eu     (grant_eu),
         .grant_ifu    (grant_ifu),

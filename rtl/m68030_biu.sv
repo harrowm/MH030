@@ -1018,6 +1018,7 @@ module m68030_biu #(
         .ipl_s           (ipl_s),
         .bgack_s         (bgack_s),
         .cback_s         (cback_s),
+        .br_s            (br_s),
         // Arbiter grants
         .grant_mmu       (grant_mmu),
         .grant_eu        (grant_eu),

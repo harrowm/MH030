@@ -47,6 +47,7 @@ module biu_cycle_gen #(
     input  logic [2:0]  ipl_s,
     input  logic        bgack_s,
     input  logic        cback_s,
+    input  logic        br_s,           // Bus Request (external DMA), synchronised, active-low
 
     // Grant inputs from biu_arbiter (one-hot)
     input  logic        grant_mmu,
@@ -708,6 +709,68 @@ module biu_cycle_gen #(
     logic data_capture_ok;
     assign data_capture_ok = (!dsack_wait || sterm_active) && !berr_s;
 
+    // Back-to-back EU dispatch fast path (timing_diagrams/ investigation):
+    // an ordinary plain read/write's own terminal state (ST_READ_S7,
+    // ST_WRITE_S6) unconditionally routed through one full ST_IDLE state
+    // before the next cycle's own S0 could begin, even when the EU was
+    // already granted the bus and immediately re-requesting -- a real,
+    // if small (one state, ~2 ticks), gap real silicon's own back-to-back
+    // chaining doesn't have (Figure 7-25 shows zero idle time). grant_eu
+    // is a REGISTERED grant that only changes at a genuine bus_idle
+    // (biu_arbiter.sv), so it's still exactly the correct, unchanged
+    // grant for the cycle that's finishing -- safe to act on directly,
+    // PROVIDED nothing that would make the arbiter choose someone else
+    // at the next real bus_idle has become true meanwhile. This mirrors
+    // ST_IDLE's own dispatch priority chain exactly (down through the
+    // eu_req branch), substituting "still holds its existing grant" for
+    // "arbiter decides fresh" -- every condition below is independently
+    // live/visible here, not something only the arbiter's own
+    // bus_idle-gated re-evaluation could know:
+    //   - mmu_req: MMU outranks EU in the arbiter's own priority order
+    //     (biu_arbiter.sv checks mmu_req before eu_req) -- if asserted,
+    //     the arbiter would hand the NEXT grant to MMU instead, so this
+    //     fast path must defer to a real ST_IDLE exactly like today.
+    //   - br_s: external DMA (BR#) preempts everyone in the arbiter's own
+    //     outer check (`bus_idle && !br_s && !bus_lock`) -- without this,
+    //     the fast path would silently starve a legitimate external bus
+    //     master. br_s was not previously visible to this module; added
+    //     as a new input specifically for this check.
+    //   - eu_iack_req/eu_rst_req/eu_cas2_req/eu_burst_req/eu_m16_req/
+    //     eu_coproc_req/eu_bkpt_req: every one of these outranks plain
+    //     eu_req in ST_IDLE's own priority chain.
+    //   - init_done_r/retry_r/halt_s: ST_IDLE's own leading gates: no
+    //     dispatch at all is legal here unless all three already permit
+    //     ST_IDLE to dispatch too.
+    //   - eu_ae_cond: an address-error-rejected request needs a real
+    //     ST_IDLE cycle (matching ST_IDLE's own "reject, stay put"
+    //     behavior) so the EU can see the rejection and withdraw eu_req.
+    //   - berr_abort_r: the cycle that's finishing must have genuinely
+    //     ACKed, not BERR'd/retried. A first version omitted this and hung
+    //     `make test`'s own biu suite hard: a BERR'd cycle still reaches
+    //     ST_READ_S7/ST_WRITE_S6 (the completion body dispatches eu_berr
+    //     there instead of eu_ack), and a test holding eu_req asserted
+    //     across a deliberately-never-acking access (watchdog-timeout
+    //     coverage) made the fast path immediately redispatch the
+    //     identical failing access forever, with bus_idle never once
+    //     becoming true for anything waiting on it to observe progress.
+    // dma_active is deliberately NOT checked: DMA can only ever begin at
+    // a genuine bus_idle (biu_arbiter.sv's own `if (!dma_r)` gate), which
+    // cannot have happened mid-cycle between this dispatch and now.
+    logic eu_continue_ok;
+    assign eu_continue_ok =
+        grant_eu && eu_req && !eu_ae_cond && !berr_abort_r &&
+        init_done_r && !retry_r && halt_s && br_s &&
+        !mmu_req &&
+        !eu_iack_req && !eu_rst_req && !eu_cas2_req &&
+        !eu_burst_req && !eu_m16_req && !eu_coproc_req && !eu_bkpt_req;
+
+    bus_state_t eu_continue_state;
+    always_comb begin
+        if      (eu_rmw) eu_continue_state = ST_RMW_READ_S0;
+        else if (eu_rw)  eu_continue_state = ST_READ_S0;
+        else             eu_continue_state = ST_WRITE_S0;
+    end
+
     // biu_burst_ctrl output wires
     logic [1:0]  bc_burst_beat;
     // Deferred-items closure plan Stage 9 (plan.md): see biu_burst_ctrl.sv's
@@ -1187,7 +1250,10 @@ module biu_cycle_gen #(
                 else                                     state_nxt = ST_READ_S4;
             end
             ST_READ_S6: state_nxt = ST_READ_S7;
-            ST_READ_S7: state_nxt = ST_IDLE;
+            ST_READ_S7: begin
+                if (eu_continue_ok) state_nxt = eu_continue_state;
+                else                state_nxt = ST_IDLE;
+            end
 
             // Bus-cycle round-trip overhead investigation (plan.md, follows
             // Phase 160/205): WRITE now skips S1 too -- S1's own block lost
@@ -1221,7 +1287,10 @@ module biu_cycle_gen #(
             // proven SP_S7 arm below completely untouched for everyone
             // still using it) into a new ST_WRITE_S6-gated block right after
             // the case statement -- see the comment there.
-            ST_WRITE_S6: state_nxt = ST_IDLE;
+            ST_WRITE_S6: begin
+                if (eu_continue_ok) state_nxt = eu_continue_state;
+                else                state_nxt = ST_IDLE;
+            end
 
             // Bus-cycle round-trip overhead investigation (plan.md, follows
             // Phase 160/205/206/207): IACK is architecturally a plain read

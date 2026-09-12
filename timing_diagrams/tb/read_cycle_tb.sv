@@ -92,6 +92,8 @@ module read_cycle_tb;
     logic        eu_m16_ack, eu_m16_berr;
     logic [31:0] eu_coproc_rdata;
     logic        eu_coproc_ack, eu_coproc_berr;
+    logic [31:0] eu_bkpt_rdata;
+    logic        eu_bkpt_ack, eu_bkpt_berr;
     logic [31:0] eu_mo_rdata0, eu_mo_rdata1, eu_mo_rdata2, eu_mo_rdata3;
     logic        eu_mo_ack, eu_mo_berr;
     logic [31:0] ifu_rdata;
@@ -213,6 +215,15 @@ module read_cycle_tb;
         .eu_coproc_rdata (eu_coproc_rdata),
         .eu_coproc_ack   (eu_coproc_ack),
         .eu_coproc_berr  (eu_coproc_berr),
+        .eu_bkpt_req     (1'b0),
+        .eu_bkpt_rw      (1'b1),
+        .eu_bkpt_addr    (32'h0),
+        .eu_bkpt_fc      (3'b0),
+        .eu_bkpt_siz     (2'b0),
+        .eu_bkpt_wdata   (32'h0),
+        .eu_bkpt_rdata   (eu_bkpt_rdata),
+        .eu_bkpt_ack     (eu_bkpt_ack),
+        .eu_bkpt_berr    (eu_bkpt_berr),
         .eu_mo_req       (1'b0),
         .eu_mo_start_addr(32'h0),
         .eu_mo_fc        (3'b0),

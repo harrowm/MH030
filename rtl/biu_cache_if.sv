@@ -744,6 +744,28 @@ module biu_cache_if (
                         // itself is untouched and still serves the 2
                         // remaining entry points (CI_D_BURST0/
                         // CI_D_FILL_3B) -- Track D's later stages.
+                        //
+                        // timing_diagrams/ investigation: attempted the
+                        // same "skip the idle detour when the next request
+                        // would dispatch right back here anyway" fast path
+                        // biu_cycle_gen.sv/biu_sizing_fsm.sv now use, gated
+                        // on eu_req/eu_rw/dhit/tc_e/burst-eligibility
+                        // mirroring CI_IDLE's own dispatch decision
+                        // exactly. Reverted: broke `make test` broadly
+                        // (mmu_xlate Phases 1-5, cache D-1/D-8, several
+                        // stall_fsm MOVEM/memory-indirect/interrupt-mid-
+                        // sequence tests, multiple hard timeouts) --
+                        // something about re-evaluating these conditions
+                        // one cycle earlier than CI_IDLE normally would
+                        // is unsafe here in a way that wasn't true for the
+                        // other two FSMs (plausibly a stale-broadcast-
+                        // shaped issue akin to past mmu_ci/xl_ci_r bugs
+                        // in this same file, not run to ground). This
+                        // module's own extensive Track A-D history already
+                        // flags it as the most delicate in the project;
+                        // left exactly as Track D Stage D1 established it,
+                        // not pushed further without a dedicated
+                        // investigation of its own.
                         state <= CI_IDLE;
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault

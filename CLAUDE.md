@@ -1772,6 +1772,67 @@ green), full 124-suite Harte sweep bit-identical to baseline (`PASS
 702142 FAIL 2` — the documented ASL.b corpus anomaly — `SKIP 281221
 TIMEOUT 0`).
 
+**Phase 253 (back-to-back EU bus-cycle dispatch gap — 2 of 3 layers
+IMPLEMENTED AND VERIFIED, 1 layer attempted and reverted, found while
+extending `timing_diagrams/`)**: the diagram's own back-to-back chained
+cycles showed a small idle gap the manual's Figure 7-25 doesn't have.
+Traced it to **three separate, independently-discovered FSM layers**
+between the top-level `eu_req` and the actual bus pins, each inserting
+its own mandatory "return to idle" state even when the very next
+request was already known and pending:
+
+1. **`biu_cycle_gen.sv`** — an ordinary read/write's own terminal state
+   (`ST_READ_S7`/`ST_WRITE_S6`) unconditionally routed through a real
+   `ST_IDLE` state before the next cycle could begin. Added a new
+   `eu_continue_ok` fast path that dispatches directly to the next
+   cycle's own S0 when nothing could legitimately want the bus instead
+   — mirroring `ST_IDLE`'s own dispatch priority chain exactly (MMU,
+   IACK, CAS2, burst, coprocessor, breakpoint, reset, retry, halt, and
+   (new) external DMA all still correctly preempt it; a new `br_s` input
+   was threaded into the module specifically for the DMA check, since it
+   wasn't previously visible there). **Found and fixed a real bug in the
+   first attempt**: omitting a check for the finishing cycle itself
+   having BERR'd/retried let a test that holds `eu_req` asserted across
+   a deliberately-never-acking access (existing watchdog-timeout
+   coverage) redispatch the identical failing access forever, hanging
+   `make test`'s own `biu` suite hard — fixed by adding `!berr_abort_r`
+   to the fast-path condition.
+2. **`biu_sizing_fsm.sv`** — a sibling, independent one-tick gap: this
+   FSM's own `SS_DONE` state (between `biu_cache_if` and
+   `biu_cycle_gen`) unconditionally held `cyc_req` at 0 for one tick
+   between transfers, regardless of whether the next request was
+   already pending. Its own code comments already documented this state
+   as mostly obsoleted by an earlier optimization (the "bus-pipelining-
+   overlap plan" — `eu_ack`/`eu_rdata` already bypass it entirely);
+   removed it from the state-transition path too, going straight from
+   `SS_ACTIVE`'s own final beat to `SS_IDLE`.
+3. **`biu_cache_if.sv`** — attempted the identical "skip the idle
+   detour when the next request would dispatch right back here anyway"
+   fast path for its own `CI_D_MISS`→`CI_IDLE`→`CI_D_MISS` round trip,
+   mirroring `CI_IDLE`'s own dispatch decision (hit/translate/burst-
+   eligibility checks) exactly. **Reverted** — it broke `make test`
+   broadly (`mmu_xlate` Phases 1-5, `cache` D-1/D-8, several
+   `stall_fsm` MOVEM/memory-indirect/interrupt-mid-sequence tests,
+   multiple hard timeouts). Root cause not run to ground; plausibly a
+   stale-broadcast-shaped issue akin to this same file's own past
+   `mmu_ci`/`xl_ci_r` bugs (see [[feedback_stale_broadcast_signal]]),
+   surfaced by re-evaluating dispatch conditions one cycle earlier than
+   `CI_IDLE` normally would. This module's own extensive Track A-D
+   history already flags it as the most delicate in the project (see
+   Phase 228/246/250-Part-B and the bus-pipelining-overlap plan);
+   left exactly as Track D Stage D1 established it rather than pushed
+   further without a dedicated investigation of its own.
+
+Layers 1-2 are real, verified improvements (full mandatory gate clean:
+`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`/`dat-synth` clean,
+Harte bit-identical to baseline). They do not yet visibly close the
+diagram's own gap, though, since layer 3 (`biu_cache_if.sv`, left
+unfixed) dominates it for an ordinary D-cache-bypassing EU read — every
+access routes through `biu_cache_if` first, so its own one-tick
+`CI_IDLE` floor is the binding constraint regardless of how fast the
+two layers underneath it now are. See `timing_diagrams/README.md`'s own
+"Known differences" section for how this reads in the rendered diagram.
+
 Permanently out of scope by design, not started: coprocessor conditional
 instructions + Coprocessor Protocol Violation (Phase 248 item #7);
 STATUS's other 3 sub-cases + REFILL# (Phase 248 item #5); PTEST's
