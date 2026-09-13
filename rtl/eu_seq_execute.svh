@@ -5466,6 +5466,46 @@
     assign memind_wr_hazard = memind_wr_en && (dec_src_reg == memind_dest_r ||
                                                  dec_dst_reg == memind_dest_r);
 
+    // Track 3 #13 (general RMW, `mem_rmw_run_r`, wobbly-honking-cascade.md,
+    // first Group C family): confirmed via direct inspection this family
+    // does NOT use the bus-LOCKED RMW protocol at all -- `mem_rmw`
+    // (the signal driving `biu_cycle_gen.sv`'s own continuous-AS
+    // `ST_RMW_READ_*`/`ST_RMW_WRITE_*` sequence) is asserted ONLY for
+    // `ex_is_tas` (`assign mem_rmw = ex_valid && ex_is_tas && ...`) --
+    // general RMW ops (ASL/BSET/etc. memory forms) are a plain 2-phase
+    // read-then-write FSM using two ORDINARY, non-locked bus cycles via
+    // the generic `mem_req`/`mem_ack` path. This matches the plan's own
+    // framing of this family as "not bus-locked the way TAS/CAS/CAS2
+    // are... a reasonable bridge into bus-lock territory" -- the
+    // dedicated AS-continuity/arbiter re-read the plan's own Group C
+    // methodology calls for is genuinely needed starting at TAS (Task
+    // #14), not here. Final beat: `mem_rmw_run_r && mem_ack` (the write
+    // phase's own ack). **Confirmed SAFE from the Phase 264/PMOVE64-
+    // shaped regression, the same reason as move_mm/CMPM**: this
+    // family's own decode DOES set `dec_is_mem_rd=1` for its read phase,
+    // but `mem_rmw_read_ack` (pre-existing, already in `ex_mem_stall`'s
+    // own OR-chain) already correctly stays 1 through that read-ack
+    // moment. **New hazard signal needed**: `mem_rmw_an_wr_en` (the
+    // memory operand's own auto-inc/dec An update, for -(An)/(An)+
+    // forms) fires on the EXACT SAME cycle as this final beat -- and
+    // critically, `hazard_ex`'s own generic "An-update hazard" clause
+    // EXPLICITLY EXCLUDES this family (`!ex_is_mem_rmw`, confirmed via
+    // direct inspection of that clause's own condition) because RMW's
+    // own An update commits via the dedicated `an_wr_en` port at
+    // write-ack, not the ordinary WB timing that generic clause assumes
+    // -- so there is genuinely no existing protection at all here,
+    // unlike every other family in this track. `mem_rmw_hazard` supplies
+    // it directly, mirroring the excluded clause's own field but at the
+    // correct (write-ack) cycle. No Dn register write exists via the
+    // generic `wr_en` path (confirmed -- no `mem_rmw_*_wr_en` term
+    // there); the only other write is CCR (`mem_rmw_sr_wr_en`), already
+    // covered by `hazard_ccr`. General RMW never traps or changes flow.
+    logic mem_rmw_final_ack;
+    assign mem_rmw_final_ack = ex_valid && ex_is_mem_rmw && mem_rmw_run_r && mem_ack;
+    logic mem_rmw_hazard;
+    assign mem_rmw_hazard = mem_rmw_an_wr_en && (dec_src_reg == {1'b1, ex_an_upd_reg} ||
+                                                   dec_dst_reg == {1'b1, ex_an_upd_reg});
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5507,7 +5547,8 @@
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
-                                    cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack;
+                                    cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack ||
+                                    mem_rmw_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5530,7 +5571,7 @@
                         // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
                         !bf_hazard && !pack_hazard && !move_mm_hazard && !cmpm_hazard &&
-                        !memind_addr_hazard && !memind_wr_hazard && !need_ext;
+                        !memind_addr_hazard && !memind_wr_hazard && !mem_rmw_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||

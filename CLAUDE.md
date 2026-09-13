@@ -2617,6 +2617,37 @@ SKIP 281221 TIMEOUT 0`) — critical given this family's own high blast
 radius (4 prior phases already found distinct bugs in it historically).
 **This closes Group B.**
 
+**Phase 270 (Track 3 #13: general RMW preview — IMPLEMENTED AND
+VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**: confirmed via
+direct inspection this family does NOT use the bus-LOCKED RMW protocol
+at all — `mem_rmw` (the signal driving `biu_cycle_gen.sv`'s own
+continuous-AS RMW sequence) is asserted only for `ex_is_tas`; general
+RMW ops (ASL/BSET/etc. memory forms) are a plain 2-phase read-then-write
+FSM using two ordinary, non-locked bus cycles. New `mem_rmw_final_ack =
+ex_valid && ex_is_mem_rmw && mem_rmw_run_r && mem_ack`. Confirmed safe
+from the Phase 264/PMOVE64-shaped regression (same reason as
+move_mm/CMPM): `dec_is_mem_rd=1` is set, but `mem_rmw_read_ack`
+(pre-existing, already in `ex_mem_stall`'s own OR-chain) already covers
+the read-ack moment. New `mem_rmw_hazard` protects `mem_rmw_an_wr_en`
+(the memory operand's own auto-inc/dec An update, fires on the same
+cycle as the final beat) — `hazard_ex`'s own generic An-update clause
+explicitly excludes this family (`!ex_is_mem_rmw`), since its own An
+update commits via a dedicated port at write-ack, so there was
+genuinely no existing protection here at all. **Found and documented (not
+fixed) a genuine, pre-existing tooling quirk, unrelated to Track 3**:
+`tools/m68ksim.c`'s own reference bus logging rounds the address field
+down to the containing longword boundary for a WORD READ at
+`addr&2==2`, while writes at the identical address log correctly —
+sidestepped by choosing a base register value where the post-decrement
+result lands 4-byte-aligned. Verified via a hazard test (with 3 leading
+NOPs to settle a benign IFU-readahead reordering artifact) whose
+critical portion matches Musashi byte-for-byte in identical cycle
+order, and its non-hazard control; both fired live with zero artificial
+stall needed. Full mandatory gate clean (`make test` 37/37, `cosim_grp`
+8/8, `cosim_memind` 29/29, `dat-synth` 50/50), full 124-suite Harte
+sweep bit-identical to baseline (general RMW has genuine Harte coverage
+— ASL/LSL/ROL/etc. memory forms).
+
 ## Verification Commands
 
 ```bash
