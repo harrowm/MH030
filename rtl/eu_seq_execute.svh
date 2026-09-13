@@ -5097,20 +5097,54 @@
     assign movem_hazard = (movem_wr_en && (dec_src_reg == movem_reg_sel || dec_dst_reg == movem_reg_sel)) ||
                           (movem_an_wr_en && (dec_src_reg == {1'b1, movem_an_r} || dec_dst_reg == {1'b1, movem_an_r}));
 
+    // Track 3 #2 (CMP2/CHK2, wobbly-honking-cascade.md): the second
+    // (upper-bound) read's own ack, `cmp2_run_r && mem_ack`, is the
+    // family's "genuinely final beat" signal (mirrors `movem_last`'s own
+    // derivation -- `ex_mem_stall` includes the raw registered
+    // `cmp2_run_r`, which only clears ONE CYCLE AFTER this same ack, per
+    // Phase 257's universal finding, so `!ex_mem_stall` cannot be reused
+    // as the trigger here either). No dedicated hazard signal is needed
+    // the way MOVEM needed `movem_hazard`: CMP2/CHK2 never sets
+    // `dec_writes_reg` (confirmed via direct inspection -- Rn is only
+    // ever READ, via `dec_dst_reg`/`rd_b`, to be compared against the
+    // bounds, never written), so `hazard_ex`/`hazard_wb`'s own generic
+    // `ex_dest_reg`/`wb_dest_reg` check is trivially satisfied (nothing
+    // to protect). The only real write this family makes is to CCR
+    // (`cmp2_sr_wr_en`), which the EXISTING `hazard_ccr` term already
+    // covers with zero changes: `ex_updates_ccr` latches at EX-dispatch
+    // time (`dec_updates_ccr`) and stays 1 for the instruction's entire
+    // EX residency, including this exact final-ack cycle, so
+    // `hazard_ccr` already blocks any NEXT that reads CCR here.
+    // **New exclusion needed, unlike MOVEM**: CHK2 (not CMP2) can
+    // synchronously TRAP on this exact same cycle (`chk_trap`, gated on
+    // `cmp2_run_r && mem_ack && cmp2_is_chk2_r && cmp2_c_w` -- see
+    // `chk_trap_raw`'s own declaration). A trap redirects flow to the
+    // exception vector; the ordinarily-decoded `dec_valid` instruction
+    // this same cycle is never actually going to execute, so preview_ok
+    // must not dispatch a phantom bus read for it (the same "unrequested
+    // phantom cycle" bug class Phase 254's own investigation flagged as
+    // a genuine correctness issue, not just a missed optimization).
+    // `chk_trap` itself is already the correct one-shot/edge-triggered
+    // form (`chk_trap_raw && !chk_trap_fired_r`, the same signal
+    // `ex_will_except`/`ex_exc_dispatch_hazard` use to protect the
+    // ORDINARY dispatch path) -- reused directly here.
+    logic cmp2_final_ack;
+    assign cmp2_final_ack = cmp2_run_r && mem_ack && !chk_trap;
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
-    // project's own established convention), OR `movem_last` (already a
-    // combinational "final beat, acking this cycle" signal built for
-    // MOVEM's own register-loop termination -- see its own declaration
-    // comment; `ex_mem_stall` does NOT clear on this same cycle for
-    // MOVEM, confirmed via direct inspection of every special-FSM
+    // project's own established convention), OR `movem_last`/
+    // `cmp2_final_ack` (each already a combinational "final beat, acking
+    // this cycle" signal built for that family's own FSM termination;
+    // `ex_mem_stall` does NOT clear on this same cycle for either
+    // family, confirmed via direct inspection of every special-FSM
     // `_run_r`-clearing block, so it cannot be reused as the trigger
     // here the way it is for the ordinary case).
     logic preview_current_ready;
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
-                                    movem_last;
+                                    movem_last || cmp2_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&

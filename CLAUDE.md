@@ -2271,6 +2271,47 @@ clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 29/29,
 `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to baseline
 (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
 
+**Phase 259 (Track 3 #2: CMP2/CHK2 preview — IMPLEMENTED AND VERIFIED,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: lower risk than MOVEM.
+The family's own final-beat signal is `cmp2_final_ack = cmp2_run_r &&
+mem_ack && !chk_trap` (mirrors `movem_last`'s derivation — the raw
+registered `cmp2_run_r` inside `ex_mem_stall` clears one cycle after
+this same ack, matching Phase 257's universal finding). No dedicated
+hazard signal was needed the way MOVEM needed `movem_hazard`: CMP2/CHK2
+never sets `dec_writes_reg` (Rn is only ever read via `dec_dst_reg`/
+`rd_b`, to compare against the bounds, confirmed via direct inspection
+of the decode arm), so `hazard_ex`/`hazard_wb` have nothing to protect;
+the only real write this family makes is to CCR, already covered by
+the pre-existing `hazard_ccr` (its `ex_valid && ex_updates_ccr` term
+latches at EX-dispatch time and stays 1 through the whole EX residency,
+including the final-ack cycle). **A new consideration MOVEM didn't
+have**: CHK2 (not CMP2) can synchronously trap on this exact same
+cycle (`chk_trap`, already the correct one-shot/edge-triggered signal
+`ex_will_except`/`ex_exc_dispatch_hazard` use to protect the ordinary
+dispatch path from an analogous race) — a trap redirects flow to the
+exception vector, so the `dec_valid` instruction that same cycle never
+actually executes and must not receive a phantom preview bus read (the
+same "unrequested phantom cycle" bug class Phase 254 flagged as a real
+correctness issue). Excluded directly via `!chk_trap` in
+`cmp2_final_ack`. Verified with two dedicated tests:
+`tests/timing_preview_cmp2_hazard.s` (CMP2, in-range, no trap) matches
+Musashi's bus trace exactly (19/19 cycles), proving the ordinary
+final-beat trigger engages correctly; `tests/timing_preview_chk2_trap.s`
+(CHK2, deliberately out-of-range, traps) matches Musashi exactly up
+through the trap dispatch point — zero phantom reads of the
+would-be-next instruction's own target address — before diverging on
+the exception-frame push itself, confirmed to be a pre-existing,
+already-documented, out-of-scope bus-write-granularity difference
+(this RTL pushes exception frames as 2 longword writes per Phase 250's
+own frame-layout fix; Musashi's own native reference model pushes as
+individual word writes instead) that predates and is unrelated to
+Track 3 — `tests/memind37.s`'s own comment confirms no test in this
+project has ever bus-trace-compared a CHK2 trap dispatch before (Harte
+has zero CHK2 coverage, 68020+-only). Full mandatory gate clean
+(`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 29/29, `dat-synth`
+50/50), full 124-suite Harte sweep bit-identical to baseline (`PASS
+702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash
