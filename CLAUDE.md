@@ -2480,6 +2480,38 @@ every other family. New lesson for the remaining families: always check
 whether a family's own decode sets `dec_is_mem_rd`/`dec_is_mem_wr`
 before assuming a dedicated trigger is the only change needed.
 
+**Phase 265 (Track 3 #8: cpSAVE/cpRESTORE preview — IMPLEMENTED AND
+VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**: the first
+family whose own "genuinely final beat" is NOT always a memory-bus
+event. Its transfer loop alternates between a memory access
+(`cpsr_xfer_mem_r`) and a coprocessor-interface access
+(`cpsr_xfer_cir_r`, via the separate `eu_coproc_req`/`eu_coproc_ack`
+port), looping until a runtime, coprocessor/memory-supplied byte length
+is exhausted. cpSAVE's own last iteration ends on the MEMORY write;
+cpRESTORE's own last iteration ends on the COPROCESSOR write instead —
+confirmed by direct inspection of both loop-termination branches. New
+`cpsr_last_iter` and `cpsr_final_ack = (cpsr_xfer_mem_r && mem_ack &&
+!cpsr_is_restore_r && cpsr_last_iter) || (cpsr_xfer_cir_r &&
+eu_coproc_ack && cpsr_is_restore_r && cpsr_last_iter)`. No dedicated
+hazard signal needed: the -(An)/(An)+ auto-update commits at the
+instruction's own FIRST cycle, long before any final-beat trigger; no
+Dn register write exists for either direction; the format-error abort
+path is a structurally separate, mutually exclusive state. Confirmed
+via direct decode inspection (the Phase 264/PMOVE64 checklist item)
+that neither direction ever sets `dec_is_mem_rd`/`dec_is_mem_wr`.
+**Verification took a different shape**: this project has no
+Musashi-comparable coprocessor model at all (a documented, pre-existing
+boundary), so the usual DUT-vs-Musashi bus-trace comparison is
+structurally inapplicable — verified instead via a temporary debug
+trace against `tb/eu_seq_tb.sv`'s own existing exhaustive 2-longword
+transfer test for both directions, confirming `cpsr_final_ack` fires
+exactly once per direction, precisely on the true final iteration's own
+ack, never earlier. Full mandatory gate clean (`make test` 37/37,
+`cosim_grp` 8/8, `cosim_memind` 29/29, `dat-synth` 50/50), full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0`; zero cpSAVE/cpRESTORE coverage in that corpus,
+68020+-only).
+
 ## Verification Commands
 
 ```bash

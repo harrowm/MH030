@@ -5270,6 +5270,51 @@
     logic pmove64_final_ack;
     assign pmove64_final_ack = pmove64_run_r && !pmove64_skip_r && mem_ack && !mmu_config_trap;
 
+    // Track 3 #8 (cpSAVE/cpRESTORE, wobbly-honking-cascade.md): the
+    // first family whose own "genuinely final beat" is NOT itself
+    // always a memory-bus event. Its transfer loop alternates between a
+    // memory access (`cpsr_xfer_mem_r`) and a coprocessor-interface
+    // access (`cpsr_xfer_cir_r`, via the SEPARATE `eu_coproc_req`/
+    // `eu_coproc_ack` port, confirmed independent of `mem_req`/
+    // `mem_ack`), looping until `cpsr_xfer_cnt_r+4 >= cpsr_len_r`
+    // (`cpsr_len_r` is a runtime, coprocessor/memory-supplied byte
+    // length -- confirmed via direct inspection of the loop's own
+    // termination arms). **cpSAVE's own last iteration ends on the
+    // MEMORY write** (`cpsr_xfer_mem_r && mem_ack`, writing the final
+    // longword to the destination -(An) address); **cpRESTORE's own
+    // last iteration ends on the COPROCESSOR write instead**
+    // (`cpsr_xfer_cir_r && eu_coproc_ack`, writing the final longword
+    // to the Operand CIR) -- confirmed by direct inspection of both
+    // branches' own "else: this was the last longword -- done" comments.
+    // `ex_mem_stall` already includes both `cpsr_xfer_mem_r` and
+    // `cpsr_xfer_cir_r` as raw, unconditional OR-terms (so it stays 1
+    // through the WHOLE loop, clearing only the cycle AFTER whichever
+    // ack is genuinely final -- the same universal one-cycle-late
+    // pattern Phase 257 found for every other special FSM), so a
+    // dedicated trigger is needed regardless of which port the final ack
+    // arrives on. **No dedicated hazard signal is needed**: `cpsr_an_wr_en`
+    // (the -(An)/(An)+ auto-update) fires at `cpsr_start_r`, the
+    // instruction's own FIRST cycle -- committed many cycles before any
+    // final-beat trigger below could possibly fire, the same "already
+    // safely committed" reasoning ADDX-mem's own Ay/Ax updates rely on.
+    // Neither cpSAVE nor cpRESTORE ever writes a Dn register (confirmed
+    // -- no `cpsr_*_wr_en` term anywhere in the generic `wr_en` OR-chain;
+    // `dec_unit=UNIT_NONE` for both). The format-error abort path
+    // (`cpsr_abort_r`) is a structurally separate state, mutually
+    // exclusive with `cpsr_xfer_mem_r`/`cpsr_xfer_cir_r` (a malformed
+    // transfer never enters the loop at all), so no CHK2-style trap
+    // exclusion is needed either. Confirmed via direct decode inspection
+    // (the new standing checklist item from Phase 264/PMOVE64) that
+    // neither `dec_is_cpsave` nor `dec_is_cprestore` ever sets
+    // `dec_is_mem_rd`/`dec_is_mem_wr` (`dec_unit=UNIT_NONE`, only
+    // `dec_src_reg`/`dec_reads_src` for An itself) -- safe from the
+    // PMOVE64-shaped regression.
+    logic cpsr_last_iter;
+    assign cpsr_last_iter = !((cpsr_xfer_cnt_r + 8'd4) < cpsr_len_r);
+    logic cpsr_final_ack;
+    assign cpsr_final_ack = (cpsr_xfer_mem_r && mem_ack && !cpsr_is_restore_r && cpsr_last_iter) ||
+                            (cpsr_xfer_cir_r && eu_coproc_ack && cpsr_is_restore_r && cpsr_last_iter);
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5309,7 +5354,8 @@
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst && !ex_is_pmove64) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
-                                    bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack;
+                                    bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
+                                    cpsr_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
