@@ -2580,6 +2580,43 @@ baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`) — the first
 family in several rounds with genuine Harte corpus coverage (CMPM is a
 real 68000 instruction).
 
+**Phase 269 (Track 3 #12: memory-indirect/Group B preview —
+IMPLEMENTED AND VERIFIED, closes Group B,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: the shared `memind_*`
+FSM, used as a PREFIX by 9 other families (MOVE, LEA, PEA, JMP, JSR,
+general ALU-EA, CMP2/CHK2, TAS, Scc, MOVEM). Splits into two
+structurally different completion points: `memind_addr_only_r`
+(LEA/JMP/TAS/MOVEM) skips the outer phase, completing/handing off
+directly at `memind_inner_r && mem_ack` — but only LEA and JMP
+genuinely complete there (TAS and MOVEM hand off to their own dedicated
+FSMs, already covered elsewhere in this track, excluded via
+`!ex_is_tas && !ex_is_movem`); the remaining 5 run the outer phase and
+complete at its own ack — except CMP2/CHK2, which also runs the outer
+phase but hands off to `cmp2_run_r` (already closed), excluded via
+`!ex_is_cmp2chk2`. New `memind_inner_final_ack` (LEA/JMP) and
+`memind_outer_final_ack` (MOVE/PEA/JSR/ALU-EA/Scc). Two new hazard
+signals for the MOVEM/PACK shape: `memind_addr_hazard` protects LEA's
+own `memind_addr_wr_en` (identical gating condition to the new inner
+trigger); `memind_wr_hazard` protects MOVE-via-memind's own
+`memind_wr_en` (identical gating condition to the new outer trigger).
+General ALU-EA's own result write is not among these — confirmed
+`memind_wr_en` explicitly excludes it, so it writes back via the
+ordinary generic path, already protected. PEA/JSR/Scc need no new
+hazard. Confirmed via the Phase 264 checklist item that every
+memind-consuming decode arm clears `dec_is_mem_rd` when setting
+`dec_is_memind` — safe from the PMOVE64-shaped regression structurally.
+Verified via 4 dedicated tests (LEA hazard + control, MOVE-via-memind
+hazard + control), all matching Musashi exactly and firing live with
+zero artificial stall needed; also confirmed the full pre-existing
+`cosim_memind` suite (29/29) stayed clean immediately after
+implementing, since it already exercises every consumer's own memind
+form extensively. Full mandatory gate clean (`make test` 37/37,
+`cosim_grp` 8/8, `cosim_memind` 29/29, `dat-synth` 50/50), full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0`) — critical given this family's own high blast
+radius (4 prior phases already found distinct bugs in it historically).
+**This closes Group B.**
+
 ## Verification Commands
 
 ```bash

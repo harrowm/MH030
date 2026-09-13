@@ -5400,6 +5400,72 @@
     assign cmpm_hazard = cmpm_ax_wr_en && (dec_src_reg == {1'b1, cmpm_ax_reg_r} ||
                                             dec_dst_reg == {1'b1, cmpm_ax_reg_r});
 
+    // Track 3 #12 (memory-indirect, Group B, wobbly-honking-cascade.md):
+    // the shared `memind_*` FSM used as a PREFIX by 9 other families
+    // (MOVE, LEA, PEA, JMP, JSR, general ALU-EA, CMP2/CHK2, TAS, Scc,
+    // MOVEM). Confirmed via direct inspection this is NOT one single
+    // "final beat" shape -- it splits into two structurally different
+    // completion points, and several of its own 9 consumers hand off to
+    // an ENTIRELY SEPARATE dedicated FSM afterward (already covered by
+    // their own final-beat triggers elsewhere in this track) rather than
+    // completing via memind itself:
+    //   - `memind_addr_only_r` (LEA/JMP/TAS/MOVEM): skips the outer
+    //     phase entirely, completing/handing-off directly at
+    //     `memind_inner_r && mem_ack`. Of these four, only LEA and JMP
+    //     genuinely COMPLETE here -- TAS hands off to
+    //     `tas_memind_pending_r`->`tas_run_r` (Task #14, not yet done)
+    //     and MOVEM hands off to `movem_memind_pending_r`->`movem_run_r`
+    //     (already closed, Task #1/Phase 258) -- excluded here via
+    //     `!ex_is_tas && !ex_is_movem` so this new trigger never fires
+    //     mid-hand-off for either.
+    //   - The remaining 5 (MOVE, PEA, JSR, general ALU-EA, Scc) all run
+    //     the outer phase (`memind_outer_r`) and genuinely complete at
+    //     its own ack -- EXCEPT CMP2/CHK2, which ALSO runs the outer
+    //     phase (to resolve its own LOWER bound) but then hands off to
+    //     `cmp2_run_r` for the upper bound via `memind_outer_done_r`
+    //     (already closed, Task #2/Phase 259) -- excluded via
+    //     `!ex_is_cmp2chk2`.
+    // **New hazard signals needed for two of these sub-cases, the
+    // MOVEM/PACK shape (a direct-port register write landing on the
+    // EXACT SAME cycle as the trigger)**: LEA's own resolved address
+    // commits via `memind_addr_wr_en` (bypassing `hazard_ex`/
+    // `hazard_wb`) at the SAME condition as the inner/addr-only trigger
+    // -- confirmed via direct inspection this signal's own gating
+    // (`memind_inner_r && mem_ack && memind_addr_only_r && !ex_is_tas &&
+    // !ex_is_movem`) is IDENTICAL to the new trigger itself.
+    // MOVE-via-memind's own resolved value commits via `memind_wr_en`
+    // (also bypassing the generic path) at the SAME condition as the
+    // outer trigger. Both write to the same captured field,
+    // `memind_dest_r` (4-bit, already `{is_an,reg}`-encoded, captured at
+    // `memind_start_r`'s own transition from `dec_dest_reg`). General
+    // ALU-EA's own result write is NOT among these -- confirmed
+    // `memind_wr_en` explicitly excludes it (`!ex_is_mem_src`), so ALU-EA
+    // writes back via the ORDINARY `wb_valid && wb_writes_reg` generic
+    // path instead, already protected by the existing `hazard_ex`/
+    // `hazard_wb` mechanism with no new signal needed. PEA/JSR/Scc write
+    // only to memory (or change flow, already covered by
+    // `!ex_redirect_pending` via `branch_taken`'s own existing JMP/JSR
+    // coverage -- confirmed the comment at `ex_redirect_pending`'s own
+    // declaration explicitly states it covers JMP/JSR's redirect cycle
+    // itself, not just the wait beforehand), so neither needs a new
+    // hazard term. CCR updates from any of these are already covered
+    // generically by `hazard_ccr`. Confirmed via the Phase 264 checklist
+    // item that every memind-consuming decode arm explicitly clears
+    // `dec_is_mem_rd` when setting `dec_is_memind` (the shared
+    // `mode110_ea_src` decode template convention) -- safe from the
+    // PMOVE64-shaped regression structurally, not just by coincidence.
+    logic memind_inner_final_ack;
+    assign memind_inner_final_ack = memind_inner_r && mem_ack && memind_addr_only_r &&
+                                    !ex_is_tas && !ex_is_movem;
+    logic memind_outer_final_ack;
+    assign memind_outer_final_ack = memind_outer_r && mem_ack && !ex_is_cmp2chk2;
+    logic memind_addr_hazard;
+    assign memind_addr_hazard = memind_addr_wr_en && (dec_src_reg == memind_dest_r ||
+                                                        dec_dst_reg == memind_dest_r);
+    logic memind_wr_hazard;
+    assign memind_wr_hazard = memind_wr_en && (dec_src_reg == memind_dest_r ||
+                                                 dec_dst_reg == memind_dest_r);
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5441,7 +5507,7 @@
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
-                                    cmpm_final_ack;
+                                    cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5463,7 +5529,8 @@
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
-                        !bf_hazard && !pack_hazard && !move_mm_hazard && !cmpm_hazard && !need_ext;
+                        !bf_hazard && !pack_hazard && !move_mm_hazard && !cmpm_hazard &&
+                        !memind_addr_hazard && !memind_wr_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
