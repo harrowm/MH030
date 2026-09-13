@@ -2403,6 +2403,45 @@ mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
 29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
 baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
 
+**Phase 263 (Track 3 #6: PACK/UNPK-mem preview — IMPLEMENTED AND
+VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**: a 2-phase FSM
+(0=read Ay, 1=write result to Ax) superficially like ADDX/SUBX-mem, but
+with a critical timing difference: ADDX-mem's own Ax predecrement
+update commits a full PHASE before its own final beat, so nothing is
+in-flight at the preview moment; PACK/UNPK-mem has only 2 phases total,
+so `pack_ax_wr_en` (Ax's own predecrement update, via the same dedicated
+`an_wr_en` port MOVEM's own `movem_an_wr_en` uses) fires on the EXACT
+SAME condition as the family's own final beat — the MOVEM shape, not
+the ADDX-mem shape. New `pack_mem_final_ack = pack_mem_run_r &&
+pack_mem_phase_r && mem_ack` (reuses `pack_mem_stall`'s own "done"
+condition) and `pack_hazard = pack_ax_wr_en &&
+(dec_src_reg=={1'b1,pack_mem_ax_reg_r} ||
+dec_dst_reg=={1'b1,pack_mem_ax_reg_r})` (Ay's own update, at phase 0,
+needs no protection — already committed by the final beat). PACK/UNPK-
+mem never writes a Dn register via the generic path and affects no CCR
+bits, so no other hazard source exists. **Found, documented, NOT
+fixed — a second genuine, pre-existing, out-of-scope correctness gap in
+as many families**: this RTL's own PACK reads its source as ONE 16-bit
+word (standard big-endian order), while Musashi's own
+`m68k_op_pack_16_mm` (confirmed via direct inspection of
+`tools/musashi/m68kops.c`) predecrements and reads TWO SEPARATE BYTES,
+combining them as `{first-read-byte, second-read-byte}` — the FIRST
+byte read (at the HIGHER address) becomes the upper half, the OPPOSITE
+of standard word byte order — producing a genuinely different packed
+RESULT for two different digits, invisible to Harte (68020+-only, zero
+PACK/UNPK coverage) and apparently never bus-trace-compared against
+Musashi before. Because this is an access-GRANULARITY difference, no
+PACK/UNPK-mem test can achieve a clean full bus-trace match at all —
+verified instead via a direct debug trace (the established `MULU.L`-
+stall technique), confirming both `pack_hazard=1`/`preview_ok=0`
+(blocked) and `pack_hazard=0`/`preview_ok=1`/`preview_addr`-correct
+(engaged) live. A real bug worth its own dedicated future investigation,
+explicitly out of scope for Track 3. Full mandatory gate clean
+(`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 29/29, `dat-synth`
+50/50 — none of these exercise PACK/UNPK's own bus trace), full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash

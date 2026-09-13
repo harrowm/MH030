@@ -5211,6 +5211,35 @@
     assign bf_hazard = bf_dn_wr_en && (dec_src_reg == {1'b0, bf_mem_dn_r} ||
                                         dec_dst_reg == {1'b0, bf_mem_dn_r});
 
+    // Track 3 #6 (PACK/UNPK-mem, wobbly-honking-cascade.md): a 2-phase
+    // FSM (0=read Ay, 1=write result to Ax), superficially like
+    // ADDX/SUBX-mem's 3-phase shape, but with one critical difference
+    // found via direct inspection: ADDX-mem's own Ax predecrement update
+    // (`addx_ax_wr_en`) fires at PHASE 1's ack -- strictly BEFORE its
+    // own final beat at phase 2 -- so by the time the final trigger
+    // fires, Ax has already committed. PACK/UNPK-mem has only 2 phases
+    // total, so `pack_ax_wr_en` (Ax's own predecrement update, via the
+    // SAME dedicated `an_wr_en`/`an_wr_sel` port MOVEM's own
+    // `movem_an_wr_en` uses -- confirmed bypassing `hazard_ex`/
+    // `hazard_wb` entirely, same as every other direct-port write this
+    // track has found) fires on the EXACT SAME condition as this
+    // family's own final beat (`pack_mem_run_r && pack_mem_phase_r &&
+    // mem_ack`) -- a genuine same-cycle hazard, the MOVEM shape, not the
+    // ADDX-mem shape. A dedicated `pack_hazard` is therefore needed
+    // (Ay's own update, at phase 0's ack, is NOT the final-beat cycle,
+    // so it's already safely committed by then -- no protection needed
+    // there, matching ADDX-mem's own Ay/Ax reasoning). PACK/UNPK-mem
+    // never writes a data register via the generic `wr_en`/`wr_sel`
+    // path (confirmed -- no `pack_*_wr_en` term in that OR-chain; the
+    // packed/unpacked byte goes to MEMORY, not Dn) and affects no CCR
+    // bits at all (a documented 68k ISA property), so no other hazard
+    // source exists. PACK/UNPK-mem never traps or changes flow.
+    logic pack_mem_final_ack;
+    assign pack_mem_final_ack = pack_mem_run_r && pack_mem_phase_r && mem_ack;
+    logic pack_hazard;
+    assign pack_hazard = pack_ax_wr_en && (dec_src_reg == {1'b1, pack_mem_ax_reg_r} ||
+                                            dec_dst_reg == {1'b1, pack_mem_ax_reg_r});
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5229,7 +5258,7 @@
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
-                                    bf_mem_final_ack;
+                                    bf_mem_final_ack || pack_mem_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5251,7 +5280,7 @@
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
-                        !bf_hazard && !need_ext;
+                        !bf_hazard && !pack_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
