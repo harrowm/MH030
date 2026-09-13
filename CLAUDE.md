@@ -2335,6 +2335,36 @@ mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
 29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
 baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
 
+**Phase 261 (Track 3 #4: ADDX/SUBX-mem preview — IMPLEMENTED AND
+VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**: genuinely
+simpler than MOVEM/MOVEP — no dedicated hazard signal needed at all.
+ADDX/SUBX `-(Ay),-(Ax)`'s own decode arm never sets `dec_is_mem_rd`/
+`dec_is_mem_wr` (dispatches entirely through its own 3-phase FSM: 0=read
+Ay, 1=read Ax, 2=write result), so a new `addx_mem_final_ack =
+addx_mem_run_r && addx_mem_phase_r==2'd2 && mem_ack` OR-term was needed
+regardless of `ex_mem_stall` timing (unlike MOVEM/CMP2/MOVEP,
+`ex_mem_stall`'s own ADDX contribution — via `addx_mem_stall`'s own
+formula — actually already clears the SAME cycle as this final ack; it
+just doesn't matter here since `ex_is_mem_rd` is never true for this
+family, so the ordinary trigger structurally can't fire regardless).
+Confirmed via direct inspection why no hazard signal is needed: the ALU
+result writes to MEMORY, not a register; Ay's own predecrement-pointer
+update commits at phase 0's ack and Ax's at phase 1's ack, both strictly
+BEFORE phase 2 (this new trigger) ever begins, so neither is
+in-flight/same-cycle at the moment of preview; CCR is the only real
+write, already covered by the pre-existing `hazard_ccr`. Verified via
+`tests/timing_preview_addx_hazard.s` (`ADDX.L -(A2),-(A1)` producer,
+immediately followed by `MOVE.L (A1),D3` reading the SAME address ADDX
+just wrote, via A1's own already-decremented value) — matches Musashi's
+bus trace exactly (17/17 cycles), AND fired live on the first attempt
+with zero artificial stall needed (`preview_ok=1`, `preview_addr`
+exactly correct) — no `MULU.L`-stall trick was required this time,
+unlike MOVEM/MOVEP, since ADDX-mem's own longer 3-phase FSM gives the
+IFU's ambient readahead enough natural time to reach NEXT. Full
+mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash

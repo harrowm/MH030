@@ -5150,20 +5150,55 @@
     logic movep_hazard;
     assign movep_hazard = movep_wr_en && (dec_src_reg == movep_wr_sel || dec_dst_reg == movep_wr_sel);
 
+    // Track 3 #4 (ADDX/SUBX-mem, wobbly-honking-cascade.md): unlike
+    // MOVEM/MOVEP, ADDX/SUBX -(Ay),-(Ax)'s own decode arm
+    // (`eu_seq_decode.svh`) never sets `dec_is_mem_rd`/`dec_is_mem_wr`
+    // at all -- it dispatches entirely through its own dedicated 3-phase
+    // FSM (`addx_mem_run_r`/`addx_mem_phase_r`: 0=read Ay, 1=read Ax,
+    // 2=write the ALU result back to memory at Ax), so the ordinary
+    // trigger's `ex_is_mem_rd` term structurally never fires for it,
+    // regardless of `ex_mem_stall` timing -- a new dedicated OR-term is
+    // still needed. Final beat = phase 2's own write ack.
+    // **No dedicated hazard signal is needed here, unlike MOVEM/MOVEP**:
+    // confirmed via direct inspection that (1) the ALU RESULT is written
+    // to MEMORY, not a register, so there is no Dn/An VALUE hazard of
+    // that shape at all; (2) Ay's own predecrement-pointer update
+    // (`addx_ay_wr_en`) commits when PHASE 0 acks, and Ax's
+    // (`addx_ax_wr_en`) when PHASE 1 acks -- both strictly BEFORE phase
+    // 2 ever begins, so by the time phase 2's ack fires (this new
+    // trigger), both address-register writes already committed at least
+    // one full clock edge earlier -- no in-flight/same-cycle collision
+    // the way MOVEM's own final beat coincides with its own register
+    // write. `hazard_ex`/`hazard_wb` need no new coverage either: both
+    // are gated on `ex_writes_reg`, which ADDX/SUBX-mem's own decode arm
+    // never sets (confirmed -- no `dec_writes_reg` assignment in that
+    // branch), so they're trivially satisfied (nothing to protect via
+    // the generic path, consistent with the memory-only-result finding
+    // above). The only real write this family makes is to CCR
+    // (`addx_mem_sr_wr_en`), already covered by the pre-existing
+    // `hazard_ccr` exactly as for CMP2/CHK2. ADDX/SUBX-mem never traps
+    // or changes flow, so no CHK2-style exclusion is needed either.
+    logic addx_mem_final_ack;
+    assign addx_mem_final_ack = addx_mem_run_r && addx_mem_phase_r == 2'd2 && mem_ack;
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
     // project's own established convention), OR `movem_last`/
-    // `cmp2_final_ack` (each already a combinational "final beat, acking
-    // this cycle" signal built for that family's own FSM termination;
-    // `ex_mem_stall` does NOT clear on this same cycle for either
-    // family, confirmed via direct inspection of every special-FSM
-    // `_run_r`-clearing block, so it cannot be reused as the trigger
-    // here the way it is for the ordinary case).
+    // `cmp2_final_ack`/`movep_last`/`addx_mem_final_ack` (each already a
+    // combinational "final beat, acking this cycle" signal built for
+    // that family's own FSM termination; `ex_mem_stall` does NOT clear
+    // on this same cycle for MOVEM/CMP2/MOVEP -- confirmed via direct
+    // inspection of every special-FSM `_run_r`-clearing block -- so it
+    // cannot be reused as the trigger there the way it is for the
+    // ordinary case; ADDX/SUBX-mem's own `ex_mem_stall` contribution
+    // actually DOES already clear the same cycle, per its own
+    // `addx_mem_stall` formula, but a dedicated OR-term is still needed
+    // since `ex_is_mem_rd` is never set for this family at all).
     logic preview_current_ready;
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
-                                    movem_last || cmp2_final_ack || movep_last;
+                                    movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
