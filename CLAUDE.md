@@ -2512,6 +2512,27 @@ ack, never earlier. Full mandatory gate clean (`make test` 37/37,
 SKIP 281221 TIMEOUT 0`; zero cpSAVE/cpRESTORE coverage in that corpus,
 68020+-only).
 
+**Phase 266 (Track 3 #9: BCD-mem preview — IMPLEMENTED AND VERIFIED,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: ABCD/SBCD `-(Ay),-(Ax)`
+is structurally identical to ADDX/SUBX-mem's own 3-phase shape (0=read
+Ay, 1=read Ax, 2=write result) — confirmed via direct inspection:
+`bcds_ay_wr_en` fires at phase 0's ack, `bcds_ax_wr_en` at phase 1's
+ack, both strictly before phase 2 (the new trigger), so no in-flight
+register write exists at the preview moment. New `bcds_final_ack =
+ex_valid && ex_is_abcd_sbcd_mem && bcds_run_r && bcds_phase_r==2'd2 &&
+mem_ack`. The BCD result byte writes to MEMORY, not a register; the
+only other write is CCR, already covered by `hazard_ccr`. No dedicated
+hazard signal needed — confirmed via the Phase 264 checklist item that
+ABCD/SBCD-mem's own decode never sets `dec_is_mem_rd`/`dec_is_mem_wr`
+either. Verified via `tests/timing_preview_bcd_hazard.s` (ABCD.B
+producer immediately followed by a plain read of the same
+just-decremented address) — matches Musashi's bus trace exactly (17/17
+cycles), and fired live on the first attempt with zero artificial stall
+needed, same as ADDX-mem. Full mandatory gate clean (`make test` 37/37,
+`cosim_grp` 8/8, `cosim_memind` 29/29, `dat-synth` 50/50), full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash

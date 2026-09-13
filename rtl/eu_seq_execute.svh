@@ -5315,6 +5315,26 @@
     assign cpsr_final_ack = (cpsr_xfer_mem_r && mem_ack && !cpsr_is_restore_r && cpsr_last_iter) ||
                             (cpsr_xfer_cir_r && eu_coproc_ack && cpsr_is_restore_r && cpsr_last_iter);
 
+    // Track 3 #9 (BCD-mem, ABCD/SBCD -(Ay),-(Ax), wobbly-honking-cascade.md):
+    // structurally IDENTICAL to ADDX/SUBX-mem's own 3-phase shape (0=read
+    // Ay, 1=read Ax, 2=write result) -- confirmed via direct inspection:
+    // `bcds_ay_wr_en` fires at phase 0's ack, `bcds_ax_wr_en` at phase 1's
+    // ack, BOTH strictly before phase 2 (this new trigger), so neither
+    // address-register write is in-flight at the moment of preview, the
+    // same reasoning ADDX-mem's own Ay/Ax updates already established.
+    // The BCD result byte writes to MEMORY, not a register (confirmed --
+    // no `bcds_*_wr_en` term in the generic `wr_en` chain); the only
+    // other write is to CCR (`bcds_sr_wr_en`), already covered by the
+    // pre-existing `hazard_ccr`. ABCD/SBCD-mem never traps or changes
+    // flow, and its own decode arm (confirmed via the same Phase 264
+    // checklist item) never sets `dec_is_mem_rd`/`dec_is_mem_wr` either
+    // (dispatches entirely through its own dedicated FSM, same as
+    // ADDX/SUBX-mem) -- safe from the PMOVE64-shaped regression. No
+    // dedicated hazard signal needed at all.
+    logic bcds_final_ack;
+    assign bcds_final_ack = ex_valid && ex_is_abcd_sbcd_mem && bcds_run_r &&
+                            bcds_phase_r == 2'd2 && mem_ack;
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5355,7 +5375,7 @@
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst && !ex_is_pmove64) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
-                                    cpsr_final_ack;
+                                    cpsr_final_ack || bcds_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
