@@ -51,6 +51,24 @@ module eu_seq (
     output logic [1:0]  rd_c_siz,
     input  logic [31:0] rd_c_data,
 
+    // Register file read ports D/E (Track 2 Stage 2.1,
+    // wobbly-honking-cascade.md) — dedicated to the EU-side dispatch-gap
+    // preview mechanism's own NEXT-instruction address generation
+    // (An/rd_prev_a, Xn/rd_prev_b), see eu_regfile.sv's own port comment.
+    output logic [3:0]  rd_prev_a_sel,
+    output logic [1:0]  rd_prev_a_siz,
+    input  logic [31:0] rd_prev_a_data,
+    output logic [3:0]  rd_prev_b_sel,
+    output logic [1:0]  rd_prev_b_siz,
+    input  logic [31:0] rd_prev_b_data,
+
+    // Register file read port F (Track 2 Stage 2.2,
+    // wobbly-honking-cascade.md) — preview mechanism's own NEXT-
+    // instruction write data (plain register-source write).
+    output logic [3:0]  rd_prev_c_sel,
+    output logic [1:0]  rd_prev_c_siz,
+    input  logic [31:0] rd_prev_c_data,
+
     // Register file write port
     output logic        wr_en,
     output logic [3:0]  wr_sel,

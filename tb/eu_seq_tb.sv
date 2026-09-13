@@ -37,6 +37,12 @@ module eu_seq_tb;
     logic [3:0]  rd_a_sel, rd_b_sel, rd_c_sel;
     logic [1:0]  rd_a_siz, rd_b_siz, rd_c_siz;
     logic [31:0] rd_a_data, rd_b_data, rd_c_data = 32'h0;
+    // Track 2 Stage 2.1 (wobbly-honking-cascade.md): new dedicated
+    // preview-only ports, same "eu_regfile's own instantiation below
+    // leaves the data output unconnected, default 0" convention as rd_c.
+    logic [3:0]  rd_prev_a_sel, rd_prev_b_sel, rd_prev_c_sel;
+    logic [1:0]  rd_prev_a_siz, rd_prev_b_siz, rd_prev_c_siz;
+    logic [31:0] rd_prev_a_data = 32'h0, rd_prev_b_data = 32'h0, rd_prev_c_data = 32'h0;
     logic        wr_en;
     logic [3:0]  wr_sel;
     logic [1:0]  wr_siz;
@@ -132,6 +138,15 @@ module eu_seq_tb;
         .rd_c_sel       (rd_c_sel),
         .rd_c_siz       (rd_c_siz),
         .rd_c_data      (rd_c_data),
+        .rd_prev_a_sel  (rd_prev_a_sel),
+        .rd_prev_a_siz  (rd_prev_a_siz),
+        .rd_prev_a_data (rd_prev_a_data),
+        .rd_prev_b_sel  (rd_prev_b_sel),
+        .rd_prev_b_siz  (rd_prev_b_siz),
+        .rd_prev_b_data (rd_prev_b_data),
+        .rd_prev_c_sel  (rd_prev_c_sel),
+        .rd_prev_c_siz  (rd_prev_c_siz),
+        .rd_prev_c_data (rd_prev_c_data),
         .wr_en          (wr_en),
         .wr_sel         (wr_sel),
         .wr_siz         (wr_siz),
@@ -227,6 +242,15 @@ module eu_seq_tb;
         .rd_c_sel   (4'h0),
         .rd_c_siz   (2'b00),
         .rd_c_data  (),
+        .rd_prev_a_sel  (4'h0),
+        .rd_prev_a_siz  (2'b00),
+        .rd_prev_a_data (),
+        .rd_prev_b_sel  (4'h0),
+        .rd_prev_b_siz  (2'b00),
+        .rd_prev_b_data (),
+        .rd_prev_c_sel  (4'h0),
+        .rd_prev_c_siz  (2'b00),
+        .rd_prev_c_data (),
         .wr_en      (wr_en),
         .wr_sel     (wr_sel),
         .wr_siz     (wr_siz),

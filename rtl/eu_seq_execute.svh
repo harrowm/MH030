@@ -2293,15 +2293,6 @@
                                                && !(ex_is_cmp2chk2 && !cmp2_run_r && !cmp2_after_r))))
                           || (ex_is_dyn_bit_idx && ex_is_memind && !ex_is_cmp2chk2 && memind_outer_done_r && memind_is_rd_r)
                           || (ex_is_dyn_bit_idx && ex_is_cmp2chk2 && cmp2_run_r && mem_ack);
-    // preview_ok/preview_trivial_ea/preview_is_idx (assigned further below,
-    // near mem_req/mem_addr, where their own no_special_bus_op/mem_ack/
-    // dec_* dependencies are already in scope) are forward-declared here
-    // since Icarus requires a `logic`'s declaration to textually precede
-    // this use, even though all `assign`s in this file are concurrent --
-    // rd_b_sel (Track 1 Stage 4, wobbly-honking-cascade.md) needs
-    // preview_is_idx to know when to steer its own port at the NEXT
-    // instruction's own Xn register instead of the CURRENT instruction's.
-    logic preview_trivial_ea, preview_ok, preview_is_idx;
     assign rd_a_sel = (movem_run_r && !movem_load_r) ? movem_reg_sel :
                       cas2_rd2_r                      ? ex_cas2_rn2_reg :
                       (dyn_bit_get_Dn && (ex_dyn_bit_swap_a || ex_dyn_bit_swap_both)) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
@@ -2330,40 +2321,45 @@
                       // Use explicit flag: An for ADDA/SUBA/CMPA indexed, Dn for bit ops
                       (dyn_bit_get_Dn && ex_dyn_bit_swap_both) ? {ex_dyn_bit_is_an2, ex_dyn_bit_reg2} :
                       (dyn_bit_get_Dn && !ex_dyn_bit_swap_a) ? {ex_dyn_bit_is_an, ex_dyn_bit_reg} :
-                      // Track 1 Stage 4 (wobbly-honking-cascade.md): preview
-                      // the NEXT instruction's own Xn register when it's an
-                      // indexed EA -- safe only because preview_ok's own
-                      // condition (below) additionally requires !ex_is_idx
-                      // for the CURRENT instruction, meaning rd_b's real
-                      // value is provably unused this cycle (ex_xn_scaled
-                      // is force-zeroed whenever !ex_is_idx) exactly as
-                      // Stage 1's own re-verified finding established --
-                      // none of the arms above this one can be active at
-                      // the same time (they all require CURRENT to be one
-                      // of their own specific special ops, mutually
-                      // exclusive with the CURRENT-is-a-plain-non-indexed-
-                      // read shape preview_ok's own ex_is_mem_rd/!ex_is_idx
-                      // gate requires).
-                      (preview_ok && preview_is_idx) ? dec_dst_reg :
                                          ex_dst_reg;
     // for indexed EA and CMP2/CHK2, rd_b carries Xn/Rn — full longword needed
     // memind post-indexed also needs full longword Xn in rd_b (for outer EA scaling)
     // CMPM rd_b carries Ax address base — must be full 32-bit regardless of siz
-    // Track 1 Stage 4: preview_is_idx's own Xn read (NEXT instruction) needs
-    // the identical full-longword treatment -- preview_xn_val (below) does
-    // its own word/long selection from the full value via dec_xn_wl,
-    // mirroring ex_xn_val's own dec_xn_wl-vs-ex_xn_wl split exactly.
-    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem || ex_is_bf || ex_is_move_mm || ex_is_cas || ex_is_abcd_sbcd_mem || ex_is_cas2 || (preview_ok && preview_is_idx)) ? 2'b00 : ex_siz;
+    assign rd_b_siz = (ex_is_mem_wr || ex_is_idx || ex_is_cmp2chk2 || ex_is_memind || ex_is_cmpm || ex_is_mem_rmw || ex_is_addx_mem || ex_is_bf || ex_is_move_mm || ex_is_cas || ex_is_abcd_sbcd_mem || ex_is_cas2) ? 2'b00 : ex_siz;
 
     // Read port C: MOVE Dn/An,(d8,An,Xn)'s own source register (Phase 149,
     // plan.md) -- the sole consumer today. Always full longword (like rd_a's
     // own ex_is_mem_wr case): eu_lane() sizes the write from d[7:0]/d[15:0].
-    // preview_ok is a second consumer (already forward-declared above,
-    // alongside rd_a_sel/rd_b_sel's own use of it).
-    assign rd_c_sel = ex_is_move_reg_idx_dst ? ex_c_reg :
-                      preview_ok             ? dec_src_reg :
-                                                4'd0;
+    // (Track 1's own preview_ok arm here was removed at Track 2 Stage 2.1 --
+    // the preview mechanism now has its own dedicated rd_prev_a/rd_prev_b
+    // ports and no longer touches rd_c at all.)
+    assign rd_c_sel = ex_is_move_reg_idx_dst ? ex_c_reg : 4'd0;
     assign rd_c_siz = 2'b00;
+
+    // Track 2 Stage 2.1 (wobbly-honking-cascade.md): dedicated preview-only
+    // ports for the NEXT instruction's own An/Xn -- always unconditionally
+    // driven (nothing else ever reads rd_prev_a/rd_prev_b, so there's no
+    // "is the current instruction using this" question, unlike rd_a/rd_b/
+    // rd_c above). preview_addr (below, near mem_req/mem_addr) decides
+    // whether the value is ever actually used.
+    //
+    // preview_is_write (Track 2 Stage 2.2, assigned near mem_req/mem_addr
+    // where its own dec_is_mem_wr/dec_use_imm dependencies are already in
+    // scope) is forward-declared here for the same Icarus reason as
+    // preview_ok/preview_is_idx used to be: for a plain register-source
+    // WRITE, decode's own `dst = memory` arm (eu_seq_decode.svh) puts An
+    // on `dec_dst_reg` and the value being written on `dec_src_reg` -- the
+    // OPPOSITE of the read-family convention `dec_src_reg`=An this port
+    // was originally wired for. `preview_is_idx` never co-occurs with
+    // `preview_is_write` (the write family never sets `dec_is_idx` --
+    // indexed writes route through the separate, already-excluded
+    // `dec_is_move_reg_idx_dst`/rd_c mechanism instead), so rd_prev_a
+    // alone (no Xn) is all a write preview ever needs.
+    logic preview_is_write;
+    assign rd_prev_a_sel = preview_is_write ? dec_dst_reg : dec_src_reg;
+    assign rd_prev_a_siz = 2'b00;
+    assign rd_prev_b_sel = dec_dst_reg;
+    assign rd_prev_b_siz = 2'b00;
 
     // EA computation: An base from rd_a (loads/LEA) or rd_b (stores) --
     // EXCEPT an indexed write (Phase 144, plan.md), which needs An on rd_a
@@ -4995,48 +4991,58 @@
     // 2a/2c originally had. `(d16,An)` needs no extra register either:
     // the displacement is a decode-time sign-extended constant
     // (`dec_ea_offset`), so `preview_addr`'s An-based arm now adds it to
-    // `rd_c_data` (a no-op add of zero for the original plain-`(An)`
+    // `rd_prev_a_data` (a no-op add of zero for the original plain-`(An)`
     // case, so this is a strict, backward-compatible generalization of
     // the same mechanism, not a new one).
-    logic preview_is_an, preview_is_abs;
+    logic preview_trivial_ea, preview_ok;
+    logic preview_is_an, preview_is_abs, preview_is_idx;
     assign preview_is_an  = !dec_is_jsr_idx && !dec_is_pea_idx && !dec_abs_ea_en &&
                             !dec_is_idx && !dec_is_memind;
     assign preview_is_abs = dec_abs_ea_en && !dec_is_idx && !dec_is_jsr_idx &&
                             !dec_is_pea_idx && !dec_is_memind;
-    // Track 1 Stage 4 (wobbly-honking-cascade.md): `(d8,An,Xn)`/`(bd,An,Xn)`
-    // preview -- needs Xn too, read via rd_b (declared/forward-referenced
-    // above, alongside rd_a_sel/rd_b_sel), which Stage 1's own re-verified
-    // finding proved is provably unused by the CURRENT instruction exactly
-    // when CURRENT is `ex_is_mem_rd && !ex_is_idx` (the same shape
-    // preview_ok already requires for the CURRENT side). preview_ok's own
-    // condition below adds an explicit `!ex_is_idx` (CURRENT) guard for
-    // this sub-case specifically -- it is NOT redundant with the existing
-    // `ex_is_mem_rd` gate (a current indexed READ also has ex_is_mem_rd=1),
-    // so must be checked separately, only when preview_is_idx is the
-    // reason preview_trivial_ea is true.
+    // Track 2 Stage 2.1 (wobbly-honking-cascade.md): `(d8,An,Xn)`/
+    // `(bd,An,Xn)` preview -- needs Xn too, now read via the dedicated
+    // rd_prev_b port (see eu_regfile.sv's own port comment) instead of
+    // reusing rd_b the way Track 1 Stage 4 originally did. Since
+    // rd_prev_b is never used by anything else, this no longer needs (or
+    // has) any restriction on what the CURRENT instruction is doing with
+    // its own rd_a/rd_b/dyn_bit_get_Dn -- Track 1's own `!ex_is_idx`
+    // (current) term in preview_ok is gone.
     assign preview_is_idx = !dec_is_jsr_idx && !dec_is_pea_idx && !dec_abs_ea_en &&
                             dec_is_idx && !dec_is_memind;
     assign preview_trivial_ea = preview_is_an || preview_is_abs || preview_is_idx;
     // preview_xn_val/preview_xn_scaled mirror ex_xn_val/ex_xn_scaled's own
     // formula exactly, but for the NEXT instruction (dec_xn_wl/dec_xn_scale,
-    // rd_b_data now steered at dec_dst_reg via rd_b_sel's own preview arm)
-    // instead of the CURRENT one (ex_xn_wl/ex_xn_scale) -- unconditional
-    // (always computed), matching ex_xn_scaled's own "not is_idx-gated at
-    // the value-computation level" shape; preview_addr below only selects
-    // it when preview_is_idx is actually the active case.
+    // rd_prev_b_data steered at dec_dst_reg unconditionally) instead of the
+    // CURRENT one (ex_xn_wl/ex_xn_scale/rd_b_data) -- unconditional (always
+    // computed), matching ex_xn_scaled's own "not is_idx-gated at the
+    // value-computation level" shape; preview_addr below only selects it
+    // when preview_is_idx is actually the active case.
     logic [31:0] preview_xn_val, preview_xn_scaled;
-    assign preview_xn_val    = dec_xn_wl ? rd_b_data : {{16{rd_b_data[15]}}, rd_b_data[15:0]};
+    assign preview_xn_val    = dec_xn_wl ? rd_prev_b_data : {{16{rd_prev_b_data[15]}}, rd_prev_b_data[15:0]};
     assign preview_xn_scaled = preview_xn_val << dec_xn_scale;
     // mem_addr's own preview arm (below) must pick the right source:
-    // rd_c_data (+ the decode-time displacement, zero for plain `(An)`,
-    // + Xn when indexed) for the An-based case, dec_abs_ea_val for the
-    // absolute case (no register read at all, and rd_c_data would be
-    // meaningless here -- rd_c_sel isn't even pointed at anything
-    // relevant for an abs-addressed instruction).
+    // rd_prev_a_data (+ the decode-time displacement, zero for plain
+    // `(An)`, + Xn via rd_prev_b_data when indexed) for the An-based
+    // case, dec_abs_ea_val for the absolute case (no register read at
+    // all).
     logic [31:0] preview_addr;
     assign preview_addr = preview_is_abs ? dec_abs_ea_val :
-                          preview_is_idx ? (rd_c_data + dec_ea_offset + preview_xn_scaled) :
-                                           (rd_c_data + dec_ea_offset);
+                          preview_is_idx ? (rd_prev_a_data + dec_ea_offset + preview_xn_scaled) :
+                                           (rd_prev_a_data + dec_ea_offset);
+
+    // Track 2 Stage 2.2 (wobbly-honking-cascade.md): plain register-source
+    // write preview -- the NEXT instruction being a simple `MOVE Dn,(ea)`-
+    // shaped write (no immediate source, not the indexed-dst-swap case
+    // that already owns rd_c) across any of the EA shapes above. Mirrors
+    // mem_wdata's own existing "ordinary write" fallback exactly
+    // (`eu_lane(rd_a_data, ex_siz)`, the CURRENT-instruction analogue) --
+    // dec_src_reg is the same field ex_src_reg already is for that case.
+    // Read via the dedicated rd_prev_c port (never shared with anything
+    // else, same "always unconditionally driven" shape as rd_prev_a/b).
+    assign preview_is_write = dec_is_mem_wr && !dec_use_imm && !dec_is_move_reg_idx_dst;
+    assign rd_prev_c_sel = dec_src_reg;
+    assign rd_prev_c_siz = 2'b00;
     // Found via a real full-Harte-sweep regression (RTE/RTR/CMPM suites,
     // widespread FAIL/TIMEOUT), root-caused via direct inspection, not
     // guessed at: RTE/RTR/CMPM (and structurally, ADDX/SUBX-mem, BF-mem,
@@ -5075,20 +5081,24 @@
     assign preview_ok = ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                         !ex_mem_stall && !ex_redirect_pending &&
                         !ex_is_move_reg_idx_dst &&
-                        dec_valid && dec_is_mem_rd && !dec_is_mem_wr &&
+                        dec_valid &&
+                        // Track 2 Stage 2.2: NEXT may now be an ordinary
+                        // read OR a plain register-source write (never
+                        // both -- dec_is_mem_rd/dec_is_mem_wr are mutually
+                        // exclusive by decode convention throughout this
+                        // file).
+                        ((dec_is_mem_rd && !dec_is_mem_wr) || preview_is_write) &&
                         !dec_is_moves && preview_trivial_ea &&
                         (dec_mem_rd_siz == 2'b00) &&
-                        // Stage 4: previewing NEXT's own indexed EA needs
-                        // rd_b for Xn, which is only provably free when
-                        // CURRENT is not itself indexed (Stage 1's own
-                        // re-verified finding) -- NOT implied by the
-                        // ex_is_mem_rd gate above (a current indexed read
-                        // also has ex_is_mem_rd=1), so checked separately
-                        // and scoped only to the preview_is_idx sub-case
-                        // (preview_is_an/preview_is_abs never touch rd_b
-                        // at all, so they stay unaffected by CURRENT's own
-                        // indexing).
-                        (!preview_is_idx || !ex_is_idx) &&
+                        // Track 1 Stage 4 originally needed an extra
+                        // `!ex_is_idx` (CURRENT) guard here, since indexed
+                        // preview reused the CURRENT instruction's own
+                        // rd_b port for Xn. Track 2 Stage 2.1 gave the
+                        // preview mechanism its own dedicated rd_prev_a/
+                        // rd_prev_b ports (never touched by anything
+                        // else), so that restriction no longer applies --
+                        // indexed-EA preview is now unconditional on what
+                        // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !need_ext;
 
     assign mem_req   = preview_ok ||
@@ -5100,7 +5110,7 @@
                        cpsr_mem_fmt_r || cpsr_xfer_mem_r ||
                        (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
     assign mem_new_dispatch = preview_ok;
-    assign mem_rw    = preview_ok    ? 1'b1   // preview is read-only (Stage 2 scope)
+    assign mem_rw    = preview_ok    ? !preview_is_write   // Track 2 Stage 2.2: preview may now be a write
                      : movem_run_r    ? movem_load_r
                      : tas_run_r      ? 1'b0
                      : tas_memind_pending_r ? 1'b1   // genuine-indirect TAS: RMW-locked read phase
@@ -5177,7 +5187,8 @@
     // For MOVEM store: rd_a_data provides the register value (rd_a_sel overridden above).
     // For TAS write phase: drive tas_wdata_r (original byte | 0x80).
     // For MOVEP store: drive the appropriate byte of Dn.
-    assign mem_wdata = cas2_wr1_r               ? cas2_du1_val_r
+    assign mem_wdata = preview_ok && preview_is_write ? eu_lane(rd_prev_c_data, dec_siz)
+                     : cas2_wr1_r               ? cas2_du1_val_r
                      : cas2_wr2_r              ? cas2_du2_val_r
                      : cas_write_r             ? cas_du_val_r
                      // cpSAVE only (mem_rw=0 -- cpRESTORE's own cpsr_mem_fmt_r/

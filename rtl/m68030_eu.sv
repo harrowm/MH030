@@ -189,9 +189,9 @@ module m68030_eu (
     // -----------------------------------------------------------------------
     // Internal wires: eu_seq ↔ eu_regfile
     // -----------------------------------------------------------------------
-    logic [3:0]  rd_a_sel, rd_b_sel, rd_c_sel;
-    logic [1:0]  rd_a_siz, rd_b_siz, rd_c_siz;
-    logic [31:0] rd_a_data, rd_b_data, rd_c_data;
+    logic [3:0]  rd_a_sel, rd_b_sel, rd_c_sel, rd_prev_a_sel, rd_prev_b_sel, rd_prev_c_sel;
+    logic [1:0]  rd_a_siz, rd_b_siz, rd_c_siz, rd_prev_a_siz, rd_prev_b_siz, rd_prev_c_siz;
+    logic [31:0] rd_a_data, rd_b_data, rd_c_data, rd_prev_a_data, rd_prev_b_data, rd_prev_c_data;
     logic        wr_en;
     logic [3:0]  wr_sel;
     logic [1:0]  wr_siz;
@@ -290,6 +290,15 @@ module m68030_eu (
         .rd_c_sel     (rd_c_sel),
         .rd_c_siz     (rd_c_siz),
         .rd_c_data    (rd_c_data),
+        .rd_prev_a_sel  (rd_prev_a_sel),
+        .rd_prev_a_siz  (rd_prev_a_siz),
+        .rd_prev_a_data (rd_prev_a_data),
+        .rd_prev_b_sel  (rd_prev_b_sel),
+        .rd_prev_b_siz  (rd_prev_b_siz),
+        .rd_prev_b_data (rd_prev_b_data),
+        .rd_prev_c_sel  (rd_prev_c_sel),
+        .rd_prev_c_siz  (rd_prev_c_siz),
+        .rd_prev_c_data (rd_prev_c_data),
         .wr_en        (wr_en),
         .wr_sel       (wr_sel),
         .wr_siz       (wr_siz),
@@ -564,7 +573,18 @@ module m68030_eu (
         // read port C (Phase 148, plan.md)
         .rd_c_sel     (rd_c_sel),
         .rd_c_siz     (rd_c_siz),
-        .rd_c_data    (rd_c_data)
+        .rd_c_data    (rd_c_data),
+        // read ports D/E (Track 2 Stage 2.1, wobbly-honking-cascade.md)
+        .rd_prev_a_sel  (rd_prev_a_sel),
+        .rd_prev_a_siz  (rd_prev_a_siz),
+        .rd_prev_a_data (rd_prev_a_data),
+        .rd_prev_b_sel  (rd_prev_b_sel),
+        .rd_prev_b_siz  (rd_prev_b_siz),
+        .rd_prev_b_data (rd_prev_b_data),
+        // read port F (Track 2 Stage 2.2, wobbly-honking-cascade.md)
+        .rd_prev_c_sel  (rd_prev_c_sel),
+        .rd_prev_c_siz  (rd_prev_c_siz),
+        .rd_prev_c_data (rd_prev_c_data)
     );
 
     // Route CACR/CAAR to module outputs for BIU/MMU use

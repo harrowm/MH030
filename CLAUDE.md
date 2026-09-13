@@ -2088,6 +2088,105 @@ show the dispatch gap unless individually revisited — genuine, literal
 parity with real silicon for every instruction combination remains a
 much larger, multi-phase program, not a single change.
 
+**Phase 256 (Track 2: dedicated preview-only register-file ports —
+IMPLEMENTED AND VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**:
+the user reviewed Phase 255's own diagram, correctly noted it only shows
+the fix for the one case it happens to test, and asked for a plan to
+close the gap further. Re-examining Track 1's own original "migrate
+`ex_an_base`/`ex_xn_val` off `rd_a`/`rd_b`" sketch found a simpler, lower-
+risk design once `eu_regfile.sv` was inspected directly: it isn't a real
+banked SRAM with a fixed port count, every "port" is just an independent
+combinational mux over the same `d_reg`/`a_reg` arrays — so adding MORE
+such muxes, *dedicated solely to the preview mechanism and touched by
+nothing else*, needs zero changes to any existing consumer, unlike
+Track 1's own `rd_b`/`rd_c` reuse (which needed the `!ex_is_idx`
+(current) restriction precisely because those ports already had other
+jobs). **Stage 2.1**: added `rd_prev_a` (An/base) and `rd_prev_b`
+(Xn/index), threaded through the same 3-file chain `rd_c` established at
+Phase 148-149 (`eu_regfile.sv` new port pair + mux, `eu_seq.sv` new
+module ports, `m68030_eu.sv` new wires at both the `eu_seq` and
+`eu_regfile` instantiations), wired **unconditionally** (`rd_prev_a_sel
+= dec_src_reg`, `rd_prev_b_sel = dec_dst_reg`, always full longword —
+nothing else ever reads them, so there's no "is current using this port"
+question to gate on). Removed Stage 4's own `(!preview_is_idx ||
+!ex_is_idx)` term from `preview_ok` entirely — indexed-EA preview no
+longer depends on what the current instruction is doing with its own
+`rd_a`/`rd_b`/`dyn_bit_get_Dn` swap. Reverted `rd_b_sel`/`rd_c_sel` back
+to their pre-Track-1 form (`rd_c_sel` back to only
+`ex_is_move_reg_idx_dst`; `rd_b_sel` back to no `preview_ok` term at
+all). **Stage 2.2**: added `rd_prev_c` (write-data preview) and a new
+`preview_is_write` condition (`dec_is_mem_wr && !dec_use_imm &&
+!dec_is_move_reg_idx_dst`), extending `preview_ok`/`mem_rw`/`mem_wdata`
+to cover the *next* instruction being a plain `MOVE Dn,(ea)`-shaped
+write. **Found and fixed a real bug before it shipped**, caught by
+directly re-deriving the write family's own decode fields rather than
+assuming the read family's convention carried over: for a plain write,
+decode's own `dst = memory` arm (`eu_seq_decode.svh`) puts An on
+`dec_dst_reg` and the value being written on `dec_src_reg` — the
+*opposite* of the read family's convention (`dec_src_reg`=An) `rd_prev_a`
+was originally wired for. Fixed by making `rd_prev_a_sel` conditional
+(`preview_is_write ? dec_dst_reg : dec_src_reg`); confirmed
+`preview_is_idx` and `preview_is_write` never co-occur (indexed writes
+route through the already-excluded `dec_is_move_reg_idx_dst`/`rd_c`
+mechanism instead), so a write preview never needs Xn.
+
+**Verified the existing `hazard_ex`/`hazard_wb` mechanism already covers
+every new case with zero changes**, by direct inspection: both key off
+`dec_reads_src`/`dec_reads_dst`/`dec_reads_c` generically (not one
+specific field), and every relevant decode arm already sets the matching
+`dec_reads_*` flag — an established, long-standing, heavily-used
+convention, not something added for this phase. Built 3 dedicated cosim
+hazard tests (`tests/timing_preview_idx_hazard.s`,
+`timing_preview_idx_current_idx.s`, `timing_preview_write_hazard.s`) —
+each: a producer writes a register, an ordinary read immediately
+follows (triggering `preview_ok`'s own gate), then a third instruction
+uses that same register as Xn (Stage 2.1) or write-data (Stage 2.2) —
+proving the previewed value uses the register's real, correctly-produced
+value, not a stale one; all match Musashi's own reference bus trace
+exactly.
+
+**A genuinely important finding surfaced while trying to visually
+confirm the mechanism engages**: in this project's own "isolated,
+zero-head-start" timing-test convention (`tests/timing0.s`'s pattern),
+`preview_ok` essentially never fires for anything needing an extension
+word (abs EA, `(d16,An)`, indexed EA) — direct `q_cnt` tracing
+(`m68030_ifu.sv`) showed the prefetch queue tops out around 2 words
+ahead of the current decode point in that specific construction, one
+short of the 3 (`ext_valid`) an extension word needs. This is **not**
+specific to the isolated-timing convention, though — a plain
+fall-through sequence with no isolating branch showed the identical cap.
+It **is** resolved by genuine prior idle time: inserting `MULU.L Dn,Dn`
+(a real ~168-tick artificial-stall instruction, `eu_seq_execute.svh`)
+before the target sequence let the queue reach `q_cnt=5`, and
+`preview_ok`/`preview_is_idx`/`preview_is_write` were then confirmed
+firing live, with `preview_addr`/`rd_prev_c_data` correctly reflecting
+each register's real current value (including, unintentionally, `MULU`
+itself legitimately zeroing the very register a follow-on instruction
+then indexed with — confirmed matching Musashi's own reference exactly
+once the resulting EA was worked out by hand). **The honest takeaway**:
+Stages 2-4/2.1/2.2's own real-world benefit requires the target
+instruction's own extension word(s) to already be prefetched — true in
+ordinary code with enough preceding non-memory work, but genuinely
+invisible in this project's own worst-case isolated timing-measurement
+convention (only the original zero-extension `(An)` case from Phase 254
+needs nothing from the prefetch queue at all, which is exactly why it
+was the one case visible in that convention).
+
+Full mandatory gate clean at every stage (`make test` 37/37, `cosim_grp`
+8/8, `cosim_memind` 29/29, `dat-synth` 50/50), full 124-suite Harte
+sweep bit-identical to baseline after every stage (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0` — the documented ASL.b corpus anomaly).
+
+**What remains out of scope, honestly**: none of the ~20 special
+multi-cycle FSMs (`movem_run_r`, `cas_write_r`, `mem_rmw_run_r`,
+`memind_*`, `cas2_*`, bitfields, RMW/CAS/CAS2 bus locks, etc.) route
+through `ex_ea`/`preview_ok` at all — closing the gap for those would
+need one dedicated investigation phase per family, the same shape of
+work Stage 9's memory-indirect-EA rollout took ~10 phases to complete
+for the *existing*, non-preview addressing paths. A candidate Track 3,
+not started, to be scoped separately (starting with whichever families
+are actually common in real code) only if pursued further.
+
 ## Verification Commands
 
 ```bash

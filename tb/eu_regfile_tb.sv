@@ -68,6 +68,18 @@ module eu_regfile_tb;
         .rd_c_sel    (rd_c_sel),
         .rd_c_siz    (rd_c_siz),
         .rd_c_data   (rd_c_data),
+        // Track 2 Stage 2.1 (wobbly-honking-cascade.md): new dedicated
+        // preview-only ports -- this file's own tests don't exercise them,
+        // tied off like rd_c's own convention here.
+        .rd_prev_a_sel  (4'h0),
+        .rd_prev_a_siz  (2'b00),
+        .rd_prev_a_data (),
+        .rd_prev_b_sel  (4'h0),
+        .rd_prev_b_siz  (2'b00),
+        .rd_prev_b_data (),
+        .rd_prev_c_sel  (4'h0),
+        .rd_prev_c_siz  (2'b00),
+        .rd_prev_c_data (),
         .wr_en       (wr_en),
         .wr_sel      (wr_sel),
         .wr_siz      (wr_siz),

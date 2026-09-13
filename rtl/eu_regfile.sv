@@ -88,7 +88,33 @@ module eu_regfile (
     // deferred-swap trick (see port3.md).
     input  logic [3:0]  rd_c_sel,
     input  logic [1:0]  rd_c_siz,
-    output logic [31:0] rd_c_data
+    output logic [31:0] rd_c_data,
+
+    // Combinational read ports D/E (Track 2 Stage 2.1,
+    // wobbly-honking-cascade.md) -- dedicated SOLELY to the EU-side
+    // dispatch-gap preview mechanism's own address generation for the
+    // NEXT instruction (An on rd_prev_a, Xn on rd_prev_b), mirroring
+    // rd_c's own shape exactly. Unlike rd_a/rd_b/rd_c, no other consumer
+    // ever reads these -- the driving `_sel`/`_siz` values are wired
+    // unconditionally in eu_seq_execute.svh (always reflecting whatever
+    // the next decoded instruction's own base/index registers would be),
+    // so there is no "is the current instruction using this port right
+    // now" question to answer, unlike Track 1's own rd_b/rd_c reuse.
+    input  logic [3:0]  rd_prev_a_sel,
+    input  logic [1:0]  rd_prev_a_siz,
+    output logic [31:0] rd_prev_a_data,
+    input  logic [3:0]  rd_prev_b_sel,
+    input  logic [1:0]  rd_prev_b_siz,
+    output logic [31:0] rd_prev_b_data,
+
+    // Combinational read port F (Track 2 Stage 2.2, wobbly-honking-
+    // cascade.md) -- dedicated to the preview mechanism's own NEXT-
+    // instruction write DATA (a plain register-source write's own Dn),
+    // independent of rd_prev_a/rd_prev_b since an indexed write's own EA
+    // still needs An+Xn simultaneously alongside the source value.
+    input  logic [3:0]  rd_prev_c_sel,
+    input  logic [1:0]  rd_prev_c_siz,
+    output logic [31:0] rd_prev_c_data
 );
 
     // -----------------------------------------------------------------------
@@ -168,6 +194,49 @@ module eu_regfile (
                               (rd_c_is_addr ? {{16{rd_c_raw[15]}}, rd_c_raw[15:0]}
                                            : {16'b0,               rd_c_raw[15:0]}) :
                           rd_c_raw;
+
+    // Track 2 Stage 2.1: rd_prev_a/rd_prev_b, mirroring rd_c's own shape
+    // exactly (see the port declarations above for why these are always
+    // unconditionally driven, with no other consumer).
+    logic [31:0] rd_prev_a_raw, rd_prev_b_raw;
+    logic        rd_prev_a_is_addr, rd_prev_b_is_addr;
+
+    assign rd_prev_a_is_addr = rd_prev_a_sel[3];
+    assign rd_prev_a_raw     = !rd_prev_a_sel[3] ? d_reg[rd_prev_a_sel[2:0]] :
+                               (rd_prev_a_sel != 4'd15) ? a_reg[rd_prev_a_sel[2:0]] : a7_current;
+    assign rd_prev_a_data    = (rd_prev_a_siz == 2'b01) ?
+                                   (rd_prev_a_is_addr ? {{24{rd_prev_a_raw[7]}},  rd_prev_a_raw[7:0]}
+                                                      : {24'b0,                   rd_prev_a_raw[7:0]}) :
+                               (rd_prev_a_siz == 2'b10) ?
+                                   (rd_prev_a_is_addr ? {{16{rd_prev_a_raw[15]}}, rd_prev_a_raw[15:0]}
+                                                      : {16'b0,                   rd_prev_a_raw[15:0]}) :
+                               rd_prev_a_raw;
+
+    assign rd_prev_b_is_addr = rd_prev_b_sel[3];
+    assign rd_prev_b_raw     = !rd_prev_b_sel[3] ? d_reg[rd_prev_b_sel[2:0]] :
+                               (rd_prev_b_sel != 4'd15) ? a_reg[rd_prev_b_sel[2:0]] : a7_current;
+    assign rd_prev_b_data    = (rd_prev_b_siz == 2'b01) ?
+                                   (rd_prev_b_is_addr ? {{24{rd_prev_b_raw[7]}},  rd_prev_b_raw[7:0]}
+                                                      : {24'b0,                   rd_prev_b_raw[7:0]}) :
+                               (rd_prev_b_siz == 2'b10) ?
+                                   (rd_prev_b_is_addr ? {{16{rd_prev_b_raw[15]}}, rd_prev_b_raw[15:0]}
+                                                      : {16'b0,                   rd_prev_b_raw[15:0]}) :
+                               rd_prev_b_raw;
+
+    // Track 2 Stage 2.2: rd_prev_c, mirroring rd_prev_a/rd_prev_b exactly.
+    logic [31:0] rd_prev_c_raw;
+    logic        rd_prev_c_is_addr;
+
+    assign rd_prev_c_is_addr = rd_prev_c_sel[3];
+    assign rd_prev_c_raw     = !rd_prev_c_sel[3] ? d_reg[rd_prev_c_sel[2:0]] :
+                               (rd_prev_c_sel != 4'd15) ? a_reg[rd_prev_c_sel[2:0]] : a7_current;
+    assign rd_prev_c_data    = (rd_prev_c_siz == 2'b01) ?
+                                   (rd_prev_c_is_addr ? {{24{rd_prev_c_raw[7]}},  rd_prev_c_raw[7:0]}
+                                                      : {24'b0,                   rd_prev_c_raw[7:0]}) :
+                               (rd_prev_c_siz == 2'b10) ?
+                                   (rd_prev_c_is_addr ? {{16{rd_prev_c_raw[15]}}, rd_prev_c_raw[15:0]}
+                                                      : {16'b0,                   rd_prev_c_raw[15:0]}) :
+                               rd_prev_c_raw;
 
     // -----------------------------------------------------------------------
     // D0-D7: byte/word writes preserve upper bits
