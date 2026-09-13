@@ -5131,6 +5131,25 @@
     logic cmp2_final_ack;
     assign cmp2_final_ack = cmp2_run_r && mem_ack && !chk_trap;
 
+    // Track 3 #3 (MOVEP, wobbly-honking-cascade.md): `movep_last`
+    // (already declared/derived at line ~527 for MOVEP's own byte-
+    // sequence termination) is the final-beat signal -- `ex_mem_stall`
+    // includes the raw registered `movep_run_r`, which clears one cycle
+    // after this same final ack, matching Phase 257's universal finding.
+    // Like MOVEM (not CMP2/CHK2), MOVEP writes a register via its own
+    // direct port (`wr_sel = ... : movep_wr_en ? movep_wr_sel`,
+    // `movep_wr_sel = {1'b0, movep_dn_r}` -- always Dn, never An, since
+    // MOVEP's own EA is fixed d16(An) with no auto-inc/dec) --
+    // hazard_ex/hazard_wb never see this write, so a dedicated
+    // `movep_hazard` is needed, mirroring `movem_hazard`'s own shape but
+    // simpler: only ONE hazard source (no second `_an_wr_en`-style term,
+    // since MOVEP never updates An). `movep_wr_en` is already 0 for the
+    // store direction (`movep_wr_en = movep_last && movep_load_r`), so
+    // this is naturally a no-op hazard for MOVEP stores. MOVEP never
+    // traps or changes flow, so no CHK2-style exclusion is needed either.
+    logic movep_hazard;
+    assign movep_hazard = movep_wr_en && (dec_src_reg == movep_wr_sel || dec_dst_reg == movep_wr_sel);
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5144,7 +5163,7 @@
     logic preview_current_ready;
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
-                                    movem_last || cmp2_final_ack;
+                                    movem_last || cmp2_final_ack || movep_last;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5165,7 +5184,7 @@
                         // else), so that restriction no longer applies --
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
-                        !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !need_ext;
+                        !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||

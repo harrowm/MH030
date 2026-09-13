@@ -2312,6 +2312,29 @@ has zero CHK2 coverage, 68020+-only). Full mandatory gate clean
 50/50), full 124-suite Harte sweep bit-identical to baseline (`PASS
 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
 
+**Phase 260 (Track 3 #3: MOVEP preview — IMPLEMENTED AND VERIFIED,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: same shape as MOVEM
+(writes a register via its own direct port, bypassing `hazard_ex`/
+`hazard_wb` entirely), but simpler — only one hazard source, since
+MOVEP never updates An (its own EA is fixed `d16(An)`, no auto-inc/dec,
+unlike MOVEM's predec/postinc). Final-beat signal: the pre-existing
+`movep_last` (`movep_run_r && mem_ack` at the final byte index for the
+given size). New `movep_hazard = movep_wr_en &&
+(dec_src_reg==movep_wr_sel || dec_dst_reg==movep_wr_sel)`
+(`movep_wr_sel = {1'b0, movep_dn_r}`, always Dn — naturally 0 for the
+store direction since `movep_wr_en = movep_last && movep_load_r`). No
+CHK2-style trap exclusion needed — MOVEP never traps or changes flow.
+Verified via 3 tests: `tests/timing_preview_movep_hazard.s`
+(zero-head-start, end-state correctness) matches Musashi's bus trace
+exactly (26/26 cycles); a temporary debug trace with the same
+`MULU.L`-stall trick Phase 256/258 established (2 variants, not shipped
+as permanent tests) confirmed `movep_hazard=1`/`preview_ok=0` correctly
+blocking a genuine hazard, and `movep_hazard=0`/`preview_ok=1`/
+`preview_addr` exactly correct in a non-hazard control case. Full
+mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash
