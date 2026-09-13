@@ -5240,6 +5240,36 @@
     assign pack_hazard = pack_ax_wr_en && (dec_src_reg == {1'b1, pack_mem_ax_reg_r} ||
                                             dec_dst_reg == {1'b1, pack_mem_ax_reg_r});
 
+    // Track 3 #7 (PMOVE64, wobbly-honking-cascade.md): PMOVE CRP/SRP's
+    // own 2-phase FSM (phase 0: bus cycle at An; phase 1: bus cycle at
+    // An+4). Final beat = phase 1's own ack, `pmove64_run_r &&
+    // !pmove64_skip_r && mem_ack` (mirrors `pmove64_skip_r`'s own
+    // declaration comment exactly -- `pmove64_skip_r` burns the one
+    // stale mem_ack that fires the same clock `pmove64_run_r` transitions
+    // 0->1, so `!pmove64_skip_r` is required to pick out the GENUINE
+    // second-half ack, not that transitional one). **No dedicated hazard
+    // signal is needed at all, unlike MOVEM/MOVEP/bitfield-mem/PACK**:
+    // confirmed via direct inspection of the decode arm
+    // (`eu_seq_decode.svh`) that PMOVE64's own EA is restricted to
+    // `f_mode==3'b010` (plain `(An)`) ONLY -- no auto-inc/dec form is
+    // even decoded, so there is no An-update hazard source at all (the
+    // one structural difference from PACK/UNPK-mem, which shares this
+    // family's "own dedicated 2-phase FSM" shape but DOES use
+    // predecrement EAs). The 64-bit CRP/SRP value itself is internal MMU
+    // state (`crp_out`/`srp_out`), never a Dn/An register, so
+    // `hazard_ex`/`hazard_wb`/`hazard_ccr` have nothing to protect
+    // regardless. **New consideration, shared with CMP2/CHK2's own
+    // shape**: PMOVE CRP/SRP can synchronously trigger the MMU
+    // Configuration Exception (vector 56) on this exact same final-ack
+    // cycle (`mmu_config_trap`, already the correct one-shot/edge-
+    // triggered signal, mirroring `chk_trap`'s own shape exactly) -- a
+    // trap redirects flow to the exception vector, so `dec_valid`'s own
+    // instruction this same cycle never actually executes and must not
+    // receive a phantom preview bus access. Excluded directly via
+    // `!mmu_config_trap`.
+    logic pmove64_final_ack;
+    assign pmove64_final_ack = pmove64_run_r && !pmove64_skip_r && mem_ack && !mmu_config_trap;
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5254,11 +5284,32 @@
     // actually DOES already clear the same cycle, per its own
     // `addx_mem_stall` formula, but a dedicated OR-term is still needed
     // since `ex_is_mem_rd` is never set for this family at all).
+    //
+    // `!ex_is_pmove64` (Track 3 #7): PMOVE CRP/SRP's own LOAD direction
+    // sets `dec_is_mem_rd=1` (unlike MOVEM/CMP2/MOVEP/ADDX/PACK), so its
+    // own phase-0 ack (BEFORE `pmove64_run_r` transitions to 1) would
+    // otherwise satisfy this ordinary clause by pure coincidence --
+    // found via a genuine live regression: without this exclusion,
+    // `preview_ok` fired one beat early (at phase 0's ack instead of the
+    // real final beat), hijacking `mem_addr` mid-FSM-handoff and causing
+    // a spurious MMU Configuration Exception downstream (the trap's own
+    // check read stale phase-0 `mem_rdata` instead of the genuine
+    // phase-1 response). A first fix attempt added a `pmove64_first_ack`
+    // term to the shared `ex_mem_stall` signal (mirroring
+    // `cmp2_first_ack`'s own shape) -- reverted after it caused a
+    // genuine simulation hang: `ex_mem_stall` gates the pipeline's own
+    // ordinary (non-preview) dispatch timing throughout the whole
+    // module, and extending it changed when `ex_valid` drops after
+    // PMOVE64's own phase-0 ack broadly enough to break something
+    // downstream. Excluding `ex_is_pmove64` from ONLY this trigger's own
+    // clause instead is fully equivalent for preview purposes (PMOVE64
+    // already has its own dedicated `pmove64_final_ack` trigger below)
+    // and touches nothing else.
     logic preview_current_ready;
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
-                                     !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
+                                     !ex_mem_stall && !ex_is_move_reg_idx_dst && !ex_is_pmove64) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
-                                    bf_mem_final_ack || pack_mem_final_ack;
+                                    bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&

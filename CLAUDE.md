@@ -2442,6 +2442,44 @@ explicitly out of scope for Track 3. Full mandatory gate clean
 124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
 SKIP 281221 TIMEOUT 0`).
 
+**Phase 264 (Track 3 #7: PMOVE64 preview — IMPLEMENTED AND VERIFIED, a
+real regression found and fixed mid-implementation,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: PMOVE CRP/SRP's own
+2-phase FSM (phase 0: bus cycle at An, phase 1: bus cycle at An+4).
+Final beat: `pmove64_final_ack = pmove64_run_r && !pmove64_skip_r &&
+mem_ack && !mmu_config_trap` (excludes the synchronous MMU
+Configuration Exception trap PMOVE CRP/SRP can take on this exact
+cycle, the same CHK2-style consideration). No dedicated hazard signal
+needed — PMOVE64's own EA is restricted to plain `(An)` only (no
+auto-inc/dec decoded at all), and CRP/SRP are internal MMU state, never
+a Dn/An register. **Found and fixed a genuine regression before it
+shipped**: PMOVE64's LOAD direction sets `dec_is_mem_rd=1` (unlike
+every prior Track 3 family), so its own phase-0 ack coincidentally
+satisfied the *ordinary* preview trigger's own gate — `preview_ok`
+fired one beat early, hijacking `mem_addr` mid-FSM-handoff and causing
+a spurious MMU Configuration Exception (confirmed via direct debug
+trace). A first fix attempt added a `pmove64_first_ack` term to the
+shared `ex_mem_stall` signal (mirroring CMP2/CHK2's own
+`cmp2_first_ack` shape) — this fixed the preview bug but caused a
+genuine simulation HANG in the original zero-head-start test (confirmed
+via direct process inspection): `ex_mem_stall` gates the whole
+pipeline's own ordinary dispatch timing, and extending it broke
+something downstream. Reverted that approach entirely and instead
+excluded `ex_is_pmove64` directly from only the ordinary preview
+trigger's own clause — fully equivalent for preview purposes (PMOVE64
+already has its own dedicated final-beat trigger) and touches nothing
+else. Re-verified: no hang, both the zero-head-start test and the
+`MULU.L`-stall variant match Musashi exactly (20/20 cycles each, modulo
+the already-documented benign IFU-readahead reordering artifact), with
+the spurious trap confirmed gone via direct trace. Full mandatory gate
+clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 29/29,
+`dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`) — especially
+significant this time since the fix touched shared code exercised by
+every other family. New lesson for the remaining families: always check
+whether a family's own decode sets `dec_is_mem_rd`/`dec_is_mem_wr`
+before assuming a dedicated trigger is the only change needed.
+
 ## Verification Commands
 
 ```bash
