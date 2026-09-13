@@ -5181,6 +5181,36 @@
     logic addx_mem_final_ack;
     assign addx_mem_final_ack = addx_mem_run_r && addx_mem_phase_r == 2'd2 && mem_ack;
 
+    // Track 3 #5 (bitfield-mem, wobbly-honking-cascade.md): BFCHG/BFCLR/
+    // BFSET/BFINS/BFEXTU/BFEXTS/BFFFO/BFTST's own memory-EA form
+    // dispatches through a 2-phase FSM (0=read, 1=write -- write phase
+    // skipped entirely for the 4 non-mutating ops, mirroring
+    // `bf_mem_stall`'s own "done" sub-expression exactly, reused
+    // directly here as the final-beat signal). Like MOVEM/MOVEP (not
+    // ADDX/SUBX-mem), the non-mutating ops (BFEXTU/BFEXTS/BFFFO) DO
+    // write a result to a Dn register via their own direct port
+    // (`bf_dn_wr_en`/`bf_mem_dn_r`, confirmed in `wr_sel`'s own
+    // `bf_dn_wr_en ? {1'b0, bf_mem_dn_r}` arm) -- bypassing
+    // `hazard_ex`/`hazard_wb` entirely, and this write lands on the
+    // EXACT SAME cycle as the final-beat trigger for that sub-case
+    // (`bf_dn_wr_en`'s own condition, `!bf_mem_phase_r &&
+    // !bf_mem_mutates_r`, is one of the two final-beat conditions
+    // itself) -- a dedicated `bf_hazard` is needed, mirroring
+    // `movem_hazard`/`movep_hazard`. For the 4 mutating ops (BFCHG/
+    // BFCLR/BFSET/BFINS), `bf_dn_wr_en` requires `!bf_mem_mutates_r`, so
+    // it is always 0 regardless of phase -- `bf_hazard` is naturally
+    // inert there, the same "no-op for the write-only direction" shape
+    // MOVEP's own hazard already established. Bitfield instructions
+    // never use auto-inc/dec addressing (no An-update hazard source
+    // exists to protect against, unlike MOVEM), never trap, and never
+    // change flow.
+    logic bf_mem_final_ack;
+    assign bf_mem_final_ack = bf_mem_run_r && mem_ack &&
+                              ((!bf_mem_phase_r && !bf_mem_mutates_r) || bf_mem_phase_r);
+    logic bf_hazard;
+    assign bf_hazard = bf_dn_wr_en && (dec_src_reg == {1'b0, bf_mem_dn_r} ||
+                                        dec_dst_reg == {1'b0, bf_mem_dn_r});
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5198,7 +5228,8 @@
     logic preview_current_ready;
     assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
-                                    movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack;
+                                    movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
+                                    bf_mem_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5219,7 +5250,8 @@
                         // else), so that restriction no longer applies --
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
-                        !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard && !need_ext;
+                        !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
+                        !bf_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||

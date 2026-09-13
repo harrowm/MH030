@@ -2365,6 +2365,44 @@ mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
 29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
 baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
 
+**Phase 262 (Track 3 #5: bitfield-mem preview — IMPLEMENTED AND
+VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**: same shape as
+MOVEM/MOVEP. The 3 non-mutating ops (BFEXTU/BFEXTS/BFFFO) write a Dn
+result via their own direct port (`bf_dn_wr_en`/`bf_mem_dn_r`),
+bypassing `hazard_ex`/`hazard_wb`; the 4 mutating ops (BFCHG/BFCLR/
+BFSET/BFINS) write only to memory, so `bf_dn_wr_en` (and the new
+`bf_hazard`) is naturally 0 there, mirroring MOVEP's own store-
+direction no-op shape. Final-beat signal (`bf_mem_final_ack`) directly
+reuses `bf_mem_stall`'s own existing "done" sub-expression. New
+`bf_hazard = bf_dn_wr_en && (dec_src_reg=={1'b0,bf_mem_dn_r} ||
+dec_dst_reg=={1'b0,bf_mem_dn_r})`. No An-update hazard exists
+(bitfields never use auto-inc/dec EA); no trap/flow-change exclusion
+needed. Verified via `tests/timing_preview_bf_hazard.s` (BFEXTU
+producer, end-state match, 16/16 cycles) plus 2 debug-trace variants
+(the same `MULU.L`-stall trick) confirming both `bf_hazard=1`/
+`preview_ok=0` (blocked) and `bf_hazard=0`/`preview_ok=1`/
+`preview_addr`-correct (engaged) live, and
+`tests/timing_preview_bf_mutate.s` (BFCLR, the mutating/write-phase
+half of the final-beat trigger) also matches exactly. **Found,
+documented, NOT fixed — a genuine, pre-existing, out-of-scope
+correctness gap, unrelated to Track 3**: an initial mutating-path test
+using a narrow `{0:8}` field found `bf_mem_run_r`'s own read/write
+dispatch (`mem_siz`) is hardwired to always access a full LONGWORD
+regardless of the field's real offset+width footprint (`bf_mem_run_r ?
+2'b00`) — Musashi's own reference correctly narrows an 8-bit field at
+offset 0 to a single BYTE access instead. Confirmed via `git log -S`
+this predates Track 3 entirely (last touched at Phase 261, which never
+touched this line) — no existing test in this project has apparently
+ever bus-trace-compared a narrow-field bitfield-mem access against
+Musashi before. Sidestepped in the mutating-path test with a full
+`{0:32}` field (needs the longword by construction). A real,
+previously-undiscovered bug worth its own dedicated future
+investigation, but explicitly out of scope for Track 3's own
+dispatch-gap-closing work — documented here, not chased. Full
+mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash
