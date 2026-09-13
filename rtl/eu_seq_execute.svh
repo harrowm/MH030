@@ -5078,6 +5078,23 @@
     // `ex_redirect_pending`'s own declaration/comment above) -- reusing
     // that existing signal directly rather than re-deriving the same
     // exclusion list by hand.
+    //
+    // reg_hazard: shared helper for the Track 3 hazard-signal shape that
+    // recurs below -- "this family's own direct-port register write
+    // (bypassing hazard_ex/hazard_wb entirely) is landing THIS cycle on
+    // the exact register NEXT's own preview would read as src or dst."
+    // Ten of the eleven Track 3 hazard checks were hand-copied instances
+    // of this identical template with only the write-enable/target pair
+    // substituted -- centralized here as a single function instead,
+    // mirroring the project's own opcode_fields.sv precedent (Phase
+    // 221-224) for the same hand-copied-field bug shape (a silently
+    // dropped `dec_dst_reg` half of the OR would be a real, hard-to-catch
+    // under-protection bug). Pure refactor: behaviorally identical to
+    // every site it replaces.
+    function automatic logic reg_hazard(logic wr_en, logic [3:0] target);
+        return wr_en && (dec_src_reg == target || dec_dst_reg == target);
+    endfunction
+
     // Track 3 #1 (MOVEM, wobbly-honking-cascade.md): MOVEM writes
     // registers via its own direct wr_en/movem_reg_sel port -- NOT
     // through ex_dest_reg/wb_dest_reg, so hazard_ex/hazard_wb's own
@@ -5094,8 +5111,8 @@
     // source -- checked against both `dec_src_reg` and `dec_dst_reg`
     // since either could be the field the active preview sub-case uses.
     logic movem_hazard;
-    assign movem_hazard = (movem_wr_en && (dec_src_reg == movem_reg_sel || dec_dst_reg == movem_reg_sel)) ||
-                          (movem_an_wr_en && (dec_src_reg == {1'b1, movem_an_r} || dec_dst_reg == {1'b1, movem_an_r}));
+    assign movem_hazard = reg_hazard(movem_wr_en, movem_reg_sel) ||
+                          reg_hazard(movem_an_wr_en, {1'b1, movem_an_r});
 
     // Track 3 #2 (CMP2/CHK2, wobbly-honking-cascade.md): the second
     // (upper-bound) read's own ack, `cmp2_run_r && mem_ack`, is the
@@ -5148,7 +5165,7 @@
     // this is naturally a no-op hazard for MOVEP stores. MOVEP never
     // traps or changes flow, so no CHK2-style exclusion is needed either.
     logic movep_hazard;
-    assign movep_hazard = movep_wr_en && (dec_src_reg == movep_wr_sel || dec_dst_reg == movep_wr_sel);
+    assign movep_hazard = reg_hazard(movep_wr_en, movep_wr_sel);
 
     // Track 3 #4 (ADDX/SUBX-mem, wobbly-honking-cascade.md): unlike
     // MOVEM/MOVEP, ADDX/SUBX -(Ay),-(Ax)'s own decode arm
@@ -5208,8 +5225,7 @@
     assign bf_mem_final_ack = bf_mem_run_r && mem_ack &&
                               ((!bf_mem_phase_r && !bf_mem_mutates_r) || bf_mem_phase_r);
     logic bf_hazard;
-    assign bf_hazard = bf_dn_wr_en && (dec_src_reg == {1'b0, bf_mem_dn_r} ||
-                                        dec_dst_reg == {1'b0, bf_mem_dn_r});
+    assign bf_hazard = reg_hazard(bf_dn_wr_en, {1'b0, bf_mem_dn_r});
 
     // Track 3 #6 (PACK/UNPK-mem, wobbly-honking-cascade.md): a 2-phase
     // FSM (0=read Ay, 1=write result to Ax), superficially like
@@ -5237,8 +5253,7 @@
     logic pack_mem_final_ack;
     assign pack_mem_final_ack = pack_mem_run_r && pack_mem_phase_r && mem_ack;
     logic pack_hazard;
-    assign pack_hazard = pack_ax_wr_en && (dec_src_reg == {1'b1, pack_mem_ax_reg_r} ||
-                                            dec_dst_reg == {1'b1, pack_mem_ax_reg_r});
+    assign pack_hazard = reg_hazard(pack_ax_wr_en, {1'b1, pack_mem_ax_reg_r});
 
     // Track 3 #7 (PMOVE64, wobbly-honking-cascade.md): PMOVE CRP/SRP's
     // own 2-phase FSM (phase 0: bus cycle at An; phase 1: bus cycle at
@@ -5367,9 +5382,7 @@
     logic move_mm_final_ack;
     assign move_mm_final_ack = ex_is_move_mm && move_mm_run_r && mem_ack;
     logic move_mm_hazard;
-    assign move_mm_hazard = move_mm_dst_an_wr_en &&
-                            (dec_src_reg == {1'b1, move_mm_dst_an_reg_r} ||
-                             dec_dst_reg == {1'b1, move_mm_dst_an_reg_r});
+    assign move_mm_hazard = reg_hazard(move_mm_dst_an_wr_en, {1'b1, move_mm_dst_an_reg_r});
 
     // Track 3 #11 (CMPM, wobbly-honking-cascade.md): CMPM (Ay)+,(Ax)+'s
     // own 2-phase FSM (phase 1: read Ay, postincrement; phase 2: read Ax,
@@ -5397,8 +5410,7 @@
     logic cmpm_final_ack;
     assign cmpm_final_ack = ex_valid && ex_is_cmpm && cmpm_phase_r && mem_ack;
     logic cmpm_hazard;
-    assign cmpm_hazard = cmpm_ax_wr_en && (dec_src_reg == {1'b1, cmpm_ax_reg_r} ||
-                                            dec_dst_reg == {1'b1, cmpm_ax_reg_r});
+    assign cmpm_hazard = reg_hazard(cmpm_ax_wr_en, {1'b1, cmpm_ax_reg_r});
 
     // Track 3 #12 (memory-indirect, Group B, wobbly-honking-cascade.md):
     // the shared `memind_*` FSM used as a PREFIX by 9 other families
@@ -5460,11 +5472,9 @@
     logic memind_outer_final_ack;
     assign memind_outer_final_ack = memind_outer_r && mem_ack && !ex_is_cmp2chk2;
     logic memind_addr_hazard;
-    assign memind_addr_hazard = memind_addr_wr_en && (dec_src_reg == memind_dest_r ||
-                                                        dec_dst_reg == memind_dest_r);
+    assign memind_addr_hazard = reg_hazard(memind_addr_wr_en, memind_dest_r);
     logic memind_wr_hazard;
-    assign memind_wr_hazard = memind_wr_en && (dec_src_reg == memind_dest_r ||
-                                                 dec_dst_reg == memind_dest_r);
+    assign memind_wr_hazard = reg_hazard(memind_wr_en, memind_dest_r);
 
     // Track 3 #13 (general RMW, `mem_rmw_run_r`, wobbly-honking-cascade.md,
     // first Group C family): confirmed via direct inspection this family
@@ -5503,8 +5513,7 @@
     logic mem_rmw_final_ack;
     assign mem_rmw_final_ack = ex_valid && ex_is_mem_rmw && mem_rmw_run_r && mem_ack;
     logic mem_rmw_hazard;
-    assign mem_rmw_hazard = mem_rmw_an_wr_en && (dec_src_reg == {1'b1, ex_an_upd_reg} ||
-                                                   dec_dst_reg == {1'b1, ex_an_upd_reg});
+    assign mem_rmw_hazard = reg_hazard(mem_rmw_an_wr_en, {1'b1, ex_an_upd_reg});
 
     // Track 3 #14 (TAS, wobbly-honking-cascade.md, first GENUINELY
     // bus-locked family): a dedicated re-read of the exact AS-
@@ -5609,8 +5618,7 @@
     logic cas_final_ack;
     assign cas_final_ack = (cas_get_du_r && !cas_z_r) || cas_after_r;
     logic cas_hazard;
-    assign cas_hazard = cas_dc_wr_en && (dec_src_reg == cas_dc_reg_r ||
-                                          dec_dst_reg == cas_dc_reg_r);
+    assign cas_hazard = reg_hazard(cas_dc_wr_en, cas_dc_reg_r);
 
     // Track 3 #16 (CAS2, wobbly-honking-cascade.md, the LAST family in
     // this whole track): direct inspection of CAS2's own 6-8-phase FSM
