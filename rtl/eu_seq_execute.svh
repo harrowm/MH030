@@ -5548,6 +5548,70 @@
     logic tas_final_ack;
     assign tas_final_ack = ex_valid && ex_is_tas && tas_run_r && mem_ack;
 
+    // Track 3 #15 (CAS, wobbly-honking-cascade.md): a SECOND dedicated
+    // re-read of the exact AS-continuity/`bus_lock`/arbiter mechanics
+    // (Group C methodology), since this project's own history
+    // (`silent-copper-latch.md`'s own 5 attempts) documents CAS's own
+    // bus-lock as MORE delicate than TAS's. Key structural difference
+    // from TAS: CAS has a genuine, registered "bus release" gap
+    // (`cas_get_du_r`, between the read and write phases) where
+    // `mem_req` really drops to 0 for one cycle -- `eu_cas_hold =
+    // cas_active_r` is what keeps `bus_lock` asserted through that gap
+    // regardless (confirmed via direct inspection: `bus_lock`'s own
+    // formula includes `eu_cas_hold` alongside `is_rmw_write`/`is_cas2`),
+    // so `cas_active_r`'s own exact clear timing is THE single most
+    // safety-critical signal in this whole mechanism -- and critically,
+    // my own new preview trigger does NOT touch `cas_active_r`,
+    // `eu_cas_hold`, or any other CAS-internal register at all; it only
+    // ever reads them combinationally to decide when `mem_addr`/
+    // `mem_req` (the EU's own OUTPUT toward the BIU) may show NEXT's own
+    // values -- so there is no risk of it altering `cas_active_r`'s own
+    // timing, only of firing at the WRONG moment relative to it.
+    // CAS has TWO structurally different completion paths, confirmed by
+    // direct inspection of exactly when `cas_active_r` itself clears:
+    //   - MISMATCH (`cas_z_r=0`): the FSM never reaches `cas_write_r` at
+    //     all -- `cas_active_r <= 1'b0` fires DIRECTLY inside the
+    //     `cas_get_du_r` branch itself, on the identical condition as
+    //     the pre-existing `cas_dc_wr_en` (`cas_get_du_r && !cas_z_r`).
+    //   - MATCH (`cas_z_r=1`): the FSM proceeds through `cas_write_r`
+    //     (the real bus write) and only clears `cas_active_r` one cycle
+    //     later, at `cas_after_r` (the write's own post-ack cooldown) --
+    //     NOT at the write's own `mem_ack` cycle itself.
+    // `cas_final_ack` reuses these two EXACT conditions verbatim (not a
+    // new derivation), so it fires on precisely the same cycle
+    // `cas_active_r` itself is captured transitioning to 0 -- at that
+    // moment `cas_active_r`/`eu_cas_hold` are STILL 1 (the transition
+    // takes effect on the NEXT edge), so `bus_lock` is still asserted
+    // and the arbiter's own sticky grant is still held THIS cycle,
+    // exactly mirroring the timing relationship every other family's
+    // own final-beat trigger already relies on (fires the cycle the
+    // family's own "busy" flag is ABOUT TO clear, never after). Must
+    // NOT fire during `cas_get_du_r && cas_z_r` (match found, but the
+    // write hasn't happened yet -- CAS is genuinely NOT done) -- the
+    // explicit `!cas_z_r`/`cas_after_r` split guarantees this.
+    // **New hazard signal needed**: `cas_dc_wr_en` (Dc's own mismatch-
+    // path load, via the SEPARATE `wr2_en`/`wr2_sel`/`wr2_data` direct
+    // port -- confirmed bypassing `hazard_ex`/`hazard_wb` entirely, a
+    // second direct-write port beyond the `wr_en` one every earlier
+    // family in this track used) fires on the EXACT SAME condition as
+    // the mismatch arm of this new trigger. `cas_hazard` protects it.
+    // No An-update hazard exists: confirmed via direct inspection this
+    // project's own CAS decode is scoped to `CAS Dc,Du,(An)` only (no
+    // auto-inc/dec forms, no `cas_an_wr_en` signal exists anywhere).
+    // MATCH's own memory write needs no hazard (writes to MEMORY, not a
+    // register); CCR (`cas_sr_wr_en`) is already covered by
+    // `hazard_ccr`. **Confirmed safe from the Phase 264/PMOVE64-shaped
+    // regression**: CAS's own decode DOES set `dec_is_mem_rd=1` for its
+    // read phase, but `cas_read_ack` (pre-existing, already in
+    // `ex_mem_stall`'s own OR-chain) already covers that moment -- the
+    // same "already closed before Track 3" pattern as move_mm/CMPM/
+    // general RMW/TAS.
+    logic cas_final_ack;
+    assign cas_final_ack = (cas_get_du_r && !cas_z_r) || cas_after_r;
+    logic cas_hazard;
+    assign cas_hazard = cas_dc_wr_en && (dec_src_reg == cas_dc_reg_r ||
+                                          dec_dst_reg == cas_dc_reg_r);
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5590,7 +5654,7 @@
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
                                     cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack ||
-                                    mem_rmw_final_ack || tas_final_ack;
+                                    mem_rmw_final_ack || tas_final_ack || cas_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5613,7 +5677,8 @@
                         // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
                         !bf_hazard && !pack_hazard && !move_mm_hazard && !cmpm_hazard &&
-                        !memind_addr_hazard && !memind_wr_hazard && !mem_rmw_hazard && !need_ext;
+                        !memind_addr_hazard && !memind_wr_hazard && !mem_rmw_hazard &&
+                        !cas_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||

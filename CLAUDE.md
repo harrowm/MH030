@@ -2680,6 +2680,39 @@ drops). Full mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8,
 bit-identical to baseline — despite touching the project's single
 highest-blast-radius mechanism.
 
+**Phase 272 (Track 3 #15: CAS preview — IMPLEMENTED AND VERIFIED, the
+family this project's own history flags as MORE delicate than TAS,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: did a second dedicated
+re-read of the exact AS-continuity/`bus_lock`/arbiter mechanics before
+touching any RTL. Key structural difference from TAS: CAS has a
+genuine, registered "bus release" gap (`cas_get_du_r`, between the read
+and write phases) where `mem_req` really drops to 0 for one cycle —
+`eu_cas_hold = cas_active_r` keeps `bus_lock` asserted through that gap
+regardless. Confirmed the new preview trigger does not touch
+`cas_active_r`/`eu_cas_hold` at all, only reads them combinationally.
+CAS has two structurally different completion paths: MISMATCH
+(`cas_get_du_r && !cas_z_r`, the FSM never reaches `cas_write_r`) and
+MATCH (`cas_after_r`, one cycle after the real write's own `mem_ack`,
+not the ack cycle itself). New `cas_final_ack = (cas_get_du_r &&
+!cas_z_r) || cas_after_r` reuses these two exact pre-existing
+conditions verbatim, firing precisely when `cas_active_r` itself is
+captured transitioning to 0. New `cas_hazard` protects `cas_dc_wr_en`
+(Dc's own mismatch-path load, via a second separate direct port
+distinct from every earlier family's `wr_en`). No An-update hazard
+exists (this project's own CAS decode is scoped to `CAS Dc,Du,(An)`
+only). Confirmed safe from the Phase 264/PMOVE64-shaped regression.
+Verified via 5 dedicated tests covering both completion arms (mismatch
+hazard + control, match/write-completion path), all matching Musashi
+exactly (or showing only the already-documented benign IFU reordering
+artifact) and firing live. Given the elevated stakes, again directly
+re-ran `tb/stall_fsm_tb.sv`'s own AS-LOCK/AS-LOCK-MISMATCH tests
+standalone (all 9 checks clean) plus `tb/atomic_tb.sv` (35/35). Full
+mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind`
+29/29, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline — despite touching the single most extensively-hardened
+mechanism in the whole project (5 attempts in `silent-copper-latch.md`
+alone).
+
 ## Verification Commands
 
 ```bash
