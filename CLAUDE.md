@@ -2556,6 +2556,30 @@ needed. Full mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8,
 `cosim_memind` 29/29, `dat-synth` 50/50), full 124-suite Harte sweep
 bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
 
+**Phase 268 (Track 3 #11: CMPM preview — IMPLEMENTED AND VERIFIED,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: CMPM `(Ay)+,(Ax)+`'s own
+2-phase FSM (phase 1: read Ay, postincrement; phase 2: read Ax,
+postincrement + compare). New `cmpm_final_ack = ex_valid && ex_is_cmpm
+&& cmpm_phase_r && mem_ack`. Confirmed safe from the Phase 264/PMOVE64-
+shaped regression, the same reason as MOVE mem-to-mem: CMPM's own
+decode DOES set `dec_is_mem_rd=1`, but `cmpm_stall` (pre-existing,
+already in `ex_mem_stall`'s own OR-chain) already correctly stays 1
+through phase 1's own ack. New `cmpm_hazard` protects against
+`cmpm_ax_wr_en` (Ax's own postincrement update), which fires on the
+exact same cycle as the final beat — CMPM has only 2 phases total, so
+there's no earlier phase for it to commit at (the PACK/move_mm shape).
+`cmpm_ay_wr_en` fires at phase 1's ack, strictly before the final beat,
+needing no protection. CMPM never writes a Dn register; the only other
+effect is CCR, already covered by `hazard_ccr`. Verified via a hazard
+test (CMPM.L producer, `MOVE.L (A1),D3` using the just-postincremented
+A1) and its non-hazard control, both matching Musashi exactly and
+firing live with zero artificial stall needed. Full mandatory gate
+clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 29/29,
+`dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`) — the first
+family in several rounds with genuine Harte corpus coverage (CMPM is a
+real 68000 instruction).
+
 ## Verification Commands
 
 ```bash

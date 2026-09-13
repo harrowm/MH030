@@ -5371,6 +5371,35 @@
                             (dec_src_reg == {1'b1, move_mm_dst_an_reg_r} ||
                              dec_dst_reg == {1'b1, move_mm_dst_an_reg_r});
 
+    // Track 3 #11 (CMPM, wobbly-honking-cascade.md): CMPM (Ay)+,(Ax)+'s
+    // own 2-phase FSM (phase 1: read Ay, postincrement; phase 2: read Ax,
+    // postincrement + compare). Final beat = `cmpm_phase_r && mem_ack`
+    // (mirrors `cmpm_stall`'s own complement exactly). **Confirmed SAFE
+    // from the Phase 264/PMOVE64-shaped regression, the same reason as
+    // MOVE mem-to-mem**: CMPM's own decode DOES set `dec_is_mem_rd=1`
+    // (matching PMOVE64's exposure shape), but `cmpm_stall` (a
+    // pre-existing signal, already in `ex_mem_stall`'s own OR-chain)
+    // already correctly stays 1 through phase 1's own ack (its own
+    // formula, `!(cmpm_phase_r && mem_ack)`, is 1 whenever
+    // `cmpm_phase_r=0`, i.e. throughout phase 1) -- this family's own
+    // history already closed the gap PMOVE64 exposed. **New hazard
+    // signal needed, the PACK/move_mm shape**: `cmpm_ax_wr_en` (Ax's own
+    // postincrement update, via the same dedicated `an_wr_en` port)
+    // fires on the EXACT SAME cycle as this final beat (CMPM has only 2
+    // phases total, so there's no earlier phase for it to commit at,
+    // unlike ADDX-mem's own 3-phase Ay/Ax timing) -- `cmpm_hazard`
+    // protects against it. `cmpm_ay_wr_en` (Ay's own postincrement),
+    // fires at phase 1's ack, strictly BEFORE this final beat, so it's
+    // already safely committed by then, needing no protection (the
+    // ADDX-mem shape for Ay specifically). CMPM never writes a Dn
+    // register (a pure compare); the only other effect is CCR, already
+    // covered by `hazard_ccr`. CMPM never traps or changes flow.
+    logic cmpm_final_ack;
+    assign cmpm_final_ack = ex_valid && ex_is_cmpm && cmpm_phase_r && mem_ack;
+    logic cmpm_hazard;
+    assign cmpm_hazard = cmpm_ax_wr_en && (dec_src_reg == {1'b1, cmpm_ax_reg_r} ||
+                                            dec_dst_reg == {1'b1, cmpm_ax_reg_r});
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5411,7 +5440,8 @@
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst && !ex_is_pmove64) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
-                                    cpsr_final_ack || bcds_final_ack || move_mm_final_ack;
+                                    cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
+                                    cmpm_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5433,7 +5463,7 @@
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
-                        !bf_hazard && !pack_hazard && !move_mm_hazard && !need_ext;
+                        !bf_hazard && !pack_hazard && !move_mm_hazard && !cmpm_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
