@@ -2533,6 +2533,29 @@ needed, same as ADDX-mem. Full mandatory gate clean (`make test` 37/37,
 124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
 SKIP 281221 TIMEOUT 0`).
 
+**Phase 267 (Track 3 #10: MOVE mem-to-mem indexed-dst preview —
+IMPLEMENTED AND VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**:
+`ex_is_move_mm`'s own 2-phase FSM (read source, then write). New
+`move_mm_final_ack = ex_is_move_mm && move_mm_run_r && mem_ack`. This
+family is also one of `dyn_bit_get_Dn`'s 5 consumer families, but that
+swap fires at the SOURCE READ's own ack (a different cycle than this
+family's own final beat, the WRITE ack), so no collision. **Confirmed
+safe from the Phase 264/PMOVE64-shaped regression, for a different
+reason**: `dec_is_move_mm` DOES set `dec_is_mem_rd=1` for its own
+source-read phase, but `ex_mem_stall` already includes
+`move_mm_read_ack` as a pre-existing OR-term — this family's own
+history already closed the exact gap PMOVE64 exposed. New
+`move_mm_hazard` protects against `move_mm_dst_an_wr_en` (destination An
+auto-inc/dec, non-indexed forms only — indexed EA never sets
+`move_mm_dst_an_upd_r`), which fires on the same cycle as the final
+beat. Verified via the indexed-dst case (matches Musashi exactly, 19/19
+cycles, confirming no interaction with the pre-existing
+`dyn_bit_get_Dn` swap) and a non-indexed auto-increment hazard test plus
+its non-hazard control, both firing live with zero artificial stall
+needed. Full mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8,
+`cosim_memind` 29/29, `dat-synth` 50/50), full 124-suite Harte sweep
+bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash

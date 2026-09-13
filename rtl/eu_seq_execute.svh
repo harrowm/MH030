@@ -5335,6 +5335,42 @@
     assign bcds_final_ack = ex_valid && ex_is_abcd_sbcd_mem && bcds_run_r &&
                             bcds_phase_r == 2'd2 && mem_ack;
 
+    // Track 3 #10 (MOVE mem-to-mem indexed-dst, wobbly-honking-cascade.md):
+    // `ex_is_move_mm`'s own 2-phase FSM (read source, then
+    // `move_mm_run_r`=write phase) is ALSO one of `dyn_bit_get_Dn`'s 5
+    // consumer families -- but that swap fires at the SOURCE READ's own
+    // ack (`ex_is_mem_rd && mem_ack`, explicitly excluding
+    // `move_mm_run_r`/`move_mm_after_r` in its own formula), a
+    // completely different cycle than this family's own final beat
+    // (`move_mm_run_r && mem_ack`, the WRITE ack) -- no collision.
+    // **Confirmed SAFE from the Phase 264/PMOVE64-shaped regression, but
+    // for a different reason than every later family**: `dec_is_move_mm`
+    // DOES set `dec_is_mem_rd=1` for its own source-read phase (matching
+    // PMOVE64's own exposure shape) -- but `ex_mem_stall` ALREADY
+    // includes `move_mm_read_ack` as its own dedicated OR-term (pre-
+    // existing, not added by this track), so the ordinary trigger's own
+    // `!ex_mem_stall` already correctly excludes the read-ack moment;
+    // this family's own history already closed the exact gap PMOVE64
+    // exposed, before Track 3 ever started. **New hazard signal needed**:
+    // `move_mm_dst_an_wr_en` (the destination An auto-inc/dec update, for
+    // non-indexed destination EA forms only -- indexed destinations never
+    // set `move_mm_dst_an_upd_r`) fires on the EXACT SAME cycle as this
+    // family's own final beat (`move_mm_run_r && mem_ack`), the PACK
+    // shape, not the ADDX-mem shape. `move_mm_hazard` protects against
+    // it; naturally 0 for the indexed-destination sub-case the plan's
+    // own item name specifically flags (the higher-risk `dyn_bit_get_Dn`
+    // consumer), since indexed EA never sets `move_mm_dst_an_upd_r` at
+    // all. No Dn register write exists via the generic `wr_en` path
+    // (confirmed -- no `move_mm_*_wr_en` term there); the only other
+    // write is CCR (`move_mm_sr_wr_en`), already covered by
+    // `hazard_ccr`. MOVE mem-to-mem never traps or changes flow.
+    logic move_mm_final_ack;
+    assign move_mm_final_ack = ex_is_move_mm && move_mm_run_r && mem_ack;
+    logic move_mm_hazard;
+    assign move_mm_hazard = move_mm_dst_an_wr_en &&
+                            (dec_src_reg == {1'b1, move_mm_dst_an_reg_r} ||
+                             dec_dst_reg == {1'b1, move_mm_dst_an_reg_r});
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5375,7 +5411,7 @@
                                      !ex_mem_stall && !ex_is_move_reg_idx_dst && !ex_is_pmove64) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
-                                    cpsr_final_ack || bcds_final_ack;
+                                    cpsr_final_ack || bcds_final_ack || move_mm_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
@@ -5397,7 +5433,7 @@
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
                         !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
-                        !bf_hazard && !pack_hazard && !need_ext;
+                        !bf_hazard && !pack_hazard && !move_mm_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
