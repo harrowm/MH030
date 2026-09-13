@@ -2187,6 +2187,90 @@ for the *existing*, non-preview addressing paths. A candidate Track 3,
 not started, to be scoped separately (starting with whichever families
 are actually common in real code) only if pursued further.
 
+**Phase 257 (Track 3 scoping — SURVEYED, not implemented,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: the user asked to scope
+out closing the gap for the ~20 special multi-cycle FSMs. Direct
+inspection of every family's own `_run_r`-clearing logic, plus
+`ex_mem_stall`'s own full formula, found a structural property shared
+by **all** of them, reshaping the whole scope: unlike an ordinary read
+(where `ex_mem_stall` clears the *same* cycle `mem_ack` arrives, letting
+Track 1/2's `!ex_mem_stall` serve directly as the preview trigger),
+every special FSM's own `_run_r` flag clears **one cycle after** its own
+final beat's `mem_ack` — confirmed for `movem_run_r`, `tas_run_r`,
+`cmp2_run_r`, `movep_run_r`, `mem_rmw_run_r`, `cas_write_r`, `cas2_wr2_r`,
+and the `_first_ack`/`_read_ack` signals holding the same property even
+for the *first* beat. `!ex_mem_stall` therefore cannot be reused as
+Track 3's trigger at all; each family needs its own new "genuinely final
+beat, acking this cycle" signal, comparable in derivation effort to the
+one-cycle-gap fixes this project already needed 3 separate times before
+(`tas_memind_pending_r`, `cmp2_memind_first_ack`, `movem_memind_pending_r`
+— Phases 243/244/251) — real per-family work, not a mechanical extension.
+Port contention is a non-issue for all of them (Track 2's dedicated
+`rd_prev_*` ports are never touched by any special FSM). RTR/RTE are not
+applicable at all (already excluded via `ex_redirect_pending`; there's no
+"next" decoded instruction to preview at the moment a return's own final
+beat acks). Tiered the rest: **Tier 1 (do not pursue)** — TAS/CAS/CAS2/
+general-RMW all sit on or beside this project's own repeatedly-documented
+highest-blast-radius mechanism (the RMW/CAS/CAS2 bus lock, Phases
+108-114/207/233/241/242/250-F1). **Tier 2 (worth it if continuing)** —
+MOVEM (best first candidate: common in real code, no bus lock, the
+final-beat signal is nearly already built), memory-indirect (highest
+leverage — shared by 9 other families — but highest complexity, 4 prior
+phases already found bugs in it; attempt only after MOVEM), CMP2/CHK2
+(has its own reusable one-cycle-gap precedent). **Tier 3 (low value)** —
+MOVEP/ADDX/bitfields/PACK/PMOVE64/cpSAVE-cpRESTORE/BCD/MOVE-mem-to-mem/
+CMPM: all rare in real code, same investigation cost as Tier 2 for much
+less payoff. No RTL changed this phase — a survey only, matching this
+project's own Stage 9 (Phase 235) precedent of scoping before
+implementing.
+
+**Superseded by Phase 258** (see below): the user explicitly rejected
+this survey's own tiered recommendation ("we need to do them all .. it
+isn't optional not to be cycle accurate") — every family below except
+the structurally-inapplicable RTR/RTE is now being implemented and
+verified in order, including Tier 1 (TAS/CAS/CAS2/general RMW). The risk
+tiers above still inform ORDER (safest-first), not exclusion.
+
+**Phase 258 (Track 3 #1: MOVEM preview — IMPLEMENTED AND VERIFIED,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: the first of 16 special-
+FSM families now being closed in full per the user's explicit directive.
+Added `movem_hazard` — MOVEM writes registers via its own direct
+`wr_sel=movem_wr_en?movem_reg_sel:...` port, completely bypassing the
+generic `hazard_ex`/`hazard_wb` mechanism every other family's preview
+relies on, so a dedicated hazard signal was required: `movem_wr_en`'s
+own load-mode write to `movem_reg_sel`, OR `movem_an_wr_en`'s predec/
+postinc base-register update to `{1'b1,movem_an_r}`, checked against
+both `dec_src_reg` and `dec_dst_reg` (either could carry the field the
+active preview sub-case uses). The trigger itself is
+`preview_current_ready` — the ordinary-read case OR'd with `movem_last`
+(an already-existing "final beat, acking this cycle" signal, built for
+MOVEM's own register-loop termination) — since `ex_mem_stall` does NOT
+clear the same cycle as MOVEM's own final `mem_ack` (confirmed via
+direct inspection, matching Phase 257's own "every special FSM clears
+`_run_r` one cycle late" finding), ruling out reusing `!ex_mem_stall` as
+Track 1/2 do. `preview_ok` gained a `!movem_hazard` term, trivially 0
+(harmless) whenever `movem_run_r=0`. **Verified the mechanism actually
+engages, not just stays safely inert**: this project's own established
+"isolated, zero-head-start" test convention initially showed `dec_valid=0`
+at `movem_last` (the same prefetch-queue-depth limitation Phase 256
+documented) — resolved with the same proven fix, an artificial `MULU.L`
+stall giving the IFU's own readahead a head start. A temporary debug
+trace then directly confirmed both directions: `movem_hazard=1`/
+`preview_ok=0` when NEXT's own base register is the one MOVEM just
+loaded as its final register (`tests/timing_preview_movem_hazard2.s`),
+and `movem_hazard=0`/`preview_ok=1`/`preview_addr` exactly correct when
+NEXT's base is untouched by MOVEM (`tests/timing_preview_movem_hazard3.s`).
+Both variants' own bus traces show only the already-documented benign
+IFU-readahead fetch-reordering artifact relative to Musashi (identical
+set of accesses, different fetch/data interleaving), not a data error —
+the debug trace itself was removed before shipping. The original,
+zero-artificial-stall cosim hazard test (`tests/timing_preview_movem_hazard.s`)
+matches Musashi's own bus trace exactly (23/23 cycles) and is the one
+kept as a permanent, dedicated regression test. Full mandatory gate
+clean (`make test` 37/37, `cosim_grp` 8/8, `cosim_memind` 29/29,
+`dat-synth` 50/50), full 124-suite Harte sweep bit-identical to baseline
+(`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
 ## Verification Commands
 
 ```bash

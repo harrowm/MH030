@@ -5078,9 +5078,41 @@
     // `ex_redirect_pending`'s own declaration/comment above) -- reusing
     // that existing signal directly rather than re-deriving the same
     // exclusion list by hand.
-    assign preview_ok = ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
-                        !ex_mem_stall && !ex_redirect_pending &&
-                        !ex_is_move_reg_idx_dst &&
+    // Track 3 #1 (MOVEM, wobbly-honking-cascade.md): MOVEM writes
+    // registers via its own direct wr_en/movem_reg_sel port -- NOT
+    // through ex_dest_reg/wb_dest_reg, so hazard_ex/hazard_wb's own
+    // generic check never sees these writes at all (confirmed by direct
+    // inspection: `assign wr_sel = movem_wr_en ? movem_reg_sel : ...`,
+    // a completely separate path). Two hazard sources, both landing on
+    // the exact cycle `movem_last` fires (one cycle before the write
+    // itself commits -- the same "this cycle still reads the OLD value"
+    // timing every synchronous write has): (1) `movem_wr_en` (load
+    // mode): the register `movem_reg_sel` names is being loaded THIS
+    // cycle; (2) `movem_an_wr_en` (predec/postinc): the base An register
+    // is being updated THIS cycle regardless of load/store direction.
+    // NEXT's own preview must not read either as its own An/Xn/write-
+    // source -- checked against both `dec_src_reg` and `dec_dst_reg`
+    // since either could be the field the active preview sub-case uses.
+    logic movem_hazard;
+    assign movem_hazard = (movem_wr_en && (dec_src_reg == movem_reg_sel || dec_dst_reg == movem_reg_sel)) ||
+                          (movem_an_wr_en && (dec_src_reg == {1'b1, movem_an_r} || dec_dst_reg == {1'b1, movem_an_r}));
+
+    // preview_current_ready: "CURRENT is genuinely handing off the bus
+    // this cycle, safe to preview NEXT" -- the ordinary read case (its
+    // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
+    // project's own established convention), OR `movem_last` (already a
+    // combinational "final beat, acking this cycle" signal built for
+    // MOVEM's own register-loop termination -- see its own declaration
+    // comment; `ex_mem_stall` does NOT clear on this same cycle for
+    // MOVEM, confirmed via direct inspection of every special-FSM
+    // `_run_r`-clearing block, so it cannot be reused as the trigger
+    // here the way it is for the ordinary case).
+    logic preview_current_ready;
+    assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
+                                     !ex_mem_stall && !ex_is_move_reg_idx_dst) ||
+                                    movem_last;
+
+    assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&
                         // Track 2 Stage 2.2: NEXT may now be an ordinary
                         // read OR a plain register-source write (never
@@ -5099,7 +5131,7 @@
                         // else), so that restriction no longer applies --
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
-                        !hazard_ex && !hazard_wb && !hazard_ccr && !need_ext;
+                        !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !need_ext;
 
     assign mem_req   = preview_ok ||
                        movem_run_r || tas_run_r  || tas_memind_pending_r || cmp2_run_r  || movep_run_r ||
