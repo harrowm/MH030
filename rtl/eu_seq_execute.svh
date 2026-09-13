@@ -5506,6 +5506,48 @@
     assign mem_rmw_hazard = mem_rmw_an_wr_en && (dec_src_reg == {1'b1, ex_an_upd_reg} ||
                                                    dec_dst_reg == {1'b1, ex_an_upd_reg});
 
+    // Track 3 #14 (TAS, wobbly-honking-cascade.md, first GENUINELY
+    // bus-locked family): a dedicated re-read of the exact AS-
+    // continuity/`bus_lock`/arbiter mechanics, per the plan's own
+    // explicit Group C methodology, confirmed the following BEFORE any
+    // RTL was touched. `bus_lock` (the REAL, structural continuous-lock
+    // signal `biu_arbiter.sv` uses to suppress DMA grants) is derived
+    // ENTIRELY from `biu_cycle_gen.sv`'s own INTERNAL FSM state
+    // (`state==ST_RMW_READ_S0/S1`, `is_rmw_write`, etc.) -- NOT from
+    // `mem_rmw`/`eu_rmw` staying asserted throughout the locked
+    // sequence. `mem_rmw` (this project's own EU-side dispatch signal,
+    // `assign mem_rmw = ex_valid && ex_is_tas && (ex_is_mem_rd ||
+    // tas_memind_pending_r) && !tas_run_r && !tas_after_write_r`) is
+    // used ONLY to TRIGGER the BIU's own transition INTO the RMW state
+    // sequence (`if (eu_rmw) state_nxt = ST_RMW_READ_S0`); once inside,
+    // `bus_lock` is governed purely by the BIU's own state register,
+    // completely independent of what the EU side's `mem_addr`/`mem_req`
+    // outputs show afterward. This means a preview mechanism that only
+    // ever touches those EU-side OUTPUT signals -- and only at the exact
+    // cycle TAS's own write genuinely ACKS (the same edge the BIU's own
+    // state machine independently reacts to for its own natural
+    // state transition, mirroring the already-proven `eu_continue_ok`
+    // fast path Phase 253 built for ordinary reads/writes) -- cannot
+    // structurally interfere with `bus_lock`'s own drop timing or the
+    // arbiter's own grant continuity. TAS's own final beat:
+    // `tas_run_r && mem_ack` (mirrors the pre-existing `tas_sr_wr_en`'s
+    // own exact condition). **No hazard signal needed at all** (simpler
+    // than every prior family): TAS writes NO Dn/An register through
+    // any port -- only the memory byte itself (bit 7 set, the write
+    // phase's own result) and CCR (`tas_sr_wr_en`, already covered
+    // generically by `hazard_ccr`); TAS's own genuine memory-indirect EA
+    // (`tas_memind_pending_r`) resolves and hands off to `tas_run_r`
+    // BEFORE this trigger, already excluded from memind's own inner
+    // trigger (`!ex_is_tas` in `memind_inner_final_ack`, Task #12).
+    // **Confirmed safe from the Phase 264/PMOVE64-shaped regression**:
+    // TAS's own decode DOES set `dec_is_mem_rd=1` for its read phase,
+    // but `tas_read_ack` (pre-existing, already in `ex_mem_stall`'s own
+    // OR-chain) already covers that moment. TAS never traps or changes
+    // flow (unlike CAS, it always writes back regardless of the tested
+    // value -- no conditional-write trap path to exclude).
+    logic tas_final_ack;
+    assign tas_final_ack = ex_valid && ex_is_tas && tas_run_r && mem_ack;
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5548,7 +5590,7 @@
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
                                     cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack ||
-                                    mem_rmw_final_ack;
+                                    mem_rmw_final_ack || tas_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&

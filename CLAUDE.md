@@ -2648,6 +2648,38 @@ stall needed. Full mandatory gate clean (`make test` 37/37, `cosim_grp`
 sweep bit-identical to baseline (general RMW has genuine Harte coverage
 — ASL/LSL/ROL/etc. memory forms).
 
+**Phase 271 (Track 3 #14: TAS preview — IMPLEMENTED AND VERIFIED, the
+first GENUINELY bus-locked family in this track,
+`~/.claude/plans/wobbly-honking-cascade.md`)**: per the plan's own
+explicit Group C methodology, did a dedicated re-read of the exact
+AS-continuity/`bus_lock`/arbiter mechanics before touching any RTL. Key
+finding: `bus_lock` (the real, structural continuous-lock signal
+`biu_arbiter.sv` uses to suppress DMA grants) is derived entirely from
+`biu_cycle_gen.sv`'s own internal FSM state — not from `mem_rmw`/
+`eu_rmw` staying asserted throughout. `mem_rmw` only TRIGGERS the BIU's
+own transition into the RMW sequence; once inside, `bus_lock` is
+governed purely by the BIU's own state register, independent of the EU
+side's `mem_addr`/`mem_req` outputs afterward — meaning a preview
+mechanism touching only those EU-side outputs, at the exact cycle TAS's
+own write acks (the same edge the BIU's own state machine independently
+reacts to for its natural transition), cannot structurally interfere
+with `bus_lock`'s own drop timing or arbiter continuity. New
+`tas_final_ack = ex_valid && ex_is_tas && tas_run_r && mem_ack`. No
+hazard signal needed at all — TAS writes no Dn/An register through any
+port; only the memory byte and CCR (already covered). Confirmed safe
+from the Phase 264/PMOVE64-shaped regression (`tas_read_ack` already in
+`ex_mem_stall`'s own OR-chain). TAS never traps or changes flow.
+Verified via a producer/NEXT test matching Musashi's bus trace exactly
+(16/16 cycles, including the full RMW-locked sequence), firing live on
+the first attempt. Given the elevated stakes, also directly re-ran
+`tb/stall_fsm_tb.sv`'s own dedicated AS-LOCK/AS-LOCK-MISMATCH tests
+standalone — all 9 checks passed, including arbitration-continuity
+proofs (IFU never grants during the locked window, EU grant never
+drops). Full mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8,
+`cosim_memind` 29/29, `dat-synth` 50/50), full 124-suite Harte sweep
+bit-identical to baseline — despite touching the project's single
+highest-blast-radius mechanism.
+
 ## Verification Commands
 
 ```bash
