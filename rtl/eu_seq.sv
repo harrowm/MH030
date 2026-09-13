@@ -649,6 +649,7 @@ module eu_seq (
     // -----------------------------------------------------------------------
 `include "eu_seq_decode.svh"
 `include "eu_seq_execute.svh"
+`include "eu_seq_preview.svh"
 
     // 10-item backlog Stage 5 (plan.md): need_ext itself is declared inside
     // eu_seq_execute.svh, only in scope from this point on -- assign the
