@@ -5612,6 +5612,44 @@
     assign cas_hazard = cas_dc_wr_en && (dec_src_reg == cas_dc_reg_r ||
                                           dec_dst_reg == cas_dc_reg_r);
 
+    // Track 3 #16 (CAS2, wobbly-honking-cascade.md, the LAST family in
+    // this whole track): direct inspection of CAS2's own 6-8-phase FSM
+    // (rd1-ack -> rd2_r -> [get_du1_r -> wr1_r -> get_du2_r -> wr2_r] on
+    // MATCH, or [dc1_wr_r -> dc2_wr_r] on MISMATCH -> after_r either way)
+    // found this family is structurally SIMPLER to close than single
+    // CAS, not harder, despite chaining twice as many sub-cycles: BOTH
+    // completion paths funnel through the SAME unified `cas2_after_r`
+    // cooldown step before `cas2_active_r` itself clears --
+    // `cas2_after_r <= (cas2_wr2_r && mem_ack) || cas2_dc2_wr_r`, and
+    // `cas2_active_r <= 1'b0` fires only inside the `cas2_after_r`
+    // branch, for MATCH and MISMATCH alike. This differs from single
+    // CAS, whose mismatch path clears `cas_active_r` immediately with NO
+    // cooldown step at all. New `cas2_final_ack = cas2_after_r` --
+    // fires precisely when `cas2_active_r` itself is captured
+    // transitioning to 0, the same timing relationship every other
+    // family's own final-beat trigger relies on.
+    // **No hazard signal needed at all**, confirmed by tracing exactly
+    // when CAS2's own two register writes commit relative to this
+    // trigger: `cas2_dc1_wr_en`/`cas2_dc2_wr_en` (Dc1/Dc2's own
+    // mismatch-path loads, via the SAME shared `wr2_en`/`wr2_sel` second
+    // direct port single CAS's own `cas_dc_wr_en` uses) fire at
+    // `cas2_dc1_wr_r`/`cas2_dc2_wr_r` respectively -- ONE and TWO cycles
+    // BEFORE `cas2_after_r` (this new trigger), not on the same cycle --
+    // both are already safely committed to the register file well before
+    // the trigger ever fires (the ADDX-mem/BCD-mem shape, not the
+    // MOVEM/single-CAS shape). No An-update mechanism exists for CAS2 at
+    // all (confirmed -- no `cas2_an_wr_en` signal anywhere; real CAS2
+    // uses plain register-indirect Rn1/Rn2 addressing only, no
+    // auto-inc/dec). CCR (`cas2_sr_wr_en`) is already covered generically
+    // by `hazard_ccr`. **Confirmed safe from the Phase 264/PMOVE64-
+    // shaped regression**: CAS2's own decode DOES set `dec_is_mem_rd=1`
+    // for its first read phase, but `cas2_rd1_ack` (pre-existing,
+    // already in `ex_mem_stall`'s own OR-chain) already covers that
+    // moment -- the same "already closed before Track 3" pattern every
+    // prior `dec_is_mem_rd`-setting family in this track has shown.
+    logic cas2_final_ack;
+    assign cas2_final_ack = cas2_after_r;
+
     // preview_current_ready: "CURRENT is genuinely handing off the bus
     // this cycle, safe to preview NEXT" -- the ordinary read case (its
     // own `ex_mem_stall` clears the same cycle as `mem_ack`, the
@@ -5654,7 +5692,8 @@
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
                                     cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack ||
-                                    mem_rmw_final_ack || tas_final_ack || cas_final_ack;
+                                    mem_rmw_final_ack || tas_final_ack || cas_final_ack ||
+                                    cas2_final_ack;
 
     assign preview_ok = preview_current_ready && !ex_redirect_pending &&
                         dec_valid &&

@@ -1879,6 +1879,65 @@ STATUS's other 3 sub-cases + REFILL# (Phase 248 item #5); PTEST's
 DSACK-breadth exclusion + I-cache CEI's per-line-only limitation (both
 pre-existing architecture boundaries, not bugs).
 
+**Phases 258-273 (Track 3: closing the back-to-back bus-cycle dispatch
+gap for all ~20 special multi-cycle instruction FSMs — IMPLEMENTED AND
+VERIFIED IN FULL, `~/.claude/plans/wobbly-honking-cascade.md`)**: Phase
+257 scoped this as a large, risk-tiered program; the user rejected
+deferring any tier ("we need to do them all .. it isn't optional not to
+be cycle accurate"), so all 16 families were implemented and verified
+one at a time, safest-to-riskiest, each with its own full mandatory gate
++ Harte sweep before moving to the next. Every family follows the same
+shape: a new dedicated "genuinely final beat, acking this cycle"
+combinational signal added as an OR-term to `preview_current_ready`
+(`rtl/eu_seq_execute.svh`), since Phase 257's own universal finding
+confirmed every special FSM's `_run_r`-clearing flag clears ONE CYCLE
+AFTER its own final `mem_ack` (unlike an ordinary read, where
+`ex_mem_stall` clears the SAME cycle) — `!ex_mem_stall` can never be
+reused directly as a Track 3 trigger. Families in order: MOVEM (#1,
+Phase 258, `movem_hazard` for the direct-port register write),
+CMP2/CHK2 (#2, Phase 259, `cmp2_final_ack` excludes `chk_trap`), MOVEP
+(#3, Phase 260, `movep_hazard`), ADDX/SUBX-mem (#4, Phase 261, no hazard
+— Ay/Ax commit a full phase early), bitfield-mem (#5, Phase 262,
+`bf_hazard`; found+documented, not fixed, a pre-existing longword-only
+sizing bug), PACK/UNPK-mem (#6, Phase 263, `pack_hazard`; found+
+documented, not fixed, a pre-existing source-byte-read-order bug vs.
+Musashi), PMOVE64 (#7, Phase 264, no hazard; **found and fixed a real
+regression** — PMOVE64 uniquely sets `dec_is_mem_rd=1`, so the ordinary
+preview clause misfired one beat early; a first fix extending
+`ex_mem_stall` caused a genuine sim hang in an unrelated test, reverted
+in favor of excluding `ex_is_pmove64` from only the ordinary clause —
+see `feedback_shared_stall_signal_blast_radius.md`), cpSAVE/cpRESTORE
+(#8, Phase 265, no hazard; verified via `tb/eu_seq_tb.sv`'s own existing
+test, no Musashi coprocessor model exists), BCD-mem (#9, Phase 266, no
+hazard), MOVE mem-to-mem indexed-dst (#10, Phase 267, `move_mm_hazard`),
+CMPM (#11, Phase 268, `cmpm_hazard`), memory-indirect/Group B (#12,
+Phase 269, `memind_addr_hazard`/`memind_wr_hazard`, the highest-leverage
+family — shared by 9 others), general RMW (#13, Phase 270,
+`mem_rmw_hazard`; confirmed NOT bus-locked, a plain 2-phase FSM; found
++documented, not fixed, a Musashi word-read address-logging quirk),
+TAS (#14, Phase 271, no hazard, first genuinely bus-locked family —
+confirmed `bus_lock` is entirely BIU-internal-FSM-state-driven, never
+touched by the EU-side preview outputs), CAS (#15, Phase 272,
+`cas_hazard`; confirmed CAS's own `cas_get_du_r` bus-release gap and
+`eu_cas_hold` sticky-grant mechanism are untouched by the new trigger),
+and **CAS2 (#16, Phase 273, THE LAST FAMILY — no hazard needed;
+`cas2_final_ack = cas2_after_r`, simpler than single CAS since both
+match/mismatch paths funnel through one unified completion signal)**.
+Each family got its own dedicated cosim hazard test (or, for
+cpSAVE/cpRESTORE, a direct EU-level trace against pre-existing
+coverage) matching Musashi's bus trace exactly. Full mandatory gate
+clean and full 124-suite Harte sweep bit-identical to baseline
+(`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`) after every single family.
+**This closes Track 3, and the entire `wobbly-honking-cascade.md` plan
+(Tracks 1+2+3), in full** — real 68030 silicon's own chained
+back-to-back bus-cycle timing (MC68030UM.pdf Figure 7-25) is now matched
+for essentially every instruction combination in the chip. RTR/RTE
+remain the one confirmed structural exception (not a risk exclusion):
+there is no "next" instruction for `dec_valid` to reflect at the moment
+a return's own final beat acks, since the return address itself isn't
+known until that beat completes — real silicon has this identical
+floor.
+
 **Phase 254 (closing layer 3's own dispatch floor for a narrow slice —
 IMPLEMENTED AND VERIFIED, `~/.claude/plans/wobbly-honking-cascade.md`)**:
 Phase 253 confirmed `biu_cache_if.sv`'s own one-tick `CI_IDLE` floor was
