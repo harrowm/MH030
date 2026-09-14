@@ -80,10 +80,55 @@ module read_cycle_eu_tb;
         end
     end
 
-    wire dsack0_n = ~ds_active_r2;
-    wire dsack1_n = ~ds_active_r2;
+    // Device-side data/DSACK hold, MC68030UM.pdf State 5 text (same
+    // section the DSACK-vs-DBEN assert-edge alignment above already
+    // draws on): "The external device keeps its data and DSACKx signals
+    // asserted until it detects the negation of AS or DS... The device
+    // must remove its data and negate DSACKx within approximately one
+    // clock period after sensing the negation of AS or DS." Modeled as a
+    // genuine ~1-external-clock (4-tick) hold past /AS-/DS negation,
+    // rather than the previous behavior (data/DSACK dropping essentially
+    // immediately, ~2 ticks, an incidental side effect of the assert-side
+    // pipeline depth rather than a deliberate hold). Testbench-only, same
+    // scope/reasoning as the assert-edge fix.
+    localparam int HOLD_TICKS = 4;
+    logic [2:0] hold_cnt_r;
+    logic       hold_active_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            hold_cnt_r    <= '0;
+            hold_active_r <= 1'b0;
+        end else if (ds_active_r2) begin
+            hold_cnt_r    <= HOLD_TICKS[2:0];
+            hold_active_r <= 1'b1;
+        end else if (hold_cnt_r != 0) begin
+            hold_cnt_r    <= hold_cnt_r - 3'd1;
+            hold_active_r <= 1'b1;
+        end else begin
+            hold_active_r <= 1'b0;
+        end
+    end
 
-    wire [31:0] ext_d_in = (!ext_ds_n & ext_rw) ? rd_word : {32{1'bz}};
+    // Latch rd_word while ds_active_r2 is genuinely true, and drive the
+    // LATCHED value through the hold window instead of re-deriving
+    // rd_word live from ext_a -- ext_a itself reads 0 for one state after
+    // /AS negates (biu_cycle_gen.sv's own address/FC output mux has no
+    // explicit drive for that state, architecturally don't-care since
+    // nothing samples the address once /AS is negated; left as-is per
+    // its own investigation). Without this latch, the extended hold
+    // window below would show a spurious rom[0] read instead of
+    // continuing to hold the real just-latched value.
+    logic [31:0] held_data_r;
+    always_ff @(posedge clk_4x) begin
+        if (ds_active_r2) held_data_r <= rd_word;
+    end
+
+    wire dev_data_valid = ds_active_r2 || hold_active_r;
+    wire dsack0_n = ~dev_data_valid;
+    wire dsack1_n = ~dev_data_valid;
+
+    wire [31:0] ext_d_in = ds_active_r2 ? rd_word :
+                            hold_active_r ? held_data_r : {32{1'bz}};
 
     always_ff @(posedge clk_4x) begin
         if (ds_active_r2 && !ext_ds_n && !ext_as_n && !ext_rw && ext_d_oe) begin

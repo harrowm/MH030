@@ -293,14 +293,19 @@ def main():
         return wave
 
     def wave_and_data_for_byte_lane(byte_idx):
-        # Gated on /DBEN rather than /AS: /DBEN is the manual's own "data
-        # bus enable" signal (asserted once the device is expected to be
-        # presenting valid data, MC68030UM.pdf S2/table 7-x), so gating on
-        # it (rather than the wider /AS window) avoids showing a value
-        # before the bus cycle has actually reached that point -- matching
-        # the manual's own single clean data-valid box per cycle instead of
-        # a spurious one-column "00" placeholder at the very start of /AS.
-        dben_vid = name_to_id['ext_dben_n']
+        # Gated on /DSACK0 rather than /DBEN or /AS. MC68030UM.pdf's own
+        # State 5 text ties DATA validity to the device's own DSACKx hold,
+        # not to /DBEN specifically: "the external device keeps its data
+        # and DSACKx signals asserted until it detects the negation of AS
+        # or DS... must remove its data and negate DSACKx within
+        # approximately one clock period after" -- /DBEN is a CPU-side
+        # buffer-enable output with its own, separately-confirmed-correct
+        # timing (asserted one clock after cycle start, negated with /DS),
+        # but it says nothing about how long the DEVICE itself continues
+        # driving data afterward, which is what this row is meant to show.
+        # Gating on /DSACK0 (rather than the wider /AS window) still avoids
+        # showing a value before the cycle has actually reached that point.
+        dsack_vid = name_to_id['dsack0_n']
         siz_vid = name_to_id['ext_siz']
         a_vid = name_to_id['ext_a']
         d_vid = name_to_id['ext_d_in']
@@ -309,12 +314,12 @@ def main():
         prev_kind = None  # None | 'blank' | 'data'
         prev_hex = None
         for t in columns:
-            dben_v = value_at(changes[dben_vid], t)
+            dsack_v = value_at(changes[dsack_vid], t)
             siz_iv = bin_to_int(value_at(changes[siz_vid], t))
             a_iv = bin_to_int(value_at(changes[a_vid], t))
             d_iv = bin_to_int(value_at(changes[d_vid], t))
             hv = None
-            if dben_v == '0' and siz_iv is not None and a_iv is not None and d_iv is not None:
+            if dsack_v == '0' and siz_iv is not None and a_iv is not None and d_iv is not None:
                 lanes = active_lanes(siz_iv, a_iv & 0b11)
                 if byte_idx in lanes:
                     shift = (3 - byte_idx) * 8
@@ -410,7 +415,11 @@ def main():
     for name, label in ACTIVE_LOW_LEVEL_SIGNALS:
         signal_list.append({'name': label, 'wave': wave_for_level(name)})
 
-    signal_list.append({'name': '', 'wave': ''})  # spacer
+    signal_list.append({})  # spacer -- WaveDrom's own blank-row idiom;
+    # {'name': '', 'wave': ''} instead renders a stray hatched placeholder
+    # box at the very start of the row (an artifact of declaring a zero-
+    # length wave, not a real signal), found while investigating the
+    # /DBEN-vs-data-hold question.
     for byte_idx, label in BYTE_LANES:
         wave, data = wave_and_data_for_byte_lane(byte_idx)
         entry = {'name': label, 'wave': wave}

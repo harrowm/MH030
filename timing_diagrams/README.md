@@ -201,6 +201,55 @@ closer visual comparison, not an RTL or protocol change (`/DSACK`
 remains comfortably stable well before the "must be recognized by end
 of S2" zero-wait-state deadline either way).
 
+**`/DBEN` full text audit, and the data bus's own hold time**: after the
+fix above, a separate question came up (data-box timing relative to
+`/DBEN` looked visually different from the manual) — rather than guess
+from the figure alone, did a fresh, from-scratch search of every
+substantive `DBEN` mention in `docs/MC68030UM.pdf`'s own text (§5.6.7,
+§7.1.6, and the shared State 0-5 flowchart prose covering Figures
+7-21/7-22/7-23). Result: **`/DBEN`'s own CPU-side timing has no bug at
+all** — every documented rule (asserted one clock after cycle start and
+negated with `/DS` for reads; asserted with `/AS` and held for the
+cycle's duration for writes; forced inactive at S0) matches
+`biu_cycle_gen.sv`'s own `ext_dben_n` expression exactly, confirmed both
+by reading the code and by direct VCD measurement. The text also
+independently re-confirms the `/DBEN`-`/DSACK` co-timing fix above
+("during S2... the processor asserts DBEN... **concurrently**, the
+selected device asserts DSACKx").
+
+What the text *did* surface, previously missed: the same State 5
+paragraph says "the external device keeps its data and DSACKx signals
+asserted until it detects the negation of AS or DS... must remove its
+data and negate DSACKx within **approximately one clock period after**"
+— a real, documented device-side hold time past `/AS`/`/DS` negation,
+which is a property of the *device* (this testbench's own memory
+model), not `/DBEN` or any CPU-side signal. `tb/read_cycle_eu_tb.sv`
+previously dropped `/DSACK`/data essentially immediately (~2 ticks, an
+incidental side effect of the assert-side pipeline depth, not a
+deliberate hold) — added an explicit ~1-external-clock (4-tick) hold
+past negation instead, and latched the held data value rather than
+re-deriving it live from `ext_a` (which itself reads 0 for one state
+after `/AS` negates — harmless for the CPU, since nothing samples the
+address then, but it would have produced a spurious stale-address read
+if the extended hold naively re-sampled memory through it). The
+byte-lane display itself (`scripts/vcd_to_wavedrom.py`) was also
+switched from gating on `/DBEN` to gating on `/DSACK0`, since the
+manual's own text ties data validity to the device's `DSACKx` hold, not
+to `/DBEN` specifically — this is a shared rendering change (applies to
+all three diagrams), but is a strict accuracy improvement, not a
+behavior change, for the other two (their own existing memory models
+already have a small incidental `/DSACK` hold past negation of their
+own, just not a deliberately-modeled one). All testbench/rendering-only
+— no RTL touched.
+
+**The small hatched box** that used to appear between `/DBEN` and the
+data-lane rows was an unrelated rendering artifact, found while
+investigating this: the spacer entry between the control-signal group
+and the data lanes was `{'name': '', 'wave': ''}`, which WaveDrom
+renders as a stray placeholder box rather than genuine blank space.
+Fixed by using WaveDrom's own documented blank-row idiom, a bare `{}`,
+instead.
+
 Needs its own test hex (`../tests/timing_manual_chain.hex`, already
 assembled and committed) — see `Makefile`'s own `TOP_SRCS` for the
 fuller RTL file list a full-CPU diagram needs versus a standalone-BIU one.
