@@ -34,9 +34,11 @@ TOP_SRCS := $(RTL)/m68030_top.sv $(RTL)/m68030_biu.sv $(RTL)/biu_cycle_gen.sv \
             $(RTL)/biu_burst_ctrl.sv $(EU_SRCS) $(RTL)/m68030_ifu.sv $(RTL)/m68030_seq.sv \
             $(RTL)/m68030_exc.sv $(RTL)/m68030_mmu.sv
 
-.PHONY: all read_cycle read_cycle_eu preview_dispatch clean
+.PHONY: all read_cycle read_cycle_eu preview_dispatch manual_722 manual_723 \
+        manual_725 manual_726 manual_728 manual_730 clean
 
-all: read_cycle read_cycle_eu preview_dispatch
+all: read_cycle read_cycle_eu preview_dispatch manual_722 manual_723 \
+     manual_725 manual_726 manual_728 manual_730
 
 # ── read_cycle: Figure 7-21's own leftmost cycle (single word read) ────────
 read_cycle: generated/read_cycle_sim.png generated/read_cycle_manual.png
@@ -94,5 +96,99 @@ specs/preview_dispatch.json: preview_dispatch.vcd scripts/vcd_to_wavedrom.py
 generated/preview_dispatch_sim.png: specs/preview_dispatch.json
 	npx --yes wavedrom-cli -i $< -p $@
 
+# ── manual_725/726/730: same inline-32-bit-port-model shape as
+# read_cycle_eu, different test program/testbench per figure. All three
+# reuse the Figure 7-21 manual crop's own established recipe (own
+# manual_NNN.png crop instead, generated once already via
+# scripts/crop_manual_page.sh -- see diagrams.md for the page numbers).
+manual_725: generated/manual_725_sim.png
+
+sim_manual_725: tb/manual_725_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_725_tb.sv
+
+manual_725.vcd: sim_manual_725 ../tests/timing_manual_725.hex
+	$(VVP) sim_manual_725
+
+specs/manual_725.json: manual_725.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_725.vcd -o $@ --cycles 4 --margin-cycles 2
+
+generated/manual_725_sim.png: specs/manual_725.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_726: generated/manual_726_sim.png
+
+sim_manual_726: tb/manual_726_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_726_tb.sv
+
+manual_726.vcd: sim_manual_726 ../tests/timing_manual_726.hex
+	$(VVP) sim_manual_726
+
+specs/manual_726.json: manual_726.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_726.vcd -o $@ --cycles 3 --margin-cycles 2
+
+generated/manual_726_sim.png: specs/manual_726.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_730: generated/manual_730_sim.png
+
+sim_manual_730: tb/manual_730_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_730_tb.sv
+
+manual_730.vcd: sim_manual_730 ../tests/timing_manual_730.hex
+	$(VVP) sim_manual_730
+
+specs/manual_730.json: manual_730.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_730.vcd -o $@ --cycles 1 --margin-cycles 3
+
+generated/manual_730_sim.png: specs/manual_730.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+# ── manual_722/723/728: dynamic-bus-sizing diagrams (8-bit/16-bit port),
+# driven through the real EU/decode pipeline PLUS the shared
+# tb/mem_model.sv (its own configurable PORT_WIDTH parameter is what
+# actually produces the multi-beat dynamic-sizing split these figures
+# show -- the inline 32-bit-only model the other diagrams use can't).
+manual_722: generated/manual_722_sim.png
+
+sim_manual_722: tb/manual_722_tb.sv $(TOP_SRCS) ../tb/mem_model.sv
+	$(IVERILOG) -o $@ $(TOP_SRCS) ../tb/mem_model.sv tb/manual_722_tb.sv
+
+manual_722.vcd: sim_manual_722 ../tests/timing_manual_722.hex
+	$(VVP) sim_manual_722
+
+specs/manual_722.json: manual_722.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_722.vcd -o $@ --cycles 4 --margin-cycles 2
+
+generated/manual_722_sim.png: specs/manual_722.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_723: generated/manual_723_sim.png
+
+sim_manual_723: tb/manual_723_tb.sv $(TOP_SRCS) ../tb/mem_model.sv
+	$(IVERILOG) -o $@ $(TOP_SRCS) ../tb/mem_model.sv tb/manual_723_tb.sv
+
+manual_723.vcd: sim_manual_723 ../tests/timing_manual_723.hex
+	$(VVP) sim_manual_723
+
+specs/manual_723.json: manual_723.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_723.vcd -o $@ --cycles 2 --margin-cycles 2
+
+generated/manual_723_sim.png: specs/manual_723.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_728: generated/manual_728_sim.png
+
+sim_manual_728: tb/manual_728_tb.sv $(TOP_SRCS) ../tb/mem_model.sv
+	$(IVERILOG) -o $@ $(TOP_SRCS) ../tb/mem_model.sv tb/manual_728_tb.sv
+
+manual_728.vcd: sim_manual_728 ../tests/timing_manual_728.hex
+	$(VVP) sim_manual_728
+
+specs/manual_728.json: manual_728.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_728.vcd -o $@ --cycles 2 --margin-cycles 2
+
+generated/manual_728_sim.png: specs/manual_728.json
+	npx --yes wavedrom-cli -i $< -p $@
+
 clean:
-	rm -f sim_read_cycle sim_preview_dispatch *.vcd
+	rm -f sim_read_cycle sim_preview_dispatch sim_manual_* *.vcd
