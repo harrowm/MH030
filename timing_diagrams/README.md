@@ -58,13 +58,18 @@ display server needed) — no local install required beyond Node/npm.
      longword continuously regardless of `SIZ`, unlike real silicon,
      where an unselected lane may not be driven by anything at all.
    - A synthetic `S-STATE (RTL)` lane reports the BIU's own `s_state`
-     output, relabeled sequentially (`S0`, `S1`, ...) each time it
-     leaves `ST_IDLE` — an honest report of how many distinct internal
-     states this RTL actually visits per cycle, not a claim that it
-     matches the manual's own `S0`/`S2`/`S4` numbering label-for-label
-     (the manual labels only every other real S-state; this RTL's own
-     `state` enum skips two *different* named states for an ordinary
-     read — see `CLAUDE.md`'s own "S-State Signal Timing" section).
+     output, relabeled sequentially (`S0`, `S1`, ...) and reset to `S0`
+     at the start of each new bus cycle — either on leaving `ST_IDLE`,
+     or on a fresh `/AS` assert edge, since chained cycles with zero
+     idle gap between them never pass through `ST_IDLE` at all and
+     would otherwise number straight through an unbroken chain instead
+     of resetting per cycle the way the manual's own labeling does. An
+     honest report of how many distinct internal states this RTL
+     actually visits per cycle, not a claim that it matches the
+     manual's own `S0`/`S2`/`S4` numbering label-for-label (the manual
+     labels only every other real S-state; this RTL's own `state` enum
+     skips two *different* named states for an ordinary read — see
+     `CLAUDE.md`'s own "S-State Signal Timing" section).
 3. **`wavedrom-cli`** renders the JSON spec to a PNG.
 4. **`scripts/crop_manual_page.sh`** extracts and crops the corresponding
    manual page (via `pdftoppm`/`imagemagick`) to just the diagram +
@@ -158,12 +163,14 @@ need — the established technique for exercising live preview engagement
 in this project's own otherwise zero-head-start test convention
 (`CLAUDE.md`'s own Phase 256 entry).
 
-**Result: zero gap, matching the manual exactly.** `S-STATE` runs
-continuously `S0` through `S17` across all three chained cycles (6
-states × 3 cycles) with no `--` anywhere — this is not a narrow,
-one-addressing-mode-only result. Tracks 1-3 (`CLAUDE.md`'s own Phase
-254-273 entries) generalized the EU-side preview mechanism, in stages,
-from the single narrow `(An)`-only case first demonstrated here to every
+**Result: zero gap, matching the manual exactly.** `S-STATE` resets to
+`S0` at the start of each of the three chained cycles (`S0`-`S5`
+repeated 3 times, same as the manual's own per-cycle `S0`/`S2`/`S4`
+labeling) with no `--` idle marker anywhere between them — this is not
+a narrow, one-addressing-mode-only result. Tracks 1-3 (`CLAUDE.md`'s own
+Phase 254-273 entries) generalized the EU-side preview mechanism, in
+stages, from the single narrow `(An)`-only case first demonstrated here
+to every
 plain/absolute/indexed EA shape, plain register-source writes, and all
 16 special multi-cycle instruction FSMs (MOVEM, CAS/CAS2, memory-
 indirect, etc.) — and, as directly confirmed while investigating this

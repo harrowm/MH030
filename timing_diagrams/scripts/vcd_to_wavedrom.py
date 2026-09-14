@@ -39,12 +39,20 @@ biu_byte_lane_ctrl.sv performs internally for writes).
 A synthetic "S-STATE" lane is also emitted, derived directly from the
 BIU's own `s_state` output: labeled sequentially (S0, S1, S2, ...) in
 the order distinct state values are actually observed within each bus
-cycle (reset at each ST_IDLE -> non-idle transition), NOT a hardcoded
-reproduction of the RTL's internal enum names (which skip two of the
-eight literal ST_READ_S* values for a plain read) -- this labeling is
-therefore an honest, self-consistent report of what the RTL actually
-does, not a claim that it matches the manual's own S0/S2/S4 numbering
-label-for-label.
+cycle, renumbered from 0 at the start of each new cycle -- either an
+ST_IDLE -> non-idle boundary, OR a fresh assert edge of the start
+signal (--start-signal, default /AS), since chained cycles with zero
+idle gap between them (the whole point of the Track 1-3 dispatch-gap
+fix, CLAUDE.md) never pass through ST_IDLE at all and would otherwise
+number straight through an unbroken chain (S0..S17 for three chained
+6-state cycles) instead of resetting per cycle like the manual. This is
+NOT a hardcoded reproduction of the RTL's internal enum names (which
+skip two of the eight literal ST_READ_S* values for a plain read) --
+this labeling is an honest, self-consistent report of what the RTL
+actually does (every one of the 6 distinct states it visits gets its
+own label), not a claim that it matches the manual's own S0/S2/S4
+numbering label-for-label (the manual only labels every other state;
+this project's internal clock has no equivalent "skip" to mirror).
 """
 import argparse
 import json
@@ -318,16 +326,29 @@ def main():
 
     def wave_for_state():
         """Sequential S0/S1/... labels derived from real s_state transitions,
-        renumbered from 0 at each ST_IDLE -> non-idle boundary (ST_IDLE == 1,
-        confirmed against rtl/biu_cycle_gen.sv's own enum)."""
+        renumbered from 0 at each new bus cycle -- either an ST_IDLE ->
+        non-idle boundary (ST_IDLE == 1, confirmed against
+        rtl/biu_cycle_gen.sv's own enum), OR a fresh assert edge of the
+        start signal (--start-signal, default /AS). The second trigger
+        matters because chained cycles with zero idle gap between them
+        (the whole point of the Track 1-3 dispatch-gap fix, CLAUDE.md)
+        never pass through ST_IDLE at all -- without it the count would
+        run on indefinitely across an unbroken chain (S0..S17 for 3
+        chained 6-state cycles) instead of resetting each cycle the way
+        the manual's own S0/S2/S4-per-cycle labeling does."""
         vid = name_to_id['s_state']
+        as_vid = name_to_id[args.start_signal]
         wave = ''
         data = []
         prev_raw = None
+        prev_as = None
         label_n = None  # None while idle
         for t in columns:
             raw = value_at(changes[vid], t)
             iv = bin_to_int(raw)
+            as_v = value_at(changes[as_vid], t)
+            as_fell = (prev_as == '1' and as_v == '0')
+            prev_as = as_v
             if iv is None:
                 wave += 'x'
                 prev_raw = None
@@ -342,10 +363,10 @@ def main():
                 prev_raw = 1
                 label_n = None
                 continue
-            if prev_raw == iv:
+            if prev_raw == iv and not as_fell:
                 wave += '.'
             else:
-                if label_n is None:
+                if label_n is None or as_fell:
                     label_n = 0
                 else:
                     label_n += 1

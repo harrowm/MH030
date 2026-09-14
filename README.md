@@ -135,15 +135,20 @@ FC transitions at the same time as the address, never mid-cycle.
 To sanity-check the S-state timing above against something outside this
 project's own test harness, `timing_diagrams/` generates a bus-cycle
 diagram straight from an Icarus Verilog simulation and places it next
-to the manual's own diagram for the same cycle:
+to the manual's own diagram for the same cycle. The two source images
+have very different native shapes (the manual crop is a tall portrait
+page scan; the simulated waveform is a wide landscape strip), so they're
+stacked here — each at a width suited to its own proportions — rather
+than squeezed into equal-width side-by-side columns, which made the
+wide image illegible:
 
-<table>
-<tr><th>MC68030UM.pdf, Figure 7-21</th><th>This RTL, simulated (driven through the real EU/decode pipeline)</th></tr>
-<tr>
-<td><img src="timing_diagrams/generated/read_cycle_manual.png" width="420"></td>
-<td><img src="timing_diagrams/generated/read_cycle_eu_sim.png" width="420"></td>
-</tr>
-</table>
+**MC68030UM.pdf, Figure 7-21:**
+
+<img src="timing_diagrams/generated/read_cycle_manual.png" width="520">
+
+**This RTL, simulated (driven through the real EU/decode pipeline):**
+
+<img src="timing_diagrams/generated/read_cycle_eu_sim.png" width="1000">
 
 Left: a crop of *Figure 7-21, "Asynchronous Byte and Word Read Cycles —
 32-Bit Port"* (`docs/MC68030UM.pdf`, PDF page 194 / printed page 7-33) —
@@ -157,7 +162,9 @@ all reproduced alongside `/AS`/`/DS`/`/DSACK`/`/DBEN`. `/AS` and `/DS`
 assert together, matching this project's own S-state model above, not
 the manual's own staggered legacy timing notation — and the three
 cycles chain with **zero idle gap**, matching the manual exactly
-(`S-STATE` runs continuously `S0` through `S17`).
+(`S-STATE` resets to `S0` at the start of each cycle, same as the
+manual's own per-cycle `S0`/`S2`/`S4` labeling, with no idle tick
+between cycles).
 
 That zero-gap result wasn't free — closing it is most of what this
 project's own "Track 1-3" effort (`CLAUDE.md`) was about. An earlier,
