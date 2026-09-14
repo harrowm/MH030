@@ -60,19 +60,33 @@ module read_cycle_eu_tb;
 
     wire [31:0] rd_word = (ext_a[13:2] < MEM_WORDS) ? rom[ext_a[13:2]] : 32'hDEAD_DEAD;
 
-    logic ds_active_r;
+    // Two register stages (not the usual one) so DSACK lands on the same
+    // tick /DBEN does (S2, one full S-state after /AS+/DS assert) instead
+    // of a half-state early -- matches MC68030UM.pdf Figure 7-21's own
+    // illustrative device response speed, for a closer visual comparison.
+    // Purely a testbench-side memory-model timing choice (one of several
+    // equally protocol-valid response speeds, all still recognized well
+    // before "DSACK must be stable by end of S2" for a zero-wait-state
+    // cycle) -- not a CPU-side/RTL correctness question, confirmed via
+    // direct VCD measurement before making this change.
+    logic ds_active_r1, ds_active_r2;
     always_ff @(posedge clk_4x or negedge rst_n) begin
-        if (!rst_n) ds_active_r <= 1'b0;
-        else        ds_active_r <= !ext_ds_n & !ext_as_n;
+        if (!rst_n) begin
+            ds_active_r1 <= 1'b0;
+            ds_active_r2 <= 1'b0;
+        end else begin
+            ds_active_r1 <= !ext_ds_n & !ext_as_n;
+            ds_active_r2 <= ds_active_r1;
+        end
     end
 
-    wire dsack0_n = ~ds_active_r;
-    wire dsack1_n = ~ds_active_r;
+    wire dsack0_n = ~ds_active_r2;
+    wire dsack1_n = ~ds_active_r2;
 
     wire [31:0] ext_d_in = (!ext_ds_n & ext_rw) ? rd_word : {32{1'bz}};
 
     always_ff @(posedge clk_4x) begin
-        if (ds_active_r && !ext_ds_n && !ext_as_n && !ext_rw && ext_d_oe) begin
+        if (ds_active_r2 && !ext_ds_n && !ext_as_n && !ext_rw && ext_d_oe) begin
             if (ext_a[13:2] < MEM_WORDS) begin
                 case ({ext_siz, ext_a[1:0]})
                     4'b00_00: rom[ext_a[13:2]]        <= ext_d_out;

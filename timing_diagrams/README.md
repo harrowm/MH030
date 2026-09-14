@@ -111,8 +111,13 @@ investigation) — that test now asserts the corrected timing instead.
 
 What's now matched: all 3 chained cycles (word + 2 byte reads), the
 A2-A31/A1/A0 split, `/ECS`/`/OCS` (toggling together, matching the
-manual exactly — see below), and the 4-way byte-lane data split with
-values landing in the same lanes at the same cycles as the manual's own
+manual exactly — see below), `/DBEN` landing on the same tick as
+`/DSACK0`/`/DSACK1` (see `read_cycle_eu` below — `/DBEN`'s own timing
+is a real, CPU-side, manual-derived S2 assert; `/DSACK`'s is a
+testbench memory-model response-speed choice, tuned to match the
+manual's own illustrative device rather than the fastest possible
+response), and the 4-way byte-lane data split with values landing in
+the same lanes at the same cycles as the manual's own
 `OP2`/`OP3`/`OP3`/`OP3` boxes. What's still different, and why it's left
 alone rather than "fixed":
 
@@ -170,15 +175,31 @@ labeling) with no `--` idle marker anywhere between them — this is not
 a narrow, one-addressing-mode-only result. Tracks 1-3 (`CLAUDE.md`'s own
 Phase 254-273 entries) generalized the EU-side preview mechanism, in
 stages, from the single narrow `(An)`-only case first demonstrated here
-to every
-plain/absolute/indexed EA shape, plain register-source writes, and all
-16 special multi-cycle instruction FSMs (MOVEM, CAS/CAS2, memory-
-indirect, etc.) — and, as directly confirmed while investigating this
-very diagram, to every access SIZE (byte/word/longword) uniformly, not
-just longword as an earlier draft of this README's own text assumed.
-The only case left showing the gap is a diagram like `read_cycle` itself
-that bypasses the EU on purpose — a property of that testbench, not a
-remaining RTL gap.
+to every plain/absolute/indexed EA shape, plain register-source writes,
+and all 16 special multi-cycle instruction FSMs (MOVEM, CAS/CAS2,
+memory-indirect, etc.) — and, as directly confirmed while investigating
+this very diagram, to every access SIZE (byte/word/longword) uniformly,
+not just longword as an earlier draft of this README's own text
+assumed. The only case left showing the gap is a diagram like
+`read_cycle` itself that bypasses the EU on purpose — a property of
+that testbench, not a remaining RTL gap.
+
+**`/DBEN` vs `/DSACK` timing**: an earlier version of this diagram
+showed `/DBEN` asserting one tick after `/DSACK0`/`/DSACK1`, unlike the
+manual's own co-timed depiction. Checked directly against the VCD
+before changing anything: `/DBEN` was already correct (asserting
+exactly one S-state after `/AS`/`/DS`, matching `biu_cycle_gen.sv`'s
+own manual-derived S2 timing, Phase 248 item #5) — the difference was
+entirely in how fast this testbench's own inline memory model responds
+with `/DSACK` (one tick after `/AS`/`/DS`, a plain single register
+stage). Real `/DSACK` timing is peripheral-dependent; the manual's own
+figure just illustrates one particular (slower) device. Added a second
+register stage (`tb/read_cycle_eu_tb.sv`'s own `ds_active_r1`/
+`ds_active_r2`) so this testbench's device responds at the same speed
+the manual's own example does — a cosmetic, testbench-only tuning for
+closer visual comparison, not an RTL or protocol change (`/DSACK`
+remains comfortably stable well before the "must be recognized by end
+of S2" zero-wait-state deadline either way).
 
 Needs its own test hex (`../tests/timing_manual_chain.hex`, already
 assembled and committed) — see `Makefile`'s own `TOP_SRCS` for the
