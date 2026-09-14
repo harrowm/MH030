@@ -629,9 +629,59 @@
     // clause instead is fully equivalent for preview purposes (PMOVE64
     // already has its own dedicated `pmove64_final_ack` trigger below)
     // and touches nothing else.
+    // Post-Track-3 gap closure (`wobbly-honking-cascade.md`, found while
+    // building the Figure 7-25 read-write-write-read timing diagram):
+    // the ordinary clause above only ever fired when CURRENT was a READ
+    // (`ex_is_mem_rd`) -- an ordinary WRITE as CURRENT never triggered a
+    // preview of NEXT at all, regardless of what NEXT was. Track 2 Stage
+    // 2.2 only ever extended what NEXT is allowed to be (a plain write);
+    // it never extended CURRENT-side eligibility to writes, and no later
+    // Track 3 family closed this either, since all 16 of them are
+    // read-final-beat families. Confirmed empirically before fixing (a
+    // throwaway write-then-write test showed zero `preview_ok`
+    // engagement on either transition, despite both writes acking
+    // cleanly). Fixed by mirroring the read clause exactly, with the
+    // SAME two exclusions and the same justification for each,
+    // re-verified fresh for the write side rather than assumed:
+    //   - `!ex_is_move_reg_idx_dst`: this family's own decode (confirmed
+    //     via direct inspection) never sets `dec_is_mem_rd`, so it could
+    //     never have collided with the read clause above -- but it DOES
+    //     set `dec_is_mem_wr`, so it newly enters scope here. Kept
+    //     excluded, matching the read clause's own conservative posture
+    //     (its original Track 1-era rationale, rd_c port contention, is
+    //     stale post-Track-2 -- preview no longer touches rd_c at all --
+    //     but excluding it costs nothing: a narrow, rare indexed-MOVE-
+    //     write form, not a new gap relative to today).
+    //   - `!ex_is_pmove64`: confirmed via direct decode inspection that
+    //     PMOVE64's own STORE direction (`dec_pmove_to_mem`) ALSO sets
+    //     `dec_is_mem_wr=1'b1` for its own phase-0 write -- the exact
+    //     same shape as the original Phase 264 read-side regression,
+    //     confirmed via inspection before it could ship as a live bug
+    //     this time, not found the hard way again.
+    // **No new hazard signal needed**: confirmed via direct inspection
+    // that `hazard_ex`'s own generic An-update clause already covers
+    // every ordinary write with auto-inc/dec addressing (`ex_an_upd_en
+    // && !ex_is_mem_rmw`, and ordinary writes are not `ex_is_mem_rmw`),
+    // asserted for the instruction's entire EX residency including the
+    // exact cycle this new trigger fires -- the same "generic path
+    // already protects it" shape as ADDX-mem (Track 3 #4), not a new
+    // direct-port write needing its own dedicated signal. CCR is already
+    // covered by `hazard_ccr` generically, as always. Every OTHER
+    // special-FSM family whose own write phase sets the generic
+    // `dec_is_mem_wr` (confirmed via a full survey of all 26
+    // `dec_is_mem_wr=1'b1` decode sites) turned out to be an ordinary,
+    // non-multi-phase instruction (MOVE/PEA/JSR/ALU-to-memory/Scc
+    // variants) except PMOVE64, already excluded above; every
+    // memind-consuming write-shaped family (PEA/JSR/MOVE/Scc via
+    // memind) already explicitly suppresses `dec_is_mem_wr` when
+    // `dec_is_memind` is set (confirmed via direct inspection, mirroring
+    // the identical `dec_is_mem_rd` suppression Track 3 #12 already
+    // relied on) -- safe from this regression shape structurally, not
+    // just by coincidence.
     logic preview_current_ready;
-    assign preview_current_ready = (ex_valid && ex_is_mem_rd && no_special_bus_op && mem_ack &&
-                                     !ex_mem_stall && !ex_is_move_reg_idx_dst && !ex_is_pmove64) ||
+    assign preview_current_ready = (ex_valid && (ex_is_mem_rd || ex_is_mem_wr) && no_special_bus_op &&
+                                     mem_ack && !ex_mem_stall && !ex_is_move_reg_idx_dst &&
+                                     !ex_is_pmove64) ||
                                     movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
