@@ -1134,7 +1134,48 @@ module biu_cache_if (
                         // unchanged and still serves every OTHER entry
                         // point (CI_D_MISS/CI_D_BURST0/CI_D_FILL_3B) --
                         // Track D's later stages, not this one.
-                        state <= CI_IDLE;
+                        //
+                        // Post-Track-3 gap closure (wobbly-honking-cascade.md,
+                        // found while building the Figure 7-25 Read-Write-
+                        // Write-Read timing diagram): unlike CI_D_MISS's own
+                        // completion just above, this state never re-checked
+                        // `eu_new_dispatch` on its own way back to CI_IDLE --
+                        // every WRITE-then-READ-MISS transition therefore
+                        // always took the ordinary one-tick CI_IDLE detour
+                        // even after the EU-side write-as-CURRENT preview fix
+                        // (eu_seq_preview.svh) started correctly asserting
+                        // `eu_new_dispatch` the moment the write's own ack
+                        // fires. Confirmed via direct trace before touching
+                        // this: `preview_ok`/`eu_new_dispatch` were already
+                        // 1 at the exact cycle this block runs; the gap was
+                        // entirely here, this state simply never asking the
+                        // question CI_D_MISS's own completion already does.
+                        // Fixed by mirroring CI_D_MISS's own fast-path check
+                        // verbatim (the same, already twice-hardened
+                        // `eu_new_dispatch`-gated condition -- explicit
+                        // signal, not inferred from address inequality, per
+                        // that mechanism's own documented history) rather
+                        // than inventing a new one: if NEXT is a genuine
+                        // read miss ready to dispatch, skip CI_IDLE entirely
+                        // and land directly in CI_D_MISS; otherwise fall
+                        // through to the unmodified CI_IDLE return exactly
+                        // as before.
+                        if (eu_req && eu_new_dispatch && eu_rw && !dhit && !tc_e &&
+                            !(dcache_en && dburst_en && d_size_ok && !dfreeze_en)) begin
+                            addr_r      <= eu_addr;
+                            wdata_r     <= eu_wdata;
+                            fc_r        <= eu_fc;
+                            rw_r        <= eu_rw;
+                            siz_r       <= eu_siz;
+                            idx_r       <= idx;
+                            woff_r      <= woff;
+                            vtag_r      <= vtag;
+                            fill_base_r <= {eu_addr[31:4], 4'h0};
+                            xl_ci_r     <= 1'b0;
+                            state       <= CI_D_MISS;
+                        end else begin
+                            state <= CI_IDLE;
+                        end
                     end else if (sf_berr) begin
                         xlate_fault_r <= 1'b0;  // real bus error, not a translation fault
                         state <= CI_BERR;
