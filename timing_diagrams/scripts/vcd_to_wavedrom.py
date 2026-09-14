@@ -25,14 +25,20 @@ VCD format notes (see IEEE 1364-2005 Annex A, or just Icarus's own output):
     is naturally insensitive to this, so it's never worth de-duplicating.
 
 Rendered signal set mirrors MC68030UM.pdf Figure 7-21's own layout as
-closely as this project's own m68030_biu ports allow: address split into
-A2-A31/A1/A0 (masking the low 2 bits out of A2-A31 so it reads as
-constant across a same-longword chain, matching the manual), /ECS and
-/OCS included (both are real m68030_biu ports), and the data bus split
-into 4 byte lanes (D24-D31/D16-D23/D8-D15/D0-D7) with only the lane(s)
-actually selected by SIZ+A1/A0 populated per column -- everything else
-matches the underlying real value (mem_model.sv drives the full stored
-longword on every access; the *display* re-derives which lanes a real
+closely as this project's own m68030_biu ports allow, both in which
+signals are shown and their row order (CLK, address, FC, SIZ1, SIZ0,
+R/W, /ECS, /OCS, /AS, /DS, /DSACK0, /DSACK1, /DBEN, then the 4 data
+lanes): address split into A2-A31/A1/A0 (masking the low 2 bits out of
+A2-A31 so it reads as constant across a same-longword chain, matching
+the manual), SIZ1/SIZ0 plotted as two separate single-bit rows rather
+than one combined 2-bit data-box row (matching the manual, which also
+plots them separately), /ECS and /OCS included (both are real
+m68030_biu ports) and ordered before /AS/DS/DSACK/DBEN as the manual
+has them, and the data bus split into 4 byte lanes (D24-D31/D16-D23/
+D8-D15/D0-D7) with only the lane(s) actually selected by SIZ+A1/A0
+populated per column -- everything else matches the underlying real
+value (mem_model.sv drives the full stored longword on every access;
+the *display* re-derives which lanes a real
 32-bit-port peripheral would actually be read from, the same computation
 biu_byte_lane_ctrl.sv performs internally for writes).
 
@@ -157,13 +163,13 @@ def build_columns(changes, clk_id, window_start, window_end):
 
 
 ACTIVE_LOW_LEVEL_SIGNALS = [
+    ('ext_ecs_n',  '/ECS'),
+    ('ext_ocs_n',  '/OCS'),
     ('ext_as_n',   '/AS'),
     ('ext_ds_n',   '/DS'),
     ('dsack0_n',   '/DSACK0'),
     ('dsack1_n',   '/DSACK1'),
     ('ext_dben_n', '/DBEN'),
-    ('ext_ecs_n',  '/ECS'),
-    ('ext_ocs_n',  '/OCS'),
 ]
 
 # byte_index -> (bit_hi, bit_lo) within a 32-bit big-endian D0-D31 bus,
@@ -205,7 +211,6 @@ def main():
 
     bus_signals = [
         ('ext_fc',  'FC0-FC2', 3),
-        ('ext_siz', 'SIZ1-SIZ0', 2),
     ]
 
     wanted = {args.clock, args.start_signal, 'ext_a', 'ext_siz', 'ext_d_in', 's_state'}
@@ -271,8 +276,12 @@ def main():
                 prev = hv
         return wave, data
 
-    def wave_for_addr_bit(bit_index):
-        vid = name_to_id['ext_a']
+    def wave_for_bit(signal_name, bit_index):
+        """Single-bit level waveform extracted from a wider bus signal --
+        used for A1/A0 (out of ext_a) and SIZ1/SIZ0 (out of ext_siz), each
+        plotted as its own row to match the manual's own layout rather
+        than a single combined multi-bit data-box row."""
+        vid = name_to_id[signal_name]
         wave = ''
         prev = None
         for t in columns:
@@ -382,8 +391,8 @@ def main():
 
     addr_wave, addr_data = wave_and_data_for_bus('ext_a', 32, mask_low_bits=2)
     signal_list.append({'name': 'A2-A31', 'wave': addr_wave, 'data': addr_data})
-    signal_list.append({'name': 'A1', 'wave': wave_for_addr_bit(1)})
-    signal_list.append({'name': 'A0', 'wave': wave_for_addr_bit(0)})
+    signal_list.append({'name': 'A1', 'wave': wave_for_bit('ext_a', 1)})
+    signal_list.append({'name': 'A0', 'wave': wave_for_bit('ext_a', 0)})
 
     for name, label, nbits in bus_signals:
         wave, data = wave_and_data_for_bus(name, nbits)
@@ -391,6 +400,11 @@ def main():
         if data:
             entry['data'] = data
         signal_list.append(entry)
+
+    # SIZ1/SIZ0 as two separate single-bit rows (matching the manual's own
+    # layout) rather than one combined 2-bit data-box row.
+    signal_list.append({'name': 'SIZ1', 'wave': wave_for_bit('ext_siz', 1)})
+    signal_list.append({'name': 'SIZ0', 'wave': wave_for_bit('ext_siz', 0)})
 
     signal_list.append({'name': 'R/W', 'wave': wave_for_level('ext_rw')})
     for name, label in ACTIVE_LOW_LEVEL_SIGNALS:
