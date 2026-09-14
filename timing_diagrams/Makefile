@@ -34,9 +34,9 @@ TOP_SRCS := $(RTL)/m68030_top.sv $(RTL)/m68030_biu.sv $(RTL)/biu_cycle_gen.sv \
             $(RTL)/biu_burst_ctrl.sv $(EU_SRCS) $(RTL)/m68030_ifu.sv $(RTL)/m68030_seq.sv \
             $(RTL)/m68030_exc.sv $(RTL)/m68030_mmu.sv
 
-.PHONY: all read_cycle preview_dispatch clean
+.PHONY: all read_cycle read_cycle_eu preview_dispatch clean
 
-all: read_cycle preview_dispatch
+all: read_cycle read_cycle_eu preview_dispatch
 
 # ── read_cycle: Figure 7-21's own leftmost cycle (single word read) ────────
 read_cycle: generated/read_cycle_sim.png generated/read_cycle_manual.png
@@ -55,6 +55,26 @@ generated/read_cycle_sim.png: specs/read_cycle.json
 
 generated/read_cycle_manual.png: scripts/crop_manual_page.sh
 	./scripts/crop_manual_page.sh 194 "1150x1400+0+190" $@
+
+# ── read_cycle_eu: the same Figure 7-21 word/byte/byte chain as
+# read_cycle, but driven through the REAL EU/decode pipeline instead of
+# m68030_biu standalone -- answers whether the gap read_cycle shows
+# between its three cycles is closed once a real decoded instruction
+# stream drives dispatch. Shares generated/read_cycle_manual.png (same
+# figure, same crop) rather than needing its own manual crop.
+read_cycle_eu: generated/read_cycle_eu_sim.png
+
+sim_read_cycle_eu: tb/read_cycle_eu_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/read_cycle_eu_tb.sv
+
+read_cycle_eu.vcd: sim_read_cycle_eu ../tests/timing_manual_chain.hex
+	$(VVP) sim_read_cycle_eu
+
+specs/read_cycle_eu.json: read_cycle_eu.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py read_cycle_eu.vcd -o $@ --cycles 3 --margin-cycles 2
+
+generated/read_cycle_eu_sim.png: specs/read_cycle_eu.json
+	npx --yes wavedrom-cli -i $< -p $@
 
 # ── preview_dispatch: Phase 254's own EU-side dispatch-gap fix, shown
 # through the real EU pipeline (CLAUDE.md) -- no manual figure to compare

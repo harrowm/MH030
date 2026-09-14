@@ -118,63 +118,17 @@ alone rather than "fixed":
   This is the single biggest *visual* difference, but it doesn't affect
   the actual protocol timing being compared.
 - **A small idle gap appears between the 3 chained cycles that the
-  manual doesn't show.** The manual's own Figure 7-25 shows chained
-  reads with zero idle time between them; this RTL takes a few extra
-  internal states between one cycle's negation and the next's. This is
-  not a testbench artifact — the testbench keeps `eu_req` asserted
-  continuously and never inserts a deliberate gap. Investigating this
-  directly (Phase 253, `CLAUDE.md`) found the real dispatch path is
-  actually **three separate FSM layers** stacked between the top-level
-  `eu_req` and the bus pins (`biu_cache_if.sv` → `biu_sizing_fsm.sv` →
-  `biu_cycle_gen.sv`), each of which used to insert its own one-tick
-  "return to idle" state regardless of whether the next request was
-  already pending. Two of the three are now fixed (`biu_cycle_gen.sv`'s
-  own `ST_IDLE` hand-off and `biu_sizing_fsm.sv`'s own `SS_DONE` state
-  — both removed as genuinely unnecessary, full mandatory gate clean).
-  The third, `biu_cache_if.sv`'s own `CI_IDLE` transit, is what's still
-  visible in *this* diagram specifically, because this diagram's own
-  testbench (`read_cycle_tb.sv`) drives `eu_addr`/`eu_rw` directly
-  rather than routing through the real EU pipeline, bypassing the
-  mechanism that eventually closed it for a narrow case (below) —
-  regenerating this particular diagram would still show the gap.
-  Two attempts to fix layer 3 the SAME way (skip `CI_IDLE` whenever
-  `eu_req` is already asserted) were reverted — the second time with the
-  real root cause traced and confirmed, not just guessed at: this
-  module's own `eu_req` input is the *raw, unmediated* top-level EU
-  request, and the real EU needs at least one clock edge to react to
-  `eu_ack` before it can withdraw `eu_req` — so `eu_req` is guaranteed
-  to still read 1 the instant a transfer completes, whether or not a
-  genuinely new request follows, with no way to tell the two apart from
-  `eu_req` alone.
-
-  **Phase 254 closed a narrow slice of this for real**, by changing the
-  EU side instead of trying to infer novelty at the BIU boundary: a new
-  EU-side "preview" fast path (`eu_seq_execute.svh`'s `preview_ok`)
-  computes the *next* instruction's own address one cycle early — but
-  only for the narrowest, safest case (a plain `(An)` register-indirect
-  read, no index/displacement, hazard-checked against the same logic
-  that already gates `dec_valid`) — and a new explicit `eu_new_dispatch`
-  signal (`eu_seq.sv` → `m68030_eu.sv` → `m68030_top.sv` →
-  `m68030_biu.sv` → `biu_cache_if.sv`) tells `CI_IDLE`'s own fast path
-  exactly when that preview is legitimately valid, rather than
-  inferring it from `eu_addr` changing. (A first attempt inferred
-  novelty from `eu_addr != addr_r` directly — it looked sound on paper
-  but was falsified by a real `cosim_memind`/`memind7` regression: a
-  separate, pre-existing mechanism, `dyn_bit_get_Dn`'s own deferred
-  register-port swap, already changes `mem_addr` on the *current*
-  instruction's own ack cycle for 5 unrelated instruction families,
-  harmless until this was the first thing to ever look at it right
-  then.) Measured via a dedicated test (`tests/timing_preview.s`,
-  since this project's own EA-computing datapath needs to be exercised
-  for real, unlike this diagram's direct-injection style): the
-  back-to-back-`(An)`-read gap shrinks from 8 ticks to 6. Every other
-  addressing mode, every write, and every `dyn_bit_get_Dn`-consuming
-  instruction (dynamic-bit ops, CMP2/CHK2, general ALU-EA indexed,
-  MOVE mem-to-mem indexed-dst, indexed CHK) still takes the unmodified
-  one-tick `CI_IDLE` detour — closing those would need the EU's own
-  interface to carry more information than this narrow signal, out of
-  scope for this investigation. See `CLAUDE.md`'s own Phase 254 entry
-  for the full writeup.
+  manual doesn't show — but this is a property of THIS diagram's own
+  testbench, not of the RTL.** `read_cycle_tb.sv` drives `eu_addr`/
+  `eu_rw` directly into a standalone `m68030_biu`, bypassing the real
+  EU/decode pipeline entirely — there is no "next instruction" for the
+  preview mechanism (below) to see, so `biu_cache_if.sv`'s own
+  `CI_IDLE` transit (the one layer of the original three-layer dispatch
+  floor that turned out to need real EU-side visibility to close, Phase
+  253) is unavoidable here by construction, regardless of how complete
+  that mechanism has since become. **`read_cycle_eu` (below) proves
+  this directly**: the exact same word/byte/byte scenario, driven
+  through the real pipeline instead, shows zero gap.
 - **`SIZ1`/`SIZ0` are one combined 2-bit lane**, not two separate rows
   like the manual. The combined decimal value (`2`=word, `1`=byte)
   already conveys the same information; splitting it further is a
@@ -184,42 +138,54 @@ alone rather than "fixed":
   boxes). WaveDrom renders a generic digital-waveform style — a tooling
   difference, not a correctness one.
 
-## `preview_dispatch`: seeing Phase 254's fix live
+## `read_cycle_eu`: the same Figure 7-21 scenario, driven for real
 
-`read_cycle` (above) can never show Phase 254's own EU-side dispatch-gap
-fix (`CLAUDE.md`), because its testbench (`tb/read_cycle_tb.sv`) drives
-`eu_req`/`eu_addr` directly into a standalone `m68030_biu` — there is no
-real EU/decode pipeline there for `preview_ok` to run in at all.
+`read_cycle` (above) can never show the dispatch-gap fix at all, for the
+structural reason explained above — there's no EU/decode pipeline in
+that testbench for `preview_ok` to run in. `read_cycle_eu`
+(`tb/read_cycle_eu_tb.sv`) answers the direct question this raises: if
+the SAME word/byte/byte chain Figure 7-21 depicts is driven through a
+REAL decoded instruction stream instead, does it actually close the gap?
 
-`preview_dispatch` (`tb/preview_dispatch_tb.sv`) instantiates the full
-`m68030_top` instead — the real CPU, not just the BIU — and boots
-`tests/timing_preview.s` (the same program `tb/timing_tb.sv` uses to
-*measure* Phase 254's improvement numerically). It shows 3 consecutive
-bus cycles: the opcode fetch for `MOVE.L (A0),D0`, that instruction's own
-data read at `$3000`, and `MOVE.L (A1),D1`'s own data read at `$3010`
-immediately following it. The `S-STATE` row makes the effect directly
-visible: the ordinary opcode-fetch cycle is followed by a `--` idle tick
-before the next cycle starts (the usual `CI_IDLE` detour), while the two
-back-to-back `(An)` reads chain with **no** `--` at all — `S-STATE` runs
-straight from `S5` into `S6` with no gap, because `preview_ok`'s own
-`eu_new_dispatch` signal let `biu_cache_if.sv` skip `CI_IDLE` entirely
-for that one pair.
+It instantiates the full `m68030_top` (not just the BIU, mirroring
+`preview_dispatch`'s own approach) and boots `tests/timing_manual_chain.s`
+— `MOVE.W (A0),D0` / `MOVE.B (2,A0),D1` / `MOVE.B (3,A0),D2` against a
+preloaded `$1234_5678` at the base address, the same address pattern and
+values `read_cycle_tb.sv` itself uses (word @ `+0`, byte @ `+2`, byte @
+`+3`). A leading `MULU.L` (bus-silent, ~168 ticks) gives the IFU genuine
+idle time to prefetch the `(d16,An)` forms' own extension words ahead of
+need — the established technique for exercising live preview engagement
+in this project's own otherwise zero-head-start test convention
+(`CLAUDE.md`'s own Phase 256 entry).
 
-**Why this is only sometimes true**: this is real, current RTL behavior,
-not a hypothetical — but it's also narrow. Every other back-to-back
-combination (a read followed by a write, indexed/indirect addressing,
-any of the ~20 special multi-cycle instruction FSMs, or even a plain
-`(An)` read that happens to belong to one of the 5 `dyn_bit_get_Dn`
-families) still takes the one-tick `CI_IDLE` detour real silicon's own
-chained-cycle timing (Figure 7-25) doesn't have. Closing that generally
-would mean threading `eu_new_dispatch`'s own "trust me, this is
-genuinely new" guarantee through every one of those cases individually —
-explicitly out of scope for Phase 254 (see its own plan's "Stage 3 —
-optional, only if worth generalizing," never pursued).
+**Result: zero gap, matching the manual exactly.** `S-STATE` runs
+continuously `S0` through `S17` across all three chained cycles (6
+states × 3 cycles) with no `--` anywhere — this is not a narrow,
+one-addressing-mode-only result. Tracks 1-3 (`CLAUDE.md`'s own Phase
+254-273 entries) generalized the EU-side preview mechanism, in stages,
+from the single narrow `(An)`-only case first demonstrated here to every
+plain/absolute/indexed EA shape, plain register-source writes, and all
+16 special multi-cycle instruction FSMs (MOVEM, CAS/CAS2, memory-
+indirect, etc.) — and, as directly confirmed while investigating this
+very diagram, to every access SIZE (byte/word/longword) uniformly, not
+just longword as an earlier draft of this README's own text assumed.
+The only case left showing the gap is a diagram like `read_cycle` itself
+that bypasses the EU on purpose — a property of that testbench, not a
+remaining RTL gap.
 
-Needs the same test hex `read_cycle` doesn't (`../tests/timing_preview.hex`,
-already assembled and committed) — see `Makefile`'s own `TOP_SRCS` for the
+Needs its own test hex (`../tests/timing_manual_chain.hex`, already
+assembled and committed) — see `Makefile`'s own `TOP_SRCS` for the
 fuller RTL file list a full-CPU diagram needs versus a standalone-BIU one.
+
+## `preview_dispatch`: the original, narrowest-case proof
+
+`tb/preview_dispatch_tb.sv` boots `tests/timing_preview.s` (two
+back-to-back plain `(An)` LONGWORD reads, no extension words needed at
+all) — the first, simplest case Phase 254 closed, and the same program
+`tb/timing_tb.sv` uses to *measure* the improvement numerically (an
+8-tick to 6-tick AS-fall-to-AS-fall reduction). Kept alongside
+`read_cycle_eu` as the original, minimal demonstration; `read_cycle_eu`
+is the one that maps directly onto a manual figure.
 
 ## One-time setup
 
@@ -234,5 +200,8 @@ fuller RTL file list a full-CPU diagram needs versus a standalone-BIU one.
 
 ```bash
 cd timing_diagrams
-make read_cycle    # rebuilds sim -> VCD -> spec -> both PNGs
+make read_cycle       # rebuilds sim -> VCD -> spec -> both PNGs
+make read_cycle_eu    # same Figure 7-21 scenario, driven through the real EU
+make preview_dispatch # the original, narrowest-case (An)-only proof
+make all               # all of the above
 ```

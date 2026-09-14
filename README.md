@@ -134,14 +134,14 @@ FC transitions at the same time as the address, never mid-cycle.
 
 To sanity-check the S-state timing above against something outside this
 project's own test harness, `timing_diagrams/` generates a bus-cycle
-diagram straight from an Icarus Verilog simulation of `m68030_biu` and
-places it next to the manual's own diagram for the same cycle:
+diagram straight from an Icarus Verilog simulation and places it next
+to the manual's own diagram for the same cycle:
 
 <table>
-<tr><th>MC68030UM.pdf, Figure 7-21 (leftmost cycle)</th><th>This RTL, simulated</th></tr>
+<tr><th>MC68030UM.pdf, Figure 7-21</th><th>This RTL, simulated (driven through the real EU/decode pipeline)</th></tr>
 <tr>
 <td><img src="timing_diagrams/generated/read_cycle_manual.png" width="420"></td>
-<td><img src="timing_diagrams/generated/read_cycle_sim.png" width="420"></td>
+<td><img src="timing_diagrams/generated/read_cycle_eu_sim.png" width="420"></td>
 </tr>
 </table>
 
@@ -149,36 +149,51 @@ Left: a crop of *Figure 7-21, "Asynchronous Byte and Word Read Cycles —
 32-Bit Port"* (`docs/MC68030UM.pdf`, PDF page 194 / printed page 7-33) —
 copyright NXP/Motorola, included here for direct visual comparison.
 Right: the same three chained cycles the figure shows — a word read
-followed by two byte reads, all within one test longword — driven
-through `m68030_biu` and rendered from the resulting VCD, with the
+followed by two byte reads, all within one test longword — this time
+driven by a REAL decoded instruction sequence (`MOVE.W`/`MOVE.B`/
+`MOVE.B`) through the full CPU, not just the bus interface, with the
 address bus, byte-lane data split, `/ECS`/`/OCS`, and an S-state lane
 all reproduced alongside `/AS`/`/DS`/`/DSACK`/`/DBEN`. `/AS` and `/DS`
 assert together, matching this project's own S-state model above, not
-the manual's own staggered legacy timing notation.
+the manual's own staggered legacy timing notation — and the three
+cycles chain with **zero idle gap**, matching the manual exactly
+(`S-STATE` runs continuously `S0` through `S17`).
 
-Building this diagram found and fixed a real, previously-undiscovered
-bug: `/OCS` never asserted anywhere in the chip (`biu_cache_if.sv` had
-its own "is this an operand transfer" output hardwired to 0, and
-separately `biu_cycle_gen.sv`'s own `/OCS` assert/negate window was two
-states later than MC68030UM.pdf specifies) — see `timing_diagrams/
-README.md`'s own "A real bug this diagram found" section for the full
-writeup. The two diagrams still differ in a couple of ways worth
-knowing about before comparing them pixel-for-pixel: the `CLK` lane on
-the right is this project's internal 4× clock, not the external bus
-clock the manual's `CLK` shows; and a small idle gap still appears
-between the RTL's three chained cycles that the manual's own
-back-to-back timing doesn't have — not a testbench artifact. Digging
-into it found three separate, stacked FSM layers between `eu_req` and
-the bus pins each contributing their own one-tick "return to idle";
-two are now fixed, the third (`biu_cache_if.sv`, the most delicate
-module in the project by its own history) was attempted and reverted
-after it broke MMU/cache correctness elsewhere — see `timing_diagrams/
-README.md`'s own "Known differences" section for the full account.
+That zero-gap result wasn't free — closing it is most of what this
+project's own "Track 1-3" effort (`CLAUDE.md`) was about. An earlier,
+narrower diagram (`timing_diagrams/generated/read_cycle_sim.png`,
+driven straight at the bus interface with no real EU/decode pipeline
+behind it at all) shows a one-tick idle gap between each cycle the
+manual doesn't have — investigating that gap found three separate,
+stacked FSM layers between the CPU's internal bus request and the pins,
+each independently inserting a "return to idle" state even when the
+next request was already known. Two were straightforward fixes; the
+third turned out to need the EU to tell the bus interface *"trust this
+address, it's a genuinely new instruction"* one cycle ahead of time,
+rather than trying to infer that fact from the request line alone
+(which is structurally ambiguous at that layer — see `timing_diagrams/
+README.md`'s own "Known differences" section). That EU-side preview
+mechanism started narrow (one addressing mode, longword-only reads) and
+was generalized in stages to every plain/absolute/indexed addressing
+mode, plain register-source writes, every access size, and all 16
+special multi-cycle instruction FSMs (MOVEM, CAS/CAS2, memory-indirect,
+etc.) — the diagram above is that generalized mechanism, driving the
+literal manual figure, not a cherry-picked case.
+
+Building the original diagram also found and fixed a real,
+previously-undiscovered bug along the way: `/OCS` never asserted
+anywhere in the chip (`biu_cache_if.sv` had its own "is this an operand
+transfer" output hardwired to 0, and separately `biu_cycle_gen.sv`'s
+own `/OCS` assert/negate window was two states later than
+MC68030UM.pdf specifies) — see `timing_diagrams/README.md`'s own "A
+real bug this diagram found" section for the full writeup. The two
+diagrams above still differ in one cosmetic way worth knowing about:
+the `CLK` lane on the right is this project's internal 4× clock, not
+the external bus clock the manual's `CLK` shows.
 
 See `timing_diagrams/README.md` for the full pipeline (testbench → VCD →
 WaveDrom spec → PNG) and `timing_diagrams/diagrams.md` for the manifest
-of what's been generated so far — currently just this one figure, with
-the rest of the manual's own timing figures as a future extension.
+of every diagram generated so far.
 
 ---
 
