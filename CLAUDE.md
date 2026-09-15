@@ -507,7 +507,8 @@ mid-track (PMOVE64's own ordinary-read clause misfiring one beat early, a first 
 extending the shared `ex_mem_stall` causing an unrelated sim hang, reverted in favor of a
 narrow per-family exclusion — see `feedback_shared_stall_signal_blast_radius.md`) and
 documented two genuine, pre-existing, out-of-scope bugs found along the way (bitfield-mem's
-always-longword sizing; PACK's source-byte read order vs. Musashi). **This closes Track 3,
+always-longword sizing, later fixed at Phase 276; PACK's source-byte read order vs.
+Musashi, still open). **This closes Track 3,
 and the entire `wobbly-honking-cascade.md` plan, in full** — real 68030 silicon's own
 chained back-to-back bus-cycle timing is now matched for essentially every instruction
 combination in the chip. RTR/RTE remain the one confirmed structural exception (not a risk
@@ -563,7 +564,35 @@ Harte bit-identical to baseline. See `plan.md` Phases 274-275 for the full write
 (including the Musashi `MOVE.L Dn,-(An)`-splits-into-2-words reference quirk found while
 verifying Phase 274's own hazard test).
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 29/29,
+**Phase 276 (bitfield-mem always-longword bus access sizing, a later session,
+`project_bf_mem_longword_sizing_bug.md`, IMPLEMENTED AND VERIFIED)**: closes the real,
+pre-existing gap documented (and deliberately deferred) at Phase 262 — `bf_mem_run_r`
+always dispatched a fixed 4-byte longword read/write regardless of the bit-field's own
+offset+width footprint. Re-derived Musashi's own `m68ki_load_bitfield`/
+`m68ki_store_bitfield` algorithm (`tools/musashi/m68kcpu.h`) against this project's own
+framing — real minimal footprint is a BYTE, WORD, LONGWORD, or (3-byte case) a WORD then a
+BYTE sub-access, computed from `offset%8+width`, keeping `eu_bitfield.sv`'s own unpatched
+0-31 `bf_offset` convention completely untouched; scoped to the `offset+width<=32` envelope
+(the only one where the old fixed-longword access was ever value-correct — the `>32` case
+is a separate, deeper, pre-existing gap in `eu_bitfield.sv` itself, left as-is). Two real
+bugs found and fixed before shipping, neither obvious from static inspection: (1)
+`mem_rdata` is RIGHT-justified for reads (byte@[7:0], word@[15:0]) — the OPPOSITE of
+`eu_lane`'s own TOP-justified WRITE-side convention — a first attempt wrongly assumed the
+same convention for both directions, caught via a real cosim mismatch, confirmed via a
+direct debug trace on the real BIU-backed pipeline; (2) two independent testbench-only
+memory-model gaps (`tb/bitfield_tb.sv` and `tb/ea_extended_tb.sv` both lacked genuine
+lane-aware byte/word read+write support, dormant since `bf_mem_run_r` had never dispatched
+anything but a longword before), the second of which also surfaced a THIRD, independent,
+previously-latent bug: `ea_extended_tb.sv`'s own pre-existing TAS-01 test had its own byte
+test value at the wrong bit position, masked for years by two unrelated testbench bugs
+canceling out by coincidence — fixed the test's own setup to match its own
+already-correct expected value. New dedicated cosim tests (`tests/bf_sizing1.s`/
+`bf_sizing2.s`, spans 1 and 3) match Musashi exactly, wired into `make cosim_memind`
+(31/31). Full mandatory gate clean, Harte bit-identical to baseline (bitfield memory-EA
+forms have zero Harte coverage, 68020+-only). **Closes
+`project_bf_mem_longword_sizing_bug.md` in full.**
+
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 31/31,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). No outstanding plan

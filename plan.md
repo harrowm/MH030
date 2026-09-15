@@ -1597,3 +1597,170 @@ write-as-CURRENT preview gap and this phase's `CI_WRITE` fast-path
 gap) are now fixed, matching real 68030 silicon's own zero-idle-gap
 chained-cycle timing (MC68030UM.pdf Figure 7-25) for this instruction
 sequence shape.
+
+## Phase 276 (bitfield-mem always-longword bus access sizing —
+IMPLEMENTED AND VERIFIED, `project_bf_mem_longword_sizing_bug.md`, a
+later session)
+
+Real, pre-existing, previously-documented-but-deferred gap: found at
+Phase 262 (Track 3 #5, while building the bitfield-mem preview cosim
+test) and explicitly left unfixed at the time as out of scope for that
+track's own dispatch-gap work. User asked to fix it directly this
+session.
+
+**The bug**: `rtl/eu_seq_execute.svh`'s `bf_mem_run_r` FSM (the shared
+memory-EA dispatch path for BFCHG/BFCLR/BFSET/BFINS/BFEXTU/BFEXTS/
+BFFFO/BFTST) always issued a fixed 4-byte LONGWORD read (and, for the
+4 mutating ops, write) at the field's own base address, regardless of
+the field's real offset+width footprint. Real 68030 silicon (confirmed
+against Musashi's own `m68ki_load_bitfield`/`m68ki_store_bitfield`,
+`tools/musashi/m68kcpu.h`) computes the MINIMAL real footprint instead:
+`bcount = (offset%8 + width + 7) / 8`, giving 1 (BYTE), 2 (WORD), 3
+(WORD then BYTE, two sub-accesses), 4 (LONGWORD), or 5 (LONGWORD then
+BYTE — this last case only when the field spans a 5th byte, i.e.
+offset+width>32) bytes, starting at `ea + offset/8`, not always a fixed
+4 bytes at `ea`.
+
+**Root cause / fix, re-derived directly against this project's own
+framing** (not a literal port of Musashi's own patched-address model):
+`eu_bitfield.sv`'s own `bf_offset` input is UNPATCHED (0-31, treating
+byte 0 = the field's base address itself), so rather than patching the
+address AND re-deriving a patched sub-8 offset (Musashi's own
+approach), this fix keeps `eu_bitfield.sv` completely untouched and
+instead computes, at dispatch time (`bf_disp_*` combinational signals,
+derived from the live `ex_imm` the moment a bit-field memory-EA
+instruction is about to dispatch):
+- `byte_start` (0-3) = `offset[4:3]` — which byte of the virtual,
+  4-byte-wide "as if fully read/written" span the footprint starts at.
+- `span` (1-4) = `byte_end - byte_start + 1`, where `byte_end =
+  (offset+width-1)>>3` — how many bytes the real footprint covers.
+  Scoped to `offset+width<=32` (`bf_disp_in_envelope_v`) — the ONLY
+  envelope in which the CURRENT (pre-fix) longword-only access was
+  even value-correct to begin with (`eu_bitfield.sv`'s own header
+  comment already states its own `offset+width<=32` restriction
+  directly — the `>32` case is a separate, deeper, pre-existing gap in
+  that module too, not introduced or worsened here, and deliberately
+  left exactly as before: falls back to the old fixed-longword-at-
+  byte_start-0 access, matching this project's own established
+  precedent for "found harder than expected, document don't fix" when
+  a gap is discovered mid-implementation but is genuinely out of
+  scope).
+- `siz1` (the only, or first, sub-access's SIZ) = byte/word/long
+  matching `span` (1→01, 2 or 3→10, 4→00).
+- `has_sub2` = `(span==3)` — the one case needing a second (BYTE)
+  sub-access 2 bytes past the first (WORD) sub-access.
+
+New FSM state: `bf_mem_byte_start_r`/`bf_mem_siz1_r`/
+`bf_mem_has_sub2_r` (captured once at dispatch) plus `bf_mem_sub_r`
+(0=first sub-access in flight, 1=second) and `bf_mem_word_contrib_r`
+(holds the first sub-read's own shifted contribution while waiting for
+the second). `mem_addr`/`mem_siz` for the `bf_mem_run_r` branch now
+compute the real per-sub-access address/size instead of the fixed
+`bf_mem_addr_r`/`2'b00`. A new `bf_mem_sub_last` wire (`!has_sub2 ||
+sub_r`) gates every "this phase is genuinely done" transition
+(`bf_mem_stall`'s own completion, `bf_dn_wr_en`, `bf_mem_sr_wr_en`, and
+the FSM's own phase-advance logic) so a 3-byte footprint's own
+intermediate (first) sub-access ack is never mistaken for real
+completion.
+
+**Two new helper functions, `bf_place`/`bf_extract`** (`rtl/
+eu_seq_execute.svh`), convert between a real bus transfer and the
+"virtual full-longword-relative" position `eu_bitfield.sv`'s own
+unpatched `bf_offset` expects (byte0@[31:24], byte1@[23:16], etc.,
+big-endian). `bf_data_mux`'s own read-phase branch (feeding
+`eu_bitfield`) and the register capture (`bf_mem_data_r`) both now use
+`bf_place`'s assembled value instead of raw `mem_rdata` directly;
+`mem_wdata`'s own write-phase branch uses `bf_extract` to pull the
+correct sub-portion out of the assembled write-back result
+(`bf_result_w`).
+
+**Bug found and fixed before shipping, via a real cosim mismatch, not
+guessed at**: `bf_place`'s own first implementation assumed READS use
+the SAME top-justified convention `eu_lane`'s own header comment
+documents for WRITES (byte@[31:24]) — this is WRONG for reads.
+Confirmed via a direct debug trace on the real, full BIU-backed
+pipeline (`cosim_grp_tb.sv`, not a simplified unit testbench) that
+`mem_rdata` for reads is instead RIGHT-justified (byte@[7:0],
+word@[15:0]) — an asymmetric read/write convention this project's own
+existing code already relied on elsewhere (e.g. `alu_src_mem`'s own
+sign-extension from bit 15, treating a word read as already
+right-justified) but had never been stated explicitly anywhere `bf_place`
+could have referenced it. The wrong assumption produced an all-zero
+assembled value, caught by `tests/bf_sizing2.s`'s own cosim mismatch
+before it shipped. Fixed by top-justifying the right-justified raw
+value FIRST (mirroring `eu_lane`'s own write-side transform), then
+shifting into the virtual position — `bf_extract` (the write side)
+needed no equivalent fix, since its own job (assembled-value →
+top-justified write lane) was already correctly oriented.
+
+**Two more real, previously-latent bugs found while building the
+dedicated cosim tests, both pure testbench gaps, neither an RTL
+issue**: `tb/bitfield_tb.sv`'s own inline memory model always read/
+wrote the WHOLE longword regardless of `mem_siz` — harmless as long as
+`bf_mem_run_r` never dispatched anything but a longword (true before
+this fix), but exposed once it started dispatching genuine narrow
+accesses: a byte/word WRITE would silently clobber the OTHER,
+untouched bytes of the same memory word (three existing mutating-op
+tests, BFCLR-02/BFSET-02/BFINS-02, are the first in this file to write
+a narrow size onto a location with non-zero surrounding bytes — every
+earlier byte/word-write test here happened to pre-zero its own target
+first, masking the gap entirely), and a byte/word READ at non-zero
+A[1:0] would return the wrong lane. Fixed with a proper lane-aware
+read/write model, matching the SAME asymmetric convention just
+confirmed for the real pipeline (write: top-justified, replicated
+byte-lane-style per `mem_addr[1:0]`; read: right-justified, gathered
+from the correct real lane per `mem_addr[1:0]`) — an initial attempt at
+this fix used the WRONG (top-justified) convention for the read side
+too, caught immediately by BFTST-03/BFEXTU-02 regressing, fixed the
+same way `bf_place`'s own analogous mistake was.
+
+Separately, `tb/ea_extended_tb.sv`'s own memory model had NO byte-size
+read case at all (always fell through to the raw full-longword
+branch) — adding one (right-justified, matching the now-confirmed real
+convention) surfaced a THIRD, independent, previously-latent bug: the
+pre-existing TAS-01 test's own memory SETUP placed its byte test value
+at bits[7:0], inconsistent with this SAME array's own established
+big-endian convention every other test in the file uses (byte at
+address%4==0 → bits[31:24] — confirmed by TAS-01's own ALREADY-CORRECT
+expected post-TAS value, `0xC2000000`, at that SAME standard
+position). This was previously masked by two independent testbench
+bugs silently canceling out: the OLD memory model's own byte-read
+fallback returned the raw, unmodified longword (0x00000042, i.e. the
+value AT bits[7:0] where the test had — wrongly — placed it), and
+TAS's own real `mem_rdata` consumption (confirmed right-justified, the
+SAME convention this whole investigation established) happens to
+expect the value at bits[7:0] too — so the WRONG data placement
+"worked" purely by coincidence with the WRONG memory-model fallback.
+Fixed the test's own setup (`32'h4200_0000` instead of
+`32'h0000_0042`) to match the array's own already-correct convention,
+rather than touching the (now correct) memory model.
+
+**Verification**: two new dedicated cosim tests, `tests/bf_sizing1.s`
+(`BFCLR (A0){0:8}`, the span==1 case — matches the narrow field Phase
+262's own original finding used) and `tests/bf_sizing2.s` (`BFCLR
+(A0){0:20}`, the harder span==3 word+byte case), both match Musashi's
+own bus trace exactly, wired into `make cosim_memind` as
+`buscmp-bf_sizing1`/`buscmp-bf_sizing2` (31/31 total). Both deliberately
+use address `$100`, not a larger address like `$3010` — an early
+attempt at `$3010` was found, via a genuine corrupted-execution
+failure (not guessed at), to alias onto code space within `tools/
+m68ksim`'s own 4KB reference window, corrupting the test program's own
+not-yet-fetched instructions; `$100` matches this project's own
+established memind-test convention for exactly this reason. Neither
+test needs the `MULU.L`-stall trick Track 3's own preview tests use
+(that trick exists specifically to give the IFU's prefetch queue a
+head start before a PREVIEW trigger fires — irrelevant here, since
+`bf_mem_run_r` dispatches on ordinary EX-stage entry, not a preview);
+an early attempt included it anyway and produced extra, benign
+IFU-readahead prefetch cycles that shifted the DUT/reference cycle
+alignment, confirmed via inspection to be the same already-documented
+benign reordering artifact this project has seen many times before,
+not a new bug — removed rather than worked around.
+
+Full mandatory gate clean: `make test` 37/37 (including `bitfield`
+24/24 and `ea_extended` 27/27), `cosim_grp` 8/8, `cosim_memind` 31/31,
+`dat-synth` 50/50, full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bitfield
+memory-EA forms have zero Harte coverage, 68020+-only).
+
+**Closes `project_bf_mem_longword_sizing_bug.md` in full.**
