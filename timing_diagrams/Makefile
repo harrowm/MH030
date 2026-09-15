@@ -35,10 +35,12 @@ TOP_SRCS := $(RTL)/m68030_top.sv $(RTL)/m68030_biu.sv $(RTL)/biu_cycle_gen.sv \
             $(RTL)/m68030_exc.sv $(RTL)/m68030_mmu.sv
 
 .PHONY: all read_cycle read_cycle_eu preview_dispatch manual_722 manual_723 \
-        manual_725 manual_726 manual_728 manual_730 clean
+        manual_725 manual_726 manual_728 manual_730 manual_732 manual_738 \
+        manual_744 manual_747 manual_749 manual_760 manual_764 clean
 
 all: read_cycle read_cycle_eu preview_dispatch manual_722 manual_723 \
-     manual_725 manual_726 manual_728 manual_730
+     manual_725 manual_726 manual_728 manual_730 manual_732 manual_738 \
+     manual_744 manual_747 manual_749 manual_760 manual_764
 
 # ── read_cycle: Figure 7-21's own leftmost cycle (single word read) ────────
 read_cycle: generated/read_cycle_sim.png generated/read_cycle_manual.png
@@ -141,6 +143,117 @@ specs/manual_730.json: manual_730.vcd scripts/vcd_to_wavedrom.py
 	python3 scripts/vcd_to_wavedrom.py manual_730.vcd -o $@ --cycles 1 --margin-cycles 3
 
 generated/manual_730_sim.png: specs/manual_730.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+# ── manual_732/738/744/747/749/760/764: the second diagram batch
+# (synchronous STERM, burst, IACK/autovector, breakpoint, bus
+# error/retry, bus arbitration, reset) -- see INDEX.md's own "Scope"
+# section for what's covered vs. deliberately deferred within each
+# category (including Figure 7-54's own late-retry variant, never
+# built). All use the plain 32-bit inline-model template except where
+# a testbench's own header comment says otherwise.
+manual_732: generated/manual_732_sim.png
+
+sim_manual_732: tb/manual_732_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_732_tb.sv
+
+manual_732.vcd: sim_manual_732 ../tests/timing_manual_732.hex
+	$(VVP) sim_manual_732
+
+specs/manual_732.json: manual_732.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_732.vcd -o $@ --cycles 1 --margin-cycles 3 \
+	    --extra-signals "sterm_n:/STERM,ciin_n:/CIIN,ciout_n:/CIOUT,ext_cbreq_n:/CBREQ,cback_n:/CBACK"
+
+generated/manual_732_sim.png: specs/manual_732.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_738: generated/manual_738_sim.png
+
+sim_manual_738: tb/manual_738_tb.sv $(TOP_SRCS) ../tb/mem_model.sv
+	$(IVERILOG) -o $@ $(TOP_SRCS) ../tb/mem_model.sv tb/manual_738_tb.sv
+
+manual_738.vcd: sim_manual_738 ../tests/timing_manual_738.hex
+	$(VVP) sim_manual_738
+
+specs/manual_738.json: manual_738.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_738.vcd -o $@ --cycles 1 --margin-cycles 52 \
+	    --extra-signals "ext_cbreq_n:/CBREQ,cback_n:/CBACK"
+
+generated/manual_738_sim.png: specs/manual_738.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_744: generated/manual_744_sim.png
+
+sim_manual_744: tb/manual_744_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_744_tb.sv
+
+manual_744.vcd: sim_manual_744 ../tests/timing_manual_744.hex
+	$(VVP) sim_manual_744
+
+specs/manual_744.json: manual_744.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_744.vcd -o $@ --cycles 6 --margin-cycles 2 \
+	    --extra-signals "avec_n:/AVEC"
+
+generated/manual_744_sim.png: specs/manual_744.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_747: generated/manual_747_sim.png
+
+sim_manual_747: tb/manual_747_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_747_tb.sv
+
+manual_747.vcd: sim_manual_747 ../tests/timing_manual_747.hex
+	$(VVP) sim_manual_747
+
+specs/manual_747.json: manual_747.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_747.vcd -o $@ --cycles 3 --margin-cycles 2
+
+generated/manual_747_sim.png: specs/manual_747.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_749: generated/manual_749_sim.png
+
+sim_manual_749: tb/manual_749_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_749_tb.sv
+
+manual_749.vcd: sim_manual_749 ../tests/timing_manual_749.hex
+	$(VVP) sim_manual_749
+
+specs/manual_749.json: manual_749.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_749.vcd -o $@ --cycles 2 --margin-cycles 3 \
+	    --extra-signals "berr_n:/BERR"
+
+generated/manual_749_sim.png: specs/manual_749.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_760: generated/manual_760_sim.png
+
+sim_manual_760: tb/manual_760_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_760_tb.sv
+
+manual_760.vcd: sim_manual_760 ../tests/timing_manual_760.hex
+	$(VVP) sim_manual_760
+
+specs/manual_760.json: manual_760.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_760.vcd -o $@ --cycles 2 --margin-cycles 55 \
+	    --extra-signals "br_n:/BR,ext_bg_n:/BG,bgack_n:/BGACK"
+
+generated/manual_760_sim.png: specs/manual_760.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_764: generated/manual_764_sim.png
+
+sim_manual_764: tb/manual_764_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_764_tb.sv
+
+manual_764.vcd: sim_manual_764 ../tests/timing_manual_764.hex
+	$(VVP) sim_manual_764
+
+specs/manual_764.json: manual_764.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_764.vcd -o $@ --cycles 2 --margin-cycles 20 \
+	    --extra-signals "rst_n:/RESET_IN,ext_rstout_n:/RSTOUT"
+
+generated/manual_764_sim.png: specs/manual_764.json
 	npx --yes wavedrom-cli -i $< -p $@
 
 # ── manual_722/723/728: dynamic-bus-sizing diagrams (8-bit/16-bit port),

@@ -207,7 +207,21 @@ def main():
                      help='number of trailing back-to-back bus cycles to render (default: 3)')
     ap.add_argument('--margin-cycles', type=int, default=3,
                      help='idle clock cycles to show before/after the active window')
+    ap.add_argument('--extra-signals', default='',
+                     help='additional active-low level signals to render after the '
+                          'standard set, as comma-separated signal:Label pairs (e.g. '
+                          '"sterm_n:/STERM,ciin_n:/CIIN") -- for cycle types the '
+                          'standard ACTIVE_LOW_LEVEL_SIGNALS row set does not cover '
+                          '(STERM/CIIN/CIOUT/CBREQ/CBACK etc.); appended, not merged '
+                          'into that shared list, so every existing diagram\'s own '
+                          'row set is unaffected by default')
     args = ap.parse_args()
+
+    extra_signals = []
+    if args.extra_signals:
+        for pair in args.extra_signals.split(','):
+            sig_name, label = pair.split(':', 1)
+            extra_signals.append((sig_name, label))
 
     bus_signals = [
         ('ext_fc',  'FC0-FC2', 3),
@@ -216,6 +230,7 @@ def main():
     wanted = {args.clock, args.start_signal, 'ext_a', 'ext_siz', 'ext_d_in', 's_state'}
     wanted |= {n for n, _, _ in bus_signals}
     wanted |= {n for n, _ in ACTIVE_LOW_LEVEL_SIGNALS}
+    wanted |= {n for n, _ in extra_signals}
     wanted.add('ext_rw')
 
     name_to_id, changes = parse_vcd(args.vcd, wanted)
@@ -413,6 +428,8 @@ def main():
 
     signal_list.append({'name': 'R/W', 'wave': wave_for_level('ext_rw')})
     for name, label in ACTIVE_LOW_LEVEL_SIGNALS:
+        signal_list.append({'name': label, 'wave': wave_for_level(name)})
+    for name, label in extra_signals:
         signal_list.append({'name': label, 'wave': wave_for_level(name)})
 
     signal_list.append({})  # spacer -- WaveDrom's own blank-row idiom;
