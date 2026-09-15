@@ -453,6 +453,9 @@ cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \
 # to special-case each one's own reason.
 winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
 	./tools/m68ksim tests/memind$*.hex 300 > $@
+
+winuae/tests/bf_sizing%_ref.log: tools/m68ksim tests/bf_sizing%.hex | winuae/tests
+	./tools/m68ksim tests/bf_sizing$*.hex 300 > $@
 # memind25 needs more than the generic 300-cycle default: DIVS.L's own
 # real (Musashi) divide microcode plus 4 chained MUL/DIV instructions
 # don't complete within 300 cycles -- this explicit rule (which make
@@ -753,13 +756,31 @@ buscmp-memind42: $(SIM)/cosim_grp winuae/tests/memind42_ref.log tests/memind42.h
 	python3 tools/buscmp.py /tmp/_dut_memind42.log winuae/tests/memind42_ref.log \
 	    --dut-may-continue
 
+# bf_sizing1/2 (project_bf_mem_longword_sizing_bug.md fix, plan.md): the
+# bitfield-mem real minimal-footprint bus sizing fix -- bf_sizing1 covers
+# the span==1 case (single BYTE read+write), bf_sizing2 covers the
+# harder span==3 case (WORD then BYTE sub-accesses, the 2-sub-access
+# shape this fix adds).
+buscmp-bf_sizing1: $(SIM)/cosim_grp winuae/tests/bf_sizing1_ref.log tests/bf_sizing1.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/bf_sizing1.hex +grp=bf_sizing1 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_bf_sizing1.log || true
+	python3 tools/buscmp.py /tmp/_dut_bf_sizing1.log winuae/tests/bf_sizing1_ref.log \
+	    --dut-may-continue
+
+buscmp-bf_sizing2: $(SIM)/cosim_grp winuae/tests/bf_sizing2_ref.log tests/bf_sizing2.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/bf_sizing2.hex +grp=bf_sizing2 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_bf_sizing2.log || true
+	python3 tools/buscmp.py /tmp/_dut_bf_sizing2.log winuae/tests/bf_sizing2_ref.log \
+	    --dut-may-continue
+
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
               buscmp-memind28 buscmp-memind29 buscmp-memind30 buscmp-memind31 \
               buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 buscmp-memind40 \
               buscmp-memind41 buscmp-memind42 \
-              buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35
+              buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35 \
+              buscmp-bf_sizing1 buscmp-bf_sizing2
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py

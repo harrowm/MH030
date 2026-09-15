@@ -289,8 +289,8 @@
     // bit-field memory FSM (declared early for ex_mem_stall)
     logic        bf_mem_run_r;       // FSM active
     logic        bf_mem_phase_r;     // 0=read, 1=write
-    logic [31:0] bf_mem_data_r;      // captured memory longword
-    logic [31:0] bf_mem_addr_r;      // EA address
+    logic [31:0] bf_mem_data_r;      // captured, footprint-assembled longword
+    logic [31:0] bf_mem_addr_r;      // EA address (base byte, un-patched)
     logic [2:0]  bf_mem_op_r;        // bf_op captured
     logic [4:0]  bf_mem_offset_r;    // offset captured
     logic [4:0]  bf_mem_width_r;     // width captured
@@ -298,12 +298,89 @@
     logic [31:0] bf_mem_src_r;       // BFINS source Dn captured
     logic        bf_mem_mutates_r;   // 1=CLR/SET/INS (needs write phase)
 
+    // Real minimal-footprint bus access sizing (project_bf_mem_longword_
+    // sizing_bug.md, found Phase 262, fixed here): the field's own
+    // offset+width determines which of {byte, word, word+byte, longword}
+    // the real 68030 actually reads/writes, starting at bf_mem_addr_r +
+    // byte_start rather than always a fixed 4-byte longword at
+    // bf_mem_addr_r. Derived by re-deriving Musashi's own
+    // m68ki_load_bitfield/m68ki_store_bitfield algorithm (tools/musashi/
+    // m68kcpu.h) directly against this project's own byte_start-relative
+    // framing (no address-patching needed here, unlike Musashi's ea+
+    // offset/8 -- byte_start plays that same role while keeping
+    // eu_bitfield.sv's own unpatched 0-31 bf_offset convention intact,
+    // see bf_place/bf_extract below). Scoped to the offset+width<=32
+    // envelope only (bf_mem_in_envelope) -- the only envelope in which
+    // the CURRENT, unfixed longword-only access is even value-correct
+    // today; the offset+width>32 (field spans into a 5th byte) case is a
+    // separate, deeper, pre-existing gap (eu_bitfield.sv's own math
+    // already breaks there too -- its own header comment states the
+    // offset+width<=32 restriction directly) and is deliberately left
+    // exactly as before (falls back to the old fixed-longword-at-
+    // byte_start-0 access) rather than guessed at here.
+    logic [1:0]  bf_mem_byte_start_r;   // starting byte (0-3), relative to bf_mem_addr_r
+    logic [1:0]  bf_mem_siz1_r;         // SIZ of the only (or first) sub-access
+    logic        bf_mem_has_sub2_r;     // 1 = 3-byte footprint, needs a 2nd (byte) sub-access
+    logic        bf_mem_sub_r;          // 0 = first sub-access in flight, 1 = second
+    logic [31:0] bf_mem_word_contrib_r; // 1st sub-read's own shifted contribution (has_sub2 only)
+
+    // True on the read (resp. write) sub-access that's genuinely the LAST
+    // one for this phase -- the single access when !bf_mem_has_sub2_r, or
+    // the second (byte) sub-access when it is. Gates both bf_mem_stall's
+    // own completion and every "phase is done" transition below, so a
+    // 3-byte footprint's own intermediate (first) sub-access ack doesn't
+    // prematurely look like phase completion.
+    wire bf_mem_sub_last = !bf_mem_has_sub2_r || bf_mem_sub_r;
+
+    // Shift a genuine mem_rdata bus read into its correct position within
+    // a virtual full-longword-relative layout starting at byte_start
+    // (0-3) -- the read-side counterpart eu_bitfield.sv's own unpatched
+    // 0-31 bf_offset already expects. mem_rdata for READS is RIGHT-
+    // justified (byte@[7:0], word@[15:0], long@[31:0] -- confirmed via a
+    // direct debug trace, not assumed: initially assumed the SAME
+    // top-justified convention eu_lane documents for WRITES, which is
+    // wrong for reads and produced an all-zero assembled value, caught
+    // via a real cosim mismatch before shipping) -- top-justify first
+    // (matching eu_lane's own write-side transform), THEN shift into the
+    // virtual position.
+    function automatic logic [31:0] bf_place(
+        input logic [31:0] raw,
+        input logic [1:0]  siz,
+        input logic [1:0]  bs
+    );
+        logic [31:0] top_justified;
+        case (siz)
+            2'b01:   top_justified = {raw[7:0],  24'h0};
+            2'b10:   top_justified = {raw[15:0], 16'h0};
+            default: top_justified = raw;
+        endcase
+        bf_place = top_justified >> (6'(bs) * 6'd8);
+    endfunction
+
+    // Inverse of bf_place: extract the sub-portion of an assembled,
+    // virtual-longword-relative value (bf_result_w) at byte_start bs and
+    // re-justify it to the top-justified bus lane a write of size `siz`
+    // expects (mirrors eu_lane's own convention).
+    function automatic logic [31:0] bf_extract(
+        input logic [31:0] full,
+        input logic [1:0]  siz,
+        input logic [1:0]  bs
+    );
+        logic [31:0] shifted;
+        shifted = full << (6'(bs) * 6'd8);
+        case (siz)
+            2'b01:   bf_extract = shifted & 32'hFF00_0000;
+            2'b10:   bf_extract = shifted & 32'hFFFF_0000;
+            default: bf_extract = shifted;
+        endcase
+    endfunction
+
     // bf_mem_stall: active while FSM is running and not yet done
     // (mem_berr || exc_active) spelled out — see addx_mem_stall's own
     // comment above for why (forward-reference / must include exc_active).
     logic bf_mem_stall;
     assign bf_mem_stall = ex_valid && ex_is_bf && !ex_bf_reg_ea && !(mem_berr || exc_active) &&
-                          !(bf_mem_run_r && mem_ack &&
+                          !(bf_mem_run_r && mem_ack && bf_mem_sub_last &&
                             (!bf_mem_phase_r && !bf_mem_mutates_r ||   // read done, non-mut
                               bf_mem_phase_r));                          // write done
 
@@ -2523,43 +2600,105 @@
         end
     end
 
+    // Real minimal-footprint sizing, derived combinationally from the
+    // live ex_imm the moment a bit-field memory-EA instruction is about
+    // to dispatch (same "re-derived every cycle from live decode output"
+    // convention ex_bf_op/ex_bf_mutates already use) -- see this file's
+    // own bf_mem_byte_start_r/bf_place/bf_extract declaration comment
+    // above for the full derivation and the offset+width<=32 envelope
+    // scoping.
+    logic [5:0] bf_disp_width_v;
+    assign bf_disp_width_v = (ex_imm[4:0] == 5'h0) ? 6'd32 : {1'b0, ex_imm[4:0]};
+    logic [6:0] bf_disp_sum_v;   // offset + width
+    assign bf_disp_sum_v = {2'b0, ex_imm[10:6]} + {1'b0, bf_disp_width_v};
+    logic       bf_disp_in_envelope_v;
+    assign bf_disp_in_envelope_v = (bf_disp_sum_v <= 7'd32);
+    logic [1:0] bf_disp_byte_start_v;
+    assign bf_disp_byte_start_v = bf_disp_in_envelope_v ? ex_imm[10:9] : 2'b00;
+    logic [6:0] bf_disp_end_bit_v;   // offset + width - 1
+    assign bf_disp_end_bit_v = bf_disp_sum_v - 7'd1;
+    logic [2:0] bf_disp_span_v;      // 1-4 (always 4 outside the envelope: old fallback behavior)
+    assign bf_disp_span_v = !bf_disp_in_envelope_v ? 3'd4
+                           : ({1'b0, bf_disp_end_bit_v[4:3]} - {1'b0, bf_disp_byte_start_v} + 3'd1);
+    logic [1:0] bf_disp_siz1_v;      // SIZ of the (only, or first) sub-access
+    assign bf_disp_siz1_v = (bf_disp_span_v == 3'd1) ? 2'b01 :
+                            (bf_disp_span_v == 3'd4) ? 2'b00 : 2'b10;  // span 2 or 3 -> word
+    logic       bf_disp_has_sub2_v;
+    assign bf_disp_has_sub2_v = (bf_disp_span_v == 3'd3);
+
     // bit-field memory EA FSM
-    // Phase 0 (read): issue longword read from M[An]; on ack: capture data, go to phase 1 if mutating
-    // Phase 1 (write): issue write of modified longword back to M[An]; on ack: FSM done
+    // Phase 0 (read): issue the real minimal-footprint read(s) from
+    // M[An+byte_start] -- 1 access (byte/word/long) or 2 (word then byte,
+    // only when the footprint is exactly 3 bytes); on the LAST read ack:
+    // assemble the footprint into a virtual-full-longword-relative value
+    // and go to phase 1 if mutating.
+    // Phase 1 (write): issue the SAME real minimal-footprint write(s) of
+    // the modified value back to M[An+byte_start]; on the last write ack:
+    // FSM done.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
-            bf_mem_run_r     <= 1'b0;
-            bf_mem_phase_r   <= 1'b0;
-            bf_mem_data_r    <= 32'h0;
-            bf_mem_addr_r    <= 32'h0;
-            bf_mem_op_r      <= 3'b0;
-            bf_mem_offset_r  <= 5'h0;
-            bf_mem_width_r   <= 5'h0;
-            bf_mem_dn_r      <= 3'b0;
-            bf_mem_src_r     <= 32'h0;
-            bf_mem_mutates_r <= 1'b0;
+            bf_mem_run_r           <= 1'b0;
+            bf_mem_phase_r         <= 1'b0;
+            bf_mem_data_r          <= 32'h0;
+            bf_mem_addr_r          <= 32'h0;
+            bf_mem_op_r            <= 3'b0;
+            bf_mem_offset_r        <= 5'h0;
+            bf_mem_width_r         <= 5'h0;
+            bf_mem_dn_r            <= 3'b0;
+            bf_mem_src_r           <= 32'h0;
+            bf_mem_mutates_r       <= 1'b0;
+            bf_mem_byte_start_r    <= 2'b0;
+            bf_mem_siz1_r          <= 2'b0;
+            bf_mem_has_sub2_r      <= 1'b0;
+            bf_mem_sub_r           <= 1'b0;
+            bf_mem_word_contrib_r  <= 32'h0;
         end else begin
             if (ex_valid && ex_is_bf && !ex_bf_reg_ea && !bf_mem_run_r) begin
                 // Setup: capture parameters from EX stage
-                bf_mem_run_r     <= 1'b1;
-                bf_mem_phase_r   <= 1'b0;
-                bf_mem_addr_r    <= ex_ea;            // effective address (An, An+d16, or abs)
-                bf_mem_op_r      <= ex_bf_op;
-                bf_mem_offset_r  <= ex_imm[10:6];
-                bf_mem_width_r   <= ex_imm[4:0];
-                bf_mem_dn_r      <= ex_dest_reg[2:0]; // result Dn from extension word
-                bf_mem_src_r     <= rd_b_data;        // BFINS source Dn (0 if not BFINS)
-                bf_mem_mutates_r <= ex_bf_mutates;
+                bf_mem_run_r        <= 1'b1;
+                bf_mem_phase_r      <= 1'b0;
+                bf_mem_addr_r       <= ex_ea;            // effective address (An, An+d16, or abs)
+                bf_mem_op_r         <= ex_bf_op;
+                bf_mem_offset_r     <= ex_imm[10:6];
+                bf_mem_width_r      <= ex_imm[4:0];
+                bf_mem_dn_r         <= ex_dest_reg[2:0]; // result Dn from extension word
+                bf_mem_src_r        <= rd_b_data;        // BFINS source Dn (0 if not BFINS)
+                bf_mem_mutates_r    <= ex_bf_mutates;
+                bf_mem_byte_start_r <= bf_disp_byte_start_v;
+                bf_mem_siz1_r       <= bf_disp_siz1_v;
+                bf_mem_has_sub2_r   <= bf_disp_has_sub2_v;
+                bf_mem_sub_r        <= 1'b0;
             end else if (bf_mem_run_r && mem_ack) begin
                 if (!bf_mem_phase_r) begin
-                    bf_mem_data_r  <= mem_rdata;      // capture longword
-                    if (bf_mem_mutates_r)
-                        bf_mem_phase_r <= 1'b1;       // proceed to write phase
-                    else
-                        bf_mem_run_r   <= 1'b0;       // read-only op: done
+                    if (bf_mem_has_sub2_r && !bf_mem_sub_r) begin
+                        // First sub-read (word) of a 3-byte footprint --
+                        // capture its shifted contribution and move to
+                        // the second (byte) sub-read; phase stays 0.
+                        bf_mem_word_contrib_r <= bf_place(mem_rdata, 2'b10, bf_mem_byte_start_r);
+                        bf_mem_sub_r          <= 1'b1;
+                    end else begin
+                        // Single access, or the final sub-read of a
+                        // 3-byte footprint: assemble the footprint-wide,
+                        // virtual-full-longword-relative value.
+                        bf_mem_data_r <= bf_mem_has_sub2_r
+                                        ? (bf_mem_word_contrib_r |
+                                           bf_place(mem_rdata, 2'b01, bf_mem_byte_start_r + 2'd2))
+                                        : bf_place(mem_rdata, bf_mem_siz1_r, bf_mem_byte_start_r);
+                        if (bf_mem_mutates_r) begin
+                            bf_mem_phase_r <= 1'b1;   // proceed to write phase
+                            bf_mem_sub_r   <= 1'b0;   // first sub-write next
+                        end else
+                            bf_mem_run_r   <= 1'b0;   // read-only op: done
+                    end
                 end else begin
-                    bf_mem_run_r   <= 1'b0;           // write done
-                    bf_mem_phase_r <= 1'b0;
+                    if (bf_mem_has_sub2_r && !bf_mem_sub_r) begin
+                        // First sub-write (word) acked -- one more (byte)
+                        // sub-write to go; phase stays 1.
+                        bf_mem_sub_r <= 1'b1;
+                    end else begin
+                        bf_mem_run_r   <= 1'b0;       // write done
+                        bf_mem_phase_r <= 1'b0;
+                    end
                 end
             end else if (bf_mem_run_r && mem_abort) begin
                 // A fault on either phase aborts the whole bit-field op —
@@ -2569,6 +2708,7 @@
                 // BFEXTS/etc. memory-EA instruction.
                 bf_mem_run_r   <= 1'b0;
                 bf_mem_phase_r <= 1'b0;
+                bf_mem_sub_r   <= 1'b0;
             end
         end
     end
@@ -3581,7 +3721,20 @@
     logic [2:0]  bf_op_mux;
     logic        bf_n, bf_z, bf_v, bf_c;
 
-    assign bf_data_mux   = (ex_is_bf && !ex_bf_reg_ea && bf_mem_run_r && !bf_mem_phase_r) ? mem_rdata
+    // Mirrors the exact assembly formula the FSM above uses to capture
+    // bf_mem_data_r -- needed here too since a NON-mutating op (BFTST/
+    // BFEXTU/BFEXTS/BFFFO) reads bf_result directly off the read phase's
+    // own final ack (bf_dn_wr_en/bf_mem_sr_wr_en below), never routing
+    // through bf_mem_data_r at all. Only meaningful on the genuine final
+    // read-ack cycle (bf_mem_sub_last); on a 3-byte footprint's own FIRST
+    // sub-read, bf_mem_word_contrib_r hasn't been updated with the
+    // current beat yet, but nothing consumes this value at that cycle.
+    wire [31:0] bf_mem_read_assembled_w =
+        bf_mem_has_sub2_r ? (bf_mem_word_contrib_r |
+                              bf_place(mem_rdata, 2'b01, bf_mem_byte_start_r + 2'd2))
+                          : bf_place(mem_rdata, bf_mem_siz1_r, bf_mem_byte_start_r);
+
+    assign bf_data_mux   = (ex_is_bf && !ex_bf_reg_ea && bf_mem_run_r && !bf_mem_phase_r) ? bf_mem_read_assembled_w
                          : (ex_is_bf && !ex_bf_reg_ea && bf_mem_run_r &&  bf_mem_phase_r) ? bf_mem_data_r
                          : rd_a_data;
     assign bf_offset_mux = bf_mem_run_r ? bf_mem_offset_r : ex_imm[10:6];
@@ -4493,15 +4646,25 @@
     assign memind_addr_wr_en   = memind_inner_r && mem_ack && memind_addr_only_r && !ex_is_tas && !ex_is_movem;
     assign memind_addr_wr_data = mem_rdata + memind_post_xn_r + memind_od_r;
 
-    // BF memory Dn write — non-mutating ops write extracted result to Dn at read ack.
+    // BF memory Dn write — non-mutating ops write extracted result to Dn at
+    // read ack. bf_mem_sub_last (project_bf_mem_longword_sizing_bug.md fix):
+    // a 3-byte footprint's own FIRST (word) sub-read is an intermediate
+    // beat, not the real completion -- without this, a non-mutating op
+    // would fire this write one beat early, off bf_result computed from
+    // only half the field's own data.
     // BFTST(000) has no Dn destination; BFEXTU/EXTS/FFO(001/010/011) write to ext_data[14:12]=bf_mem_dn_r.
     logic bf_dn_wr_en;
-    assign bf_dn_wr_en = bf_mem_run_r && mem_ack && !bf_mem_phase_r && !bf_mem_mutates_r &&
+    assign bf_dn_wr_en = bf_mem_run_r && mem_ack && bf_mem_sub_last &&
+                         !bf_mem_phase_r && !bf_mem_mutates_r &&
                          (bf_mem_op_r != 3'b000);
 
-    // BF memory CCR — non-mutating at read ack; mutating at write ack.
+    // BF memory CCR — non-mutating at (real, final) read ack; mutating at
+    // (real, final) write ack. Same bf_mem_sub_last reasoning as
+    // bf_dn_wr_en above, extended to the write side too (a 3-byte
+    // footprint's own first sub-write is likewise not the real
+    // completion).
     logic bf_mem_sr_wr_en;
-    assign bf_mem_sr_wr_en = bf_mem_run_r && mem_ack &&
+    assign bf_mem_sr_wr_en = bf_mem_run_r && mem_ack && bf_mem_sub_last &&
                              ((!bf_mem_mutates_r && !bf_mem_phase_r) ||
                               ( bf_mem_mutates_r &&  bf_mem_phase_r));
 
@@ -5130,7 +5293,10 @@
                        mem_rmw_run_r  ? ex_siz :
                        move_mm_run_r  ? move_mm_siz_r :
                        addx_mem_run_r ? addx_siz_r :
-                       bf_mem_run_r   ? 2'b00 :
+                       // project_bf_mem_longword_sizing_bug.md fix: real
+                       // minimal footprint (byte/word/long, or word then
+                       // byte for a 3-byte span) instead of always 2'b00.
+                       bf_mem_run_r   ? (bf_mem_has_sub2_r ? (bf_mem_sub_r ? 2'b01 : 2'b10) : bf_mem_siz1_r) :
                        pack_mem_run_r ? pack_mem_cur_siz :
                        pmove64_run_r  ? 2'b00 :
                        cas_write_r    ? cas_siz_r :
@@ -5156,7 +5322,12 @@
                        mem_rmw_run_r  ? mem_rmw_addr_r :
                        move_mm_run_r  ? move_mm_dst_addr_r :
                        addx_mem_run_r ? (addx_mem_phase_r == 2'd0 ? addx_ay_addr_r : addx_ax_addr_r) :
-                       bf_mem_run_r   ? bf_mem_addr_r :
+                       // byte_start (0-3) selects which byte of the real
+                       // footprint bf_mem_addr_r itself is; the 3-byte
+                       // footprint's own second (byte) sub-access sits 2
+                       // bytes past the first (word) sub-access's own start.
+                       bf_mem_run_r   ? (bf_mem_addr_r + {30'h0, bf_mem_byte_start_r} +
+                                         ((bf_mem_has_sub2_r && bf_mem_sub_r) ? 32'd2 : 32'd0)) :
                        pack_mem_run_r ? (pack_mem_phase_r ? pack_mem_ax_addr_r : pack_mem_ay_addr_r) :
                        pmove64_run_r  ? (pmove64_addr_r + 32'd4) :
                        cas_write_r    ? cas_ea_r :
@@ -5191,7 +5362,17 @@
                      : move_mm_run_r            ? eu_lane(move_mm_data_r, move_mm_siz_r)
                      : (addx_mem_run_r && addx_mem_phase_r == 2'd2) ?
                                                   eu_lane(ex_result, ex_siz)
-                     : (bf_mem_run_r && bf_mem_phase_r) ? bf_result_w
+                     // project_bf_mem_longword_sizing_bug.md fix: extract
+                     // only the sub-portion of the assembled bf_result_w
+                     // this specific sub-write actually touches, re-
+                     // justified to the top-justified bus lane its own
+                     // size expects (bf_extract, the inverse of bf_place).
+                     : (bf_mem_run_r && bf_mem_phase_r) ?
+                           (bf_mem_has_sub2_r
+                              ? (bf_mem_sub_r
+                                   ? bf_extract(bf_result_w, 2'b01, bf_mem_byte_start_r + 2'd2)
+                                   : bf_extract(bf_result_w, 2'b10, bf_mem_byte_start_r))
+                              : bf_extract(bf_result_w, bf_mem_siz1_r, bf_mem_byte_start_r))
                      : (pack_mem_run_r && pack_mem_phase_r) ? pack_mem_wdata_w
                      : tas_run_r               ? {tas_wdata_r, 24'h0}
                      : movep_run_r             ? {movep_wr_byte_r, 24'h0}

@@ -188,13 +188,33 @@ module ea_extended_tb;
 
     // Memory model with word-aware reads for CMP2.W bounds
     // Word reads: addr[1]=0 → upper word [31:16] in [15:0]; addr[1]=1 → lower word [15:0]
+    // Byte reads (project_bf_mem_longword_sizing_bug.md fix, plan.md):
+    // right-justified per mem_addr[1:0], the same real, already-gathered
+    // convention the word case above already used -- previously absent
+    // entirely (this model always fell through to the raw full-longword
+    // branch below, harmless as long as bf_mem_run_r never dispatched a
+    // genuine byte access, which it now does; caught via BFTST-01/02
+    // regressing once it started).
     logic [31:0] ram [0:8191];
+
+    function automatic logic [31:0] byte_lane_read(
+        input logic [31:0] word, input logic [1:0] a10
+    );
+        case (a10)
+            2'b00: byte_lane_read = {24'h0, word[31:24]};
+            2'b01: byte_lane_read = {24'h0, word[23:16]};
+            2'b10: byte_lane_read = {24'h0, word[15:8]};
+            2'b11: byte_lane_read = {24'h0, word[7:0]};
+        endcase
+    endfunction
 
     assign mem_ack   = mem_req;
     assign mem_rdata = (mem_req && mem_rw)
         ? ((mem_siz == 2'b10)
                ? (mem_addr[1] ? {16'h0, ram[mem_addr[14:2]][15:0]}
                                : {16'h0, ram[mem_addr[14:2]][31:16]})
+               : (mem_siz == 2'b01)
+               ? byte_lane_read(ram[mem_addr[14:2]], mem_addr[1:0])
                : ram[mem_addr[14:2]])
         : 32'h0;
 
@@ -303,9 +323,21 @@ module ea_extended_tb;
         run_instr(16'h51F0, 1'b1, 32'h0000_1010);
         chk("SCC-02:SF_indexed", ram[32'h510>>2], 32'h0000_0000);
 
-        // TAS.B (A0)+ — post-increment: 0x4AD8; A0=0x600, M[0x600]=0x42 in [7:0]
+        // TAS.B (A0)+ — post-increment: 0x4AD8; A0=0x600, M[0x600]=0x42.
+        // project_bf_mem_longword_sizing_bug.md fix (plan.md): this cell's
+        // own value used to be placed at [7:0] instead of this array's own
+        // established big-endian convention (byte at address%4==0 lives
+        // at [31:24], matching every other test's own ram[] usage in this
+        // file, and this same test's own expected post-TAS value below,
+        // 0xC2000000, already at [31:24]) -- masked before by two
+        // independent testbench bugs canceling out (the old memory model
+        // returned byte reads as the raw, unmodified longword, and TAS's
+        // own real mem_rdata consumption is right-justified, so a value
+        // placed at [7:0] coincidentally "worked"). Caught once the
+        // memory model's own byte-read case was fixed to correctly
+        // extract from the real, address-aligned big-endian lane.
         $display("--- TAS: post-increment and pre-decrement ---");
-        ram[32'h600>>2] = 32'h0000_0042;
+        ram[32'h600>>2] = 32'h4200_0000;
         set_an(3'h0, 32'h0000_0600);
         run_instr(16'h4AD8, 1'b0, 32'h0);
         chk("TAS-01:mem_postinc", ram[32'h600>>2], 32'hC200_0000);

@@ -184,14 +184,74 @@ module bitfield_tb;
     );
 
     // ─── Memory model (8K × 32, combinatorial read, synchronous write) ───────
+    // Byte/word lane-aware (project_bf_mem_longword_sizing_bug.md fix, plan.md):
+    // this model used to always read/write the WHOLE longword regardless of
+    // mem_siz -- harmless as long as every bf_mem_run_r access really was a
+    // full longword (the old, unfixed RTL behavior), but exposed as a real
+    // testbench gap once bf_mem_run_r started dispatching genuine byte/word
+    // sub-accesses: a byte/word WRITE would silently clobber the other,
+    // untouched bytes of the same ram[] word (BFCLR-02/BFSET-02/BFINS-02 are
+    // the first tests in this file to write a narrow size onto a location
+    // with non-zero surrounding bytes -- every earlier byte/word-write test
+    // here happened to pre-zero its own target first, masking the gap), and
+    // a byte/word READ at a non-zero A[1:0] would return the wrong byte
+    // lane entirely.
+    //
+    // Write side (mem_wdata) mirrors tb/mem_model.sv's own established
+    // TOP-justified lane convention (byte@D[31:24], word@D[31:16]) --
+    // that's eu_seq's own real output convention (eu_lane, rtl/eu_seq.sv),
+    // confirmed correct here (BFCLR-02/BFSET-02/BFINS-02 all pass with it).
+    //
+    // Read side (lane_read) is instead RIGHT-justified (byte@D[7:0],
+    // word@D[15:0]) -- a DIFFERENT, asymmetric convention from the write
+    // side, confirmed via a direct debug trace on the real, full BIU-
+    // backed pipeline (cosim_grp_tb.sv), not assumed: a first attempt
+    // mirrored the write side's own top-justified convention here too
+    // (matching what the RAW PIN-level ext_d_in/mem_model.sv shows), but
+    // real mem_rdata at the EU boundary is already right-justified by the
+    // real BIU's own internal gather logic (biu_cache_if.sv/biu_byte_lane_
+    // ctrl.sv) before this module's own eu_seq/m68030_eu instantiation
+    // ever sees it -- this testbench drives eu_seq directly, bypassing the
+    // BIU entirely, so its own memory model must emulate that same
+    // already-gathered, right-justified contract, not the raw pin-level
+    // one. Caught via BFTST-03/BFEXTU-02 regressing after switching
+    // rtl/eu_seq_execute.svh's own bf_place to expect right-justified
+    // input (which IS correct for the real pipeline, confirmed via
+    // cosim_grp -- this file's own model was the one still wrong).
     logic [31:0] ram [0:8191];
 
+    function automatic logic [31:0] lane_read(
+        input logic [31:0] word, input logic [1:0] siz, input logic [1:0] a10
+    );
+        case (siz)
+            2'b01: case (a10)
+                       2'b00: lane_read = {24'h0, word[31:24]};
+                       2'b01: lane_read = {24'h0, word[23:16]};
+                       2'b10: lane_read = {24'h0, word[15:8]};
+                       2'b11: lane_read = {24'h0, word[7:0]};
+                   endcase
+            2'b10: lane_read = a10[1] ? {16'h0, word[15:0]} : {16'h0, word[31:16]};
+            default: lane_read = word;
+        endcase
+    endfunction
+
     assign mem_ack   = mem_req;
-    assign mem_rdata = (mem_req && mem_rw) ? ram[mem_addr[14:2]] : 32'h0;
+    assign mem_rdata = (mem_req && mem_rw) ? lane_read(ram[mem_addr[14:2]], mem_siz, mem_addr[1:0]) : 32'h0;
 
     always_ff @(posedge clk) begin
-        if (mem_req && !mem_rw)
-            ram[mem_addr[14:2]] <= mem_wdata;
+        if (mem_req && !mem_rw) begin
+            case (mem_siz)
+                2'b01: case (mem_addr[1:0])
+                           2'b00: ram[mem_addr[14:2]][31:24] <= mem_wdata[31:24];
+                           2'b01: ram[mem_addr[14:2]][23:16] <= mem_wdata[31:24];
+                           2'b10: ram[mem_addr[14:2]][15:8]  <= mem_wdata[31:24];
+                           2'b11: ram[mem_addr[14:2]][7:0]   <= mem_wdata[31:24];
+                       endcase
+                2'b10: if (mem_addr[1]) ram[mem_addr[14:2]][15:0]  <= mem_wdata[31:16];
+                       else             ram[mem_addr[14:2]][31:16] <= mem_wdata[31:16];
+                default: ram[mem_addr[14:2]] <= mem_wdata;
+            endcase
+        end
     end
 
     // ─── Test infrastructure ─────────────────────────────────────────────────
