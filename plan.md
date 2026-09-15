@@ -1461,3 +1461,139 @@ implemented and verified; item 3/two-level-indirect corrected as a
 documentation fix, see above) — and with it, the entire
 `~/.claude/plans/wobbly-honking-cascade.md` plan the user approved for
 this session's work.
+
+## Phase 274 (post-Track-3 gap closure: preview now fires when CURRENT
+is an ordinary write — IMPLEMENTED AND VERIFIED, a later session,
+`~/.claude/plans/wobbly-honking-cascade.md`)
+
+Found while building `timing_diagrams/`'s Figure 7-25 (Read-Write-
+Write-Read chain) test program: `preview_current_ready`'s own ordinary
+clause (`rtl/eu_seq_preview.svh`, the Track 3 preview mechanism's own
+entry point) only ever fired when CURRENT was a READ (`ex_is_mem_rd`)
+— an ordinary WRITE as CURRENT never triggered a preview of NEXT at
+all, regardless of what NEXT was. Neither Track 2 (Stage 2.2 only ever
+extended what NEXT is allowed to be — a plain write as the *upcoming*
+instruction, never touching what CURRENT is allowed to be) nor any of
+Track 3's 16 special-FSM families closed this gap either, since every
+one of them is a read-final-beat family (their own `*_final_ack`
+signals all key off a READ's own completing beat). Confirmed
+empirically before touching any RTL: a throwaway write-then-write test
+showed zero `preview_ok` engagement on either transition despite both
+writes acking cleanly — the gap was real, not a rendering artifact.
+
+**Fix**: mirrored the read clause exactly (`(ex_is_mem_rd ||
+ex_is_mem_wr)`), re-verifying both of the read clause's own existing
+exclusions fresh for the write side rather than assuming they carry
+over unchanged:
+
+- `!ex_is_move_reg_idx_dst` (MOVE Dn/An→`(d8,An,Xn)`, the Phase 149
+  3rd-register-file-port case): confirmed via decode inspection it
+  never sets `dec_is_mem_rd` (so it never collided with the pre-existing
+  read clause — that exclusion there was dead code, though harmless),
+  but it DOES set `dec_is_mem_wr` — kept excluded here too, matching the
+  read clause's own conservative posture, since its own original
+  rd_c-port-contention rationale, while stale post-Track-2, costs
+  nothing to keep excluding for a rare instruction form.
+- `!ex_is_pmove64`: confirmed PMOVE64's own STORE direction also sets
+  `dec_is_mem_wr=1'b1` for its phase-0 write (`rtl/eu_seq_decode.svh`
+  line ~6266) — the identical regression shape as the original Phase
+  264 read-side PMOVE64 regression (Track 3 #7) — caught by direct
+  inspection this time, before it could ship as a live bug, rather than
+  discovered the hard way via a sim hang as Phase 264 was.
+
+**No new hazard signal needed**: confirmed via direct inspection that
+`hazard_ex`'s own generic An-update clause (`ex_valid && ex_an_upd_en
+&& !ex_is_mem_rmw && (dec_reads_src/dst/c matches ex_an_upd_reg)`) —
+already asserted for the whole EX residency of any auto-inc/dec write,
+including the new trigger's own cycle — already fully covers every
+ordinary write's own EA-register hazard. `ex_is_mem_rmw` is the clause's
+only pre-existing exclusion (mem_rmw has its own dedicated
+`mem_rmw_hazard` from Track 3 #13), irrelevant here since ordinary
+writes never set it.
+
+**Verification**: two new dedicated cosim tests,
+`tests/timing_preview_write_chain.s` (zero-hazard write→write chain,
+matches Musashi's own bus trace exactly) and
+`tests/timing_preview_write_chain_hazard.s` (a predecrement write
+immediately followed by a dependent write to the same
+just-decremented address, confirmed blocked via direct debug trace).
+The hazard test's own `buscmp.py` comparison is NOT clean, for a
+reason unrelated to this fix: Musashi's own reference model splits
+`MOVE.L Dn,-(An)` into 2 separate WORD writes (confirmed via an
+isolated single-instruction check, `MOVE.L D0,-(A1)` alone with no
+preview involved at all, reproducing the split regardless of any
+change made this session) — real 68030 silicon with a 32-bit port does
+one longword write, matching this DUT; Musashi's own model appears to
+default to word-granularity for predecrement addressing. Verified the
+hazard-blocking behavior via debug trace instead, matching this
+project's own established precedent for this exact situation (e.g. the
+PACK/bitfield-mem Musashi-divergence findings, Track 3 #5/#6).
+
+Full mandatory gate clean (`make test` 37/37, `cosim_grp` 8/8,
+`cosim_memind` 29/29, `dat-synth` 50/50), full 124-suite Harte sweep
+bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`).
+
+## Phase 275 (`biu_cache_if.sv`'s `CI_WRITE` completion missing its own
+`eu_new_dispatch` fast-path check — IMPLEMENTED AND VERIFIED, closes
+this session's own post-Track-3 work, `~/.claude/plans/
+wobbly-honking-cascade.md`)
+
+Found while re-testing the Figure 7-25 diagram after Phase 274's own
+write-as-CURRENT preview fix landed: write→write chaining now looked
+gap-free, but write→read-miss still showed a real one-tick `--` gap in
+the rendered diagram, even though `preview_ok`/`eu_new_dispatch` were
+confirmed (via direct trace) already asserted at the exact cycle
+`CI_WRITE`'s own completion runs.
+
+**Root cause** (found by direct inspection, not guessed at): `grep`
+for `eu_new_dispatch` in `rtl/biu_cache_if.sv` showed it used in
+exactly one place — `CI_D_MISS`'s own `sf_ack_rise` completion block
+(the Phase 254 fast path: when NEXT is a genuine read-miss ready to
+dispatch, skip the one-tick `CI_IDLE` detour and land directly back in
+`CI_D_MISS`). `CI_WRITE`'s own analogous completion block, reached on
+the identical `sf_ack_rise` condition, had no equivalent check at all
+— it unconditionally executed a plain `state <= CI_IDLE;`, so ANY
+access following a write always took the one-tick `CI_IDLE` detour
+regardless of what `eu_new_dispatch` said. This also explained why
+write→write chaining had looked gap-free even BEFORE Phase 274's own
+fix: that gap-free appearance came entirely from a separate,
+pre-existing mechanism — "Track A" (Phase 163/Phase 247 item #10), an
+unconditional write/cache-hit fast path inside `CI_IDLE` itself that
+never consulted `eu_new_dispatch` at all — not from the `eu_new_dispatch`
+mechanism this phase closes. Write→read-miss specifically needs the
+`eu_new_dispatch`-gated path that, until this fix, only `CI_D_MISS`'s
+own completion ever checked.
+
+**Fix**: copied `CI_D_MISS`'s own fast-path condition and full
+register-set block verbatim into `CI_WRITE`'s own completion branch —
+`if (eu_req && eu_new_dispatch && eu_rw && !dhit && !tc_e &&
+!(dcache_en && dburst_en && d_size_ok && !dfreeze_en))` dispatches
+directly into a fresh `CI_D_MISS` (loading `addr_r`/`wdata_r`/`fc_r`/
+`rw_r`/`siz_r`/`idx_r`/`woff_r`/`vtag_r`/`fill_base_r`/`xl_ci_r` exactly
+as `CI_D_MISS`'s own completion does); otherwise falls through to the
+original, unmodified `state <= CI_IDLE;`. Reusing the identical,
+already-twice-hardened `eu_new_dispatch`-gated condition (an explicit
+signal, never inferred from address inequality — see the Phase 254
+history and `feedback_post_ack_signal_reuse.md`) rather than inventing
+a new one, matching this module's own established precedent that any
+new fast path here must reuse proven-safe machinery given its own
+extensively-documented delicacy (Phase 228/246/250-Part-B, the
+bus-pipelining-overlap plan, and Phase 253's own two-attempt/revert
+history for a structurally similar fast path in this exact module).
+
+**Verification**: `make test` 37/37 (including the `cache` suite),
+`cosim_grp` 8/8, `cosim_memind` 29/29, `dat-synth` 50/50,
+`tb/cache_tb.sv` run standalone (all D-cache write-hit/write-allocate
+tests pass — extra-confidence given this fix directly touches the
+D-cache write path), full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`). The Figure 7-25
+diagram now shows zero `--` gap across all 4 chained cycles
+(read→write→write→read), regenerated and re-verified via direct JSON
+inspection post-fix.
+
+**Closes this session's own post-Track-3 work** — both gaps the
+Figure 7-25 diagram's own construction surfaced (Phase 274's
+write-as-CURRENT preview gap and this phase's `CI_WRITE` fast-path
+gap) are now fixed, matching real 68030 silicon's own zero-idle-gap
+chained-cycle timing (MC68030UM.pdf Figure 7-25) for this instruction
+sequence shape.

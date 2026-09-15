@@ -541,6 +541,28 @@ across `cache_tb.sv`/`mmu_xlate_tb.sv` (on inspection, a trivial, already-identi
 hierarchical-reference idiom, not a structurally-duplicated *decision* the way the hazard
 signals were — too small to be worth centralizing).
 
+**Phases 274-275 (post-Track-3 gap closure, a later session, `wobbly-honking-cascade.md`,
+found while building `timing_diagrams/`'s Figure 7-25 diagram, both IMPLEMENTED AND
+VERIFIED)**: two more real dispatch-gap bugs, both surfaced by the Read-Write-Write-Read
+chain Figure 7-25 demonstrates — a case Track 3's own 16 special-FSM families never
+exercised, since all of them are read-final-beat families. **Phase 274**: `preview_current_
+ready`'s own ordinary clause (`rtl/eu_seq_preview.svh`) only ever fired when CURRENT was a
+READ — an ordinary WRITE as CURRENT never triggered a preview of NEXT at all. Fixed by
+mirroring the read clause for writes, re-verifying its two exclusions fresh
+(`!ex_is_move_reg_idx_dst`, `!ex_is_pmove64` — the latter the identical regression shape as
+the original Phase 264 read-side PMOVE64 bug, caught by inspection this time before it could
+ship). No new hazard signal needed — `hazard_ex`'s own generic An-update clause already
+covers it. **Phase 275**: `biu_cache_if.sv`'s `CI_WRITE` completion, unlike `CI_D_MISS`'s
+own completion right above it, never checked `eu_new_dispatch` at all, so any access
+following a write always took the one-tick `CI_IDLE` detour even after Phase 274 landed —
+explaining why write→write chaining had looked gap-free already (via the unrelated,
+pre-existing "Track A" fast path, Phase 163/247 item #10) while write→read-miss still
+showed a real gap. Fixed by copying `CI_D_MISS`'s own fast-path condition and register-set
+block verbatim into `CI_WRITE`'s completion branch. Both fixes: full mandatory gate clean,
+Harte bit-identical to baseline. See `plan.md` Phases 274-275 for the full writeups
+(including the Musashi `MOVE.L Dn,-(An)`-splits-into-2-words reference quirk found while
+verifying Phase 274's own hazard test).
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 29/29,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
