@@ -2254,3 +2254,52 @@ new rows plus corrected descriptions for `manual_738`/`manual_744`/
 "worked around" — now describing the real fixes).
 
 **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
+
+## To Do
+
+No outstanding plan of any kind remains for RTL correctness as of Phase
+280 — every known real gap found across this project's history has been
+fixed and verified (see `CLAUDE.md`'s own "Current state" for the
+standing summary). The items below are optional, deliberately-deferred
+`timing_diagrams/` coverage and one unconfirmed lead, not known bugs —
+listed here so a future session doesn't have to reconstruct them from
+scratch. None are blocking; pick any of these up only if/when asked.
+
+**Further `timing_diagrams/` coverage** (`INDEX.md`'s own Scope section
+has the live version of this list — keep both in sync if either
+changes):
+- Figures 7-50 through 7-53 — the remaining late-BERR/retry variants
+  beyond Figure 7-49 (plain exception) and Figure 7-54 (async retry
+  that succeeds): late BERR arriving after DSACKx has already been
+  seen (7-50/7-51), and late BERR landing on the 2nd/3rd access of a
+  dynamically-sized multi-beat transfer (7-52/7-53).
+- Figure 7-56 — late retry specifically during a burst fill (combines
+  the Figure 7-54 retry mechanism with Figure 7-38/7-39's own burst
+  machinery); likely the most involved of the remaining diagrams to
+  construct correctly.
+- Figure 7-40 — "burst fill deferred": starting a new cache-block burst
+  request while a previous one is still being serviced. Not yet
+  investigated against this RTL's own arbitration/dispatch behavior at
+  all — unlike Figure 7-39, no prior scoping work has been done here to
+  know whether it's a clean fit or exposes another gap the way 7-39 did.
+- Figures 7-5 through 7-18 — the misaligned-transfer example diagrams.
+  Already assessed (Phase 280's own scoping pass, `INDEX.md`) as mostly
+  restating the dynamic-sizing behavior Figures 7-22/7-23/7-28 already
+  demonstrate — lowest priority of this list, likely not worth building
+  unless specifically requested.
+
+**One unconfirmed lead from the Phase 280 CBACK investigation**
+(`project_cback_beat0_only_sampling_bug.md`): MC68030UM.pdf's own
+§6.1.4/6.2 text, in the same paragraph group as the CBACK-negation rule
+that fix addressed, also states that CIIN asserting during the 2nd/3rd/
+4th cycle of a burst "prevents the data during that cycle from being
+loaded into the appropriate cache and causes CBREQ to negate, aborting
+the burst operation" — i.e. CIIN may carry the identical "checked once
+vs. every beat" requirement CBACK did. `rtl/biu_burst_ctrl.sv`'s own
+per-beat CIIN capture (Phase 229, `burst_ciin0..3`) was built for
+`biu_cache_if.sv`'s own per-word caching decision, not for aborting the
+burst itself — whether it ALSO needs to feed the same
+continue-vs-terminate decision `cback_ok` drives has not been checked.
+Investigate by re-reading `rtl/biu_burst_ctrl.sv`'s own beat-advance
+logic (`ST_BURST_S6`/`ST_BWRITE_S6` in `rtl/biu_cycle_gen.sv`) the same
+way the CBACK gap was found, before assuming either way.
