@@ -1764,3 +1764,162 @@ baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — bitfield
 memory-EA forms have zero Harte coverage, 68020+-only).
 
 **Closes `project_bf_mem_longword_sizing_bug.md` in full.**
+
+## Phase 277 (PACK/UNPK-mem source/destination byte access order —
+IMPLEMENTED AND VERIFIED, `project_pack_source_read_order_bug.md`, a
+later session)
+
+Real, pre-existing, previously-documented-but-deferred gap: found at
+Phase 263 (Track 3 #6, while building the PACK/UNPK-mem preview cosim
+test) and explicitly left unfixed at the time as out of scope for that
+track's own dispatch-gap work. User asked to fix it directly this
+session, immediately following Phase 276's own bitfield-mem sizing fix
+(the two bugs were found in the same investigation and share several
+techniques and lessons).
+
+**The bug**: `rtl/eu_seq_execute.svh`'s `pack_mem_run_r` FSM (the
+shared 2-phase read/write dispatch path for PACK/UNPK's memory-to-
+memory forms, `PACK -(Ay),-(Ax),#data`/`UNPK -(Ay),-(Ax),#data`) issued
+PACK's own source read as a SINGLE 16-bit WORD access, and UNPK's own
+destination write as a SINGLE 16-bit WORD access. Real 68030 silicon
+does neither — confirmed directly against Musashi's own
+`m68k_op_pack_16_mm`/`m68k_op_unpk_16_mm` (`tools/musashi/m68kops.c`):
+
+```c
+/* PACK's own source read */
+uint ea_src = EA_AY_PD_8();       /* Ay -= 1 */
+uint src = m68ki_read_8(ea_src);
+ea_src = EA_AY_PD_8();            /* Ay -= 1 again */
+src = ((src << 8) | m68ki_read_8(ea_src)) + OPER_I_16();
+```
+
+Each is genuinely TWO SEPARATE BYTE accesses via two independent
+1-byte predecrements — a direct artifact of the real microcode
+literally being "decrement, read/write, shift-and-combine; decrement
+again, read/write, combine again," not a real 16-bit bus transfer. The
+FIRST access (at the address closer to the original An, i.e. An-1)
+lands in the HIGH half of the intermediate 16-bit value; the SECOND
+(An-2, the final An) lands in the LOW half — the OPPOSITE of a
+standard big-endian word access, where the LOWER address holds the
+HIGH byte. UNPK's own destination write is the exact mirror image:
+`m68ki_write_8(EA_AX_PD_8(), (src>>8)&0xff)` (HIGH byte, first) then
+`m68ki_write_8(EA_AX_PD_8(), src&0xff)` (LOW byte, second) — same
+reversed order. PACK's own destination write (one BYTE, `-(Ax)`) and
+UNPK's own source read (one BYTE, `-(Ay)`) were both already correct
+in this RTL (each genuinely is just one byte on real hardware too;
+confirmed by direct inspection, not assumed).
+
+**Fix**: extended the existing 2-phase `pack_mem_run_r` FSM
+(`pack_mem_phase_r`: 0=read, 1=write) with a new `pack_mem_sub_r` bit
+(0=first sub-access in flight, 1=second) and `pack_mem_byte1_r`
+(captures PACK's own first sub-read byte, the future HIGH byte, while
+waiting for the second). A new `pack_mem_needs_sub2 = pack_mem_is_unpk_r ?
+pack_mem_phase_r : !pack_mem_phase_r` wire identifies the one case (of
+the four phase×instruction combinations) needing a second sub-access
+for each instruction: PACK's own READ phase, or UNPK's own WRITE
+phase. `pack_mem_sub_last = !pack_mem_needs_sub2 || pack_mem_sub_r`
+mirrors `bf_mem_sub_last`'s own identical role in Phase 276's bitfield
+fix exactly, gating every "this phase is genuinely done" transition:
+`pack_mem_stall`'s own completion condition, `pack_ay_wr_en`/
+`pack_ax_wr_en` (the An-register commit — without this gate, a 2-sub-
+access phase would commit the SAME correct final address twice, once
+per sub-access, a harmless value-wise but structurally wrong double-
+fire), and Track 3's own `pack_mem_final_ack` preview trigger
+(`rtl/eu_seq_preview.svh`) — without this last one, UNPK's own preview
+would fire one beat early, off the first (intermediate) sub-write's
+own ack rather than the true final one.
+
+`mem_addr`'s own `pack_mem_run_r` branch now adds `+1` to the base
+(already-fully-predecremented) address for the FIRST sub-access of
+whichever phase needs 2, `+0` for the second/only access — the base
+address itself (`pack_mem_ay_addr_r`/`pack_mem_ax_addr_r`) is unchanged,
+still computed once at dispatch as the FINAL predecremented value; only
+the per-sub-access OFFSET from it is new. `pack_mem_cur_siz` simplifies
+to a plain constant `2'b01` — EVERY PACK/UNPK-mem sub-access is now
+byte-sized (PACK's read: 2 byte sub-reads, was 1 word; UNPK's write: 2
+byte sub-writes, was 1 word; PACK's write and UNPK's read: already 1
+byte each, unchanged). `pack_mem_wdata_w`'s own UNPK branch now
+extracts `pack_mem_temp_w[15:8]` (HIGH byte, sub 0) or `[7:0]` (LOW
+byte, sub 1) instead of writing the whole 16-bit `temp` as one word;
+PACK's own write-side formula is untouched (was always correct).
+`pack_mem_src_r`'s own PACK-read assembly (`{16'h0, pack_mem_byte1_r,
+mem_rdata[7:0]}`, built on the SECOND sub-read's own ack) reconstructs
+the exact same `{high,low}` 16-bit value Musashi's own `(src<<8)|byte2`
+formula produces — confirmed via the dedicated cosim tests below, not
+just by symbolic derivation.
+
+**Confirmed `mem_rdata` for reads is RIGHT-justified** (the same fact
+Phase 276's own `bf_place` investigation established, reused directly
+here rather than re-derived): `mem_rdata[7:0]` is the correct
+extraction for each byte sub-read, needing no additional shifting —
+this reuse, not a fresh re-derivation, is why this fix needed no
+equivalent "wrong justification assumption" debugging round the
+bitfield fix went through.
+
+**Real, previously-latent regressions found while updating this
+session's own tests — none an RTL bug, all pre-existing testbench-only
+gaps, several matching the exact TAS-01 shape Phase 276 already
+found once**:
+
+1. `tb/stall_fsm_tb.sv`'s own `INT-mid-PACK` test had a hardcoded
+   `expected_bus_cycles=2` (1 word read + 1 byte write, matching the
+   OLD, buggy RTL exactly — this test's own comment even documented
+   having empirically confirmed "2, not 3" against the pre-fix RTL at
+   the time it was written). Now genuinely 3 (2 source byte reads + 1
+   destination byte write) — updated to match. A second reference to
+   this same "2-bus-cycle" fact, in `WS-PACK`'s own comment (a
+   different test, checking only a RELATIVE wait-states-lengthen-it
+   comparison, not an absolute count, so functionally unaffected),
+   was also corrected to avoid leaving stale documentation nearby.
+
+2. `tb/bcd_pack_tb.sv`'s own inline memory model had the identical
+   "always reads/writes the WHOLE longword regardless of `mem_siz`"
+   gap already found and fixed twice earlier this same session
+   (`tb/bitfield_tb.sv`, `tb/ea_extended_tb.sv`) — dormant here too
+   since PACK/UNPK-mem had never dispatched a genuine sub-access at a
+   real, non-coincidentally-aligned byte address before. Fixed with
+   the same lane-aware read (right-justified)/write (top-justified,
+   per-lane, preserving untouched bytes) model.
+
+3. Fixing that memory model surfaced THREE more independent,
+   previously-latent bugs in this file's own EXISTING, unrelated
+   NBCD-01/ABCD-01/SBCD-01 tests — the exact same shape as the TAS-01
+   bug Phase 276 found: each test's own byte value (NBCD-01's own
+   SETUP) or expected result (ABCD-01's/SBCD-01's own CHECK) had been
+   placed at the WRONG bit position relative to its real target
+   address's own real big-endian lane (address `mod 4`, per this
+   array's own established convention — confirmed directly, not
+   assumed, by checking every other correctly-behaving test in the
+   same file). Masked for years by the OLD memory model's own address-
+   blind read/write behavior coincidentally canceling out against each
+   instruction's own real mem_rdata/mem_wdata convention, for whichever
+   specific address happened to be used — NBCD-01's target (offset 0)
+   happened to need the fix in its SETUP; ABCD-01's and SBCD-01's
+   targets (offset 3 in both cases) happened to need it in their own
+   CHECK instead, a data point that by itself confirms this was
+   genuinely address-dependent, not a single systematic transcription
+   error. Fixed each to match its own real target address's own real
+   lane, re-deriving from first principles rather than guessing at a
+   single global convention.
+
+**Verification**: two new dedicated cosim tests, `tests/pack_order1.s`
+(`PACK -(A0),-(A1),#0`, confirms the reversed 2-byte READ order) and
+`tests/pack_order2.s` (`UNPK -(A0),-(A1),#0`, confirms the reversed
+2-byte WRITE order), both match Musashi's own bus trace exactly, wired
+into `make cosim_memind` as `buscmp-pack_order1`/`buscmp-pack_order2`
+(33/33 total). Both deliberately use addresses within `tools/m68ksim`'s
+own 4KB reference window (`$120`/`$140`, `$160`/`$182`), matching this
+project's own established memind-test convention (Phase 274 already
+found the hard way, via a genuine corrupted-execution failure, that an
+address outside that window silently aliases onto code space).
+
+Full mandatory gate clean: `make test` 37/37 (including `bcd_pack`
+23/23 and `stall_fsm`), `cosim_grp` 8/8, `cosim_memind` 33/33,
+`dat-synth` 50/50, full 124-suite Harte sweep bit-identical to
+baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` — PACK/UNPK have
+zero Harte coverage, 68020+-only).
+
+**Closes `project_pack_source_read_order_bug.md` in full**, and with
+it, both of the two real, previously-deferred bugs Track 3's own
+Phase 262/263 investigation found and documented but didn't fix at the
+time.

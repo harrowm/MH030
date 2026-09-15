@@ -508,7 +508,7 @@ extending the shared `ex_mem_stall` causing an unrelated sim hang, reverted in f
 narrow per-family exclusion — see `feedback_shared_stall_signal_blast_radius.md`) and
 documented two genuine, pre-existing, out-of-scope bugs found along the way (bitfield-mem's
 always-longword sizing, later fixed at Phase 276; PACK's source-byte read order vs.
-Musashi, still open). **This closes Track 3,
+Musashi, later fixed at Phase 277). **This closes Track 3,
 and the entire `wobbly-honking-cascade.md` plan, in full** — real 68030 silicon's own
 chained back-to-back bus-cycle timing is now matched for essentially every instruction
 combination in the chip. RTR/RTE remain the one confirmed structural exception (not a risk
@@ -592,7 +592,33 @@ already-correct expected value. New dedicated cosim tests (`tests/bf_sizing1.s`/
 forms have zero Harte coverage, 68020+-only). **Closes
 `project_bf_mem_longword_sizing_bug.md` in full.**
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 31/31,
+**Phase 277 (PACK/UNPK-mem source/destination byte access order, a later session,
+`project_pack_source_read_order_bug.md`, IMPLEMENTED AND VERIFIED)**: closes the other real
+gap documented (and deliberately deferred) at Phase 263. PACK's own memory-to-memory
+source read (`-(Ay)`) and UNPK's own destination write (`-(Ax)`) were each a single 16-bit
+word access in this RTL; real 68030 silicon (confirmed against Musashi's own
+`m68k_op_pack_16_mm`/`m68k_op_unpk_16_mm`) issues 2 SEPARATE BYTE accesses via 2
+independent 1-byte predecrements instead, with the FIRST landing in the HIGH half and the
+SECOND in the LOW half — the OPPOSITE of a standard big-endian access. PACK's own
+destination write and UNPK's own source read were already correct (both genuinely are a
+single byte). Extended the existing 2-phase `pack_mem_run_r` FSM with an optional
+2-sub-access shape for whichever phase needs it, gated throughout by a new
+`pack_mem_sub_last` signal mirroring Phase 276's own `bf_mem_sub_last`; reused Phase 276's
+own already-confirmed "`mem_rdata` is right-justified for reads" fact directly rather than
+re-deriving it. Found and fixed one real, previously-latent testbench-only regression
+(`INT-mid-PACK`'s own hardcoded bus-cycle-count expectation, 2→3) and, while fixing
+`tb/bcd_pack_tb.sv`'s own memory model to be lane-aware (the same gap already found and
+fixed twice earlier this session), surfaced THREE more independent, previously-latent bugs
+in this file's own existing NBCD-01/ABCD-01/SBCD-01 tests — the exact same shape as the
+TAS-01 bug Phase 276 found (byte values/expected results placed at the wrong bit position
+relative to their own real target address's own real lane, masked for years by two
+testbench bugs canceling out). New dedicated cosim tests (`tests/pack_order1.s`/
+`pack_order2.s`) match Musashi exactly, wired into `make cosim_memind` (33/33). Full
+mandatory gate clean, Harte bit-identical to baseline (PACK/UNPK have zero Harte coverage,
+68020+-only). **Closes `project_pack_source_read_order_bug.md` in full** — both real bugs
+Track 3's own Phase 262/263 investigation found and deferred are now fixed.
+
+**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed). No outstanding plan
