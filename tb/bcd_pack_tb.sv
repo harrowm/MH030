@@ -185,14 +185,56 @@ module bcd_pack_tb;
     );
 
     // ─── Memory model (combinatorial ack, 8K longwords) ──────────────────────
+    // Byte/word lane-aware (project_pack_source_read_order_bug.md fix,
+    // plan.md): this model used to always read/write the WHOLE longword
+    // regardless of mem_siz -- harmless as long as PACK's own source read
+    // and UNPK's own destination write were each a single fixed access
+    // (the old, unfixed RTL behavior), but exposed once PACK/UNPK-mem
+    // started dispatching genuine byte sub-accesses at real, distinct
+    // addresses within the same longword (PACK-04/UNPK-03 are the first
+    // tests in this file to exercise PACK/UNPK-mem's own real, non-
+    // coincidentally-aligned byte addressing). Mirrors the same fix
+    // already applied to tb/bitfield_tb.sv/tb/ea_extended_tb.sv this same
+    // session: read right-justified (byte@[7:0], word@[15:0] -- confirmed
+    // the real mem_rdata convention via a direct debug trace on the real,
+    // full BIU-backed pipeline), write top-justified per real lane
+    // (byte@[31:24]/word@[31:16] of mem_wdata, matching eu_lane), only
+    // touching the addressed byte(s)/word so untouched neighboring bytes
+    // of the same ram[] word are preserved.
     logic [31:0] ram [0:8191];
 
+    function automatic logic [31:0] lane_read(
+        input logic [31:0] word, input logic [1:0] siz, input logic [1:0] a10
+    );
+        case (siz)
+            2'b01: case (a10)
+                       2'b00: lane_read = {24'h0, word[31:24]};
+                       2'b01: lane_read = {24'h0, word[23:16]};
+                       2'b10: lane_read = {24'h0, word[15:8]};
+                       2'b11: lane_read = {24'h0, word[7:0]};
+                   endcase
+            2'b10: lane_read = a10[1] ? {16'h0, word[15:0]} : {16'h0, word[31:16]};
+            default: lane_read = word;
+        endcase
+    endfunction
+
     assign mem_ack   = mem_req;
-    assign mem_rdata = (mem_req && mem_rw) ? ram[mem_addr[14:2]] : 32'h0;
+    assign mem_rdata = (mem_req && mem_rw) ? lane_read(ram[mem_addr[14:2]], mem_siz, mem_addr[1:0]) : 32'h0;
 
     always_ff @(posedge clk) begin
-        if (mem_req && !mem_rw)
-            ram[mem_addr[14:2]] <= mem_wdata;
+        if (mem_req && !mem_rw) begin
+            case (mem_siz)
+                2'b01: case (mem_addr[1:0])
+                           2'b00: ram[mem_addr[14:2]][31:24] <= mem_wdata[31:24];
+                           2'b01: ram[mem_addr[14:2]][23:16] <= mem_wdata[31:24];
+                           2'b10: ram[mem_addr[14:2]][15:8]  <= mem_wdata[31:24];
+                           2'b11: ram[mem_addr[14:2]][7:0]   <= mem_wdata[31:24];
+                       endcase
+                2'b10: if (mem_addr[1]) ram[mem_addr[14:2]][15:0]  <= mem_wdata[31:16];
+                       else             ram[mem_addr[14:2]][31:16] <= mem_wdata[31:16];
+                default: ram[mem_addr[14:2]] <= mem_wdata;
+            endcase
+        end
     end
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -309,9 +351,16 @@ module bcd_pack_tb;
         // PACK/UNPK memory forms (predecrement both operands)
         // ====================================================================
         $display("--- PACK-04: PACK -(A0),-(A1),#0 memory ---");
-        // PACK: predec Ay(A0) by 2 (word read), predec Ax(A1) by 1 (byte write)
-        // A0=0x0104→0x0102; read word at 0x0102 from ram[0x100>>2][15:0]=0xABCD
-        // A1=0x0200→0x01FF; write byte 0xBD at 0x01FF → ram[0x01FC>>2][31:24]
+        // PACK: predec Ay(A0) by 1, read byte @0x103 (0xCD, becomes the
+        // HIGH byte of src); predec Ay again by 1, read byte @0x102
+        // (0xAB, becomes the LOW byte) -- project_pack_source_read_order_
+        // bug.md fix, plan.md: this is 2 SEPARATE byte reads in this
+        // real, reversed order (confirmed against Musashi's own
+        // m68k_op_pack_16_mm), not a single word read at 0x102. src =
+        // 0xCDAB; result byte = {src[11:8],src[3:0]} = {0xD,0xB} = 0xDB.
+        // Ax(A1) predecrements by 1 (byte write, unchanged) to 0x1FF --
+        // offset 3 within this longword, so this array's own big-endian
+        // convention places the written byte at bits[7:0], not [31:24].
         ram[32'h0100 >> 2] = 32'h0000_ABCD;
         set_an(3'b000, 32'h0000_0104);
         set_an(3'b001, 32'h0000_0200);
@@ -320,13 +369,22 @@ module bcd_pack_tb;
         chk("PACK-04:A0",     ram[32'h1FEC >> 2], 32'h0000_0102);
         run_instr(16'h2F09, 1'b0, 32'h0);            // MOVE.L A1,-(A7=0x1FEC)→M[0x1FE8]
         chk("PACK-04:A1",     ram[32'h1FE8 >> 2], 32'h0000_01FF);
-        chk("PACK-04:result", ram[32'h01FC >> 2], 32'hBD00_0000);
+        chk("PACK-04:result", ram[32'h01FC >> 2], 32'h0000_00DB);
 
         $display("--- UNPK-03: UNPK -(A0),-(A1),#0 memory ---");
-        // UNPK: predec Ay(A0) by 1 (byte read), predec Ax(A1) by 2 (word write)
-        // A0=0x0101→0x0100; read byte at 0x0100 from ram[0x100>>2][7:0]=0xAB
-        // A1=0x0202→0x0200; write word 0x0A0B at 0x0200 → ram[0x200>>2][31:16]
-        ram[32'h0100 >> 2] = 32'h0000_00AB;
+        // UNPK: predec Ay(A0) by 1 (byte read, unchanged -- was already a
+        // single byte). A0=0x0101→0x0100; read byte @0x100 (offset 0 of
+        // this ram[] longword -> bits[31:24]) = 0xAB. src[7:4]=0xA,
+        // src[3:0]=0xB -> temp=0x0A0B.
+        // Ax(A1)'s own write is 2 SEPARATE byte writes in reversed order
+        // (project_pack_source_read_order_bug.md fix, confirmed against
+        // Musashi's own m68k_op_unpk_16_mm): predec by 1, write HIGH byte
+        // (temp[15:8]=0x0A) @0x201 (offset 1 -> bits[23:16]); predec by 1
+        // again, write LOW byte (temp[7:0]=0x0B) @0x200 (offset 0, the
+        // FINAL address -> bits[31:24]) -- NOT a single word write of
+        // 0x0A0B at bits[31:16]. Result: bits[31:24]=0x0B (LOW byte),
+        // bits[23:16]=0x0A (HIGH byte) = 0x0B0A_0000.
+        ram[32'h0100 >> 2] = 32'hAB00_0000;
         set_an(3'b000, 32'h0000_0101);
         set_an(3'b001, 32'h0000_0202);
         run_instr(16'h8388, 1'b1, 32'h0000_0000);   // UNPK -(A0),-(A1),#0
@@ -334,7 +392,7 @@ module bcd_pack_tb;
         chk("UNPK-03:A0",     ram[32'h1FE4 >> 2], 32'h0000_0100);
         run_instr(16'h2F09, 1'b0, 32'h0);            // MOVE.L A1,-(A7=0x1FE4)→M[0x1FE0]
         chk("UNPK-03:A1",     ram[32'h1FE0 >> 2], 32'h0000_0200);
-        chk("UNPK-03:result", ram[32'h0200 >> 2], 32'h0A0B_0000);
+        chk("UNPK-03:result", ram[32'h0200 >> 2], 32'h0B0A_0000);
 
         // ====================================================================
         // RESET: eu_reset_req pulses for ~512 external cycles (2048 internal)
@@ -366,7 +424,18 @@ module bcd_pack_tb;
         // M[0x0110]=0x27, X=0 → result=0x73, C=1
         // ====================================================================
         $display("--- NBCD-01: NBCD (A0) ---");
-        ram[32'h110>>2] = 32'h0000_0027;
+        // project_pack_source_read_order_bug.md fix (plan.md): this
+        // setup's own byte value used to be placed at bits[7:0]
+        // regardless of the real target address -- 0x110's own real
+        // offset within this array's longword indexing is 0 (0x110 mod
+        // 4 == 0), which this array's own established big-endian
+        // convention (confirmed via the memory model's own now-genuine
+        // lane logic, and this SAME check's own already-correct [31:24]
+        // expectation below) places at bits[31:24], not [7:0]. Previously
+        // masked by the OLD memory model's own "always full raw longword
+        // regardless of siz/address" bug happening to cancel out with
+        // NBCD's own real right-justified mem_rdata consumption.
+        ram[32'h110>>2] = 32'h2700_0000;
         set_an(3'd0, 32'h0000_0110);
         run_instr(16'h003C, 1'b1, 32'h0000_0000);   // ORI #0,CCR — ensure X=0
         run_instr(16'h4810, 1'b0, 32'h0);
@@ -386,7 +455,14 @@ module bcd_pack_tb;
         set_an(3'd0, 32'h0000_0204);        // Ax=A0: predec→0x0203
         set_an(3'd1, 32'h0000_0208);        // Ay=A1: predec→0x0207
         run_instr(16'hC109, 1'b0, 32'h0);
-        chk("ABCD-01:mem",  ram[32'h200>>2], 32'h6500_0000);  // 0x65 in [31:24]
+        // project_pack_source_read_order_bug.md fix (plan.md): the real
+        // write address is 0x203, offset 3 within this longword (0x203
+        // mod 4 == 3) -- this array's own big-endian convention places
+        // offset 3 at bits[7:0], not [31:24] (the setup lines above
+        // already correctly used [7:0] for this same address; only this
+        // check's own expectation was wrong, previously masked by the
+        // OLD memory model's own address-blind write bug).
+        chk("ABCD-01:mem",  ram[32'h200>>2], 32'h0000_0065);  // 0x65 in [7:0] (offset 3)
         chk1("ABCD-01:C",   sr_out[0], 1'b0);
         chk1("ABCD-01:Z",   sr_out[2], 1'b0);
 
@@ -402,7 +478,10 @@ module bcd_pack_tb;
         set_an(3'd0, 32'h0000_0304);        // Ax=A0: predec→0x0303
         set_an(3'd1, 32'h0000_0308);        // Ay=A1: predec→0x0307
         run_instr(16'h8109, 1'b0, 32'h0);
-        chk("SBCD-01:mem",  ram[32'h300>>2], 32'h4500_0000);  // 0x45 in [31:24]
+        // project_pack_source_read_order_bug.md fix (plan.md): same
+        // reasoning as ABCD-01 above -- real write address 0x303, offset
+        // 3, this array's own convention places it at bits[7:0].
+        chk("SBCD-01:mem",  ram[32'h300>>2], 32'h0000_0045);  // 0x45 in [7:0] (offset 3)
         chk1("SBCD-01:C",   sr_out[0], 1'b0);
 
         // ─── Report ──────────────────────────────────────────────────────────

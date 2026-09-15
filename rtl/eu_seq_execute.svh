@@ -394,11 +394,41 @@
     logic [2:0]  pack_mem_ay_reg_r;    // Ay register number (for An update)
     logic [2:0]  pack_mem_ax_reg_r;    // Ax register number (for An update)
     logic [15:0] pack_mem_adj_r;       // adj immediate captured from ext word
-    // Stall: active while FSM is running and not done (write ack ends it)
+
+    // project_pack_source_read_order_bug.md fix, plan.md: real 68030
+    // silicon (confirmed against Musashi's own m68k_op_pack_16_mm/
+    // m68k_op_unpk_16_mm, tools/musashi/m68kops.c) does PACK's own
+    // source read, and UNPK's own destination write, as TWO SEPARATE
+    // BYTE accesses via two independent 1-byte predecrements -- NOT one
+    // word access -- with the FIRST access (at the address closer to the
+    // original An, i.e. An-1) landing in the HIGH byte position and the
+    // SECOND (An-2, the final An value) in the LOW byte position. This is
+    // the OPPOSITE of a standard big-endian word access (where the lower
+    // address holds the high byte) -- a direct artifact of the real
+    // microcode literally being "decrement, read, shift-and-OR in;
+    // decrement again, read, combine" rather than a genuine 16-bit bus
+    // transfer. PACK's own destination write (one BYTE, Ax-=1) and
+    // UNPK's own source read (one BYTE, Ay-=1) were already correct --
+    // only the SIDE that used to be a single WORD access needed this.
+    logic        pack_mem_sub_r;       // 0=first sub-access in flight, 1=second
+    logic [7:0]  pack_mem_byte1_r;     // PACK read only: first sub-read's own byte (the future HIGH byte)
+
+    // True when PACK is in its own READ phase, or UNPK is in its own
+    // WRITE phase -- the two (and only two) cases needing a second
+    // sub-access.
+    wire pack_mem_needs_sub2 = pack_mem_is_unpk_r ? pack_mem_phase_r : !pack_mem_phase_r;
+    // True on the sub-access that's genuinely the LAST one for the
+    // current phase -- gates every "this phase is really done"
+    // transition below, mirroring bf_mem_sub_last's own identical role
+    // in the bitfield-mem sizing fix this same investigation grew out of.
+    wire pack_mem_sub_last = !pack_mem_needs_sub2 || pack_mem_sub_r;
+
+    // Stall: active while FSM is running and not done (the real final
+    // write ack, pack_mem_sub_last-gated, ends it).
     logic pack_mem_stall;
     assign pack_mem_stall = ex_valid && (ex_is_pack || ex_is_unpk) && ex_is_pack_mem &&
                             !(mem_berr || exc_active) &&
-                            !(pack_mem_run_r && pack_mem_phase_r && mem_ack);
+                            !(pack_mem_run_r && pack_mem_phase_r && pack_mem_sub_last && mem_ack);
 
     // RESET counter (declared early for stall / eu_reset_req)
     logic        reset_run_r;
@@ -3615,16 +3645,23 @@
     assign pack_mem_temp_w = pack_mem_is_unpk_r
         ? ({4'h0, pack_mem_src_r[7:4], 4'h0, pack_mem_src_r[3:0]} + pack_mem_adj_r)
         : (pack_mem_src_r[15:0] + pack_mem_adj_r);
-    // Write data for phase 1
+    // Write data for phase 1. UNPK now writes 2 separate bytes (project_
+    // pack_source_read_order_bug.md fix, plan.md): sub 0 (at Ax-1) is the
+    // HIGH byte (temp[15:8]), sub 1 (at Ax-2, final) is the LOW byte
+    // (temp[7:0]) -- matches Musashi's own two independent m68ki_write_8
+    // calls, not a single word write. PACK's own write side is unchanged
+    // (always was a single byte, matching Musashi already).
     logic [31:0] pack_mem_wdata_w;
     assign pack_mem_wdata_w = pack_mem_is_unpk_r
-        ? {pack_mem_temp_w, 16'h0}                                       // UNPK: write word in [31:16]
-        : {pack_mem_temp_w[11:8], pack_mem_temp_w[3:0], 24'h0};         // PACK: write byte in [31:24]
-    // Phase 0 read size / phase 1 write size
+        ? (pack_mem_sub_r ? {pack_mem_temp_w[7:0],  24'h0}    // UNPK sub 1: LOW byte
+                          : {pack_mem_temp_w[15:8], 24'h0})   // UNPK sub 0: HIGH byte
+        : {pack_mem_temp_w[11:8], pack_mem_temp_w[3:0], 24'h0}; // PACK: single byte write
+    // Every PACK/UNPK-mem sub-access is now byte-sized (project_pack_
+    // source_read_order_bug.md fix): PACK's own read is 2 byte sub-reads
+    // (was 1 word), UNPK's own write is 2 byte sub-writes (was 1 word);
+    // PACK's write and UNPK's read were already single bytes.
     logic [1:0] pack_mem_cur_siz;
-    assign pack_mem_cur_siz = pack_mem_phase_r
-        ? (pack_mem_is_unpk_r ? 2'b10 : 2'b01)   // write: UNPK=word, PACK=byte
-        : (pack_mem_is_unpk_r ? 2'b01 : 2'b10);  // read: UNPK=byte, PACK=word
+    assign pack_mem_cur_siz = 2'b01;
 
     // CHK comparison: rd_b = value checked (Dn); upper bound from register/imm or memory.
     // CHK.W only tests/compares the low 16 bits — both operands must be sign-extended
@@ -3969,11 +4006,13 @@
             pack_mem_ay_reg_r  <= 3'b0;
             pack_mem_ax_reg_r  <= 3'b0;
             pack_mem_adj_r     <= 16'h0;
+            pack_mem_sub_r     <= 1'b0;
+            pack_mem_byte1_r   <= 8'h0;
         end else begin
             if (ex_valid && (ex_is_pack || ex_is_unpk) && ex_is_pack_mem && !pack_mem_run_r) begin
                 // Setup: capture predecremented addresses
-                // PACK: Ay-=2 (word read), Ax-=1 (byte write)
-                // UNPK: Ay-=1 (byte read), Ax-=2 (word write)
+                // PACK: Ay-=2 (2 byte reads), Ax-=1 (byte write)
+                // UNPK: Ay-=1 (byte read), Ax-=2 (2 byte writes)
                 pack_mem_run_r     <= 1'b1;
                 pack_mem_phase_r   <= 1'b0;
                 pack_mem_is_unpk_r <= ex_is_unpk;
@@ -3982,13 +4021,37 @@
                 pack_mem_ax_reg_r  <= ex_dst_reg[2:0];
                 pack_mem_ay_addr_r <= rd_a_data - (ex_is_unpk ? 32'd1 : 32'd2);
                 pack_mem_ax_addr_r <= rd_b_data - (ex_is_unpk ? 32'd2 : 32'd1);
+                pack_mem_sub_r     <= 1'b0;
             end else if (pack_mem_run_r && mem_ack) begin
                 if (!pack_mem_phase_r) begin
-                    pack_mem_src_r   <= mem_rdata;   // capture word or byte from Ay
-                    pack_mem_phase_r <= 1'b1;        // advance to write phase
+                    // Read phase (PACK: 2 byte sub-reads; UNPK: 1 byte read)
+                    if (!pack_mem_is_unpk_r && !pack_mem_sub_r) begin
+                        // PACK's first sub-read (at Ay-1): becomes the
+                        // future HIGH byte -- capture and move to the
+                        // second sub-read; phase stays 0.
+                        pack_mem_byte1_r <= mem_rdata[7:0];
+                        pack_mem_sub_r   <= 1'b1;
+                    end else begin
+                        // UNPK's only read, or PACK's second (final,
+                        // Ay-2) sub-read: assemble the real source value.
+                        pack_mem_src_r   <= pack_mem_is_unpk_r
+                                           ? mem_rdata
+                                           : {16'h0, pack_mem_byte1_r, mem_rdata[7:0]};
+                        pack_mem_phase_r <= 1'b1;   // advance to write phase
+                        pack_mem_sub_r   <= 1'b0;   // first sub-write next
+                    end
                 end else begin
-                    pack_mem_run_r   <= 1'b0;        // write done, FSM complete
-                    pack_mem_phase_r <= 1'b0;
+                    // Write phase (UNPK: 2 byte sub-writes; PACK: 1 byte write)
+                    if (pack_mem_is_unpk_r && !pack_mem_sub_r) begin
+                        // UNPK's first sub-write (HIGH byte, at Ax-1)
+                        // acked -- one more (LOW byte, Ax-2) to go;
+                        // phase stays 1.
+                        pack_mem_sub_r <= 1'b1;
+                    end else begin
+                        pack_mem_run_r   <= 1'b0;        // write done, FSM complete
+                        pack_mem_phase_r <= 1'b0;
+                        pack_mem_sub_r   <= 1'b0;
+                    end
                 end
             end else if (pack_mem_run_r && mem_abort) begin
                 // A fault on either phase aborts the whole PACK/UNPK — must
@@ -3996,6 +4059,7 @@
                 // PACK/UNPK memory-form instruction.
                 pack_mem_run_r   <= 1'b0;
                 pack_mem_phase_r <= 1'b0;
+                pack_mem_sub_r   <= 1'b0;
             end
         end
     end
@@ -4723,8 +4787,13 @@
     // PACK/UNPK memory An update enables
     // Ay is updated at read ack (phase 0); Ax is updated at write ack (phase 1).
     logic pack_ay_wr_en, pack_ax_wr_en;
-    assign pack_ay_wr_en = pack_mem_run_r && !pack_mem_phase_r && mem_ack;
-    assign pack_ax_wr_en = pack_mem_run_r &&  pack_mem_phase_r && mem_ack;
+    // pack_mem_sub_last-gated (project_pack_source_read_order_bug.md
+    // fix): PACK's own read phase and UNPK's own write phase now each
+    // ack twice (once per byte sub-access) -- without this, the An
+    // update would fire on the FIRST (intermediate) sub-access too, not
+    // just the real final one.
+    assign pack_ay_wr_en = pack_mem_run_r && !pack_mem_phase_r && pack_mem_sub_last && mem_ack;
+    assign pack_ax_wr_en = pack_mem_run_r &&  pack_mem_phase_r && pack_mem_sub_last && mem_ack;
 
     assign an_wr_en  = movem_an_wr_en || rtr_an_wr_en || rte_an_wr_en ||
                        addx_ay_wr_en || addx_ax_wr_en ||
@@ -5328,7 +5397,14 @@
                        // bytes past the first (word) sub-access's own start.
                        bf_mem_run_r   ? (bf_mem_addr_r + {30'h0, bf_mem_byte_start_r} +
                                          ((bf_mem_has_sub2_r && bf_mem_sub_r) ? 32'd2 : 32'd0)) :
-                       pack_mem_run_r ? (pack_mem_phase_r ? pack_mem_ax_addr_r : pack_mem_ay_addr_r) :
+                       // project_pack_source_read_order_bug.md fix: the
+                       // FIRST sub-access of whichever phase needs 2
+                       // (PACK's read, UNPK's write) sits 1 byte closer to
+                       // the original An than the base (already fully
+                       // predecremented) address; the second/only access
+                       // uses the base address unchanged.
+                       pack_mem_run_r ? ((pack_mem_phase_r ? pack_mem_ax_addr_r : pack_mem_ay_addr_r) +
+                                         ((pack_mem_needs_sub2 && !pack_mem_sub_r) ? 32'd1 : 32'd0)) :
                        pmove64_run_r  ? (pmove64_addr_r + 32'd4) :
                        cas_write_r    ? cas_ea_r :
                        bcds_run_r     ? (bcds_phase_r == 2'd0 ? bcds_ay_addr_r : bcds_ax_addr_r) :

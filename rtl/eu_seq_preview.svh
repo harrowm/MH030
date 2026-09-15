@@ -186,8 +186,12 @@
     // packed/unpacked byte goes to MEMORY, not Dn) and affects no CCR
     // bits at all (a documented 68k ISA property), so no other hazard
     // source exists. PACK/UNPK-mem never traps or changes flow.
+    // pack_mem_sub_last-gated (project_pack_source_read_order_bug.md
+    // fix): UNPK's own write phase now acks twice (2 byte sub-writes);
+    // without this the preview would fire one beat early, off the
+    // FIRST (intermediate) sub-write's own ack.
     logic pack_mem_final_ack;
-    assign pack_mem_final_ack = pack_mem_run_r && pack_mem_phase_r && mem_ack;
+    assign pack_mem_final_ack = pack_mem_run_r && pack_mem_phase_r && pack_mem_sub_last && mem_ack;
     logic pack_hazard;
     assign pack_hazard = reg_hazard(pack_ax_wr_en, {1'b1, pack_mem_ax_reg_r});
 

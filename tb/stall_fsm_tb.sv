@@ -2483,13 +2483,15 @@ module stall_fsm_tb;
         // A1/D1 reading garbage values from entirely different tests).
         // SV program order must match real DUT execution order for this
         // particular helper's own synchronization to work correctly.
-        // PACK's own real bus-cycle count is 2, not 3 like ADDX -- unlike
-        // ADDX's addition (needs both operands read before it can write
-        // the sum), PACK's own destination is a pure write (source word
-        // read from -(Ay), packed, written to -(Ax) with no dst-read
-        // needed first). Confirmed empirically (an initial guess of 3,
-        // matching ADDX's own shape, measured 2) before landing this.
-        run_int_mid_test("INT-mid-PACK", 32'h0000_2EA8, 2, 5, 32'd8005, 32'h0000_008A);
+        // PACK's own real bus-cycle count is 3 (project_pack_source_
+        // read_order_bug.md fix, plan.md): 2 separate BYTE reads from
+        // -(Ay) -- confirmed against Musashi's own m68k_op_pack_16_mm,
+        // real 68030 silicon does NOT read the source as one 16-bit word
+        // -- then 1 BYTE write to -(Ax). Was 2 (1 word read + 1 byte
+        // write) before that fix; updated here to match the corrected,
+        // real RTL behavior once the fix made this test's own hardcoded
+        // count stale.
+        run_int_mid_test("INT-mid-PACK", 32'h0000_2EA8, 3, 5, 32'd8005, 32'h0000_008A);
         run_int_mid_test("INT-mid-BFINS", 32'h0000_2EC6, 2, 5, 32'd8006, 32'h0000_008A);
 
         // T4e: check code positioned here (immediately after INT-mid-
@@ -3665,9 +3667,13 @@ module stall_fsm_tb;
                   elapsedX > elapsed0);
         end
 
-        // WS-PACK: same predecrement shape, source-read+write only (no
+        // WS-PACK: same predecrement shape, source-read(s)+write only (no
         // destination read needed -- PACK's own destination is a pure
-        // write, per INT-mid-PACK's own established 2-bus-cycle finding).
+        // write). Real bus-cycle count is 3 (2 source byte reads + 1
+        // destination byte write, project_pack_source_read_order_bug.md
+        // fix, plan.md) -- this test only checks the relative
+        // wait-states-lengthen-it comparison, not the absolute count, so
+        // it's unaffected by that fix either way.
         begin
             int elapsed0, elapsedX, t;
             wait_states = 0;

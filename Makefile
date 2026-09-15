@@ -456,6 +456,9 @@ winuae/tests/memind%_ref.log: tools/m68ksim tests/memind%.hex | winuae/tests
 
 winuae/tests/bf_sizing%_ref.log: tools/m68ksim tests/bf_sizing%.hex | winuae/tests
 	./tools/m68ksim tests/bf_sizing$*.hex 300 > $@
+
+winuae/tests/pack_order%_ref.log: tools/m68ksim tests/pack_order%.hex | winuae/tests
+	./tools/m68ksim tests/pack_order$*.hex 300 > $@
 # memind25 needs more than the generic 300-cycle default: DIVS.L's own
 # real (Musashi) divide microcode plus 4 chained MUL/DIV instructions
 # don't complete within 300 cycles -- this explicit rule (which make
@@ -773,6 +776,22 @@ buscmp-bf_sizing2: $(SIM)/cosim_grp winuae/tests/bf_sizing2_ref.log tests/bf_siz
 	python3 tools/buscmp.py /tmp/_dut_bf_sizing2.log winuae/tests/bf_sizing2_ref.log \
 	    --dut-may-continue
 
+# pack_order1/2 (project_pack_source_read_order_bug.md fix, plan.md):
+# PACK's own real 2-byte source-read order (pack_order1) and UNPK's own
+# real 2-byte destination-write order (pack_order2), both the opposite
+# of a standard big-endian word access.
+buscmp-pack_order1: $(SIM)/cosim_grp winuae/tests/pack_order1_ref.log tests/pack_order1.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/pack_order1.hex +grp=pack_order1 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_pack_order1.log || true
+	python3 tools/buscmp.py /tmp/_dut_pack_order1.log winuae/tests/pack_order1_ref.log \
+	    --dut-may-continue
+
+buscmp-pack_order2: $(SIM)/cosim_grp winuae/tests/pack_order2_ref.log tests/pack_order2.hex
+	$(VVP) $(SIM)/cosim_grp +hexfile=tests/pack_order2.hex +grp=pack_order2 2>&1 \
+	    | grep "^BUS" > /tmp/_dut_pack_order2.log || true
+	python3 tools/buscmp.py /tmp/_dut_pack_order2.log winuae/tests/pack_order2_ref.log \
+	    --dut-may-continue
+
 cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind12 buscmp-memind13 buscmp-memind16 buscmp-memind17 buscmp-memind21 \
               buscmp-memind15 buscmp-memind24 buscmp-memind25 buscmp-memind26 buscmp-memind27 \
@@ -780,7 +799,8 @@ cosim_memind: buscmp-memind2 buscmp-memind7 buscmp-memind10 buscmp-memind11 \
               buscmp-memind36 buscmp-memind37 buscmp-memind38 buscmp-memind39 buscmp-memind40 \
               buscmp-memind41 buscmp-memind42 \
               buscmp-memind32 buscmp-memind33 buscmp-memind34 buscmp-memind35 \
-              buscmp-bf_sizing1 buscmp-bf_sizing2
+              buscmp-bf_sizing1 buscmp-bf_sizing2 \
+              buscmp-pack_order1 buscmp-pack_order2
 
 # WinUAE ROM build (kept for future WinUAE-based reference, not used in regression)
 winuae/roms/smoke_test.rom: tests/smoke.bin tools/make_kickrom.py
