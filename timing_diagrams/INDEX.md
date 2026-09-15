@@ -92,14 +92,17 @@ burst mode accepts either termination method.
 A genuine level-7 (NMI) interrupt request, recognized at the next
 instruction boundary, dispatching a real CPU-space IACK bus cycle
 (`FC=7`, address `$FFFFFFFx`), answered here with `/AVEC` (autovector),
-followed by the exception frame push. Found and worked around a real,
-previously-undiscovered gap while building this
+followed by the exception frame push. Found and, in a later session,
+fixed a real gap while building this
 (`project_int_pending_level7_mask_gap.md`): `m68030_exc.sv`'s own
-`int_pending` formula has no edge-triggered/non-maskable path for level
-7, so a level-7 request asserted before anything lowers SR's own
-reset-default mask of 7 is never recognized — worked around in the test
-program by lowering the mask first, matching what real code would do
-regardless; not yet fixed.
+`int_pending` formula had no edge-triggered/non-maskable path for level
+7, so a level-7 request asserted before anything lowered SR's own
+reset-default mask of 7 was never recognized. Fixed via a sticky
+edge-detect latch (`nmi_pending_r`) ORed into `int_pending`, set on any
+transition of the synchronized IPL lines into level 7 and cleared once
+the interrupt actually dispatches. The test program no longer lowers
+the mask before looping — SR's mask stays at its reset-default 7
+throughout, exercising the fix directly rather than working around it.
 
 ![manual](generated/manual_744.png)
 ![sim](generated/manual_744_sim.png)

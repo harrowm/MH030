@@ -235,7 +235,30 @@ module m68030_exc (
     logic [2:0] ipl_mask_l;
     assign ipl_sync_l  = ipl_sync;
     assign ipl_mask_l  = ipl_mask;
-    assign int_pending = (ipl_sync_l != 3'b000) && (ipl_sync_l > ipl_mask_l);
+
+    // Level 7 (NMI) edge-triggered recognition (project_int_pending_level7_
+    // mask_gap.md, found building the Figure 7-44/7-45 timing diagram): real
+    // 68030 silicon treats level 7 as effectively non-maskable -- recognized
+    // on any TRANSITION of the synchronized IPL lines into level 7,
+    // regardless of the current SR interrupt mask, and only once per
+    // transition (so it does not re-trigger every cycle while IPL simply
+    // stays at 7 -- that would turn a single request into an infinite
+    // stream). The plain `ipl_sync_l > ipl_mask_l` formula below treats
+    // level 7 exactly like levels 1-6, so a level-7 request asserted before
+    // anything lowers SR's own reset-default mask of 7 was silently never
+    // recognized (confirmed via direct signal trace). `nmi_pending_r`
+    // latches on that edge and stays set until the interrupt is actually
+    // dispatched (EXC_IDLE -> EXC_IACK below), at which point it clears so
+    // a later IPL drop-then-re-assert-to-7 can latch again.
+    // `nmi_pending_r`'s own update logic (always_ff) lives further down,
+    // after `state_r`/`exc_pending`/`pend_is_int` are declared (Icarus
+    // requires a procedural block's referenced regs/nets to be declared
+    // textually first) -- declared here so this assign can use it.
+    logic [2:0] ipl_sync_prev_r;
+    logic       nmi_pending_r;
+
+    assign int_pending = nmi_pending_r ||
+                          ((ipl_sync_l != 3'b000) && (ipl_sync_l > ipl_mask_l));
     assign int_pending_out = int_pending;
 
     // -----------------------------------------------------------------------
@@ -338,6 +361,25 @@ module m68030_exc (
     } exc_state_t;
 
     exc_state_t state_r;
+
+    // Level 7 (NMI) edge-triggered sticky latch (see `nmi_pending_r`'s own
+    // declaration/comment above, near `int_pending`). Placed here, after
+    // `state_r`/`exc_pending`/`pend_is_int` are all declared, purely because
+    // Icarus needs a procedural block's referenced regs/nets declared
+    // textually first -- functionally independent of the FSM's own
+    // sequential block below.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            ipl_sync_prev_r <= 3'b000;
+            nmi_pending_r   <= 1'b0;
+        end else begin
+            ipl_sync_prev_r <= ipl_sync_l;
+            if (ipl_sync_l == 3'b111 && ipl_sync_prev_r != 3'b111)
+                nmi_pending_r <= 1'b1;
+            else if (state_r == EXC_IDLE && exc_pending && pend_is_int)
+                nmi_pending_r <= 1'b0;
+        end
+    end
 
     logic [31:0] snap_ssp_r;
     logic [7:0]  snap_vec_r;

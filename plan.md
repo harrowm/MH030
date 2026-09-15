@@ -1923,3 +1923,107 @@ zero Harte coverage, 68020+-only).
 it, both of the two real, previously-deferred bugs Track 3's own
 Phase 262/263 investigation found and documented but didn't fix at the
 time.
+
+## Phase 278 (level-7/NMI interrupt-mask-tie recognition gap —
+IMPLEMENTED AND VERIFIED, `project_int_pending_level7_mask_gap.md`, a
+later session)
+
+Real, pre-existing, previously-documented-but-deferred gap: found while
+building `timing_diagrams/`'s Figure 7-44/7-45 diagram (a materially
+different task than an RTL-correctness investigation, so deliberately
+not chased at the time) and explicitly flagged as unfixed. User asked
+to fix it directly this session.
+
+**The bug**: `rtl/m68030_exc.sv`'s `int_pending` formula —
+`(ipl_sync_l != 3'b000) && (ipl_sync_l > ipl_mask_l)` — is a plain
+LEVEL comparison, identical for every IPL level 1-7. Real 68k
+architecture requires level 7 to be effectively non-maskable: it must
+be recognized on any TRANSITION into level 7 regardless of the current
+SR interrupt mask, not gated by the same `requested > mask` check every
+other level uses. Since `7 > 7` is always false, this formula silently
+dropped any level-7 request asserted while the mask already sat at 7 —
+which is exactly SR's own reset-default state (`SR=$2700`), so a
+level-7 request asserted before anything ever lowered the mask was
+never recognized. Confirmed via direct signal trace
+(`ipl_sync_l`/`ipl_mask_l`/`int_pending` all sampled explicitly) before
+fixing, not assumed. Never caught before because every existing
+Level-7 test (`tb/stall_fsm_tb.sv`'s own Category F, 17 sources)
+injects the interrupt deep into an already-running program that has
+long since executed a mask-lowering instruction.
+
+**Fix**: a new sticky edge-detect latch, `nmi_pending_r`, ORed into
+`int_pending` alongside the existing formula. A 1-cycle-delayed
+`ipl_sync_prev_r` register detects any transition of the synchronized
+IPL lines into `3'b111` (level 7); on that edge `nmi_pending_r` sets
+unconditionally (bypassing the mask entirely), and clears again once
+the interrupt actually dispatches (`state_r==EXC_IDLE && exc_pending &&
+pend_is_int`, the same dispatch point `snap_is_int_r` already captures
+at) — so a later IPL drop-then-re-assert-to-7 can latch again, matching
+real silicon's own "recognized once per transition" behavior rather
+than turning one held request into a re-triggering storm. Icarus
+required the new `always_ff` block placed textually after
+`state_r`/`exc_pending`/`pend_is_int` are declared (a procedural-block
+forward-reference restriction, not a real dependency — the block is
+otherwise fully independent of the main FSM's own sequential block);
+the `nmi_pending_r`/`ipl_sync_prev_r` declarations and the `int_pending`
+assign itself stayed at their original location near the top of the
+file, only the `always_ff` body moved.
+
+**A genuinely separate, pre-existing test-construction bug found while
+verifying this fix end-to-end** (unrelated to the RTL, and not
+introduced by this fix): `tests/timing_manual_744.s` placed the level-7
+handler's own code directly at the vector table address (`org $7C \n
+handler7: rte`) instead of storing a POINTER there — real 68k vector-
+table semantics, confirmed directly against `m68030_exc.sv`'s own
+`EXC_FETCH` state, which performs a genuine bus read of the table entry
+and loads THAT VALUE as the new PC, not the table address's own literal
+opcode bytes. A full RTE round-trip through this handler would hang
+(confirmed by directly re-running the ORIGINAL, un-modified diagram
+test in isolation — it hung identically, entirely independent of this
+session's own RTL fix), but this was never caught because the diagram
+itself only needs the early IACK/frame-push dispatch waveform, not full
+completion. Fixed alongside this RTL fix: the vector table entry at
+`$7C` now stores a pointer to the real handler at `$200`; the test
+program's own SR-lowering workaround (`move.w #$2000,sr`, needed only
+because of the RTL bug above) was also removed, so the diagram now
+exercises the real, harder scenario (mask stays at its reset-default 7
+throughout) directly. The diagram's own testbench
+(`timing_diagrams/tb/manual_744_tb.sv`) additionally needed to wait for
+the test program's own read cycle to genuinely complete
+(`d_reg[0]===32'hCAFE_F00D`) before asserting the interrupt — recognition
+is now fast enough that asserting it immediately at reset (the
+testbench's own original approach, written before this fix existed)
+preempted the read cycle entirely, breaking the diagram's own intended
+"read, then interrupt" narrative (confirmed via a direct look at the
+first rebuilt waveform, which showed the IACK cycle jumping straight off
+the reset-vector fetch with no `$3010` access anywhere in it). Both the
+manual crop and sim waveform for Figure 7-44/7-45 were regenerated and
+re-verified correct.
+
+**Verification**: a new dedicated regression test, `tb/stall_fsm_tb.sv`'s
+`INT-mask-tie` — explicitly re-elevates SR's mask back to 7 mid-program
+via `MOVE.W #$2700,SR` (rather than relying on being first in program
+order, which is fragile in this shared, single-continuous-program
+testbench), then asserts a fresh level-7 edge and confirms recognition
+via `exc_active` leaving `EXC_IDLE`. Confirmed via a temporary disabled-
+fix rebuild (`assign int_pending = 1'b0 && nmi_pending_r || ...`) that
+this test correctly and cleanly fails (without hanging — the CPU keeps
+running its own unstalled register-only code regardless) when the fix
+is absent. An earlier version of this test also tried to pre-clear D6
+(the shared handler's own completion marker) via a `CLR.L D6` placed in
+the test's own code just before the injection point, guarding against a
+stale `12345` left over from an earlier interrupt test — this raced
+against `int_defer` itself (Phase 108) and produced a false failure,
+documented as its own lesson in `feedback_interrupt_defer_marker_race.md`;
+the final test avoids the class entirely by checking `exc_active`
+(the direct, decisive signal) rather than a marker register shared with
+the handler.
+
+Full mandatory gate clean: `make test` 37/37 (including the new
+`INT-mask-tie` case), `cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth`
+50/50, full 124-suite Harte sweep bit-identical to baseline (`PASS
+702142 FAIL 2 SKIP 281221 TIMEOUT 0` — interrupt-mask edge cases have no
+Harte coverage, the corpus captures 68000-single-step vectors with no
+real interrupt sequences).
+
+**Closes `project_int_pending_level7_mask_gap.md` in full.**

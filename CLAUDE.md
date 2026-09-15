@@ -618,6 +618,33 @@ mandatory gate clean, Harte bit-identical to baseline (PACK/UNPK have zero Harte
 68020+-only). **Closes `project_pack_source_read_order_bug.md` in full** — both real bugs
 Track 3's own Phase 262/263 investigation found and deferred are now fixed.
 
+**Phase 278 (level-7/NMI interrupt-mask-tie recognition gap, a later session,
+`project_int_pending_level7_mask_gap.md`, IMPLEMENTED AND VERIFIED)**: closes the
+real gap found (and deliberately deferred) while building `timing_diagrams/`'s
+Figure 7-44/7-45 diagram. `m68030_exc.sv`'s own `int_pending` formula
+(`ipl_sync_l > ipl_mask_l`) was a plain level comparison identical for every IPL
+level — but level 7 (NMI) is architecturally non-maskable and must be recognized
+on any TRANSITION into level 7 regardless of the current mask; since `7>7` is
+always false, a level-7 request asserted while the mask already sat at 7 (SR's
+own reset default) was silently never recognized. Fixed via a new sticky
+edge-detect latch, `nmi_pending_r` — set on any synchronized-IPL transition into
+`3'b111`, cleared once the interrupt actually dispatches — ORed into
+`int_pending`. Found a genuinely separate, pre-existing test-construction bug
+while verifying end-to-end (not introduced by this fix, not an RTL bug):
+`tests/timing_manual_744.s` placed the level-7 handler's own code directly at
+the vector table address instead of storing a pointer there (real 68k
+semantics), so a full RTE round-trip would hang — masked because the diagram
+only ever needed the early dispatch waveform. Fixed alongside the RTL change
+(vector table now stores a real pointer; the diagram test's own now-obsolete
+SR-lowering workaround was removed; the diagram's own testbench needed to wait
+for its read cycle to genuinely complete before asserting the interrupt, since
+recognition is now fast enough to have preempted it entirely on the first
+rebuild attempt) — both the manual crop and sim waveform were regenerated and
+re-verified. New dedicated regression test, `tb/stall_fsm_tb.sv`'s
+`INT-mask-tie`, confirmed via a temporary disabled-fix rebuild to fail cleanly
+(no hang) without the fix. Full mandatory gate clean, Harte bit-identical to
+baseline. **Closes `project_int_pending_level7_mask_gap.md` in full.**
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

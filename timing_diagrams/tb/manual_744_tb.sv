@@ -164,8 +164,21 @@ module manual_744_tb;
         repeat(20) @(posedge clk_4x);
         #1; rst_n = 1;
 
-        // Request a genuine level-7 (NMI) interrupt immediately -- the
-        // test program loops in place (bra.s) after its own read rather
+        // Wait for the test program's own READ CYCLE to complete first
+        // (d_reg[0] becomes the $3010 marker value) before requesting the
+        // interrupt -- this diagram is meant to show "an ordinary read,
+        // followed by a genuine level-7 interrupt" (see this file's own
+        // header comment), and now that the level-7/SR-mask-tie gap is
+        // fixed (project_int_pending_level7_mask_gap.md), asserting the
+        // request immediately at reset (as an earlier version of this
+        // testbench did) gets recognized fast enough to preempt the read
+        // itself -- confirmed via a direct look at the resulting
+        // waveform, which showed the IACK cycle jumping straight off the
+        // reset-vector fetch with no $3010 access anywhere in it.
+        for (int t = 0; t < 400 && u_top.u_eu.u_rf.d_reg[0] !== 32'hCAFE_F00D; t++)
+            @(posedge clk_4x);
+
+        // Test program loops in place (bra.s) after its own read rather
         // than using STOP (tb/stall_fsm_tb.sv's own established
         // "quiescent self-loop" convention for interrupt injection):
         // found, via direct trace, that recognizing an already-pending
@@ -173,7 +186,10 @@ module manual_744_tb;
         // than recognizing one between ordinary instructions -- not a
         // bug (STOP+interrupt already has its own dedicated, passing
         // coverage elsewhere, e.g. Phase 250 F9's own STOP+trace work),
-        // just a different, slower path than this diagram needs.
+        // just a different, slower path than this diagram needs. SR's
+        // own interrupt mask is still at its reset-default 7 throughout
+        // (this test program never lowers it) -- the request below is
+        // still recognized despite that tie, exercising the real fix.
         ipl_n = 3'b000;
 
         // Wait for dispatch to start (exc_active), then for it to finish

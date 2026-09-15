@@ -1414,6 +1414,96 @@ module stall_fsm_tb;
         end
 
         // -----------------------------------------------------------------
+        // INT-mask-tie: level-7 (NMI) recognized even when SR's own
+        // interrupt mask is ALREADY at 7 (project_int_pending_level7_
+        // mask_gap.md, found building the Figure 7-44/7-45 timing diagram,
+        // fixed a later session). m68030_exc.sv's original int_pending
+        // formula was a plain `ipl_sync_l > ipl_mask_l` level comparison,
+        // identical for every IPL level 1-7 — but real 68k architecture
+        // requires level 7 to be effectively non-maskable, recognized on
+        // any TRANSITION into level 7 regardless of the current mask. Since
+        // `7 > 7` is always false, the old formula silently dropped any
+        // level-7 request that arrived while the mask already sat at 7 —
+        // which is exactly SR's own reset-default state, so a level-7
+        // request asserted before anything ever lowered the mask (the
+        // scenario the memory file above was originally found via) was
+        // never recognized. Rather than relying on being first in program
+        // order (fragile in this shared, single-continuous-program
+        // testbench — every earlier test has already executed plenty of
+        // mask-lowering instructions by this point), this test reproduces
+        // the tie directly: MOVE.W #$2700,SR explicitly re-elevates the
+        // mask back to 7 mid-program, then a level-7 request is asserted
+        // (a genuine edge — ipl_n idles at "no request" between tests) and
+        // must still be recognized. Fixed via a sticky edge-detect latch
+        // (`nmi_pending_r`, m68030_exc.sv) ORed into int_pending, set on
+        // any ipl_sync transition into 3'b111 and cleared once the
+        // interrupt actually dispatches. Without the fix, this test hangs
+        // until its own 20000-tick timeout (nothing else in this isolated
+        // code region ever lowers the mask again) rather than failing
+        // cleanly — the timeout itself is the regression signal.
+        // -----------------------------------------------------------------
+        $display("=== Level-7 (NMI) recognized despite a tied SR interrupt mask ===");
+        rom[16'h1950/4] = {MOVE_W_IMM_SR, 16'h2700};  // S=1, mask=7, T=0 -- deliberately tied vs. the incoming level-7 request
+        rom[16'h1954/4] = {CLR_L_D5, ADDI_L_D5};      // D5 is this test's own dependent marker (778) --
+                                                       // deliberately NOT D6 (the shared handler's own marker):
+                                                       // an earlier attempt used a CLR.L D6 here too, but since
+                                                       // the interrupt can (and, confirmed via trace, does)
+                                                       // preempt at the boundary BEFORE this very instruction
+                                                       // pair ever dispatches, that CLR.L D6 runs AFTER the
+                                                       // handler's own RTE, re-clobbering the handler's D6=12345
+                                                       // back to 0 -- a false-negative test bug, not an RTL one.
+        rom[16'h1958/4] = {16'h0000, 16'd778};
+        begin
+            int t;
+            logic exc_seen4;
+
+            for (t = 0; t < 4000 && u_top.ifu_decode_pc < 32'h0000_1950; t++)
+                @(posedge clk_4x);
+            check("INT-mask-tie: reached own code", u_top.ifu_decode_pc >= 32'h0000_1950);
+
+            // Let MOVE.W #$2700,SR fully commit (register-only op, no bus
+            // access) before asserting the request, so the tie is
+            // genuinely in place in hardware at the moment of the edge.
+            for (t = 0; t < 4000 && u_top.ifu_decode_pc < 32'h0000_1954; t++)
+                @(posedge clk_4x);
+            repeat(10) @(posedge clk_4x);
+
+            exc_seen4 = 1'b0;
+            ipl_n = 3'b000;   // level 7 (NMI): a genuine edge (was idle), landing on a tied mask
+            for (t = 0; t < 20000; t++) begin
+                @(posedge clk_4x); #1;
+                if (!exc_seen4 && u_top.exc_active) begin
+                    exc_seen4 = 1'b1;
+                    ipl_n     = 3'b111;
+                end
+                if (exc_seen4 && !u_top.exc_active)
+                    break;
+            end
+            ipl_n = 3'b111;   // deassert before any later test could see it
+            // exc_active leaving EXC_IDLE at all is the decisive signal --
+            // directly reflects m68030_exc.sv's own state_r, and confirmed
+            // (via a throwaway disabled-fix rebuild while developing this
+            // test) to correctly read false for the full 20000-tick budget
+            // when nmi_pending_r's own OR term is removed. A D6-based
+            // "did the handler actually run" check was deliberately NOT
+            // added here: an earlier attempt using this test's own CLR.L D6
+            // as a stale-value guard raced against the interrupt itself --
+            // since the request can (and, confirmed via trace, does)
+            // preempt at the boundary BEFORE that very instruction ever
+            // dispatches, the CLR.L D6 ends up running AFTER the shared
+            // handler's own RTE, re-clobbering its D6=12345 marker back to
+            // 0 -- a test-construction bug, not an RTL one, and not worth
+            // the complexity of a correct fix given exc_active is already
+            // the direct, decisive, already-verified signal.
+            check("INT-mask-tie: exception was recognized despite ipl_sync==ipl_mask==7", exc_seen4);
+
+            for (t = 0; t < 4000 && u_top.u_eu.u_rf.d_reg[5] !== 32'd778; t++)
+                @(posedge clk_4x);
+            check("INT-mask-tie: dependent instruction ran, CPU didn't hang (D5=778)",
+                  u_top.u_eu.u_rf.d_reg[5] === 32'd778);
+        end
+
+        // -----------------------------------------------------------------
         // Task #3 (post-Phase-104 follow-up list): BERR arriving mid-FSM —
         // does a sustained bus error partway through a locked CAS2 sequence
         // produce a clean Bus Error exception, or does it corrupt/hang the
