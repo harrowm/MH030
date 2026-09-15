@@ -60,6 +60,24 @@ module biu_sizing_fsm (
     output logic        cyc_req,
     input  logic [31:0] cyc_rdata,   // eu_rdata from cycle_gen (SP_S7 output)
     input  logic        cyc_ack,     // eu_ack from cycle_gen
+    input  logic        cyc_berr,    // eu_berr from cycle_gen (cg_eu_berr_raw) -- a
+                                      // plain BERR (no HALT retry) abort. Mirrors
+                                      // biu_cache_if.sv's own sf_berr input exactly
+                                      // (same source signal); found and fixed
+                                      // (project_berr_no_halt_retry_loop.md) after
+                                      // this module was confirmed, via direct
+                                      // trace, to have NO abort path at all: with
+                                      // no cyc_berr, SS_ACTIVE only ever exits on
+                                      // cyc_ack_edge, which a genuinely faulted
+                                      // cycle never produces, so `sf` got stuck in
+                                      // SS_ACTIVE forever, continuously re-driving
+                                      // the STALE faulting cyc_addr/cyc_req into
+                                      // cycle_gen regardless of what biu_cache_if
+                                      // (already correctly aborted via its own
+                                      // CI_BERR state) or the exception controller
+                                      // wanted to dispatch next -- the real root
+                                      // cause of the reported "same faulting access
+                                      // re-dispatches every ~8 ticks" hang.
 
     // Port-width feedback latched by cycle_gen at S4/S5
     input  logic [1:0]  cyc_port_dsack,  // {dsack1_s, dsack0_s}
@@ -318,7 +336,13 @@ module biu_sizing_fsm (
                 end
 
                 SS_ACTIVE: begin
-                    if (cyc_ack_edge) begin
+                    if (cyc_berr) begin
+                        // Abort: mirrors SS_IDLE's own fresh-request reset --
+                        // whatever partial sub-cycle progress sf_accum held is
+                        // abandoned, matching biu_cache_if.sv's own CI_BERR
+                        // treatment of a faulted multi-beat transfer.
+                        sf_accum <= 32'h0;
+                    end else if (cyc_ack_edge) begin
                         // Capture result and prepare for next sub-cycle (if any)
                         if (sf_rw) begin
                             sf_accum <= merge_rdata(sf_accum, cyc_rdata,
@@ -361,7 +385,14 @@ module biu_sizing_fsm (
                     sf_nxt = SS_ACTIVE;
             end
             SS_ACTIVE: begin
-                if (cyc_ack_edge) begin
+                if (cyc_berr) begin
+                    // Abort straight back to idle -- see cyc_berr's own port
+                    // comment above. Checked before cyc_ack_edge: the two
+                    // are mutually exclusive per cycle_gen's own combinational
+                    // eu_ack/eu_berr split, but this ordering documents the
+                    // abort as taking priority, matching CI_BERR's own shape.
+                    sf_nxt = SS_IDLE;
+                end else if (cyc_ack_edge) begin
                     if (needs_more(sf_siz, cyc_port_dsack))
                         sf_nxt = SS_ACTIVE;
                     else

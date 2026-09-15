@@ -45,22 +45,32 @@ module manual_749_tb;
 
     // The target address ($3010) never gets a real device response --
     // /BERR asserts instead, once the access is actually seen on the
-    // bus. Found while building this diagram, documented rather than
-    // chased further (real RTL-correctness investigation is out of
-    // scope for a pin-timing diagram): with halt_n left deasserted
-    // (the "plain BERR, no HALT -> exception" path per
-    // rtl/biu_cycle_gen.sv's own berr_is_halt_retry_r logic), this
-    // specific fault address/FC combination was found, via direct
-    // trace, to make the CPU repeatedly RE-DISPATCH the same faulting
-    // access roughly every 8 ticks instead of ever completing exception
-    // dispatch -- tried both an externally-driven /BERR pulse (this
-    // version) and relying purely on biu_error_handler.sv's own
-    // internal watchdog timeout (tb/biu_int_tb.sv's own proven "no
-    // device ever responds" convention) with identical results either
-    // way, so this isn't specific to how /BERR itself is driven. This
-    // diagram only needs the ONE faulting bus cycle's own pin-level
-    // timing (Figure 7-49's actual subject), captured below without
-    // waiting for a full exception dispatch to complete.
+    // bus. Found while building this diagram (with halt_n left
+    // deasserted, the "plain BERR, no HALT -> exception" path): a real,
+    // previously-undiscovered RTL bug (project_berr_no_halt_retry_loop.md,
+    // fixed a later session) made the CPU repeatedly RE-DISPATCH the
+    // same faulting access roughly every 8 ticks instead of ever
+    // completing exception dispatch. Root cause: rtl/biu_sizing_fsm.sv
+    // (sitting between biu_cache_if.sv and biu_cycle_gen.sv) had no
+    // BERR-abort path at all -- its own state machine only ever exits
+    // its active sub-cycle state on a successful cyc_ack, which a
+    // genuinely faulted cycle never produces, so it got stuck forever
+    // continuously re-driving the STALE faulting address into
+    // biu_cycle_gen regardless of what biu_cache_if.sv (already
+    // correctly aborted via its own CI_BERR state) or the exception
+    // controller wanted to dispatch next. Fixed by giving
+    // biu_sizing_fsm.sv its own cyc_berr input (mirroring
+    // biu_cache_if.sv's own sf_berr) that resets it cleanly back to
+    // idle -- the exception now genuinely completes (verified via a
+    // dedicated tb/biu_tb.sv regression and a standalone end-to-end
+    // trace using this exact scenario, both confirming d_reg[5]
+    // eventually reaches 99). This diagram itself still only needs the
+    // ONE faulting bus cycle's own pin-level timing (Figure 7-49's
+    // actual subject), so the run below deliberately stays short and
+    // stops right after it -- letting it run all the way to completion
+    // would push the handler's own trailing activity into the "last N
+    // cycles" window vcd_to_wavedrom.py captures, displacing the fault
+    // cycle this diagram is actually about.
     localparam logic [31:0] FAULT_ADDR = 32'h0000_3010;
     wire        targeting_fault = !ext_as_n && (ext_a == FAULT_ADDR);
     logic       berr_n = 1'b1;
@@ -177,11 +187,20 @@ module manual_749_tb;
         repeat(20) @(posedge clk_4x);
         #1; rst_n = 1;
 
-        // Fixed run length covering the first fault cycle (and its own
-        // first re-dispatch) rather than waiting for d_reg[5]==99 --
-        // see this file's own header comment on why that never
-        // completes here.
-        repeat(300) @(posedge clk_4x);
+        // Wait for the fault access itself, then stop shortly after --
+        // deliberately NOT waiting for d_reg[5]==99 -- see this file's own
+        // header comment on why (the exception genuinely completes now that
+        // the fix is in, but running that far would push the diagram's own
+        // "last N cycles" capture window past the fault and onto the
+        // handler's own trailing self-loop refetches instead).
+        for (int t = 0; t < 2000 && !targeting_fault; t++)
+            @(posedge clk_4x);
+        // Stop once the faulted cycle itself has finished on the pins
+        // (/AS negates again) plus a small hold-time margin -- BEFORE the
+        // exception controller's own frame-push writes begin.
+        for (int t = 0; t < 200 && !ext_as_n; t++)
+            @(posedge clk_4x);
+        repeat(8) @(posedge clk_4x);
 
         $display("FINAL d_reg[5] = %0d", u_top.u_eu.u_rf.d_reg[5]);
         $finish;

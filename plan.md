@@ -2027,3 +2027,121 @@ Harte coverage, the corpus captures 68000-single-step vectors with no
 real interrupt sequences).
 
 **Closes `project_int_pending_level7_mask_gap.md` in full.**
+
+## Phase 279 (BERR-without-HALT infinite retry loop — IMPLEMENTED AND
+VERIFIED, `project_berr_no_halt_retry_loop.md`, a later session)
+
+Real, pre-existing, previously-documented-but-not-root-caused gap:
+found while building `timing_diagrams/`'s Figure 7-49 diagram and
+explicitly flagged as unfixed at the time (out of scope for a
+pin-timing task). User asked to fix it directly this session,
+immediately following Phase 278's own level-7 fix.
+
+**The bug**: an ordinary EU-initiated read to a non-responding address,
+terminated by a plain `/BERR` (no `/HALT`), made the CPU repeatedly
+re-dispatch the same faulting access roughly every 8 ticks instead of
+ever completing Bus Error exception dispatch.
+
+**Root cause**, found via direct per-tick signal tracing (a standalone
+testbench mirroring `timing_diagrams/tb/manual_749_tb.sv`'s own
+scenario, instrumented across every layer from the EU port down to the
+external pins): `rtl/biu_sizing_fsm.sv` — the dynamic bus-sizing module
+sitting between `biu_cache_if.sv` and `biu_cycle_gen.sv`
+(`EU → biu_cache_if → biu_sizing_fsm → biu_cycle_gen`) — had **no
+BERR-abort path of any kind** (confirmed via grep: zero occurrences of
+"berr" anywhere in the file before this fix). Its `SS_IDLE ->
+SS_ACTIVE -> SS_IDLE` state machine only ever exits `SS_ACTIVE` on
+`cyc_ack_edge` (a rising edge of cycle_gen's own success ack), which a
+genuinely faulted cycle never produces. `biu_cache_if.sv` itself
+already had a correct, working abort path (`CI_BERR`, added back in
+Phase 108/109) and cleanly returned to `CI_IDLE` on a fault — but
+`biu_sizing_fsm.sv`, one layer further down, had zero visibility into
+`cg_eu_berr_raw` at all, and was left stuck in `SS_ACTIVE` forever,
+continuously re-presenting the STALE faulting `sf_addr`/`cyc_req=1` to
+`biu_cycle_gen` regardless of what `biu_cache_if.sv` (already idle) or
+the exception controller (trying to dispatch its own frame-push write)
+actually wanted to send next. Confirmed via trace exactly what this
+caused downstream: once the exception controller recognized the fault
+and tried to write its stack frame (e.g. to `$FFFC`), `biu_eu_addr`
+correctly showed the new address at the EU-port level, but
+`biu_sizing_fsm.sv`'s own `cyc_addr` output (feeding `biu_cycle_gen`
+directly) stayed latched at the ORIGINAL faulting address the entire
+time — the frame-push write never reached the bus at all; instead the
+same faulting read kept re-executing, which (since the exception
+controller was already mid-dispatch) got misinterpreted as a second bus
+error occurring DURING dispatch of the first, incorrectly triggering
+the genuine double-bus-fault path (`EXC_DBLFAULT`, Phase 250 Part B)
+even though no real double fault ever occurred.
+
+**Fix**: added a new `cyc_berr` input to `biu_sizing_fsm.sv`, wired from
+`cg_eu_berr_raw` — the exact same raw signal `biu_cache_if.sv`'s own
+`sf_berr` input already uses (`rtl/m68030_biu.sv`'s `u_sf`
+instantiation, plus `tb/biu_tb.sv`'s own standalone unit-test
+instantiation). When `cyc_berr` pulses while `sf==SS_ACTIVE`, both the
+sequential (`sf_accum` reset, mirroring `SS_IDLE`'s own fresh-request
+reset) and next-state (`sf_nxt=SS_IDLE`) logic now abort cleanly back
+to idle, mirroring `biu_cache_if.sv`'s own `CI_BERR` treatment exactly
+— checked before `cyc_ack_edge` in the next-state logic (the two are
+mutually exclusive per cycle_gen's own combinational eu_ack/eu_berr
+split, but this ordering documents the abort as taking priority). No
+new output was needed: `biu_cache_if.sv`'s own abort reaction was
+already correct and independent (it reads `cg_eu_berr_raw` directly,
+not through `biu_sizing_fsm.sv`), so this fix only needed to stop
+`biu_sizing_fsm.sv` from continuing to feed it stale requests.
+
+**A second, real bug found and fixed while verifying end-to-end**:
+`tb/biu_tb.sv`'s own pre-existing "Retry exhausted" test (BERR+HALT
+retry-exhaustion coverage) started failing once this fix was in place —
+not because the fix was wrong, but because the test's own construction
+asserted `halt_tb` and `eu_req_tb` in the same simulation delta,
+implicitly relying on `halt_s`'s own 2-stage synchronizer not yet
+having caught up by the time the first cycle dispatched (the BERR+HALT
+retry mechanism requires HALT to be recognized only AFTER a cycle has
+already started — `biu_cycle_gen.sv`'s own ST_IDLE case has an explicit
+"Retry takes priority over HALT# — bus was already committed" comment,
+and a SEPARATE "HALT# asserted (standalone, no BERR): suspend new bus
+cycles" rule that permanently blocks dispatch if HALT is already
+asserted before any cycle starts). This fix's own correctness change
+elsewhere in the same simulation run shifted that implicit race
+unfavorably, exposing the test's own latent fragility (confirmed by
+checking the SAME test against the unmodified baseline RTL first,
+before assuming the new RTL change was at fault — it passed there,
+proving the race, not the fix, was the problem). Fixed by making the
+test explicitly wait for the cycle to genuinely start (`bus_idle`
+drops) before asserting HALT, matching the test's own already-documented
+intent directly instead of depending on an implicit race.
+
+**Verification**: a new dedicated regression in `tb/biu_tb.sv` ("Plain
+BERR (no HALT) then a fresh dispatch to a different address") —
+triggers a plain BERR at one address, then immediately issues a FRESH
+dispatch to a different, working address, and checks (a) the
+dispatched `cyc_addr` is the NEW address, not the stale fault address,
+and (b) the fresh dispatch completes cleanly (`eu_ack`, not stuck or
+re-faulted). Confirmed via a temporary disabled-fix rebuild
+(`if (1'b0 && cyc_berr) ...`) that the decisive address check correctly
+fails without the fix. Also independently confirmed end-to-end via a
+standalone testbench reproducing the exact
+`timing_diagrams/tests/timing_manual_749.s` scenario: the exception now
+genuinely completes (`d_reg[5]` reaches 99, the handler's own
+completion marker; `decode_pc` settles inside the handler's own
+self-loop) where before it hung forever. The Figure 7-49 diagram's own
+testbench (`timing_diagrams/tb/manual_749_tb.sv`) needed its own run
+length re-tuned as a direct consequence of the fix actually working:
+the diagram only needs the ONE faulting bus cycle's own pin-level
+timing, but now that the exception genuinely completes within any
+generous fixed tick budget, letting the run continue that far pushed
+`vcd_to_wavedrom.py`'s own "last N cycles" capture window onto the
+frame-push writes and eventually the handler's own trailing self-loop
+refetches instead of the fault itself — fixed by explicitly stopping
+right after the faulted cycle's own `/AS` negates (plus a small hold
+margin), rather than running for a large fixed tick count. Manual crop
+and sim waveform regenerated and re-verified correct.
+
+Full mandatory gate clean: `make test` 37/37 (including the new BERR
+regression and the re-tuned retry-exhaustion test), `cosim_grp` 8/8,
+`cosim_memind` 33/33, `dat-synth` 50/50, full 124-suite Harte sweep
+bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` —
+BERR-without-HALT has no Harte coverage, the corpus captures
+68000-single-step vectors with no bus-fault sequences).
+
+**Closes `project_berr_no_halt_retry_loop.md` in full.**

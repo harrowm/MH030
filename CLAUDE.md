@@ -645,6 +645,36 @@ re-verified. New dedicated regression test, `tb/stall_fsm_tb.sv`'s
 (no hang) without the fix. Full mandatory gate clean, Harte bit-identical to
 baseline. **Closes `project_int_pending_level7_mask_gap.md` in full.**
 
+**Phase 279 (BERR-without-HALT infinite retry loop, a later session,
+`project_berr_no_halt_retry_loop.md`, IMPLEMENTED AND VERIFIED)**: closes the
+real gap found (and not root-caused at the time) while building
+`timing_diagrams/`'s Figure 7-49 diagram. Root cause, found via direct per-tick
+signal tracing: `rtl/biu_sizing_fsm.sv` (sitting between `biu_cache_if.sv` and
+`biu_cycle_gen.sv`) had no BERR-abort path at all — its state machine only
+ever exited its active sub-cycle state on a successful ack, which a genuinely
+faulted cycle never produces, so it got stuck forever re-driving the STALE
+faulting address into `biu_cycle_gen` regardless of what `biu_cache_if.sv`
+(already correctly aborted via its own `CI_BERR` state) or the exception
+controller wanted to dispatch next — confirmed this silently prevented the
+exception controller's own frame-push write from ever reaching the bus,
+misfiring a bogus double-bus-fault instead. Fixed via a new `cyc_berr` input
+(wired from `cg_eu_berr_raw`, the same signal `biu_cache_if.sv`'s own
+`sf_berr` already uses) that resets it cleanly back to idle. Found and fixed
+a second, genuinely separate bug while verifying end-to-end: `tb/biu_tb.sv`'s
+own pre-existing "Retry exhausted" test relied on an implicit synchronizer
+race (asserting HALT and the EU request in the same delta) that this fix's
+own correctness elsewhere in the same run shifted unfavorably — confirmed via
+a clean-baseline check that the race, not the fix, was at fault — fixed by
+making the test explicitly wait for the cycle to start before asserting HALT.
+New dedicated regression in `tb/biu_tb.sv`, confirmed via a temporary
+disabled-fix rebuild to fail cleanly without the fix. The Figure 7-49
+diagram's own testbench needed its run length re-tuned to stop right after
+the fault cycle (not a large fixed budget) now that the exception genuinely
+completes, so the diagram's own "last N cycles" capture window doesn't drift
+onto the frame-push/handler activity that now legitimately follows. Full
+mandatory gate clean, Harte bit-identical to baseline. **Closes
+`project_berr_no_halt_retry_loop.md` in full.**
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

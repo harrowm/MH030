@@ -971,6 +971,7 @@ module m68030_biu #(
         .cyc_req       (sf_cyc_req),
         .cyc_rdata     (cg_eu_rdata),
         .cyc_ack       (cg_eu_ack),
+        .cyc_berr      (cg_eu_berr_raw),
         .cyc_port_dsack(cyc_port_dsack),
         .bus_idle      (bus_idle)
     );

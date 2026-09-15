@@ -992,6 +992,7 @@ module biu_tb;
         .cyc_req       (sf_cyc_req),
         .cyc_rdata     (cg_eu_rdata),
         .cyc_ack       (cg_eu_ack),
+        .cyc_berr      (eu_berr),
         .cyc_port_dsack(cyc_port_dsack),
         .bus_idle      (bus_idle)
     );
@@ -3239,6 +3240,74 @@ module biu_tb;
             check("timeout cleared on idle", !berr_timeout_tb);
         end
 
+        // --- Plain BERR (no HALT) leaves biu_sizing_fsm.sv clean -- a FRESH,
+        // different-address dispatch immediately afterward must NOT keep
+        // re-presenting the stale faulting address (project_berr_no_halt_
+        // retry_loop.md). Root cause: biu_sizing_fsm.sv had no cyc_berr
+        // input at all, so a faulted cycle left `sf` stuck in SS_ACTIVE
+        // forever (its only exit was cyc_ack_edge, which a genuinely
+        // faulted cycle never produces) -- continuously re-driving the OLD
+        // cyc_addr/cyc_req into cycle_gen regardless of what eu_addr the
+        // EU (or, in the full system, the exception controller once
+        // dispatched) actually wanted next. Confirmed via direct trace
+        // (a standalone testbench mirroring timing_diagrams/'s Figure 7-49
+        // scenario) that this made the exception controller's own frame-
+        // push write to a completely different address keep reading back
+        // as the ORIGINAL fault address on the external bus, misfiring a
+        // second, bogus double-bus-fault. Fixed by adding a cyc_berr input
+        // (wired from cg_eu_berr_raw, the same signal biu_cache_if.sv's own
+        // sf_berr already uses) that resets `sf` straight back to SS_IDLE.
+        begin
+            logic saw_berr2, saw_ack2;
+            saw_berr2 = 1'b0;
+            saw_ack2  = 1'b0;
+            $display("--- Plain BERR (no HALT) then a fresh dispatch to a different address ---");
+            test_mem_sel = MUX_NOSACK;
+            sterm_tb     = 1'b0;
+            eu_addr_tb   = 32'h0000_0060;   // fresh fault address, distinct from the prior test's 0x40
+            eu_fc_tb     = 3'b101;
+            eu_rw_tb     = 1'b1;
+            eu_siz_tb    = 2'b00;
+            eu_req_tb    = 1'b1;
+            for (int t = 0; t < 250; t++) begin
+                @(posedge clk_4x);
+                if (eu_berr) begin saw_berr2 = 1'b1; break; end
+            end
+            eu_req_tb = 1'b0;   // withdraw the faulted request cleanly before issuing a new one
+            check("plain BERR (no HALT) faulted at 0x60", saw_berr2);
+            while (!bus_idle) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+
+            // Immediately request a DIFFERENT, working address -- the real
+            // regression check: before the fix, cyc_addr stayed latched at
+            // the stale 0x60 and this dispatch would either re-fault at
+            // 0x60 again or simply never complete.
+            test_mem_sel = MUX_FAST;
+            eu_addr_tb   = 32'h0000_0010;
+            eu_req_tb    = 1'b1;
+            begin
+                logic        addr_captured;
+                logic [31:0] dispatched_addr;
+                addr_captured   = 1'b0;
+                dispatched_addr = 32'hFFFF_FFFF;
+                for (int t = 0; t < 80; t++) begin
+                    @(posedge clk_4x);
+                    if (sf_cyc_req && !addr_captured) begin
+                        addr_captured   = 1'b1;
+                        dispatched_addr = sf_cyc_addr;
+                    end
+                    if (eu_ack) begin saw_ack2 = 1'b1; break; end
+                    if (eu_berr) break;
+                end
+                check32("dispatched cyc_addr is the NEW address, not the stale fault address",
+                        dispatched_addr, 32'h0000_0010);
+            end
+            eu_req_tb = 1'b0;
+            check("fresh dispatch after a plain BERR completes cleanly (eu_ack, not stuck/re-faulted)", saw_ack2);
+            while (!bus_idle) @(posedge clk_4x);
+            repeat(4) @(posedge clk_4x);
+        end
+
         // --- Retry exhausted — BERR during retry → retry_exhausted ---
         // (renamed from "Double bus fault" -- Phase 250 Part B corrected
         // this: retry_exhausted is a real, useful BERR+HALT-retry-
@@ -3253,7 +3322,6 @@ module biu_tb;
             logic saw_halt;
             saw_halt      = 1'b0;
             $display("--- Retry exhausted → retry_exhausted ---");
-            halt_tb       = 1'b0;   // assert HALT# (active-low: 0 = asserted)
             test_mem_sel  = MUX_NOSACK;
             sterm_tb      = 1'b0;
             eu_addr_tb    = 32'h0000_0050;
@@ -3261,6 +3329,24 @@ module biu_tb;
             eu_rw_tb      = 1'b1;
             eu_siz_tb     = 2'b00;
             eu_req_tb     = 1'b1;
+            // Let the cycle genuinely start (bus_idle drops) BEFORE asserting
+            // HALT# -- matching this test's own documented intent ("bus was
+            // already committed", biu_cycle_gen.sv's own ST_IDLE comment)
+            // explicitly rather than via an implicit race against halt_s's
+            // own 2-stage synchronizer. Asserting halt_tb in the same delta
+            // as eu_req_tb (the original form) depended on halt_s not yet
+            // having caught up by the time grant_eu/eu_req first coincide --
+            // fragile timing that a real bus-error abort-path fix elsewhere
+            // in the same run (biu_sizing_fsm.sv's own cyc_berr handling,
+            // project_berr_no_halt_retry_loop.md) shifted just enough to
+            // break: with retry_r never getting a chance to be set (no cycle
+            // ever dispatches while halt_s already reads asserted from
+            // ST_IDLE, biu_cycle_gen.sv's own explicit "HALT# asserted
+            // (standalone, no BERR): suspend new bus cycles" rule), the bus
+            // hung at ST_IDLE forever instead of ever reaching a genuine
+            // BERR+HALT retry.
+            while (bus_idle) @(posedge clk_4x);
+            halt_tb = 1'b0;   // assert HALT# (active-low: 0 = asserted) -- now mid-cycle
             // Watch for retry_exhausted over both the original and retry cycles
             for (int t = 0; t < 500; t++) begin
                 @(posedge clk_4x);

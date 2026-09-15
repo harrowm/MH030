@@ -121,13 +121,22 @@ substituted instruction.
 ## Figure 7-49 — Bus Error without DSACKx
 
 An ordinary read to a non-responding address, terminated by `/BERR`
-alone (`/DSACKx`/`/STERM` never assert). Found, documented, not chased
-further (`project_berr_no_halt_retry_loop.md`): with `/HALT` left
-deasserted (the "plain BERR → exception" path), this specific
-construction re-dispatches the same faulting access repeatedly instead
-of completing exception dispatch — the diagram itself only needs the
-one faulting bus cycle's own pin-level timing, which is unaffected and
-shown here.
+alone (`/DSACKx`/`/STERM` never assert). Found and, in a later session,
+fixed a real gap while building this
+(`project_berr_no_halt_retry_loop.md`): with `/HALT` left deasserted
+(the "plain BERR → exception" path), this specific construction
+re-dispatched the same faulting access repeatedly instead of ever
+completing exception dispatch. Root cause: `biu_sizing_fsm.sv` (sitting
+between `biu_cache_if.sv` and `biu_cycle_gen.sv`) had no BERR-abort path
+at all — its state machine only ever exited its active sub-cycle state
+on a successful ack, which a genuinely faulted cycle never produces, so
+it got stuck forever re-driving the stale faulting address into
+`biu_cycle_gen` regardless of what the exception controller wanted to
+dispatch next. Fixed via a new `cyc_berr` input (mirroring
+`biu_cache_if.sv`'s own `sf_berr`) that resets it cleanly back to idle —
+the exception now genuinely completes end-to-end. The diagram itself
+still only needs the one faulting bus cycle's own pin-level timing,
+unaffected either way and shown here.
 
 ![manual](generated/manual_749.png)
 ![sim](generated/manual_749_sim.png)
