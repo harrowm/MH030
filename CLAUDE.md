@@ -675,6 +675,37 @@ onto the frame-push/handler activity that now legitimately follows. Full
 mandatory gate clean, Harte bit-identical to baseline. **Closes
 `project_berr_no_halt_retry_loop.md` in full.**
 
+**Phase 280 (CBACK beat-0-only sampling bug + 3 new representative timing
+diagrams, a later session, `project_cback_beat0_only_sampling_bug.md`,
+IMPLEMENTED AND VERIFIED)**: completed the remaining `timing_diagrams/`
+categories (synchronous RMW — Figure 7-36; a burst-abort variant — Figure
+7-39; a BERR+HALT retry variant — Figure 7-54). While building Figure 7-39,
+found a real RTL gap: `rtl/biu_burst_ctrl.sv`'s own `cback_ok_r` sampled
+`/CBACK` only once, at beat 0, as a sticky OR-latch — once granted, a real
+peripheral negating `/CBACK` on a LATER beat was silently ignored and the
+burst ran to completion regardless, contrary to MC68030UM.pdf §6.1.4/6.2's
+own confirmed text ("premature negation of CBACK... causes the current
+cycle to complete normally... however, the burst operation aborts"). Fixed
+by resampling `/CBACK` every beat instead of only the first (widened the
+gate from `burst_beat_r==0` to `at_burst_data` alone; changed from OR-
+accumulation to a plain resample). Found and fixed two more bugs while
+re-verifying the existing Figure 7-38 diagram against this fix: its own
+testbench mirrored `/CBREQ`'s brief beat-0-only pulse for `/CBACK` instead
+of modeling a real peripheral holding it asserted for the whole burst
+(confirmed via direct trace this never actually overlapped any beat's own
+sampling window, even beat 0's — only "worked" via the old sticky-latch bug
+plus a synchronizer-delay coincidence) — fixed to hold `/CBACK` asserted
+for the whole burst, matching `tb/cache_tb.sv`'s own already-proven
+convention; and the test program's own burst-triggering read raced
+`CACR`'s write with no settling gap, dispatching a spurious non-burst
+access first — fixed with an artificial stall matching this project's own
+established `timing_manual_725.s` convention. Full mandatory gate clean
+(`make test` 37/37 including `biu`/`cache`, the two suites that actually
+exercise burst mode), Harte bit-identical to baseline (no suite exercises
+burst mode). No dedicated module-level regression added — the fix is
+directly exercised and visually verified via the new Figure 7-39 diagram
+itself. **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
+
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

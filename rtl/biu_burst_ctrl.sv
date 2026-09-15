@@ -64,7 +64,8 @@ module biu_burst_ctrl (
     output logic [1:0]  burst_beat_at_berr,
     output logic [31:0] burst_addr,      // current beat's bus address
     output logic [2:0]  burst_fc,        // function code for this burst
-    output logic        cback_ok,        // CBACK# was asserted during beat-0 sampling
+    output logic        cback_ok,        // CBACK# was asserted during the just-completed
+                                          // beat's own S4/S5 sample (resampled every beat)
 
     // MOVE16 write data mux (beat-indexed, for cycle_gen cyc_wdata mux)
     output logic [31:0] m16_wdata_mux,
@@ -192,10 +193,28 @@ module biu_burst_ctrl (
             if (at_burst_s7 && burst_beat_r != 2'd3) begin
                 burst_beat_r <= burst_beat_r + 2'd1;
             end
-            // OR-accumulate CBACK# during beat-0 S4/S5 (read and write bursts).
+            // Real 68030 semantics (MC68030UM.pdf S6.1.4/6.2's own text,
+            // confirmed directly against the manual, not assumed): CBACK is
+            // sampled EVERY beat, not just beat 0 -- "The premature
+            // negation of the CBACK signal during the burst operation
+            // causes the current cycle to complete normally, loading the
+            // data successfully transferred into the appropriate cache.
+            // However, the burst operation aborts and CBREQ negates." A
+            // prior version of this file OR-accumulated CBACK only at beat
+            // 0 (sticky once granted, cback_ok_r <= cback_ok_r | !cback_s
+            // gated on burst_beat_r==0), so a real peripheral negating
+            // CBACK mid-burst (any of beats 1-3) was silently ignored and
+            // the burst ran to completion regardless -- found while
+            // building timing_diagrams/'s Figure 7-39 diagram, fixed here.
+            // Resampled (not accumulated) at S4/S5 of EVERY beat; read by
+            // ST_BURST_S6/ST_BWRITE_S6's own "continue to next beat?" check
+            // immediately after -- still correctly gives beat 0's own
+            // "never granted at all" case the identical single-beat-
+            // degrade result as before, just via a fresh sample each time
+            // instead of a sticky one.
             // cback_s active-low: 0 = asserted = peripheral supports burst continuation.
-            if (burst_beat_r == 2'd0 && at_burst_data)
-                cback_ok_r <= cback_ok_r | !cback_s;
+            if (at_burst_data)
+                cback_ok_r <= !cback_s;
         end
     end
 

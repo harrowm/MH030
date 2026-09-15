@@ -35,12 +35,14 @@ TOP_SRCS := $(RTL)/m68030_top.sv $(RTL)/m68030_biu.sv $(RTL)/biu_cycle_gen.sv \
             $(RTL)/m68030_exc.sv $(RTL)/m68030_mmu.sv
 
 .PHONY: all read_cycle read_cycle_eu preview_dispatch manual_722 manual_723 \
-        manual_725 manual_726 manual_728 manual_730 manual_732 manual_738 \
-        manual_744 manual_747 manual_749 manual_760 manual_764 clean
+        manual_725 manual_726 manual_728 manual_730 manual_732 manual_736 \
+        manual_738 manual_739 manual_744 manual_747 manual_749 manual_754 \
+        manual_760 manual_764 clean
 
 all: read_cycle read_cycle_eu preview_dispatch manual_722 manual_723 \
-     manual_725 manual_726 manual_728 manual_730 manual_732 manual_738 \
-     manual_744 manual_747 manual_749 manual_760 manual_764
+     manual_725 manual_726 manual_728 manual_730 manual_732 manual_736 \
+     manual_738 manual_739 manual_744 manual_747 manual_749 manual_754 \
+     manual_760 manual_764
 
 # ── read_cycle: Figure 7-21's own leftmost cycle (single word read) ────────
 read_cycle: generated/read_cycle_sim.png generated/read_cycle_manual.png
@@ -167,6 +169,21 @@ specs/manual_732.json: manual_732.vcd scripts/vcd_to_wavedrom.py
 generated/manual_732_sim.png: specs/manual_732.json
 	npx --yes wavedrom-cli -i $< -p $@
 
+manual_736: generated/manual_736_sim.png
+
+sim_manual_736: tb/manual_736_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_736_tb.sv
+
+manual_736.vcd: sim_manual_736 ../tests/timing_manual_736.hex
+	$(VVP) sim_manual_736
+
+specs/manual_736.json: manual_736.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_736.vcd -o $@ --cycles 1 --margin-cycles 3 \
+	    --extra-signals "sterm_n:/STERM,ciin_n:/CIIN,ciout_n:/CIOUT,ext_cbreq_n:/CBREQ,cback_n:/CBACK"
+
+generated/manual_736_sim.png: specs/manual_736.json
+	npx --yes wavedrom-cli -i $< -p $@
+
 manual_738: generated/manual_738_sim.png
 
 sim_manual_738: tb/manual_738_tb.sv $(TOP_SRCS) ../tb/mem_model.sv
@@ -180,6 +197,21 @@ specs/manual_738.json: manual_738.vcd scripts/vcd_to_wavedrom.py
 	    --extra-signals "ext_cbreq_n:/CBREQ,cback_n:/CBACK"
 
 generated/manual_738_sim.png: specs/manual_738.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_739: generated/manual_739_sim.png
+
+sim_manual_739: tb/manual_739_tb.sv $(TOP_SRCS) ../tb/mem_model.sv
+	$(IVERILOG) -o $@ $(TOP_SRCS) ../tb/mem_model.sv tb/manual_739_tb.sv
+
+manual_739.vcd: sim_manual_739 ../tests/timing_manual_739.hex
+	$(VVP) sim_manual_739
+
+specs/manual_739.json: manual_739.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_739.vcd -o $@ --cycles 1 --margin-cycles 15 \
+	    --extra-signals "ext_cbreq_n:/CBREQ,cback_n:/CBACK"
+
+generated/manual_739_sim.png: specs/manual_739.json
 	npx --yes wavedrom-cli -i $< -p $@
 
 manual_744: generated/manual_744_sim.png
@@ -224,6 +256,21 @@ specs/manual_749.json: manual_749.vcd scripts/vcd_to_wavedrom.py
 	    --extra-signals "berr_n:/BERR"
 
 generated/manual_749_sim.png: specs/manual_749.json
+	npx --yes wavedrom-cli -i $< -p $@
+
+manual_754: generated/manual_754_sim.png
+
+sim_manual_754: tb/manual_754_tb.sv $(TOP_SRCS)
+	$(IVERILOG) -o $@ $(TOP_SRCS) tb/manual_754_tb.sv
+
+manual_754.vcd: sim_manual_754 ../tests/timing_manual_754.hex
+	$(VVP) sim_manual_754
+
+specs/manual_754.json: manual_754.vcd scripts/vcd_to_wavedrom.py
+	python3 scripts/vcd_to_wavedrom.py manual_754.vcd -o $@ --cycles 2 --margin-cycles 10 \
+	    --extra-signals "berr_n:/BERR,halt_n:/HALT"
+
+generated/manual_754_sim.png: specs/manual_754.json
 	npx --yes wavedrom-cli -i $< -p $@
 
 manual_760: generated/manual_760_sim.png

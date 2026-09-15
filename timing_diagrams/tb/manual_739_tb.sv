@@ -1,23 +1,20 @@
 `default_nettype none
 `timescale 1ns / 1ps
 
-// Timing-diagram source testbench: MC68030UM.pdf Figure 7-38's own
-// Long-Word Operand Request from $07 with Burst Request and Wait Cycle
-// (tests/timing_manual_738.s header). A D-cache miss with DBE (burst
-// enable) set triggers a real 4-longword burst line fill -- uses
-// tb/mem_model.sv (already proven for burst fills via tb/cache_tb.sv,
-// including its own burst_beat_probe convention for the frozen-address
-// beat addressing real 68030 burst mode uses) for the WHOLE address
-// space rather than the inline 32-bit model every other diagram in
-// this set uses, since ordinary reads/writes and a genuine burst fill
-// both need to work against the SAME memory here. DSACK-terminated
-// (not /STERM -- mem_model.sv is DSACK-only); real 68030 burst mode
-// accepts either termination method (biu_cycle_gen.sv's own
-// `!dsack_wait || sterm_active` condition), so this still matches the
-// figure's own protocol shape even though the specific manual example
-// happens to show /STERM.
+// Timing-diagram source testbench: MC68030UM.pdf Figure 7-39's own Long-
+// Word Operand Request from $07 with Burst Request -- CBACK Negated Early
+// (tests/timing_manual_739.s header). Identical shape to manual_738_tb.sv
+// (same mem_model.sv-backed burst fill), except /CBACK is only held
+// asserted for the FIRST beat -- genuinely negated from beat 1 onward,
+// not just mirroring /CBREQ's own brief pulse. Exercises the real
+// per-beat CBACK sampling added to rtl/biu_burst_ctrl.sv while building
+// this diagram (MC68030UM.pdf S6.1.4/6.2: "The premature negation of the
+// CBACK signal during the burst operation causes the current cycle to
+// complete normally... However, the burst operation aborts") -- the
+// burst here completes beat 1 normally, then stops, never reaching
+// beats 2/3.
 
-module manual_738_tb;
+module manual_739_tb;
 
     logic clk_4x = 0;
     always #5 clk_4x = ~clk_4x;
@@ -43,27 +40,17 @@ module manual_738_tb;
     logic [2:0]  ipl_n    = 3'b111;
     logic        br_n     = 1'b1;
     logic        bgack_n  = 1'b1;
-    // Always grants a burst the CPU requests, held asserted for the
-    // WHOLE burst (matching tb/cache_tb.sv's own proven convention) --
-    // real 68030 burst protocol: once the device commits to supplying a
-    // full 4-longword line, it holds /CBACK asserted throughout, not
-    // just in response to /CBREQ's own brief beat-0-only pulse. An
-    // earlier version of this file mirrored /CBREQ directly
-    // (`cback_n = ext_cbreq_n`) -- found, while implementing real
-    // per-beat CBACK sampling in rtl/biu_burst_ctrl.sv (fixing a genuine
-    // gap vs. MC68030UM.pdf S6.1.4/6.2's own "premature negation of
-    // CBACK... aborts the burst" text, needed for Figure 7-39), that the
-    // mirrored /CBREQ pulse never actually overlaps any beat's own S4/S5
-    // sampling window at all (confirmed via direct trace: /CBREQ, and
-    // therefore the mirrored /CBACK, negates at S2, two states before
-    // S4) -- it only ever "worked" by masking through the OLD, buggy
-    // sticky-OR `cback_ok_r` (latched once at beat 0, never resampled).
-    // Held permanently asserted here instead, matching a real
-    // burst-capable peripheral.
-    logic        cback_n  = 1'b0;
     logic        ciin_n   = 1'b1;
     logic        cdis_n   = 1'b1;
     logic        mmudis_n = 1'b1;
+    // /CBACK: declared here (before u_top's own instantiation, which
+    // needs it as a port connection) but driven further down, once
+    // burst_beat_probe (itself read from u_top's own internal hierarchy)
+    // is available -- asserted for beat 0 only, genuinely negated from
+    // beat 1 onward. The burst completes beat 1 normally (its own data
+    // still placed on the bus), then aborts instead of continuing to
+    // beat 2.
+    wire cback_n;
 
     m68030_top #(.POWERON_RSTO_CLKS(40)) u_top (
         .clk_4x       (clk_4x),
@@ -104,6 +91,8 @@ module manual_738_tb;
 
     wire [1:0] burst_beat_probe = u_top.u_biu.u_cg.u_bc.burst_beat;
 
+    assign cback_n = (burst_beat_probe == 2'd0) ? 1'b0 : 1'b1;
+
     mem_model #(.DEPTH(4096), .PORT_WIDTH(32), .WAIT_STATES(0)) u_mem (
         .clk_4x           (clk_4x),
         .rst_n            (rst_n),
@@ -123,13 +112,13 @@ module manual_738_tb;
     wire [6:0] s_state = u_top.s_state;
 
     initial begin
-        $dumpfile("manual_738.vcd");
-        $dumpvars(0, manual_738_tb);
+        $dumpfile("manual_739.vcd");
+        $dumpvars(0, manual_739_tb);
 
-        $readmemh("../tests/timing_manual_738.hex", u_mem.mem);
+        $readmemh("../tests/timing_manual_739.hex", u_mem.mem);
         // Distinct marker longwords for each of the 4 beats of the burst
-        // line at $3000 (word indices 0xC00..0xC03), so the diagram's
-        // own data lanes show 4 genuinely different values per beat.
+        // line at $3000 -- only beats 0/1 should ever actually be seen on
+        // the bus (the burst aborts before reaching beats 2/3).
         u_mem.mem[16'h3000 >> 2]        = 32'hB0B0_0000;
         u_mem.mem[(16'h3000 >> 2) + 1]  = 32'hB1B1_1111;
         u_mem.mem[(16'h3000 >> 2) + 2]  = 32'hB2B2_2222;
@@ -139,10 +128,21 @@ module manual_738_tb;
         repeat(20) @(posedge clk_4x);
         #1; rst_n = 1;
 
-        for (int t = 0; t < 3000 && u_top.u_eu.u_rf.d_reg[0] !== 32'hB0B0_0000; t++)
+        // Wait for the burst to genuinely start, then genuinely end (state
+        // leaves the burst states again), then stop with a SMALL margin --
+        // deliberately NOT waiting on d_reg[0] alone plus a long fixed
+        // tail: the requested word is available to the EU after just beat
+        // 0 completes (real 68030 semantics, confirmed against the manual
+        // text), well before the abort at beat 1 even happens, so a long
+        // tail risks capturing a LATER, unrelated dispatch instead of the
+        // abort itself (confirmed via a first attempt at this diagram,
+        // which showed beats 2/3 -- from a SEPARATE, later access -- in
+        // the rendered window instead of the intended 2-beat abort).
+        for (int t = 0; t < 3000 && !u_top.u_biu.u_cg.u_bc.is_burst; t++)
             @(posedge clk_4x);
-
-        repeat(20) @(posedge clk_4x);
+        for (int t = 0; t < 3000 && u_top.u_biu.u_cg.u_bc.is_burst; t++)
+            @(posedge clk_4x);
+        repeat(4) @(posedge clk_4x);
 
         $display("FINAL d_reg[0] = %08x", u_top.u_eu.u_rf.d_reg[0]);
         $finish;

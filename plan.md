@@ -2145,3 +2145,112 @@ BERR-without-HALT has no Harte coverage, the corpus captures
 68000-single-step vectors with no bus-fault sequences).
 
 **Closes `project_berr_no_halt_retry_loop.md` in full.**
+
+## Phase 280 (CBACK beat-0-only sampling bug + 3 new representative
+timing diagrams — IMPLEMENTED AND VERIFIED,
+`project_cback_beat0_only_sampling_bug.md`, a later session)
+
+User asked to complete the remaining `timing_diagrams/` categories still
+flagged as "not attempted" in `INDEX.md`'s own Scope section: synchronous
+RMW timing (Figure 7-36), a burst-fill variant (Figures 7-39/7-40), and
+a late-BERR/retry variant (Figures 7-50 through 7-56). Scoped to 3 new
+representative diagrams (one per remaining category, matching this set's
+own established convention), skipping the misaligned-transfer examples
+(Figures 7-5 through 7-18) already flagged as low-value/redundant.
+
+**Figure 7-36 (Synchronous RMW Cycle Timing — CIIN Asserted)**: built
+directly by combining two already-proven models — `manual_730_tb.sv`'s
+own RMW-lock shape (`TAS (A0)`'s locked read-then-write, RMC held
+throughout) and `manual_732_tb.sv`'s own always-ready `/STERM`-terminated
+synchronous-device model — plus write support (the earlier STERM diagram
+was read-only; TAS's own write phase needs somewhere to land). No RTL
+gap found; straightforward composition of existing, verified pieces.
+
+**Figure 7-54 (Asynchronous Late Retry)**: a write cycle where the
+device asserts `/DSACKx` (indicating success) but also asserts `/BERR` +
+`/HALT` on the same access (a "late" fault, detected after the transfer
+appeared to succeed), forcing a genuine BERR+HALT retry — distinct from
+Figure 7-49's own plain-BERR-to-exception path, this exercises
+`biu_cycle_gen.sv`'s own `retry_r`/`in_retry_r` mechanism that no
+existing diagram had shown. The retried write completes cleanly. Two
+testbench-construction lessons found while tuning the capture window
+(both already-established patterns from earlier phases this session,
+reapplied here): the trailing instruction (`bra.s loop`) generated extra
+refetch cycles that displaced the fault+retry pair from the "last N
+cycles" window — switched to `stop #$2700` (matching `manual_730.s`'s
+own convention); and a trailing read-back instruction added a 3rd access
+to the same address for the same reason — removed, checking the write's
+own landing directly against memory instead.
+
+**Figure 7-39 (Burst Request — CBACK Negated Early), the real find**:
+while building this diagram (the peripheral needs to genuinely negate
+`/CBACK` partway through a burst, which `manual_738_tb.sv`'s own
+always-grant model never exercised), direct inspection of
+`rtl/biu_burst_ctrl.sv` found a real, previously-undocumented RTL gap:
+`cback_ok_r` (whether the burst may continue to the next beat) was
+sampled **only once, at beat 0**, as a sticky OR-latch
+(`if (burst_beat_r==0 && at_burst_data) cback_ok_r <= cback_ok_r |
+!cback_s;`) — once granted, it stayed granted for the rest of the burst
+regardless of what `/CBACK` did on beats 1-3. Confirmed directly against
+MC68030UM.pdf §6.1.4/6.2's own text before implementing (not assumed):
+*"The premature negation of the CBACK signal during the burst operation
+causes the current cycle to complete normally... However, the burst
+operation aborts and CBREQ negates"* — real silicon requires per-beat
+sampling. **Fixed**: widened the sample gate from `burst_beat_r==0` to
+every beat (`at_burst_data` alone), and changed from OR-accumulation to
+a plain resample (`cback_ok_r <= !cback_s`) — `biu_cycle_gen.sv`'s own
+`ST_BURST_S6`/`ST_BWRITE_S6` continue-vs-terminate check already reads
+this same signal immediately after each beat, so no other RTL change was
+needed.
+
+**A second bug found while re-verifying the EXISTING Figure 7-38 diagram
+against this fix**: `manual_738_tb.sv` modeled `/CBACK` as a direct
+mirror of `/CBREQ` (`cback_n = ext_cbreq_n`) — but `/CBREQ` itself is
+only asserted during beat 0's own S0/S1 (confirmed via direct trace: the
+pin, and therefore the mirrored `/CBACK`, negates at S2, two states
+before S4's own data-sample window even begins) — so this mirror never
+actually overlapped ANY beat's own sampling window, not even beat 0's.
+It only ever produced a correct-looking 4-beat diagram by masking
+through the OLD sticky-latch bug combined with a 2-stage-synchronizer-
+delay coincidence (confirmed via direct per-tick trace of `cback_ok_r`/
+`cback_s`/`state_adv` before concluding this, not guessed at). Once
+`/CBACK` was correctly resampled every beat, this test's own burst
+immediately degraded to a single beat. **Fixed** by holding `/CBACK`
+permanently asserted for the whole burst instead (`logic cback_n =
+1'b0;`), matching `tb/cache_tb.sv`'s own already-proven, already-passing
+convention for a real burst-capable peripheral.
+
+**A third, unrelated timing artifact found in the same investigation**:
+`tests/timing_manual_738.s` dispatched the burst-triggering read with
+only one register-only instruction between it and `MOVEC D7,CACR` — not
+enough of a gap for CACR's own write to settle, so the read raced it and
+the FIRST attempt dispatched as a plain non-burst miss, with the real
+burst only starting on a SEPARATE, second access to the same address
+(confirmed via direct trace: `is_burst=0` for the first access,
+`is_burst=1` only for the second). Fixed by adding an artificial
+`MULU.L` stall between the CACR write and the read, matching this
+project's own established `timing_manual_725.s` convention; applied to
+both `timing_manual_738.s` and the new `timing_manual_739.s`.
+
+**Verification**: full mandatory gate (`make test` 37/37 — including
+`biu`/`cache`, the two suites that actually exercise burst mode —
+`cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50), full
+124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0` — no suite in this corpus exercises burst mode).
+No dedicated module-level regression test was added for the CBACK fix
+(unlike the level-7 and BERR-retry fixes earlier this session) — the
+fix is directly exercised and visually verified via the new Figure 7-39
+diagram itself, which shows the burst completing beats 0/1 normally
+then aborting instead of continuing to beats 2/3, and via the corrected
+Figure 7-38 diagram, which shows a clean, undisturbed full 4-beat burst.
+
+`timing_diagrams/INDEX.md`'s own Scope section updated to reflect all
+three new categories now covered (synchronous RMW, burst-abort, BERR
+retry), narrowing the remaining "not attempted" list to Figures 7-50
+through 7-53, 7-56, and 7-40 specifically (previously stated more
+broadly as whole ranges). `diagrams.md`'s manifest updated with the 3
+new rows plus corrected descriptions for `manual_738`/`manual_744`/
+`manual_749` (previously described as "found, not chased further" or
+"worked around" — now describing the real fixes).
+
+**Closes `project_cback_beat0_only_sampling_bug.md` in full.**

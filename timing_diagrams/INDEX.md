@@ -67,6 +67,16 @@ fix, `CLAUDE.md`).
 ![manual](generated/manual_730.png)
 ![sim](generated/manual_730_sim.png)
 
+## Figure 7-36 — Synchronous Read-Modify-Write Cycle Timing, CIIN Asserted
+
+`TAS (A0)`'s own locked read-then-write (the same RMW-lock shape as
+Figure 7-30), this time terminated via `/STERM` instead of `/DSACKx` for
+both the read and write phase — combines Figure 7-30's own RMW-lock
+model with Figure 7-32's own always-ready synchronous-device model.
+
+![manual](generated/manual_736.png)
+![sim](generated/manual_736_sim.png)
+
 ## Figure 7-32 — Synchronous Read with CIIN Asserted and CBACK Negated
 
 `MOVE.L (A0),D0` terminated via `/STERM` instead of `/DSACKx` —
@@ -86,6 +96,29 @@ burst mode accepts either termination method.
 
 ![manual](generated/manual_738.png)
 ![sim](generated/manual_738_sim.png)
+
+## Figure 7-39 — Long-Word Operand Request with Burst Request, CBACK Negated Early
+
+The same burst line fill, but the peripheral negates `/CBACK` after just
+beat 1, aborting the burst early — beats 2/3 never happen. Found and
+fixed a real gap while building this: `rtl/biu_burst_ctrl.sv` only ever
+sampled `/CBACK` once, at beat 0 (a sticky latch), never re-checking it
+on later beats — a real peripheral negating `/CBACK` mid-burst was
+silently ignored and the burst ran to completion regardless, contrary
+to MC68030UM.pdf §6.1.4/6.2's own explicit text: "The premature negation
+of the CBACK signal during the burst operation causes the current cycle
+to complete normally... However, the burst operation aborts." Fixed by
+resampling `/CBACK` every beat instead of only the first. (Also found,
+while re-verifying Figure 7-38 against the fix: that diagram's own
+testbench mirrored `/CBREQ`'s own brief beat-0-only pulse for `/CBACK`
+instead of modeling a real peripheral holding it asserted for the whole
+burst — harmless under the old sticky-latch bug, but broke Figure 7-38
+once CBACK was correctly resampled every beat. Fixed to hold `/CBACK`
+asserted for the whole burst, matching `tb/cache_tb.sv`'s own already-
+proven convention.)
+
+![manual](generated/manual_739.png)
+![sim](generated/manual_739_sim.png)
 
 ## Figure 7-44 / 7-45 — Interrupt Acknowledge Cycle Timing / Autovector Operation Timing
 
@@ -141,6 +174,18 @@ unaffected either way and shown here.
 ![manual](generated/manual_749.png)
 ![sim](generated/manual_749_sim.png)
 
+## Figure 7-54 — Asynchronous Late Retry
+
+A write cycle where the device asserts `/DSACKx` (indicating success)
+but a fault is detected late and `/BERR` + `/HALT` assert anyway,
+forcing a genuine BERR+HALT retry (`biu_cycle_gen.sv`'s own
+`!halt_s && !in_retry_r` branch, distinct from Figure 7-49's own plain-
+BERR-to-exception path) — the retried write then completes cleanly with
+no further fault.
+
+![manual](generated/manual_754.png)
+![sim](generated/manual_754_sim.png)
+
 ## Figure 7-60 — Bus Arbitration Operation Timing
 
 An external DMA device requests the bus (`/BR`), the CPU grants it
@@ -169,15 +214,17 @@ there's no manual page to compare against. See `diagrams.md` for detail.
 ## Scope
 
 This set covers the core asynchronous read/write/RMW family reachable
-via ordinary EU-driven instructions, plus synchronous STERM cycles,
-burst-mode fills, CPU space/IACK, breakpoint acknowledge, bus error, bus
-arbitration, and reset — one representative diagram per category rather
-than exhaustive coverage of every figure within it. Not attempted:
-synchronous RMW timing (Figure 7-36), the various late-BERR/retry
-variants beyond Figure 7-49 (Figures 7-50 through 7-56), late retry for
-a burst specifically (Figure 7-56), the remaining burst-fill variants
-(Figures 7-39 through 7-41), and the misaligned-transfer example
-diagrams (Figures 7-5 through 7-18, which mostly restate the dynamic-
-sizing behavior Figures 7-22/7-23/7-28 already demonstrate) — each is a
-straightforward extension of a category already covered here, left as
-further optional additions rather than exhaustively built out.
+via ordinary EU-driven instructions, plus synchronous STERM cycles
+(including synchronous RMW), burst-mode fills (including an early-abort
+variant), CPU space/IACK, breakpoint acknowledge, bus error (both the
+plain-exception and the BERR+HALT-retry paths), bus arbitration, and
+reset — one representative diagram per category rather than exhaustive
+coverage of every figure within it. Not attempted: the remaining late-
+BERR/retry variants beyond Figures 7-49/7-54 (Figures 7-50 through
+7-53), late retry for a burst specifically (Figure 7-56), the remaining
+burst-fill variants beyond Figure 7-39 (Figure 7-40's own "fill
+deferred" case), and the misaligned-transfer example diagrams (Figures
+7-5 through 7-18, which mostly restate the dynamic-sizing behavior
+Figures 7-22/7-23/7-28 already demonstrate) — each is a straightforward
+extension of a category already covered here, left as further optional
+additions rather than exhaustively built out.
