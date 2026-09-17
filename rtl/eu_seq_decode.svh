@@ -48,6 +48,7 @@
     logic        dec_is_cpbcc;
     logic        dec_is_cpdbcc;    // cpDBcc: shares the cpBcc's own cpcc_* FSM
                                     // and dec_branch_disp/dec_cpcc_sel fields
+    logic        dec_is_cpscc;     // cpScc, Dn-direct only (see decode arm)
     logic [5:0]  dec_cpcc_sel;     // condition selector written to Condition CIR
                                     // (shared field: cpBcc/cpDBcc/cpScc/cpTRAPcc)
     logic        dec_reads_ccr;    // stall if pending CCR write in EX or WB
@@ -359,6 +360,7 @@
         dec_is_dbcc      = 1'b0;
         dec_is_cpbcc     = 1'b0;
         dec_is_cpdbcc    = 1'b0;
+        dec_is_cpscc     = 1'b0;
         dec_cpcc_sel     = 6'h0;
         dec_branch_cond  = 4'h0;
         dec_branch_disp  = 32'h0;
@@ -6230,6 +6232,42 @@
                         dec_cpcc_sel    = ext_data[21:16];
                         dec_branch_disp = {{16{ext_data[15]}}, ext_data[15:0]};
                         dec_dst_reg     = {1'b0, f_reg};   // Dn, read live via rd_b_data
+                        dec_reads_dst   = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b001 &&
+                                 f_mode == 3'b000) begin
+                        // cpScc, Dn-DIRECT ONLY (Figure 10-11): TYPE=001
+                        // (shared with cpDBcc/cpTRAPcc, disambiguated by
+                        // this project's own decode ordering -- cpDBcc's
+                        // mode=001 and cpTRAPcc's mode=111/reg={010,011,
+                        // 100} are checked in their own earlier/later arms,
+                        // matching plain Scc/DBcc/TRAPcc's own real-silicon
+                        // carve-out precedent within the shared Group-0101
+                        // opcode line). mode=000 (Dn direct, bits[5:3]=000)
+                        // only -- memory-EA cpScc (mode=010/011/100/101/
+                        // 110/111) is deliberately NOT YET implemented,
+                        // matching this project's own repeated "register
+                        // EA before memory EA" incremental precedent
+                        // (plan.md Phase 281 sub-phase 3); those opcodes
+                        // still fall through to the generic FPU catch-all
+                        // below, an already-existing gap this phase
+                        // doesn't worsen.
+                        //
+                        // Condition selector is the FIRST (only) extension
+                        // word's own bits[5:0] (Figure 10-11's own second
+                        // word) -- unlike cpDBcc, there's no second
+                        // extension word (no displacement), so it occupies
+                        // ext_data's LOW 16 bits here, not the high 16
+                        // (this project's "first extra word -> high 16
+                        // bits" convention only applies when a SECOND word
+                        // follows; with exactly one word, it's simply
+                        // ext_data[15:0], mirroring cpBcc.W's own
+                        // single-extension-word convention).
+                        dec_valid       = 1'b1;
+                        dec_is_cpscc    = 1'b1;
+                        dec_unit        = UNIT_NONE;
+                        dec_cpcc_sel    = ext_data[5:0];
+                        dec_dst_reg     = {1'b0, f_reg};   // Dn, read live via rd_b_data (upper 3 bytes preserved)
                         dec_reads_dst   = 1'b1;
                         dec_needs_ext   = 1'b1;
                     end else if (f_dn == 3'b001) begin

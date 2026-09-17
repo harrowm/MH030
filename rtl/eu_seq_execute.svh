@@ -1839,6 +1839,9 @@
     // fields above -- only its own completion action (decrement Dn via
     // rd_b_data, conditionally branch) differs, wired near cpcc_branch_taken.
     logic        ex_is_cpdbcc;
+    // cpScc (Dn-direct only) -- same FSM reuse, completion action is a
+    // byte-sized FF/00 write instead of a decrement.
+    logic        ex_is_cpscc;
     logic [31:0] ex_decode_pc;
     assign ex_decode_pc_out = ex_decode_pc;
     // Memory-access EX signals
@@ -1919,6 +1922,7 @@
             ex_dbcc_disp      <= 32'h0;
             ex_is_cpbcc       <= 1'b0;
             ex_is_cpdbcc      <= 1'b0;
+            ex_is_cpscc       <= 1'b0;
             ex_cpcc_sel       <= 6'h0;
             ex_cpcc_disp      <= 32'h0;
             ex_decode_pc      <= 32'h0;
@@ -2055,6 +2059,7 @@
             ex_is_dbcc        <= 1'b0;
             ex_is_cpbcc       <= 1'b0;
             ex_is_cpdbcc      <= 1'b0;
+            ex_is_cpscc       <= 1'b0;
             ex_is_mem_rd      <= 1'b0;
             ex_is_mem_wr      <= 1'b0;
             ex_is_lea         <= 1'b0;
@@ -2196,6 +2201,7 @@
             ex_dbcc_disp      <= dec_branch_disp;
             ex_is_cpbcc       <= dec_is_cpbcc;
             ex_is_cpdbcc      <= dec_is_cpdbcc;
+            ex_is_cpscc       <= dec_is_cpscc;
             ex_cpcc_sel       <= dec_cpcc_sel;
             ex_cpcc_disp      <= dec_branch_disp;
             ex_decode_pc      <= decode_pc;
@@ -3409,7 +3415,7 @@
             cpcc_sel_r   <= 6'h0;
         end else begin
             if (!cpcc_start_r && !cpcc_wr_r && !cpcc_resp_r && !cpcc_abort_r &&
-                instr_ack && (dec_is_cpbcc || dec_is_cpdbcc)) begin
+                instr_ack && (dec_is_cpbcc || dec_is_cpdbcc || dec_is_cpscc)) begin
                 cpcc_start_r <= 1'b1;
                 cpcc_sel_r   <= dec_cpcc_sel;
             end else if (cpcc_start_r) begin
@@ -3479,6 +3485,12 @@
     wire        cpdbcc_not_taken     = cpcc_resp_done && ex_is_cpdbcc && !eu_coproc_rdata[16];
     wire        cpdbcc_wr_en         = cpdbcc_not_taken;
     wire        cpdbcc_branch_taken  = cpdbcc_not_taken && (cpdbcc_dn_new != 16'hFFFF);
+
+    // cpScc completion (10.2.2.2.2), Dn-direct only: TF=1 -> byte $FF,
+    // TF=0 -> byte $00, written to Dn's low byte. Same dedicated-port
+    // shape as cpdbcc_wr_en, fires exactly once at cpcc_resp_done.
+    wire        cpscc_wr_en = cpcc_resp_done && ex_is_cpscc;
+    wire [7:0]  cpscc_byte  = eu_coproc_rdata[16] ? 8'hFF : 8'h00;
 
     // -----------------------------------------------------------------------
     // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3; live
@@ -4901,13 +4913,14 @@
 
     // Word MOVEP writes only [15:0] (siz=10); long writes full 32 bits (siz=00).
     assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || memind_addr_wr_en ||
-                    bf_dn_wr_en || cpdbcc_wr_en || (wb_valid && wb_writes_reg);
+                    bf_dn_wr_en || cpdbcc_wr_en || cpscc_wr_en || (wb_valid && wb_writes_reg);
     assign wr_sel  = movem_wr_en       ? movem_reg_sel
                    : movep_wr_en       ? movep_wr_sel
                    : memind_wr_en      ? memind_dest_r
                    : memind_addr_wr_en ? memind_dest_r
                    : bf_dn_wr_en       ? {1'b0, bf_mem_dn_r}
                    : cpdbcc_wr_en      ? ex_dst_reg
+                   : cpscc_wr_en       ? ex_dst_reg
                    :                     wb_dest_reg;
     assign wr_siz  = movem_wr_en       ? 2'b00
                    : movep_wr_en       ? (movep_long_r ? 2'b00 : 2'b10)
@@ -4915,6 +4928,7 @@
                    : memind_addr_wr_en ? memind_siz_r
                    : bf_dn_wr_en       ? 2'b00
                    : cpdbcc_wr_en      ? 2'b10
+                   : cpscc_wr_en       ? 2'b01
                    :                     wb_siz;
     assign wr_data = movem_wr_en       ? movem_wr_data
                    : movep_wr_en       ? movep_wr_data
@@ -4922,6 +4936,7 @@
                    : memind_addr_wr_en ? memind_addr_wr_data
                    : bf_dn_wr_en       ? bf_result_w
                    : cpdbcc_wr_en      ? {16'h0, cpdbcc_dn_new}
+                   : cpscc_wr_en       ? {24'h0, cpscc_byte}
                    :                     wb_result_final;
 
     // second Dn write port for 64-bit mul/div high result (Dh or Dr).

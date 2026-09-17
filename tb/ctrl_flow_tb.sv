@@ -252,6 +252,11 @@ module ctrl_flow_tb;
     function automatic [15:0] CPDBCC(input [2:0] dn);
         CPDBCC = {4'hF, 3'b001, 1'b0, 2'b01, 3'b001, dn};
     endfunction
+    // cpScc, Dn-direct only (Phase 281 sub-phase 3): F-line, CpID=001,
+    // TYPE=001, mode=000 (Figure 10-11), Dn in bits[2:0].
+    function automatic [15:0] CPSCC_DN(input [2:0] dn);
+        CPSCC_DN = {4'hF, 3'b001, 1'b0, 2'b01, 3'b000, dn};
+    endfunction
     function automatic [15:0] MOVE_L(input [2:0] dm, input [2:0] dn);
         MOVE_L = {4'h2, dn, 3'b000, 3'b000, dm};
     endfunction
@@ -358,6 +363,13 @@ module ctrl_flow_tb;
     task automatic run_cpdbcc(input logic [15:0] w0, input logic [5:0] sel,
                               input logic [15:0] disp16, input logic tf);
         run_cpbcc(w0, {10'h0, sel, disp16}, tf);
+    endtask
+
+    // cpScc: identical CIR dialog, single extension word = condition
+    // selector in bits[5:0] only (no displacement).
+    task automatic run_cpscc(input logic [15:0] w0, input logic [5:0] sel,
+                             input logic tf);
+        run_cpbcc(w0, {26'h0, sel}, tf);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);
@@ -855,6 +867,23 @@ module ctrl_flow_tb;
         run_cpdbcc(CPDBCC(3'd4), 6'd0, 16'h0100, 1'b0);
         chk1("cpDBcc D4=0: not taken",       saw_branch, 1'b0);
         chk ("cpDBcc D4=0: D4=0x5678FFFF",   dut.u_rf.d_reg[4], 32'h5678_FFFF);
+
+        // ==================================================================
+        // cpScc, Dn-direct only (Phase 281 sub-phase 3,
+        // wobbly-honking-cascade.md): TF=1 -> $FF, TF=0 -> $00, byte-sized
+        // (upper 3 bytes of Dn preserved), no branch either way.
+        // ==================================================================
+        $display("--- cpScc TF=1: D5 low byte = 0xFF ---");
+        set_dn(3'd5, 32'h1122_3300);
+        run_cpscc(CPSCC_DN(3'd5), 6'd0, 1'b1);
+        chk1("cpScc TF=1: no branch",   saw_branch, 1'b0);
+        chk ("cpScc TF=1: D5=0x112233FF", dut.u_rf.d_reg[5], 32'h1122_33FF);
+
+        $display("--- cpScc TF=0: D6 low byte = 0x00 ---");
+        set_dn(3'd6, 32'h4455_66FF);
+        run_cpscc(CPSCC_DN(3'd6), 6'd0, 1'b0);
+        chk1("cpScc TF=0: no branch",   saw_branch, 1'b0);
+        chk ("cpScc TF=0: D6=0x44556600", dut.u_rf.d_reg[6], 32'h4455_6600);
 
         // ─── summary ──────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);

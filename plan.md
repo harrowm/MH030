@@ -2451,6 +2451,65 @@ same as cpBcc.
 dedicated Coprocessor Protocol Violation test coverage — same order as
 stated in sub-phase 1's own writeup above.
 
+## Phase 281 sub-phase 3 (cpScc, Dn-direct only, a later session,
+`wobbly-honking-cascade.md` cross-repo item)
+
+Closes the third of the four coprocessor conditional instructions —
+**scope deliberately narrowed to Dn-direct only** this sub-phase
+(memory-EA cpScc explicitly deferred, matching this project's own
+repeated "register EA before memory EA" incremental precedent, e.g.
+cpSAVE/cpRESTORE's own (An)-only start).
+
+**Encoding** (MC68030UM.pdf Figure 10-11, confirmed directly): F-line,
+CpID=001, TYPE={f_dir,f_ss}=001 (the SAME TYPE cpDBcc uses — cpScc,
+cpDBcc, and cpTRAPcc all share this one TYPE value, disambiguated by
+the low 6 bits, exactly mirroring how plain Scc/DBcc/TRAPcc share
+Group-0101 in the real, non-coprocessor ISA). `f_mode==000` (Dn direct)
+selects THIS sub-phase's own arm; `f_mode==001` was already claimed by
+cpDBcc (checked first in decode priority) and `f_mode==111` with
+`f_reg∈{010,011,100}` is reserved for cpTRAPcc (not yet implemented,
+so those encodings still fall through to the generic FPU stub — an
+already-existing gap, not worsened here). The condition selector is
+the ONE extension word's own bits[5:0] — unlike cpDBcc, there's no
+second (displacement) word, so it occupies `ext_data`'s LOW 16 bits
+directly (`ext_data[5:0]`), not the high 16 bits cpDBcc's own 2-word
+convention uses.
+
+**Reused the cpBcc/cpDBcc `cpcc_*` FSM UNCHANGED again** — only the
+start-trigger condition needed one more broadening
+(`dec_is_cpbcc || dec_is_cpdbcc || dec_is_cpscc`).
+
+**Completion** (10.2.2.2.2): TF=1 → write `$FF` to the destination;
+TF=0 → write `$00`. Dn-direct write reuses the exact same "dedicated
+FSM completion write port" pattern cpDBcc's own decrement introduced
+(`cpscc_wr_en`, a new `wr_en` mux arm) — byte-sized (`wr_siz=2'b01`),
+so the regfile's own existing byte-write merge logic (`{d_reg[31:8],
+wr_data[7:0]}`) naturally preserves Dn's upper 3 bytes, matching real
+Scc's own documented behavior. cpScc never branches (Scc doesn't
+change program flow, same as plain Scc) — no `branch_taken`/
+`branch_target` involvement at all, the simplest completion of the
+three implemented so far.
+
+**Testing**: `tb/ctrl_flow_tb.sv` gained `run_cpscc()` (delegates to
+`run_cpbcc()`, single extension word in the low 16 bits) and 2 checks
+(TF=1→`$FF`, TF=0→`$00`, both confirming the upper 3 bytes of Dn are
+preserved and neither branches). Both passed on the first run.
+
+**Files**: `rtl/eu_seq_decode.svh` (`dec_is_cpscc`, 1 new decode arm),
+`rtl/m68030_seq.sv` (`is_cpscc_dn`, 1 new fixed-`ext_count=1` entry),
+`rtl/eu_seq_execute.svh` (`ex_is_cpscc` capture, `cpscc_wr_en`/
+`cpscc_byte` wires, the new `wr_en`/`wr_sel`/`wr_siz`/`wr_data` mux
+arm), `tb/ctrl_flow_tb.sv` (new tests).
+
+**`make test`: 37/37 clean, zero regressions. `make cosim_grp`: 8/8
+clean.** Full 124-suite Harte sweep (Verilator backend) re-run and
+confirmed bit-identical to the pre-existing baseline.
+
+**Remaining sub-phases**: memory-EA cpScc (deferred, not currently
+planned as its own dedicated near-term sub-phase — revisit if/when
+asked), cpTRAPcc, dedicated Coprocessor Protocol Violation test
+coverage.
+
 ## To Do
 
 No outstanding plan of any kind remains for RTL correctness as of Phase

@@ -701,6 +701,15 @@ module m68030_seq (
     assign is_cpdbcc = (f_group == 4'hf) && (f_dn == 3'b001) &&
                         (f_dir == 1'b0) && (f_ss == 2'b01) && (f_mode == 3'b001);
 
+    // cpScc, Dn-direct only (Figure 10-11, plan.md Phase 281 sub-phase 3):
+    // exactly 1 ext word (condition selector) -- memory-EA cpScc is
+    // deliberately not yet decoded here (see eu_seq_decode.svh's own
+    // cpScc arm for the full scope note), so no additional-ext-words
+    // arithmetic is needed for those modes yet.
+    logic is_cpscc_dn;
+    assign is_cpscc_dn = (f_group == 4'hf) && (f_dn == 3'b001) &&
+                          (f_dir == 1'b0) && (f_ss == 2'b01) && (f_mode == 3'b000);
+
     // RTD — exactly 1 extension word (displacement)
     logic is_rtd;
     assign is_rtd = (instr_word == 16'h4E74);
@@ -1026,7 +1035,7 @@ module m68030_seq (
                  // undetected until Phase 100 needed MOVEC in synthesized init
                  // code for VBR relocation.
                  (instr_word == 16'h4E7A || instr_word == 16'h4E7B) ||
-                 is_cpbcc_w)
+                 is_cpbcc_w || is_cpscc_dn)
             ext_count = 3'd1;
         // F-line MMU family (PFLUSH/PFLUSHA/PTEST/PMOVE/PLOAD), cpid=0
         // (f_group=4'hF, f_dn=3'b000, matching eu_seq.sv's own
