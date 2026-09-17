@@ -83,6 +83,7 @@ module ctrl_flow_tb;
     logic [3:0]  eu_trap_num;
     logic        eu_trapv_req;
     logic        eu_illegal_req;
+    logic        eu_cpviol_req;
     logic        eu_stop;
 
     // ─── DUT ─────────────────────────────────────────────────────────────────
@@ -159,6 +160,7 @@ module ctrl_flow_tb;
         .eu_trap_num    (eu_trap_num),
         .eu_trapv_req   (eu_trapv_req),
         .eu_illegal_req (eu_illegal_req),
+        .eu_cpviol_req  (eu_cpviol_req),
         .eu_stop        (eu_stop),
         .ssp_wr_en      (ssp_wr_en),
         .ssp_wr_data    (ssp_wr_data),
@@ -199,6 +201,14 @@ module ctrl_flow_tb;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)             saw_trapv <= 1'b0;
         else if (eu_trapv_req)  saw_trapv <= 1'b1;
+    end
+
+    // Latch eu_cpviol_req (Phase 281 sub-phase 5, Coprocessor Protocol
+    // Violation coverage) the same way.
+    logic saw_cpviol;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)             saw_cpviol <= 1'b0;
+        else if (eu_cpviol_req) saw_cpviol <= 1'b1;
     end
 
     // ─── Instruction encodings ────────────────────────────────────────────────
@@ -390,6 +400,60 @@ module ctrl_flow_tb;
     // itself ever reads).
     task automatic run_cptrapcc(input logic [5:0] sel, input logic tf);
         run_cpbcc(CPTRAPCC, {26'h0, sel}, tf);
+    endtask
+
+    // Coprocessor Protocol Violation coverage (Phase 281 sub-phase 5,
+    // wobbly-honking-cascade.md): drive a Response CIR reply the cpcc_*
+    // FSM does NOT recognize (a set PC bit, or a non-Null function code
+    // in payload[12:1]) and confirm it aborts to the Control CIR (10.3.2:
+    // abort mask $0001) and raises eu_cpviol_req exactly once, with no
+    // branch/register/trap side effect. Uses cpBcc as the vehicle (any
+    // of the 4 families would do -- the FSM's own response-decode path
+    // is completely shared).
+    task automatic run_cpbcc_protoviol(input logic bad_pc, input logic [11:0] bad_payload);
+        @(posedge clk);
+        instr_word  = CPBCC_W(6'd0);
+        instr_valid = 1'b1;
+        ext_data    = 32'h0000_0100;
+        ext_valid   = 1'b1;
+        saw_branch  = 1'b0;
+        saw_trapv   = 1'b0;
+        saw_cpviol  = 1'b0;
+        repeat(200) begin
+            @(posedge clk);
+            if (instr_ack) break;
+        end
+        instr_valid = 1'b0;
+        ext_valid   = 1'b0;
+        // Condition CIR write
+        repeat(200) begin
+            @(posedge clk);
+            if (eu_coproc_req) break;
+        end
+        @(posedge clk); #1; eu_coproc_ack = 1'b1;
+        @(posedge clk); #1; eu_coproc_ack = 1'b0;
+        // Response CIR read -- malformed response (CA=0,DR=0, TF
+        // arbitrary; either bad_pc or a nonzero bad_payload alone
+        // suffices to trigger the violation path).
+        repeat(200) begin
+            @(posedge clk);
+            if (eu_coproc_req) break;
+        end
+        eu_coproc_rdata = {1'b0, bad_pc, 1'b0, bad_payload, 1'b0, 16'h0};
+        @(posedge clk); #1; eu_coproc_ack = 1'b1;
+        @(posedge clk); #1; eu_coproc_ack = 1'b0;
+        // Control CIR abort-mask write (10.3.2) -- check address/data/
+        // direction before acking it.
+        repeat(200) begin
+            @(posedge clk);
+            if (eu_coproc_req) break;
+        end
+        chk1("protoviol: abort write is a write", eu_coproc_rw, 1'b0);
+        chk ("protoviol: abort addr = Control CIR", eu_coproc_addr, 32'h0002_2002);
+        chk ("protoviol: abort mask = $0001", eu_coproc_wdata, 32'h0001_0000);
+        @(posedge clk); #1; eu_coproc_ack = 1'b1;
+        @(posedge clk); #1; eu_coproc_ack = 1'b0;
+        repeat(16) @(posedge clk);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);
@@ -917,6 +981,23 @@ module ctrl_flow_tb;
         $display("--- cpTRAPcc TF=0: no trap ---");
         run_cptrapcc(6'd0, 1'b0);
         chk1("cpTRAPcc TF=0: eu_trapv_req not fired", saw_trapv, 1'b0);
+
+        // ==================================================================
+        // Coprocessor Protocol Violation (Phase 281 sub-phase 5,
+        // wobbly-honking-cascade.md): an unrecognized Response CIR
+        // primitive aborts to the Control CIR and raises eu_cpviol_req.
+        // ==================================================================
+        $display("--- Protocol Violation: PC bit set (unserviced) ---");
+        run_cpbcc_protoviol(1'b1, 12'h000);
+        chk1("protoviol(PC): eu_cpviol_req fired", saw_cpviol, 1'b1);
+        chk1("protoviol(PC): no branch",           saw_branch, 1'b0);
+        chk1("protoviol(PC): no trap",              saw_trapv, 1'b0);
+
+        $display("--- Protocol Violation: non-Null function code ---");
+        run_cpbcc_protoviol(1'b0, 12'h001);
+        chk1("protoviol(func): eu_cpviol_req fired", saw_cpviol, 1'b1);
+        chk1("protoviol(func): no branch",            saw_branch, 1'b0);
+        chk1("protoviol(func): no trap",               saw_trapv, 1'b0);
 
         // ─── summary ──────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);

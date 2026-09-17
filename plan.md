@@ -2606,6 +2606,58 @@ MH882 instance as the coprocessor (every sub-phase so far used the
 same testbench-side CIR stub this project's own cpSAVE/cpRESTORE
 precedent already established, not a live coprocessor).
 
+## Phase 281 sub-phase 5 (Coprocessor Protocol Violation test coverage,
+a later session, `wobbly-honking-cascade.md` cross-repo item — closes
+this plan item's own last remaining un-deferred sub-phase)
+
+Closes the one item explicitly flagged as "wired but unverified" in
+every prior sub-phase's own writeup: Coprocessor Protocol Violation
+(vector 13) had real RTL (`eu_cpviol_req`, `cpcc_abort_r`) since
+sub-phase 1, but no test had ever driven an unrecognized Response CIR
+primitive through the `cpcc_*` FSM to confirm it actually works.
+
+**Test design**: a new `tb/ctrl_flow_tb.sv` task, `run_cpbcc_protoviol()`,
+drives cpBcc's own Condition-CIR-write step normally, then replies to
+the Response CIR read with a MALFORMED primitive — either the PC bit
+set (`eu_coproc_rdata[30]=1`, a request this implementation doesn't
+service) or a non-zero function code in `payload[12:1]`
+(`eu_coproc_rdata[28:17]!=0`, anything but the Null primitive) — and
+confirms three things: (1) the FSM issues the documented (10.3.2)
+Control-CIR abort-mask write (address, direction, and the `$0001` data
+value all checked explicitly, not just "a write happened"), (2)
+`eu_cpviol_req` fires exactly once (via a new `saw_cpviol` latch,
+mirroring `saw_trapv`'s own shape), and (3) no side effect from the
+aborted instruction occurs (`saw_branch`/`saw_trapv` both stay 0 — the
+same 3-way check applies regardless of which of the 4 coprocessor-
+conditional families is used as the vehicle, since the response-decode
+path is completely shared; cpBcc was picked as the simplest).
+
+**A small testbench-wiring gap found while writing this**:
+`eu_cpviol_req` (added to `m68030_eu`'s own port list back in
+sub-phase 1) was never actually connected in `tb/ctrl_flow_tb.sv`'s
+own explicit (non-wildcard) `m68030_eu` instantiation — left silently
+floating, unconnected, the whole time (a real but harmless gap, since
+nothing in sub-phases 1-4 needed to observe it directly). Fixed by
+adding the missing port connection alongside `eu_trapv_req`'s own.
+
+**Testing**: 2 new test cases (PC-bit-set, bad-function-code), 8 checks
+total (3 abort-write-mechanics checks + 3 outcome checks per case, plus
+2 more) — all passed on the first run, no debugging needed.
+
+**Files**: `tb/ctrl_flow_tb.sv` (`eu_cpviol_req` port wiring,
+`saw_cpviol` latch, `run_cpbcc_protoviol()`, 2 new test cases).
+
+**`make test`: 37/37 clean, zero regressions. `make cosim_grp`: 8/8
+clean.** Full 124-suite Harte sweep (Verilator backend) re-run and
+confirmed bit-identical to the pre-existing baseline.
+
+**This closes `wobbly-honking-cascade.md`'s own coprocessor-conditional-
+instructions plan item in full**, except for the two items explicitly
+left as deliberate, documented, indefinitely-deferred scope boundaries
+(not bugs, not silently dropped): memory-EA cpScc, and a genuine
+cross-repo cosim using a live MH882 instance rather than a testbench-
+side CIR stub. No outstanding plan of any kind remains in this project.
+
 ## To Do
 
 No outstanding plan of any kind remains for RTL correctness as of Phase

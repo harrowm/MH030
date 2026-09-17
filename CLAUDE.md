@@ -56,8 +56,8 @@ Keep each module under ~3000 lines. Do not put everything in one file.
 - MOVEP byte-interleaved (individual byte cycles, address increments by 2)
 
 **Coprocessor conditional instructions (cpBcc/cpDBcc/cpScc/cpTRAPcc) —
-ALL FOUR DECODED/IMPLEMENTED (Phase 281, `wobbly-honking-cascade.md`
-cross-repo item; memory-EA cpScc deliberately excluded)**: Phase
+CLOSED (Phase 281, `wobbly-honking-cascade.md` cross-repo item;
+memory-EA cpScc and a live-MH882 cosim deliberately excluded)**: Phase
 157/199 implemented the CIR access bus protocol itself and
 cpSAVE/cpRESTORE's own full state-transfer handshake. This item was
 originally documented here as a deliberate scope boundary (Phase 248
@@ -67,32 +67,31 @@ coprocessor evaluating genuine condition predicates — MH882
 companion FPU implementation), once its own Phase 10 gave it real
 32-predicate Condition CIR logic, is exactly that missing piece,
 closing the original blocker. **cpBcc.W/.L, cpDBcc, cpScc (Dn-direct
-only — memory-EA cpScc deferred), and cpTRAPcc are now decoded and
+only — memory-EA cpScc deferred), and cpTRAPcc are all decoded and
 implemented** (`dec_is_cpbcc`/`dec_is_cpdbcc`/`dec_is_cpscc`/
 `dec_is_cptrapcc`, `rtl/eu_seq_decode.svh`; the shared `cpcc_*` CIR
 dispatch FSM, `rtl/eu_seq_execute.svh` — cpDBcc/cpScc/cpTRAPcc all
 reuse this FSM completely unchanged from cpBcc, only their own
-completion actions differ) — see `plan.md` Phase 281 (all 4
+completion actions differ) — see `plan.md` Phase 281 (all 5
 sub-phases) for the full protocol/encoding derivation, the
 response-word bit-layout resolution (read directly from MH882's own
 tested `response_word()` rather than the manual's self-contradictory
 OCR'd prose), cpDBcc's own dedicated FSM-completion register-write
-port for Dn's decrement (reused by cpScc's own Dn-direct write), and
+port for Dn's decrement (reused by cpScc's own Dn-direct write),
 cpTRAPcc's own reuse of the EXISTING `eu_trapv_req` path (Table 8-1:
 cpTRAPcc/TRAPcc/TRAPV share vector 7) plus the one-shot debounce and
-genuine Icarus declaration-order fix that needed. Coprocessor Protocol
-Violation (vector 13, MC68030UM.pdf §10.5.1.1/§10.5.4) is likewise
-wired end-to-end (`eu_cpviol_req`, `m68030_exc.sv`'s new `VEC_CPVIOL`)
-— mirroring `eu_fmt_err_req`'s existing shape — but not yet directly
-tested (no dedicated coverage of an unrecognized primitive triggering
-it yet). **Remaining, deliberately scoped-out items** (see `plan.md`
-Phase 281 sub-phase 4's own closing section): memory-EA cpScc
-(deferred indefinitely); dedicated Protocol Violation test coverage;
-a narrow T0-tracing gap (cpTRAPcc's own outcome isn't known at decode
-time, so a taken cpTRAPcc won't trigger T0 trace — documented, not
-silently dropped); and a genuine cross-repo cosim using a live MH882
-instance (every sub-phase used a testbench-side CIR stub instead,
-matching this project's own cpSAVE/cpRESTORE precedent).
+genuine Icarus declaration-order fix that needed, and Coprocessor
+Protocol Violation (vector 13, MC68030UM.pdf §10.5.1.1/§10.5.4,
+`eu_cpviol_req`/`m68030_exc.sv`'s `VEC_CPVIOL` — mirroring
+`eu_fmt_err_req`'s existing shape) now with dedicated test coverage
+(sub-phase 5: an unrecognized Response CIR primitive correctly aborts
+to the Control CIR per 10.3.2 and raises the request exactly once).
+**Deliberately scoped-out, documented, not silently dropped**:
+memory-EA cpScc (deferred indefinitely); a narrow T0-tracing gap
+(cpTRAPcc's own outcome isn't known at decode time, so a taken
+cpTRAPcc won't trigger T0 trace); and a genuine cross-repo cosim using
+a live MH882 instance (every sub-phase used a testbench-side CIR stub
+instead, matching this project's own cpSAVE/cpRESTORE precedent).
 
 ## S-State Signal Timing (Critical)
 
@@ -726,11 +725,13 @@ itself. **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
 cover any 68020+-only family, coprocessor conditionals included, so this count is unaffected
-by Phase 281). **Cross-repo plan item as of Phase 281** (`plan.md`'s own Phase 281 section,
-`wobbly-honking-cascade.md`): coprocessor conditional instructions — cpBcc.W/.L, cpDBcc,
-cpScc(Dn-direct), and cpTRAPcc all done; dedicated Protocol-Violation test coverage remains
-(memory-EA cpScc deferred indefinitely, not currently planned). No other outstanding plan of
-any kind remains. Permanently out of scope by design, not started
+by Phase 281). **`plan.md`'s own Phase 281 section (`wobbly-honking-cascade.md`) is now
+CLOSED**: all four coprocessor conditional instructions (cpBcc.W/.L, cpDBcc, cpScc(Dn-direct),
+cpTRAPcc) implemented and tested, including dedicated Coprocessor Protocol Violation coverage
+(sub-phase 5). Memory-EA cpScc and a live-MH882 cosim remain deliberately, permanently
+deferred (see CLAUDE.md's own coprocessor-conditional-instructions section above), not an
+open plan item. No outstanding plan of any kind remains. Permanently out of scope by design,
+not started
 (re-confirmed, do not re-suggest): STATUS's other 3 sub-cases + REFILL#; PTEST's DSACK-breadth
 exclusion + I-cache CEI's per-line-only limitation (pre-existing architecture boundaries, not
 bugs).
