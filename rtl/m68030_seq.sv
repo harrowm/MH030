@@ -694,6 +694,13 @@ module m68030_seq (
     assign is_cpbcc_l = (f_group == 4'hf) && (f_dn == 3'b001) &&
                          (f_dir == 1'b0) && (f_ss == 2'b11);   // {f_dir,f_ss}=011
 
+    // cpDBcc: F-line, cpid=1, TYPE=001, mode=001 (Figure 10-12) -- always
+    // exactly 2 ext words (condition selector + 16-bit displacement),
+    // fixed regardless of any other field.
+    logic is_cpdbcc;
+    assign is_cpdbcc = (f_group == 4'hf) && (f_dn == 3'b001) &&
+                        (f_dir == 1'b0) && (f_ss == 2'b01) && (f_mode == 3'b001);
+
     // RTD — exactly 1 extension word (displacement)
     logic is_rtd;
     assign is_rtd = (instr_word == 16'h4E74);
@@ -983,7 +990,7 @@ module m68030_seq (
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long ||
                  is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10) || is_muldivl_2ext ||
                  ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b001)) || // abs.L
-                 is_cpbcc_l)
+                 is_cpbcc_l || is_cpdbcc)
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||

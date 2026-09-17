@@ -46,9 +46,10 @@
     // time -- reuses dec_branch_disp for the (already sign-extended,
     // already PC+2-relative -- identical formula to plain Bcc) displacement.
     logic        dec_is_cpbcc;
+    logic        dec_is_cpdbcc;    // cpDBcc: shares the cpBcc's own cpcc_* FSM
+                                    // and dec_branch_disp/dec_cpcc_sel fields
     logic [5:0]  dec_cpcc_sel;     // condition selector written to Condition CIR
-                                    // (shared field name: also used by cpDBcc/
-                                    // cpScc/cpTRAPcc once those land)
+                                    // (shared field: cpBcc/cpDBcc/cpScc/cpTRAPcc)
     logic        dec_reads_ccr;    // stall if pending CCR write in EX or WB
     logic        dec_reads_usp;    // stall if pending USP write (MOVE An,USP) in EX or WB -- Phase 161 Part A Stage A2
     logic [3:0]  dec_branch_cond;  // condition code for Bcc/Scc/DBcc
@@ -357,6 +358,7 @@
         dec_is_branch    = 1'b0;
         dec_is_dbcc      = 1'b0;
         dec_is_cpbcc     = 1'b0;
+        dec_is_cpdbcc    = 1'b0;
         dec_cpcc_sel     = 6'h0;
         dec_branch_cond  = 4'h0;
         dec_branch_disp  = 32'h0;
@@ -6200,6 +6202,36 @@
                         dec_cpcc_sel    = instr_word[5:0];
                         dec_needs_ext   = 1'b1;
                         dec_branch_disp = ext_data;
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b001 &&
+                                 f_mode == 3'b001) begin
+                        // cpDBcc: TYPE=001, mode=001 (bits[8:3]=001001,
+                        // Figure 10-12) -- disambiguates from cpScc the
+                        // same way plain DBcc's own mode=001 carve-out
+                        // disambiguates it from Scc within the shared
+                        // Group-0101 opcode line. Dn counter in bits[2:0].
+                        // Unlike cpBcc, the condition selector is NOT in
+                        // the F-line op word itself -- it's in the FIRST
+                        // extension word (bits[5:0]), followed by a SECOND
+                        // extension word (the 16-bit displacement); this
+                        // project's own "first extra word -> ext_data's
+                        // high 16 bits" convention (matching plain Bcc.L's
+                        // own 2-word assembly) puts the selector at
+                        // ext_data[21:16] and the displacement at
+                        // ext_data[15:0]. scanPC points to the word
+                        // following the condition specifier when the
+                        // branch target is calculated (10.4.1), i.e.
+                        // decode_pc+4 (one word later than cpBcc's own
+                        // decode_pc+2, since cpDBcc has that extra
+                        // selector word) -- the +4 lives in the
+                        // cpdbcc_branch target mux, eu_seq_execute.svh.
+                        dec_valid       = 1'b1;
+                        dec_is_cpdbcc   = 1'b1;
+                        dec_unit        = UNIT_NONE;
+                        dec_cpcc_sel    = ext_data[21:16];
+                        dec_branch_disp = {{16{ext_data[15]}}, ext_data[15:0]};
+                        dec_dst_reg     = {1'b0, f_reg};   // Dn, read live via rd_b_data
+                        dec_reads_dst   = 1'b1;
+                        dec_needs_ext   = 1'b1;
                     end else if (f_dn == 3'b001) begin
                         // FPU coprocessor: cpid=1, any ppp or EA mode 4-7.
                         // Issues one CPI CPU Space bus cycle; full protocol in later phases.
@@ -6359,6 +6391,7 @@
     assign dec_is_flow_chg = dec_is_jmp || dec_is_jsr || dec_is_jsr_idx ||
                               dec_is_bsr || dec_is_rts || dec_is_rtr || dec_is_rte ||
                               dec_is_trap || dec_is_trapv || dec_is_dbcc || dec_is_cpbcc ||
+                              dec_is_cpdbcc ||
                               (dec_is_branch && dec_branch_taken);
     assign dec_is_trace = dec_valid && !dec_is_priv && !dec_is_linea && !dec_is_linef &&
                           (sr_live[15] || (sr_live[14] && dec_is_flow_chg));

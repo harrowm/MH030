@@ -1835,6 +1835,10 @@
     logic        ex_is_cpbcc;
     logic [5:0]  ex_cpcc_sel;
     logic [31:0] ex_cpcc_disp;
+    // cpDBcc reuses the identical cpcc_* FSM/ex_cpcc_sel/ex_cpcc_disp
+    // fields above -- only its own completion action (decrement Dn via
+    // rd_b_data, conditionally branch) differs, wired near cpcc_branch_taken.
+    logic        ex_is_cpdbcc;
     logic [31:0] ex_decode_pc;
     assign ex_decode_pc_out = ex_decode_pc;
     // Memory-access EX signals
@@ -1914,6 +1918,7 @@
             ex_dbcc_cond      <= 4'h0;
             ex_dbcc_disp      <= 32'h0;
             ex_is_cpbcc       <= 1'b0;
+            ex_is_cpdbcc      <= 1'b0;
             ex_cpcc_sel       <= 6'h0;
             ex_cpcc_disp      <= 32'h0;
             ex_decode_pc      <= 32'h0;
@@ -2049,6 +2054,7 @@
             ex_sext_from_byte <= 1'b0;
             ex_is_dbcc        <= 1'b0;
             ex_is_cpbcc       <= 1'b0;
+            ex_is_cpdbcc      <= 1'b0;
             ex_is_mem_rd      <= 1'b0;
             ex_is_mem_wr      <= 1'b0;
             ex_is_lea         <= 1'b0;
@@ -2189,6 +2195,7 @@
             ex_dbcc_cond      <= dec_branch_cond;
             ex_dbcc_disp      <= dec_branch_disp;
             ex_is_cpbcc       <= dec_is_cpbcc;
+            ex_is_cpdbcc      <= dec_is_cpdbcc;
             ex_cpcc_sel       <= dec_cpcc_sel;
             ex_cpcc_disp      <= dec_branch_disp;
             ex_decode_pc      <= decode_pc;
@@ -3402,7 +3409,7 @@
             cpcc_sel_r   <= 6'h0;
         end else begin
             if (!cpcc_start_r && !cpcc_wr_r && !cpcc_resp_r && !cpcc_abort_r &&
-                instr_ack && dec_is_cpbcc) begin
+                instr_ack && (dec_is_cpbcc || dec_is_cpdbcc)) begin
                 cpcc_start_r <= 1'b1;
                 cpcc_sel_r   <= dec_cpcc_sel;
             end else if (cpcc_start_r) begin
@@ -3447,11 +3454,31 @@
     // Branch decision: fires the exact cycle a recognized (CA=0) Null
     // response arrives, reading TF live off eu_coproc_rdata (see the FSM's
     // own comment above for why). ex_is_cpbcc gates this to cpBcc
-    // specifically, ready for cpDBcc/cpScc to add their own sibling terms
-    // here once implemented.
+    // specifically, ready for cpScc/cpTRAPcc to add their own sibling
+    // terms here once implemented.
     wire cpcc_resp_done = cpcc_resp_r && eu_coproc_ack && !eu_coproc_rdata[30] &&
                           (eu_coproc_rdata[28:17] == 12'h0) && !eu_coproc_rdata[31];
     wire cpcc_branch_taken = cpcc_resp_done && ex_is_cpbcc && eu_coproc_rdata[16];
+
+    // cpDBcc completion (10.2.2.3.2): TF=1 -> no operation (fall through,
+    // no decrement, no branch). TF=0 -> decrement the low word of Dn
+    // (read live via rd_b_data, same "read the still-stable EX-stage
+    // register live" convention cmp2/movep already use during their own
+    // multi-cycle FSMs, since dec_dst_reg={1'b0,f_reg} already selected
+    // Dn onto rd_b at decode time and nothing else decodes while this
+    // FSM holds `stall`); if the decremented value is $FFFF, fall
+    // through (no branch); otherwise branch. The actual register write
+    // is a dedicated FSM completion port (cpdbcc_wr_en, wr_en's own mux
+    // below), NOT the standard ex_writes_reg/wb_valid pipeline -- that
+    // pipeline commits every cycle ex_valid is 1, which spans this whole
+    // multi-cycle CIR dialog, so a normal ALU/WB dispatch would either
+    // fire too early (before TF is known) or repeatedly every stall
+    // cycle; the dedicated port fires exactly once, the same cycle
+    // cpcc_resp_done does.
+    wire [15:0] cpdbcc_dn_new        = rd_b_data[15:0] - 16'h1;
+    wire        cpdbcc_not_taken     = cpcc_resp_done && ex_is_cpdbcc && !eu_coproc_rdata[16];
+    wire        cpdbcc_wr_en         = cpdbcc_not_taken;
+    wire        cpdbcc_branch_taken  = cpdbcc_not_taken && (cpdbcc_dn_new != 16'hFFFF);
 
     // -----------------------------------------------------------------------
     // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3; live
@@ -4874,24 +4901,27 @@
 
     // Word MOVEP writes only [15:0] (siz=10); long writes full 32 bits (siz=00).
     assign wr_en   = movem_wr_en || movep_wr_en || memind_wr_en || memind_addr_wr_en ||
-                    bf_dn_wr_en || (wb_valid && wb_writes_reg);
+                    bf_dn_wr_en || cpdbcc_wr_en || (wb_valid && wb_writes_reg);
     assign wr_sel  = movem_wr_en       ? movem_reg_sel
                    : movep_wr_en       ? movep_wr_sel
                    : memind_wr_en      ? memind_dest_r
                    : memind_addr_wr_en ? memind_dest_r
                    : bf_dn_wr_en       ? {1'b0, bf_mem_dn_r}
+                   : cpdbcc_wr_en      ? ex_dst_reg
                    :                     wb_dest_reg;
     assign wr_siz  = movem_wr_en       ? 2'b00
                    : movep_wr_en       ? (movep_long_r ? 2'b00 : 2'b10)
                    : memind_wr_en      ? memind_siz_r
                    : memind_addr_wr_en ? memind_siz_r
                    : bf_dn_wr_en       ? 2'b00
+                   : cpdbcc_wr_en      ? 2'b10
                    :                     wb_siz;
     assign wr_data = movem_wr_en       ? movem_wr_data
                    : movep_wr_en       ? movep_wr_data
                    : memind_wr_en      ? mem_rdata
                    : memind_addr_wr_en ? memind_addr_wr_data
                    : bf_dn_wr_en       ? bf_result_w
+                   : cpdbcc_wr_en      ? {16'h0, cpdbcc_dn_new}
                    :                     wb_result_final;
 
     // second Dn write port for 64-bit mul/div high result (Dh or Dr).
@@ -5183,12 +5213,18 @@
                           !eu_fmt_err_req;
 
     assign branch_taken  = dec_branch_taken | ex_dbcc_taken | cpcc_branch_taken |
+                           cpdbcc_branch_taken |
                            ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
                            ex_rts_taken | ex_rtr_taken | ex_rte_taken;
 
     assign branch_target = dec_branch_taken                         ? (decode_pc    + 32'd2 + dec_branch_disp)
                          : ex_dbcc_taken                            ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
                          : cpcc_branch_taken                        ? (ex_decode_pc + 32'd2 + ex_cpcc_disp)
+                         // cpDBcc: scanPC points to the word FOLLOWING the
+                         // condition specifier (10.4.1) -- decode_pc+4, one
+                         // word later than cpBcc's own +2, since cpDBcc has
+                         // that extra selector word before the displacement.
+                         : cpdbcc_branch_taken                      ? (ex_decode_pc + 32'd4 + ex_cpcc_disp)
                          : ex_bsr_taken                             ? ex_bsr_target
                          // docs/*.md review (Phase 250 frame layout fix):
                          // RTE's own phase-1 read is now {PC lo, fmtvec}

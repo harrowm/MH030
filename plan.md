@@ -2369,6 +2369,88 @@ EA first" precedent), cpTRAPcc (reuses the existing `dec_is_trapv`/
 Coprocessor Protocol Violation test coverage (currently wired but
 unverified — see above).
 
+## Phase 281 sub-phase 2 (cpDBcc, a later session, `wobbly-honking-cascade.md`
+cross-repo item)
+
+Closes the second of the four coprocessor conditional instructions.
+
+**Encoding** (MC68030UM.pdf Figure 10-12, confirmed directly): F-line,
+CpID=001, TYPE={f_dir,f_ss}=001, mode=001 (bits[8:3]=001001) --
+disambiguates from cpScc the same way plain DBcc's own mode=001
+carve-out disambiguates it from Scc within the shared Group-0101 opcode
+line. Dn counter in bits[2:0]. Unlike cpBcc, the condition selector is
+NOT in the F-line op word -- it's the FIRST of 2 fixed extension words
+(selector in bits[5:0], the SECOND word being the 16-bit displacement),
+assembled into `ext_data` via this project's established "first extra
+word → high 16 bits" convention (matching Bcc.L's own 2-word assembly):
+`dec_cpcc_sel = ext_data[21:16]`, `dec_branch_disp =
+sext(ext_data[15:0])`.
+
+**Reused the cpBcc `cpcc_*` FSM UNCHANGED** — only its own start-trigger
+condition needed broadening (`dec_is_cpbcc || dec_is_cpdbcc`); the
+Condition-CIR-write/Response-CIR-poll/abort bus wiring was already fully
+generic. This is exactly what that FSM's own header comment anticipated
+when cpBcc landed.
+
+**Completion protocol** (10.2.2.3.2): TF=1 → no operation (fall
+through, no decrement, no branch) — the same "coprocessor says true, do
+nothing" shape cpBcc's own false case has, just mirrored. TF=0 →
+decrement the low word of Dn; if the result is `$FFFF`, fall through
+(loop terminates); otherwise branch, with `scanPC` pointing to the word
+*following* the condition specifier (10.4.1) — `decode_pc+4`, one word
+later than cpBcc's own `+2`, since cpDBcc has that extra selector word
+before the displacement.
+
+**A genuine new register-write-timing problem, absent from cpBcc**:
+Dn's decrement can't go through the normal single-cycle ALU→WB pipeline
+plain DBcc uses (`ex_writes_reg`/`wb_valid`), because that pipeline
+commits on the cycle immediately following EX-entry — but cpDBcc must
+wait for the multi-cycle CIR round-trip to even know whether to
+decrement, and `ex_valid` stays asserted across that ENTIRE wait
+(`ex_mem_stall` holds it there), so a normal WB dispatch would fire far
+too early (or every stall cycle, if not gated some other way). Solved
+via the same "dedicated FSM completion write port" pattern this
+project already uses for MOVEM/bitfield/memory-indirect writebacks
+(`wr_en`'s own mux in `eu_seq_execute.svh`, alongside `movem_wr_en`/
+`bf_dn_wr_en`/etc.) — a new `cpdbcc_wr_en` term fires exactly once, the
+same cycle `cpcc_resp_done` does, gated on `!TF`. Dn's CURRENT value is
+read live via `rd_b_data` (not a separately captured register) at that
+exact moment — safe because `rd_b_sel` already resolves to `ex_dst_reg`
+(captured generically at decode, `dec_dst_reg={1'b0,f_reg}`) throughout
+the whole multi-cycle FSM, and nothing else can decode (hence nothing
+else can change Dn) while `stall` holds — the same "read the
+still-stable EX-stage register live" convention CMP2/MOVEP's own
+multi-cycle FSMs already established.
+
+**Testing**: `tb/ctrl_flow_tb.sv` gained a `run_cpdbcc()` wrapper
+(delegates straight to `run_cpbcc()` with the 2 extension words
+pre-assembled) and 3 checks: TF=1 (Dn unchanged, no branch), TF=0 with
+Dn=5→4 (decrement + branch, target verified), TF=0 with Dn=0→`$FFFF`
+(decrement but no branch, confirming the loop-termination case AND
+that the upper 16 bits of Dn are preserved by the word-sized write).
+All 3 passed on the first run with no debugging needed, unlike cpBcc's
+own testbench-race detour — attributed directly to reusing the
+already-hardened `run_cpbcc()`/`ack_coproc` idiom rather than writing
+a new CIR-driving task from scratch.
+
+**Files**: `rtl/eu_seq_decode.svh` (`dec_is_cpdbcc`, 1 new decode arm,
+added to the trace flow-change list), `rtl/m68030_seq.sv` (`is_cpdbcc`,
+1 new fixed-`ext_count=2` entry), `rtl/eu_seq_execute.svh` (`ex_is_cpdbcc`
+capture, `cpdbcc_dn_new`/`cpdbcc_not_taken`/`cpdbcc_wr_en`/
+`cpdbcc_branch_taken` wires, the new `wr_en`/`wr_sel`/`wr_siz`/`wr_data`
+mux arm, `branch_taken`/`branch_target` extension), `tb/ctrl_flow_tb.sv`
+(new tests).
+
+**`make test`: 37/37 clean, zero regressions. `make cosim_grp`: 8/8
+clean.** Full 124-suite Harte sweep (Verilator backend) re-run and
+confirmed bit-identical to the pre-existing baseline (`PASS 702142 FAIL
+2 SKIP 281221 TIMEOUT 0`) — cpDBcc is 68020+-only, zero Harte coverage,
+same as cpBcc.
+
+**Remaining sub-phases**: cpScc (Dn-direct + simple-EA-only), cpTRAPcc,
+dedicated Coprocessor Protocol Violation test coverage — same order as
+stated in sub-phase 1's own writeup above.
+
 ## To Do
 
 No outstanding plan of any kind remains for RTL correctness as of Phase

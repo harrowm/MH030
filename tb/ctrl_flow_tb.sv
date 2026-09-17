@@ -247,6 +247,11 @@ module ctrl_flow_tb;
     function automatic [15:0] CPBCC_W(input [5:0] sel);
         CPBCC_W = {4'hF, 3'b001, 1'b0, 2'b10, sel};
     endfunction
+    // cpDBcc (Phase 281 sub-phase 2): F-line, CpID=001, TYPE=001,
+    // mode=001 (Figure 10-12), Dn counter in bits[2:0].
+    function automatic [15:0] CPDBCC(input [2:0] dn);
+        CPDBCC = {4'hF, 3'b001, 1'b0, 2'b01, 3'b001, dn};
+    endfunction
     function automatic [15:0] MOVE_L(input [2:0] dm, input [2:0] dn);
         MOVE_L = {4'h2, dn, 3'b000, 3'b000, dm};
     endfunction
@@ -345,6 +350,14 @@ module ctrl_flow_tb;
         @(posedge clk); #1; eu_coproc_ack = 1'b1;
         @(posedge clk); #1; eu_coproc_ack = 1'b0;
         repeat(16) @(posedge clk);
+    endtask
+
+    // cpDBcc: identical 2-step CIR dialog to run_cpbcc, but the 2
+    // extension words are {condition selector (bits[21:16] of ext_data),
+    // displacement (bits[15:0])} rather than a single displacement value.
+    task automatic run_cpdbcc(input logic [15:0] w0, input logic [5:0] sel,
+                              input logic [15:0] disp16, input logic tf);
+        run_cpbcc(w0, {10'h0, sel, disp16}, tf);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);
@@ -807,6 +820,41 @@ module ctrl_flow_tb;
         run_cpbcc({4'hF, 3'b001, 1'b0, 2'b11, 6'd0}, 32'h0001_0000, 1'b1);
         chk1("cpBcc.L: taken",         saw_branch,  1'b1);
         chk ("cpBcc.L: target=0x15002", last_target, 32'h0001_5002);
+
+        // ==================================================================
+        // cpDBcc TF=1: "no operation" -- Dn unchanged, no branch
+        // (Phase 281 sub-phase 2, wobbly-honking-cascade.md)
+        // ==================================================================
+        $display("--- cpDBcc TF=1 (no operation) ---");
+        set_dn(3'd2, 32'h1234_0005);
+        decode_pc = 32'h0000_6000;
+        run_cpdbcc(CPDBCC(3'd2), 6'd0, 16'h0100, 1'b1);
+        chk1("cpDBcc TF=1: not taken",    saw_branch, 1'b0);
+        chk ("cpDBcc TF=1: D2 unchanged", dut.u_rf.d_reg[2], 32'h1234_0005);
+
+        // ==================================================================
+        // cpDBcc TF=0, D3=5 (not -1 after decrement): decrement to 4,
+        // branch. target = decode_pc+4+disp (scanPC past the selector
+        // word) = 0x7000+4+0x100 = 0x7104.
+        // ==================================================================
+        $display("--- cpDBcc TF=0, D3=5->4 (branch) ---");
+        set_dn(3'd3, 32'hABCD_0005);
+        decode_pc = 32'h0000_7000;
+        run_cpdbcc(CPDBCC(3'd3), 6'd0, 16'h0100, 1'b0);
+        chk1("cpDBcc TF=0: taken",        saw_branch,  1'b1);
+        chk ("cpDBcc TF=0: target=0x7104", last_target, 32'h0000_7104);
+        chk ("cpDBcc TF=0: D3=0xABCD0004", dut.u_rf.d_reg[3], 32'hABCD_0004);
+
+        // ==================================================================
+        // cpDBcc TF=0, D4=0 (decrements to $FFFF, loop terminates): NOT
+        // taken, but D4 is still decremented (upper word preserved).
+        // ==================================================================
+        $display("--- cpDBcc TF=0, D4=0->0xFFFF (loop terminates) ---");
+        set_dn(3'd4, 32'h5678_0000);
+        decode_pc = 32'h0000_8000;
+        run_cpdbcc(CPDBCC(3'd4), 6'd0, 16'h0100, 1'b0);
+        chk1("cpDBcc D4=0: not taken",       saw_branch, 1'b0);
+        chk ("cpDBcc D4=0: D4=0x5678FFFF",   dut.u_rf.d_reg[4], 32'h5678_FFFF);
 
         // ─── summary ──────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);
