@@ -176,6 +176,7 @@ module m68030_eu (
     output logic        eu_linea_req,   // Line-A opcode → vector 10
     output logic        eu_linef_req,   // Line-F non-FPU → vector 11
     output logic        eu_fmt_err_req, // RTE format error → vector 14
+    output logic        eu_cpviol_req,  // Coprocessor Protocol Violation → vector 13
 
     // ── Exception controller write-back ───────────────────────────────────
     // ssp_wr: update active supervisor stack pointer (A7, routing by S/M bits)
@@ -465,6 +466,7 @@ module m68030_eu (
         .eu_linea_req   (eu_linea_req),
         .eu_linef_req   (eu_linef_req),
         .eu_fmt_err_req (eu_fmt_err_req),
+        .eu_cpviol_req  (eu_cpviol_req),
         .exc_sr_wr_en   (exc_sr_wr_en),
         // second Dn write port
         .wr2_en         (wr2_en),

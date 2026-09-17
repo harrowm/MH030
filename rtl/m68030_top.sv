@@ -223,6 +223,7 @@ module m68030_top #(
     logic        eu_linea_req_w;
     logic        eu_linef_req_w;
     logic        eu_fmt_err_req_w;
+    logic        eu_cpviol_req_w;
 
     // ───────────────────────────────────────────────────────────────────────
     // IFU output wires
@@ -608,6 +609,7 @@ module m68030_top #(
         .eu_linea_req   (eu_linea_req_w),
         .eu_linef_req   (eu_linef_req_w),
         .eu_fmt_err_req (eu_fmt_err_req_w),
+        .eu_cpviol_req  (eu_cpviol_req_w),
         .ssp_wr_en     (ssp_wr_en_mux),
         .ssp_wr_data   (ssp_wr_data_mux),
         .exc_sr_wr_en  (exc_new_sr_wr),
@@ -633,6 +635,7 @@ module m68030_top #(
         .linea_req    (eu_linea_req_w),
         .linef_req    (eu_linef_req_w),
         .fmt_err_req  (eu_fmt_err_req_w),
+        .cpviol_req   (eu_cpviol_req_w),
         .div_zero_req (eu_div_trap),
         .chk_req      (eu_chk_trap),
         .mmu_config_req (eu_mmu_config_trap),
@@ -670,7 +673,12 @@ module m68030_top #(
         // into a Format Error frame -- undiscovered until this item's own
         // investigation, since no prior test exercised RTE-with-invalid-
         // format/version at all.
-        .fault_pc     ((bus_err_req_w || eu_fmt_err_req_w) ? eu_ex_decode_pc : ifu_decode_pc),
+        // eu_cpviol_req_w joins the other two for the identical reason:
+        // the cpBcc/cpDBcc/cpScc/cpTRAPcc CIR dialog (cpcc_* FSM,
+        // eu_seq_execute.svh) stalls in EX across multiple coprocessor
+        // bus cycles the same way RTE's multi-phase reads and cpRESTORE's
+        // format check do.
+        .fault_pc     ((bus_err_req_w || eu_fmt_err_req_w || eu_cpviol_req_w) ? eu_ex_decode_pc : ifu_decode_pc),
         .fault_sr     (eu_sr_out),
         // docs/*.md review: fault_addr also feeds FMT_INST's ($2) own
         // "instruction address" field (CHK/CHK2/TRAPcc/TRAPV/Trace/Zero

@@ -37,6 +37,7 @@ module exc_tb;
     logic        illegal_req  = 0, priv_req      = 0;
     logic        trace_req    = 0, linea_req      = 0;
     logic        linef_req    = 0, fmt_err_req    = 0;
+    logic        cpviol_req   = 0;
     logic        div_zero_req = 0, chk_req        = 0;
     logic        mmu_config_req = 0;
     logic        trapv_req    = 0, trap_req        = 0;

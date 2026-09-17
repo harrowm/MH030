@@ -682,6 +682,18 @@ module m68030_seq (
     assign is_cprestore = (f_group == 4'hf) && (f_dn == 3'b001) &&
                            (f_dir == 1'b1) && (f_ss == 2'b01);   // {f_dir,f_ss}=101
 
+    // cpBcc.W/.L (Phase 15, wobbly-honking-cascade.md, cross-repo item):
+    // F-line, cpid=1, TYPE={f_dir,f_ss}=010/011 (Figures 10-9/10-10).
+    // cpBcc.W: 1 ext word (16-bit displacement). cpBcc.L: 2 ext words
+    // (32-bit displacement) -- identical word counts to plain Bcc.W/Bcc.L,
+    // since this project's coprocessor scope needs no coprocessor-defined
+    // extension words for condition evaluation.
+    logic is_cpbcc_w, is_cpbcc_l;
+    assign is_cpbcc_w = (f_group == 4'hf) && (f_dn == 3'b001) &&
+                         (f_dir == 1'b0) && (f_ss == 2'b10);   // {f_dir,f_ss}=010
+    assign is_cpbcc_l = (f_group == 4'hf) && (f_dn == 3'b001) &&
+                         (f_dir == 1'b0) && (f_ss == 2'b11);   // {f_dir,f_ss}=011
+
     // RTD — exactly 1 extension word (displacement)
     logic is_rtd;
     assign is_rtd = (instr_word == 16'h4E74);
@@ -970,7 +982,8 @@ module m68030_seq (
         else if (is_branch_l || is_abs_long || (is_adda_suba_cmpa_imm && f_dir) || is_pea_abs_long ||
                  is_link_l || is_moves_long_ea || is_alu_mem_src_long || is_addq_subq_ext_long ||
                  is_movem_2ext || (is_alu_imm_dn && f_ss == 2'b10) || is_muldivl_2ext ||
-                 ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b001))) // abs.L
+                 ((is_cpsave || is_cprestore) && (f_mode == 3'b111) && (f_reg == 3'b001)) || // abs.L
+                 is_cpbcc_l)
             ext_count = 3'd2;
         else if (is_branch_w || is_dbcc || is_move_d16 || is_lea_d16 || is_jsr_jmp_d16 ||
                  is_link || is_abs_short || is_pc_rel ||
@@ -1005,7 +1018,8 @@ module m68030_seq (
                  // exists for this 68010+-only instruction, so this gap went
                  // undetected until Phase 100 needed MOVEC in synthesized init
                  // code for VBR relocation.
-                 (instr_word == 16'h4E7A || instr_word == 16'h4E7B))
+                 (instr_word == 16'h4E7A || instr_word == 16'h4E7B) ||
+                 is_cpbcc_w)
             ext_count = 3'd1;
         // F-line MMU family (PFLUSH/PFLUSHA/PTEST/PMOVE/PLOAD), cpid=0
         // (f_group=4'hF, f_dn=3'b000, matching eu_seq.sv's own

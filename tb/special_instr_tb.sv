@@ -325,14 +325,30 @@ module special_instr_tb;
         ack_coproc;
         fpu_drain;
 
-        // FPU-04: cpBcc primitive (ppp=010) — A[15:13] must be 010
-        // 0xF2A0 = 1111 001 010 100 000; expected addr 0x0002_4800
-        $display("--- FPU-04: cpBcc (ppp=010) address ---");
-        send_fpu(16'hF2A0, 32'h0000_04C0);
+        // FPU-04: generic-FPU-stub address, ppp=110 (A[15:13] must be 110).
+        // Phase 15 (wobbly-honking-cascade.md): this test previously used
+        // ppp=010 (0xF2A0), but TYPE=010 is now a REAL, separately-decoded
+        // instruction (cpBcc.W, dec_is_cpbcc) rather than falling through
+        // to this generic "any ppp" stub -- confirmed as the expected,
+        // correct side effect of implementing cpBcc for real (a genuine
+        // opcode-space reassignment, not a regression): the same F-line
+        // 4'hf/cpid=1/TYPE=010 encoding, cross-checked directly against
+        // MC68030UM.pdf Figure 10-9, was always architecturally cpBcc.W,
+        // never a valid "generic coprocessor op with a made-up ppp=010
+        // address" to begin with. Retargeted to ppp=110 (still unclaimed
+        // by any real instruction: 000=CPI/FPU-01, 001=future cpScc/
+        // cpDBcc/cpTRAPcc slot, 010/011=cpBcc(now real), 100/101=cpSAVE/
+        // cpRESTORE(already real)) to keep exercising this same
+        // documented-as-buggy address-encoding stub path.
+        // 0xF3A0 = 1111 001 110 100 000; expected addr 0x0002_C800
+        // (each +1 to ppp adds 0x2000 to the address, confirmed against
+        // FPU-01/03's own already-passing 0x20800/0x22800 pattern).
+        $display("--- FPU-04: generic FPU stub address, ppp=110 ---");
+        send_fpu(16'hF3A0, 32'h0000_04C0);
         wait_coproc_req(10, got_req);
         chk  ("FPU-04a: coproc_req",           got_req);
-        chk  ("FPU-04b: A[15:13]=010 (cpBcc)", eu_coproc_addr[15:13] === 3'b010);
-        chk32("FPU-04c: full addr",             eu_coproc_addr, 32'h0002_4800);
+        chk  ("FPU-04b: A[15:13]=110",         eu_coproc_addr[15:13] === 3'b110);
+        chk32("FPU-04c: full addr",             eu_coproc_addr, 32'h0002_C800);
         ack_coproc;
         fpu_drain;
 

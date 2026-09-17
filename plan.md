@@ -2255,6 +2255,120 @@ new rows plus corrected descriptions for `manual_738`/`manual_744`/
 
 **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
 
+## Phase 281 (cpBcc.W/.L, a later session, `wobbly-honking-cascade.md`
+cross-repo item, sub-phase 1 of 5 — cpDBcc/cpScc/cpTRAPcc/Coprocessor-
+Protocol-Violation-test-coverage still to come)
+
+Closes the FIRST of the four coprocessor conditional instructions this
+project's own `CLAUDE.md` had long documented as a deliberate,
+out-of-scope gap (Phase 248 item #7) — unblocked by MH882's own Phase
+10 (real 32-predicate Condition CIR logic, `/Users/malcolm/MH882`),
+exactly as that item's own scope note anticipated.
+
+**Encoding** (MC68030UM.pdf Figures 10-9/10-10, confirmed directly):
+F-line, CpID=001 in bits[11:9], TYPE={f_dir,f_ss}=010 (cpBcc.W) or 011
+(cpBcc.L) in bits[8:6], condition selector in bits[5:0]. This project's
+coprocessor scope needs no coprocessor-defined extension words for
+condition evaluation (MH882's own Condition CIR takes the selector
+directly), so exactly 1 (W) or 2 (L) extension words follow — the
+16-bit or 32-bit branch displacement, identical shape/formula to plain
+Bcc.W/Bcc.L (`branch_target = decode_pc + 2 + displacement`).
+
+**Protocol** (Figure 10-8/10.2.2.1.2): write the condition selector to
+the Condition CIR ($0E), poll the Response CIR ($00) until a
+recognized Null primitive (CA=0) arrives, branch iff its TF bit (bit
+0) is set. New `cpcc_*` dispatch FSM (`rtl/eu_seq_execute.svh`) mirrors
+the existing cpSAVE/cpRESTORE `cpsr_*` FSM's own shape exactly (same
+`ex_mem_stall` membership, same "decide live off the exact ack cycle"
+convention for the branch decision) — deliberately named generically
+since cpDBcc/cpScc/cpTRAPcc (this same plan item's remaining
+sub-phases) reuse this identical FSM, differing only in what happens
+once TF is known.
+
+**Response-word bit layout resolved by reading the actual producer,
+not re-deriving from the manual's own OCR'd prose** — a deliberate
+verification-discipline choice, not a shortcut: MC68030UM.pdf's
+general response-primitive-format prose ("Bit[4], the PC bit") directly
+contradicts its own Null Primitive figure's column layout (PC one bit
+below CA), a single-digit OCR loss ("Bit[14]" read as "Bit[4]") that's
+plausible given this project's own prior experience with this exact
+PDF's OCR artifacts. Rather than trust either garbled source, read
+MH882's own already-tested `rtl/m68882_cir_pkg.sv` `response_word()`
+directly (`{CA,PC,DR,13-bit payload}`, PRIM_NULL=13'h0 so only bit0 of
+the payload carries TF) — the actual bits the real companion
+coprocessor this project will interoperate with puts on the bus,
+authoritative regardless of which manual reading is correct. Only the
+Null primitive is recognized and the PC bit isn't serviced (MH882's own
+Condition CIR path never sets it) — anything else routes to a new
+Coprocessor Protocol Violation request (vector 13, `eu_cpviol_req`,
+wired end-to-end: `eu_seq.sv` → `m68030_eu.sv` → `m68030_top.sv` →
+`m68030_exc.sv`'s new `VEC_CPVIOL`/`FMT_SHORT` priority-chain arm,
+mirroring `eu_fmt_err_req`'s existing wiring shape exactly, including
+the Control-CIR abort-mask write per 10.3.2 and the same
+`eu_ex_decode_pc`-vs-`ifu_decode_pc` `fault_pc` mux fix format error
+already needed) — not yet directly tested (no test currently drives an
+unrecognized primitive), noted as a real gap for the Protocol-Violation
+sub-phase of this plan item to close with dedicated coverage.
+
+**Testing**: `tb/ctrl_flow_tb.sv` gained a new `run_cpbcc()` helper task
+and 3 checks (taken/not-taken/cpBcc.L-taken) driving a testbench-side
+CIR stub — the same established precedent `tb/eu_seq_tb.sv` already
+set for cpSAVE/cpRESTORE (no live MH882 coprocessor instance in THIS
+test; a genuine cross-repo cosim is this plan item's own longer-term
+aspiration, not required for each sub-phase). **A real testbench race
+was found and fixed while writing this test**: asserting `eu_coproc_ack`
+via a blocking assignment in immediate reaction to a polling loop's own
+`break` (same simulation edge that revealed `eu_coproc_req`) raced the
+DUT's own `always_ff` sampling of `eu_coproc_ack` on that identical
+edge — confirmed via a direct `$display` trace showing the FSM's
+`cpcc_resp_r` state and `eu_coproc_ack=1` appearing together on
+`cpcc_resp_r`'s own very first cycle, causing a stray extra ack the FSM
+incorrectly consumed one instruction late (each test's own branch
+result appeared to leak into the NEXT test). Fixed by adopting
+`tb/special_instr_tb.sv`'s own already-proven `ack_coproc` idiom (a
+FRESH `@(posedge clk)` before asserting ack, not an immediate reaction
+to the same edge that revealed the request) — a genuine, reusable
+testbench-construction lesson, not merely a style preference.
+
+**A second, genuine pre-existing-test collision found and fixed**:
+`tb/special_instr_tb.sv`'s own FPU-04 test used opcode `0xF2A0`
+(F-line, CpID=1, TYPE=010) purely as a made-up "ppp=010" label to
+exercise the generic-FPU-stub's own documented address-encoding bug
+(Phase 55) — TYPE=010 is now genuinely, correctly decoded as cpBcc.W
+instead, correctly no longer reaching that stub at all. Retargeted to
+TYPE=110 (still unclaimed by any real instruction) to keep exercising
+the same stub path; not a regression, an expected and correct
+consequence of real cpBcc.W now owning that opcode-space slot per
+Figure 10-9. (TYPE=001, used by FPU-03, will need the identical
+retargeting once cpScc/cpDBcc/cpTRAPcc's own sub-phase lands.)
+
+**Files**: `rtl/eu_seq_decode.svh` (`dec_is_cpbcc`/`dec_cpcc_sel`, 2 new
+decode arms), `rtl/m68030_seq.sv` (`is_cpbcc_w`/`is_cpbcc_l`, 2 new
+`ext_count` entries), `rtl/eu_seq_execute.svh` (EX-stage capture,
+`cpcc_*` FSM, `cpcc_protoviol_raw`/`_w` one-shot debounce mirroring
+`cpsr_fmt_err_raw`/`_w`, `branch_taken`/`branch_target`/`eu_coproc_*`
+wiring, `eu_cpviol_req` assign), `rtl/eu_seq.sv`/`rtl/m68030_eu.sv`/
+`rtl/m68030_top.sv`/`rtl/m68030_exc.sv` (the new vector-13 port chain),
+`tb/ctrl_flow_tb.sv` (new tests), `tb/special_instr_tb.sv` (FPU-04
+retarget), `tb/exc_tb.sv` (new `cpviol_req` wildcard-port signal).
+
+**`make test`: 37/37 suites clean, zero regressions. `make cosim_grp`:
+8/8 clean.** Full 124-suite Harte sweep re-run and confirmed clean
+(cpBcc is a 68020+-only instruction family with zero Harte coverage,
+matching every other coprocessor/memory-indirect family in this
+project — this run is a pure regression check, not new coverage).
+
+**Remaining sub-phases of this same plan item** (in the order stated by
+`wobbly-honking-cascade.md`'s own Phase 15 section, sequenced this way
+since cpDBcc/cpScc/cpTRAPcc share the identical TYPE=001 opcode slot
+and the identical `cpcc_*` FSM this sub-phase already built): cpDBcc
+(Dn counter + branch, no EA — next lowest risk), cpScc (Dn-direct and
+simple-EA-only first, matching this project's own repeated "non-indexed
+EA first" precedent), cpTRAPcc (reuses the existing `dec_is_trapv`/
+`eu_trapv_req` path directly, trivial once TF is known), then dedicated
+Coprocessor Protocol Violation test coverage (currently wired but
+unverified — see above).
+
 ## To Do
 
 No outstanding plan of any kind remains for RTL correctness as of Phase

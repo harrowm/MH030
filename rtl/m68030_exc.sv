@@ -101,6 +101,7 @@ module m68030_exc (
     input  logic        linea_req,
     input  logic        linef_req,
     input  logic        fmt_err_req,
+    input  logic        cpviol_req,     // Coprocessor Protocol Violation (vector 13)
     input  logic        div_zero_req,
     input  logic        chk_req,
     input  logic        mmu_config_req, // PMOVE TC/CRP/SRP config error (vector 56)
@@ -196,6 +197,7 @@ module m68030_exc (
     localparam [7:0] VEC_TRACE    = 8'd9;
     localparam [7:0] VEC_LINE_A   = 8'd10;
     localparam [7:0] VEC_LINE_F   = 8'd11;
+    localparam [7:0] VEC_CPVIOL   = 8'd13;
     localparam [7:0] VEC_FMT_ERR  = 8'd14;
     localparam [7:0] VEC_MMU_CONFIG = 8'd56;
     localparam [7:0] VEC_SPURIOUS = 8'd24;  // Spurious Interrupt (IACK BERR/timeout)
@@ -323,6 +325,11 @@ module m68030_exc (
             exc_pending = 1'b1; pend_vec = VEC_LINE_A;    pend_fmt = FMT_SHORT;
         end else if (linef_req) begin
             exc_pending = 1'b1; pend_vec = VEC_LINE_F;    pend_fmt = FMT_SHORT;
+        end else if (cpviol_req) begin
+            // Table 8-1: vector 13, Format $0 (4-word) short frame -- same
+            // shape as Format Error/Illegal/Privilege/Line-A/Line-F, no
+            // dedicated extended frame documented for this vector.
+            exc_pending = 1'b1; pend_vec = VEC_CPVIOL;    pend_fmt = FMT_SHORT;
         end else if (fmt_err_req) begin
             exc_pending = 1'b1; pend_vec = VEC_FMT_ERR;   pend_fmt = FMT_SHORT;
         end else if (div_zero_req) begin

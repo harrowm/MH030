@@ -366,6 +366,7 @@ module eu_seq (
     output logic        eu_linea_req,    // Line-A opcode → vector 10
     output logic        eu_linef_req,    // Line-F non-FPU → vector 11
     output logic        eu_fmt_err_req,  // RTE format error → vector 14
+    output logic        eu_cpviol_req,   // Coprocessor Protocol Violation → vector 13
     input  logic        exc_sr_wr_en     // from exc controller: interrupt taken, resume STOP
 );
 

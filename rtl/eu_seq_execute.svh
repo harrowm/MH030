@@ -736,6 +736,25 @@
     // Gated one-shot pulse, mirroring chk_trap's own shape exactly.
     wire cpsr_fmt_err_w = cpsr_fmt_err_raw && !cpsr_fmt_err_fired_r;
 
+    // cpBcc/cpDBcc/cpScc/cpTRAPcc dispatch FSM state (Phase 15,
+    // wobbly-honking-cascade.md cross-repo item) -- declared early for
+    // ex_mem_stall, same convention as cpsr_*/fpu_run_r above. This first
+    // cut implements cpBcc.W/.L only; cpcc_sel_r/cpcc_abort_r are named
+    // generically since cpDBcc/cpScc/cpTRAPcc will reuse this same FSM
+    // shape (write condition selector to Condition CIR, poll Response CIR)
+    // in later sub-phases.
+    logic        cpcc_start_r, cpcc_wr_r, cpcc_resp_r, cpcc_abort_r;
+    logic [5:0]  cpcc_sel_r;
+    // one-shot protocol-violation trigger, identical shape to
+    // cpsr_fmt_err_raw/cpsr_fmt_err_fired_r immediately above.
+    logic        cpcc_protoviol_raw, cpcc_protoviol_fired_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                   cpcc_protoviol_fired_r <= 1'b0;
+        else if (!ex_valid)           cpcc_protoviol_fired_r <= 1'b0;
+        else if (cpcc_protoviol_raw)  cpcc_protoviol_fired_r <= 1'b1;
+    end
+    wire cpcc_protoviol_w = cpcc_protoviol_raw && !cpcc_protoviol_fired_r;
+
     // MMU instruction FSM state — declared early for ex_mem_stall
     logic        pflush_start_r, pflush_req_r;
     logic        pflush_all_r;
@@ -989,6 +1008,7 @@
                           cpsr_start_r || cpsr_run_r ||
                           cpsr_mem_fmt_r || cpsr_cir_wr_r || cpsr_cir_echo_r ||
                           cpsr_abort_r || cpsr_xfer_cir_r || cpsr_xfer_mem_r ||
+                          cpcc_start_r || cpcc_wr_r || cpcc_resp_r || cpcc_abort_r ||
                           memind_start_r || memind_inner_r || memind_outer_r ||
                           pflush_start_r || pflush_req_r ||
                           ptest_start_r  || ptest_run_r  ||
@@ -1710,7 +1730,7 @@
     logic ex_will_except;
     assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
                                           ex_is_priv || ex_is_linea || ex_is_linef) ||
-                             chk_trap || div_trap || eu_fmt_err_req || bkpt_trap_w;
+                             chk_trap || div_trap || eu_fmt_err_req || eu_cpviol_req || bkpt_trap_w;
 
     // Phase 150 Stage 1 (plan.md): mem_berr-driven dispatch race, the same
     // hazard class as ex_will_except's own gap above but for a BUS ERROR
@@ -1808,6 +1828,13 @@
     logic        ex_is_dbcc;
     logic [3:0]  ex_dbcc_cond;
     logic [31:0] ex_dbcc_disp;
+    // Phase 15 (wobbly-honking-cascade.md): cpBcc EX-stage capture --
+    // mirrors ex_is_dbcc/ex_dbcc_disp exactly, but the branch decision
+    // comes from the cpcc_* FSM's own coprocessor CIR round-trip further
+    // down, not eval_cc.
+    logic        ex_is_cpbcc;
+    logic [5:0]  ex_cpcc_sel;
+    logic [31:0] ex_cpcc_disp;
     logic [31:0] ex_decode_pc;
     assign ex_decode_pc_out = ex_decode_pc;
     // Memory-access EX signals
@@ -1886,6 +1913,9 @@
             ex_is_dbcc        <= 1'b0;
             ex_dbcc_cond      <= 4'h0;
             ex_dbcc_disp      <= 32'h0;
+            ex_is_cpbcc       <= 1'b0;
+            ex_cpcc_sel       <= 6'h0;
+            ex_cpcc_disp      <= 32'h0;
             ex_decode_pc      <= 32'h0;
             ex_is_mem_rd      <= 1'b0;
             ex_is_mem_wr      <= 1'b0;
@@ -2018,6 +2048,7 @@
             ex_sext           <= 1'b0;
             ex_sext_from_byte <= 1'b0;
             ex_is_dbcc        <= 1'b0;
+            ex_is_cpbcc       <= 1'b0;
             ex_is_mem_rd      <= 1'b0;
             ex_is_mem_wr      <= 1'b0;
             ex_is_lea         <= 1'b0;
@@ -2157,6 +2188,9 @@
             ex_is_dbcc        <= dec_is_dbcc;
             ex_dbcc_cond      <= dec_branch_cond;
             ex_dbcc_disp      <= dec_branch_disp;
+            ex_is_cpbcc       <= dec_is_cpbcc;
+            ex_cpcc_sel       <= dec_cpcc_sel;
+            ex_cpcc_disp      <= dec_branch_disp;
             ex_decode_pc      <= decode_pc;
             ex_is_mem_rd      <= dec_is_mem_rd;
             ex_is_mem_wr      <= dec_is_mem_wr;
@@ -3312,6 +3346,112 @@
     // cpsr_fmt_err_raw's own assign -- see its declaration (near the other
     // cpsr_* registers) for why this needs no Icarus forward-reference split.
     assign cpsr_fmt_err_raw = cpsr_abort_r && (eu_coproc_ack || eu_coproc_berr);
+
+    // -----------------------------------------------------------------------
+    // cpBcc dispatch FSM (Phase 15, wobbly-honking-cascade.md cross-repo
+    // item -- MH882 companion coprocessor, once its own Phase 10 gave it
+    // real Condition CIR predicate logic, is exactly the missing piece
+    // MH030's own CLAUDE.md had flagged this instruction family against).
+    //
+    // Protocol (MC68030UM.pdf Figure 10-8/10.2.2.1.2): write the condition
+    // selector (this instruction's own bits[5:0], cpcc_sel_r) to the
+    // Condition CIR ($0E), then read the Response CIR ($00) until a
+    // recognized Null primitive (CA=0) arrives; its own bit 0 (TF) decides
+    // branch/no-branch. This first sub-phase implements cpBcc.W/.L only --
+    // cpcc_wr_r/cpcc_resp_r/cpcc_abort_r are deliberately named generically
+    // since cpDBcc/cpScc/cpTRAPcc (later sub-phases of this same plan item)
+    // reuse this identical FSM shape, differing only in what happens once
+    // TF is known.
+    //
+    // Response word layout: this implementation decodes it EXACTLY as
+    // MH882's own rtl/m68882_cir_pkg.sv response_word() assembles it
+    // (bit31=CA, bit30=PC, bit29=DR, bits[28:16]=13-bit primitive payload)
+    // rather than re-deriving the layout from MC68030UM.pdf's own Figure
+    // 10-22/10-24 prose, which is internally self-contradictory here (the
+    // general-format prose says "Bit[4], the PC bit" while the Null
+    // Primitive figure's own column layout places PC one bit below CA --
+    // i.e. bit 14 of a 16-bit response word -- a plausible single-digit
+    // OCR loss, "Bit[14]" read as "Bit[4]"). MH882's own Phase 10
+    // implementation is the authoritative, already-tested source of truth
+    // for the actual bits this project's own chosen coprocessor will put
+    // on the bus, so this decode matches THAT directly: a Null primitive
+    // (PRIM_NULL=13'h0000) has every payload bit 0 except bit0 (TF), i.e.
+    // payload[12:1]==0 with TF at payload[0] (rdata[16]).
+    //
+    // Only the Null primitive is recognized (the only one a Condition-CIR
+    // dialog ever legitimately returns per Figure 10-8) and the PC bit is
+    // not serviced (MH882's own Condition CIR path never sets it, Phase
+    // 10) -- both a PC-bit request and any non-Null payload are treated as
+    // an unrecognized primitive, matching 10.4's own general statement
+    // ("Any response primitive that the MC68030 does not recognize causes
+    // it to initiate protocol violation exception processing"). Per
+    // 10.3.2, the abort mask ($0001) is written to the Control CIR before
+    // the exception fires, mirroring cpsr_abort_r's own identical
+    // Format-Error path exactly. CA=1 (come again) is serviced by a bare
+    // reread with no interrupt servicing, the same deliberate scope
+    // limitation cpsr_run_r's own NOT_READY retry already documents --
+    // MH882's own condition-eval path never actually sets CA=1 either, so
+    // this is defensive-only.
+    // -----------------------------------------------------------------------
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            cpcc_start_r <= 1'b0;
+            cpcc_wr_r    <= 1'b0;
+            cpcc_resp_r  <= 1'b0;
+            cpcc_abort_r <= 1'b0;
+            cpcc_sel_r   <= 6'h0;
+        end else begin
+            if (!cpcc_start_r && !cpcc_wr_r && !cpcc_resp_r && !cpcc_abort_r &&
+                instr_ack && dec_is_cpbcc) begin
+                cpcc_start_r <= 1'b1;
+                cpcc_sel_r   <= dec_cpcc_sel;
+            end else if (cpcc_start_r) begin
+                cpcc_start_r <= 1'b0;
+                cpcc_wr_r    <= 1'b1;
+            end else if (cpcc_wr_r && eu_coproc_ack) begin
+                cpcc_wr_r   <= 1'b0;
+                cpcc_resp_r <= 1'b1;
+            end else if (cpcc_wr_r && eu_coproc_berr) begin
+                cpcc_wr_r <= 1'b0;
+            end else if (cpcc_resp_r && eu_coproc_ack) begin
+                if (eu_coproc_rdata[30] || eu_coproc_rdata[28:17] != 12'h0) begin
+                    // PC bit set, or a non-Null function code -- neither
+                    // recognized nor serviced by this implementation.
+                    cpcc_resp_r  <= 1'b0;
+                    cpcc_abort_r <= 1'b1;
+                end else if (eu_coproc_rdata[31]) begin
+                    // CA=1, recognized Null -- come again (no interrupt
+                    // servicing, matching cpsr_run_r's own precedent).
+                end else begin
+                    // CA=0, recognized Null -- condition resolved. The
+                    // actual branch decision (cpcc_branch_taken below)
+                    // reads eu_coproc_rdata LIVE this same cycle, mirroring
+                    // cpsr_mem_fmt_r's own "decide off the exact ack cycle"
+                    // convention -- nothing downstream needs a registered
+                    // copy of TF.
+                    cpcc_resp_r <= 1'b0;
+                end
+            end else if (cpcc_resp_r && eu_coproc_berr) begin
+                cpcc_resp_r <= 1'b0;
+            end else if (cpcc_abort_r && (eu_coproc_ack || eu_coproc_berr)) begin
+                cpcc_abort_r <= 1'b0;
+            end
+        end
+    end
+
+    // cpcc_protoviol_raw's own assign -- see its declaration (near
+    // cpsr_fmt_err_raw) for why this needs no Icarus forward-reference
+    // split. Mirrors cpsr_fmt_err_raw exactly.
+    assign cpcc_protoviol_raw = cpcc_abort_r && (eu_coproc_ack || eu_coproc_berr);
+
+    // Branch decision: fires the exact cycle a recognized (CA=0) Null
+    // response arrives, reading TF live off eu_coproc_rdata (see the FSM's
+    // own comment above for why). ex_is_cpbcc gates this to cpBcc
+    // specifically, ready for cpDBcc/cpScc to add their own sibling terms
+    // here once implemented.
+    wire cpcc_resp_done = cpcc_resp_r && eu_coproc_ack && !eu_coproc_rdata[30] &&
+                          (eu_coproc_rdata[28:17] == 12'h0) && !eu_coproc_rdata[31];
+    wire cpcc_branch_taken = cpcc_resp_done && ex_is_cpbcc && eu_coproc_rdata[16];
 
     // -----------------------------------------------------------------------
     // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3; live
@@ -5042,12 +5182,13 @@
                            (rte_phase_r == 2'd2)) &&
                           !eu_fmt_err_req;
 
-    assign branch_taken  = dec_branch_taken | ex_dbcc_taken |
+    assign branch_taken  = dec_branch_taken | ex_dbcc_taken | cpcc_branch_taken |
                            ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
                            ex_rts_taken | ex_rtr_taken | ex_rte_taken;
 
     assign branch_target = dec_branch_taken                         ? (decode_pc    + 32'd2 + dec_branch_disp)
                          : ex_dbcc_taken                            ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)
+                         : cpcc_branch_taken                        ? (ex_decode_pc + 32'd2 + ex_cpcc_disp)
                          : ex_bsr_taken                             ? ex_bsr_target
                          // docs/*.md review (Phase 250 frame layout fix):
                          // RTE's own phase-1 read is now {PC lo, fmtvec}
@@ -5153,6 +5294,10 @@
                             (ex_valid && ex_is_rte && rte_phase_r == 2'd2 && mem_ack &&
                              !rte_ver_valid(mem_rdata[15:12])) ||
                             cpsr_fmt_err_w;
+
+    // Coprocessor Protocol Violation (vector 13) -- see cpcc_protoviol_raw's
+    // own FSM comment above for the full derivation.
+    assign eu_cpviol_req = cpcc_protoviol_w;
 
     // STOP — SR write fires first cycle STOP is in EX (before stop_r is set)
     assign stop_sr_wr_en = ex_valid && ex_is_stop && !stop_r;
@@ -5529,30 +5674,44 @@
     // CIR select values (byte offset per Figure 10-5): Save=0x04,
     // Restore=0x06, Control=0x02, Operand=0x10.
     // -----------------------------------------------------------------------
+    // Phase 15 (wobbly-honking-cascade.md): cpcc_wr_r/cpcc_resp_r/
+    // cpcc_abort_r (cpBcc's own Condition/Response/Control CIR dialog)
+    // join the same shared eu_coproc_* bus -- mutually exclusive with
+    // fpu_run_r/cpsr_* for the identical reason (only one instruction
+    // occupies EX at a time).
     assign eu_coproc_req   = fpu_run_r || cpsr_run_r || cpsr_cir_wr_r ||
-                             cpsr_cir_echo_r || cpsr_abort_r || cpsr_xfer_cir_r;
-    // Reads by default (Save/Restore CIR read, Restore-CIR echo read, and
-    // the save-direction Operand CIR read) -- explicit writes for
-    // cpsr_cir_wr_r (format word -> Restore CIR), cpsr_abort_r (abort mask
-    // -> Control CIR), and the restore-direction Operand CIR write.
+                             cpsr_cir_echo_r || cpsr_abort_r || cpsr_xfer_cir_r ||
+                             cpcc_wr_r || cpcc_resp_r || cpcc_abort_r;
+    // Reads by default (Save/Restore CIR read, Restore-CIR echo read,
+    // Response CIR read, and the save-direction Operand CIR read) --
+    // explicit writes for cpsr_cir_wr_r (format word -> Restore CIR),
+    // cpcc_wr_r (condition selector -> Condition CIR), (cpsr_abort_r ||
+    // cpcc_abort_r) (abort mask -> Control CIR), and the restore-direction
+    // Operand CIR write.
     assign eu_coproc_rw    = cpsr_cir_wr_r ? 1'b0
-                            : cpsr_abort_r ? 1'b0
+                            : (cpsr_abort_r || cpcc_abort_r) ? 1'b0
                             : (cpsr_xfer_cir_r && cpsr_is_restore_r) ? 1'b0
+                            : cpcc_wr_r ? 1'b0
                             : 1'b1;
     assign eu_coproc_fc    = 3'b111;        // CPU Space
     assign eu_coproc_siz   = 2'b00;         // longword
     assign eu_coproc_wdata = cpsr_cir_wr_r  ? {cpsr_fmt_r, 16'h0}
-                            : cpsr_abort_r  ? {16'h0001, 16'h0}
+                            : (cpsr_abort_r || cpcc_abort_r) ? {16'h0001, 16'h0}
                             : cpsr_xfer_cir_r ? cpsr_xfer_val_r
+                            : cpcc_wr_r ? {10'h0, cpcc_sel_r, 16'h0}
                             : 32'h0;
     assign eu_coproc_addr  = (cpsr_cir_wr_r || cpsr_cir_echo_r)
         ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h06}                   // Restore CIR
-        : cpsr_abort_r
+        : (cpsr_abort_r || cpcc_abort_r)
         ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h02}                   // Control CIR
         : cpsr_xfer_cir_r
         ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h10}                   // Operand CIR
         : cpsr_run_r
         ? {12'h000, 4'b0010, 3'b001, 8'h00, cpsr_is_restore_r ? 5'h06 : 5'h04}
+        : cpcc_wr_r
+        ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h0e}                   // Condition CIR
+        : cpcc_resp_r
+        ? {12'h000, 4'b0010, 3'b001, 8'h00, 5'h00}                   // Response CIR
         : {12'h000, 4'b0010, fpu_prim_r, 2'b01, 11'h000};
 
     // -----------------------------------------------------------------------

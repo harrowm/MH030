@@ -56,28 +56,35 @@ Keep each module under ~3000 lines. Do not put everything in one file.
 - MOVEP byte-interleaved (individual byte cycles, address increments by 2)
 
 **Coprocessor conditional instructions (cpBcc/cpDBcc/cpScc/cpTRAPcc) —
-deliberate, currently out of scope**: Phase 157/199 implemented the CIR
-access bus protocol itself and cpSAVE/cpRESTORE's own full state-transfer
-handshake, closing those items. The four coprocessor-conditional
-instructions (Branch/Test-Decrement-Branch/Set/Trap on Coprocessor
-Condition, MC68030UM.pdf §10.2.2/§10.2.3/§10.2.4/§10.2.5) are NOT decoded
-or implemented anywhere in this RTL (confirmed via grep — zero occurrences
-of any of the four mnemonics in `rtl/`) and were never previously flagged
-as a known gap. Unlike cpSAVE/cpRESTORE (a fixed-shape state-transfer
-protocol this project could fully specify and test without a real
-coprocessor attached), the four conditional instructions require the
-MAIN PROCESSOR to read back a genuine coprocessor-evaluated condition
-(via the Condition CIR / "evaluate and return condition" primitive) and
-act on it — meaningfully testing this needs an actual attached
-coprocessor model (a real or emulated FPU) exercising its own condition-
-evaluation semantics, which this project has never built and has no
-current plan to. Documented here as a deliberate scope boundary (Phase
-248 item #7, docs/*.md review), not silently dropped. Coprocessor
-Protocol Violation (vector 13, MC68030UM.pdf §10.5.1.1/§10.5.4) — the
-exception either the main processor or a coprocessor can signal when
-the CIR handshake itself is malformed — is likewise unimplemented for
-the same reason (nothing in this project ever drives a genuine
-protocol-violation condition to detect).
+IN PROGRESS, cpBcc done (Phase 281, `wobbly-honking-cascade.md`
+cross-repo item)**: Phase 157/199 implemented the CIR access bus
+protocol itself and cpSAVE/cpRESTORE's own full state-transfer
+handshake. This item was originally documented here as a deliberate
+scope boundary (Phase 248 item #7) because meaningfully testing it
+needs a real attached coprocessor evaluating genuine condition
+predicates — MH882 (`/Users/malcolm/MH882`, this project's own
+standalone MC68881/68882 companion FPU implementation), once its own
+Phase 10 gave it real 32-predicate Condition CIR logic, is exactly that
+missing piece, closing the original blocker. **cpBcc.W/.L is now
+decoded and implemented** (`dec_is_cpbcc`, `rtl/eu_seq_decode.svh`; the
+`cpcc_*` CIR dispatch FSM, `rtl/eu_seq_execute.svh`) — see `plan.md`
+Phase 281 for the full protocol/encoding derivation and the response-
+word bit-layout resolution (read directly from MH882's own tested
+`response_word()` rather than the manual's self-contradictory OCR'd
+prose). Coprocessor Protocol Violation (vector 13, MC68030UM.pdf
+§10.5.1.1/§10.5.4) is likewise now wired end-to-end (`eu_cpviol_req`,
+`m68030_exc.sv`'s new `VEC_CPVIOL`) — mirroring `eu_fmt_err_req`'s
+existing shape — but not yet directly tested (no dedicated coverage of
+an unrecognized primitive triggering it yet; flagged in `plan.md`'s own
+Phase 281 writeup as this plan item's own next-but-one sub-phase). Real
+cpDBcc, cpScc, and cpTRAPcc remain NOT YET implemented (confirmed via
+grep — zero occurrences of those three mnemonics anywhere in `rtl/`) —
+see `plan.md` Phase 281's own "Remaining sub-phases" list for the
+planned order (cpDBcc next, since it shares cpBcc's own no-EA
+simplicity; cpScc's own initial cut will be Dn-direct/simple-EA-only,
+matching this project's established "non-indexed EA first" precedent;
+cpTRAPcc reuses the existing `dec_is_trapv`/`eu_trapv_req` path
+directly).
 
 ## S-State Signal Timing (Critical)
 
@@ -709,12 +716,15 @@ itself. **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
 **Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
-split has shifted slightly across later phases as harness gaps closed). No outstanding plan
-of any kind remains in this project as of this condensation — check with the user for new
-work. Permanently out of scope by design, not started (re-confirmed, do not re-suggest):
-coprocessor conditional instructions + Coprocessor Protocol Violation; STATUS's other 3
-sub-cases + REFILL#; PTEST's DSACK-breadth exclusion + I-cache CEI's per-line-only
-limitation (pre-existing architecture boundaries, not bugs).
+split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
+cover any 68020+-only family, coprocessor conditionals included, so this count is unaffected
+by Phase 281). **One active cross-repo plan item as of Phase 281** (`plan.md`'s own Phase 281
+section, `wobbly-honking-cascade.md`): coprocessor conditional instructions — cpBcc.W/.L done,
+cpDBcc/cpScc/cpTRAPcc/dedicated-Protocol-Violation-coverage remaining, in that order. No other
+outstanding plan of any kind remains. Permanently out of scope by design, not started
+(re-confirmed, do not re-suggest): STATUS's other 3 sub-cases + REFILL#; PTEST's DSACK-breadth
+exclusion + I-cache CEI's per-line-only limitation (pre-existing architecture boundaries, not
+bugs).
 
 ## Verification Commands
 
@@ -738,13 +748,19 @@ actually use (proven, one `vvp` process per test). For quick full-corpus checks,
 `compare` logic, validated to produce identical verdicts:
 
 ```bash
-make sim/harte_batch                              # Icarus backend (build once)
 make sim/harte_vbatch                             # Verilator backend (build once)
 python3 -u scripts/run_harte_batch.py tests/harte/*.json.gz tests/harte/*.json.bin \
     --backend verilator -j 10 --chunk-size 300     # full 124-suite corpus in ~3m18s
-# (chunk-size 150 is the tuned default for the Icarus backend specifically;
-#  the Verilator full-sweep timing above was measured at chunk-size 300)
 ```
+
+**Use the Verilator backend (`--backend verilator`) for the full 124-suite
+sweep, not Icarus.** `make sim/harte_batch` (Icarus backend) exists and is
+still valid for a single suite or a quick spot-check, but running the FULL
+corpus through it is dramatically slower than Verilator's ~3m18s — a real
+attempt (Phase 281 verification) was still running after 8+ minutes at
+`-j 8 --chunk-size 150` and had to be killed and redone with Verilator
+instead. Don't default to Icarus for this specific full-sweep gate; reach
+for `sim/harte_vbatch` directly.
 
 Bus log format: `BUS R|W %08x %08x fc=%b siz=%b` (siz: 00=longword, 01=byte, 10=word, 11=line)
 

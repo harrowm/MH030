@@ -39,6 +39,16 @@
     logic        dec_bit_from_reg;
     logic        dec_is_branch;    // BRA/Bcc: redirects PC at decode time
     logic        dec_is_dbcc;      // DBcc: branch decision deferred to EX stage
+    // Phase 15 (wobbly-honking-cascade.md, cross-repo item): cpBcc.
+    // Structurally like Bcc, but the true/false condition comes from a
+    // coprocessor Condition CIR round-trip (cpcc_* FSM, eu_seq_execute.svh)
+    // instead of eval_cc, so the branch decision can't resolve at decode
+    // time -- reuses dec_branch_disp for the (already sign-extended,
+    // already PC+2-relative -- identical formula to plain Bcc) displacement.
+    logic        dec_is_cpbcc;
+    logic [5:0]  dec_cpcc_sel;     // condition selector written to Condition CIR
+                                    // (shared field name: also used by cpDBcc/
+                                    // cpScc/cpTRAPcc once those land)
     logic        dec_reads_ccr;    // stall if pending CCR write in EX or WB
     logic        dec_reads_usp;    // stall if pending USP write (MOVE An,USP) in EX or WB -- Phase 161 Part A Stage A2
     logic [3:0]  dec_branch_cond;  // condition code for Bcc/Scc/DBcc
@@ -346,6 +356,8 @@
         // ── Branches / jumps ───────────────────────────────────────────────────
         dec_is_branch    = 1'b0;
         dec_is_dbcc      = 1'b0;
+        dec_is_cpbcc     = 1'b0;
+        dec_cpcc_sel     = 6'h0;
         dec_branch_cond  = 4'h0;
         dec_branch_disp  = 32'h0;
         dec_is_jmp       = 1'b0;
@@ -6155,6 +6167,39 @@
                                                   dec_an_delta, dec_ea_offset);
                             end
                         end
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b010) begin
+                        // cpBcc.W: cpid=1, TYPE=010 (Figure 10-9). The
+                        // condition selector is bits[5:0] of THIS F-line op
+                        // word itself (the manual's own text says the whole
+                        // op word is written to the Condition CIR, but only
+                        // bits[5:0] are architecturally meaningful --
+                        // Figure 10-20 -- so writing just that 6-bit field
+                        // is equivalent and matches cpScc/cpDBcc/cpTRAPcc's
+                        // own shared mechanism, cpcc_sel_r, below). This
+                        // project's own coprocessor scope never needs
+                        // coprocessor-defined extension words for condition
+                        // evaluation (MH882's own Condition CIR takes the
+                        // selector directly, Phase 10), so exactly 1
+                        // extension word (the 16-bit displacement) follows
+                        // -- identical shape/formula to plain Bcc.W, reusing
+                        // dec_branch_disp directly.
+                        dec_valid       = 1'b1;
+                        dec_is_cpbcc    = 1'b1;
+                        dec_unit        = UNIT_NONE;
+                        dec_cpcc_sel    = instr_word[5:0];
+                        dec_needs_ext   = 1'b1;
+                        dec_branch_disp = {{16{ext_data[15]}}, ext_data[15:0]};
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b011) begin
+                        // cpBcc.L: TYPE=011 (Figure 10-10). 2 extension
+                        // words (32-bit displacement, already assembled by
+                        // m68030_seq.sv's own ext_count into ext_data as one
+                        // 32-bit value, identical to plain Bcc.L).
+                        dec_valid       = 1'b1;
+                        dec_is_cpbcc    = 1'b1;
+                        dec_unit        = UNIT_NONE;
+                        dec_cpcc_sel    = instr_word[5:0];
+                        dec_needs_ext   = 1'b1;
+                        dec_branch_disp = ext_data;
                     end else if (f_dn == 3'b001) begin
                         // FPU coprocessor: cpid=1, any ppp or EA mode 4-7.
                         // Issues one CPI CPU Space bus cycle; full protocol in later phases.
@@ -6313,7 +6358,7 @@
     logic dec_is_flow_chg;
     assign dec_is_flow_chg = dec_is_jmp || dec_is_jsr || dec_is_jsr_idx ||
                               dec_is_bsr || dec_is_rts || dec_is_rtr || dec_is_rte ||
-                              dec_is_trap || dec_is_trapv || dec_is_dbcc ||
+                              dec_is_trap || dec_is_trapv || dec_is_dbcc || dec_is_cpbcc ||
                               (dec_is_branch && dec_branch_taken);
     assign dec_is_trace = dec_valid && !dec_is_priv && !dec_is_linea && !dec_is_linef &&
                           (sr_live[15] || (sr_live[14] && dec_is_flow_chg));

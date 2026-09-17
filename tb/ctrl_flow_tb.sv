@@ -242,6 +242,11 @@ module ctrl_flow_tb;
     function automatic [15:0] BCC_B(input [3:0] cc, input [7:0] d8);
         BCC_B = {4'h6, cc, d8};
     endfunction
+    // cpBcc.W (Phase 15, wobbly-honking-cascade.md): F-line, CpID=001,
+    // TYPE={f_dir,f_ss}=010 (Figure 10-9), condition selector in bits[5:0].
+    function automatic [15:0] CPBCC_W(input [5:0] sel);
+        CPBCC_W = {4'hF, 3'b001, 1'b0, 2'b10, sel};
+    endfunction
     function automatic [15:0] MOVE_L(input [2:0] dm, input [2:0] dn);
         MOVE_L = {4'h2, dn, 3'b000, 3'b000, dm};
     endfunction
@@ -288,6 +293,57 @@ module ctrl_flow_tb;
         // own header comment) -- SWAP/EXT/EXG/Scc's own entries all used
         // here went 4->8 ticks, exceeding this fixed post-ack margin's
         // old headroom. Widened 8->16 to stay clear of the new floor.
+        repeat(16) @(posedge clk);
+    endtask
+
+    // Present a cpBcc instruction and service its 2-step CIR dialog as a
+    // stub coprocessor would: ack the Condition CIR write, then answer the
+    // Response CIR read with a recognized (CA=0,PC=0) Null primitive whose
+    // TF bit is the caller-supplied condition -- same manual bit-layout
+    // MH882's own rtl/m68882_cir_pkg.sv response_word() assembles (see
+    // this project's own cpcc_* FSM comment, eu_seq_execute.svh, for the
+    // full derivation). No live MH882 instance here -- mirrors this
+    // project's own established cpSAVE/cpRESTORE precedent (tb/eu_seq_tb.sv)
+    // of a testbench-side CIR stub rather than a cross-repo cosim.
+    // ack_coproc's own idiom (a FRESH @(posedge clk) before asserting ack,
+    // not an immediate blocking reaction to the same edge that revealed
+    // eu_coproc_req) matters here, not just style -- an earlier version of
+    // this task asserted ack in immediate response to the polling loop's
+    // own break, which raced the DUT's own always_ff sampling eu_coproc_ack
+    // on that SAME edge (confirmed via a direct $display trace: the FSM's
+    // cpcc_resp_r state and eu_coproc_ack=1 appeared in the identical
+    // cycle), causing a stray extra ack the FSM's own next state
+    // incorrectly consumed one instruction late. This two-edge shape avoids
+    // it entirely.
+    task automatic run_cpbcc(input logic [15:0] w0, input logic [31:0] disp,
+                             input logic tf);
+        @(posedge clk);
+        instr_word  = w0;
+        instr_valid = 1'b1;
+        ext_data    = disp;
+        ext_valid   = 1'b1;
+        saw_branch  = 1'b0;
+        repeat(200) begin
+            @(posedge clk);
+            if (instr_ack) break;
+        end
+        instr_valid = 1'b0;
+        ext_valid   = 1'b0;
+        // Condition CIR write
+        repeat(200) begin
+            @(posedge clk);
+            if (eu_coproc_req) break;
+        end
+        @(posedge clk); #1; eu_coproc_ack = 1'b1;
+        @(posedge clk); #1; eu_coproc_ack = 1'b0;
+        // Response CIR read
+        repeat(200) begin
+            @(posedge clk);
+            if (eu_coproc_req) break;
+        end
+        eu_coproc_rdata = {3'b000, 12'h000, tf, 16'h0};
+        @(posedge clk); #1; eu_coproc_ack = 1'b1;
+        @(posedge clk); #1; eu_coproc_ack = 1'b0;
         repeat(16) @(posedge clk);
     endtask
 
@@ -722,6 +778,35 @@ module ctrl_flow_tb;
         chk1("CMPM.W: N=0", sr_out[3], 1'b0);
         chk ("CMPM.W: A0=0x0112", dut.u_rf.a_reg[0], 32'h0000_0112);
         chk ("CMPM.W: A1=0x0116", dut.u_rf.a_reg[1], 32'h0000_0116);
+
+        // ==================================================================
+        // cpBcc.W taken: decode_pc=0x3000, d16=0x0100 → target=0x3102
+        // (Phase 15, wobbly-honking-cascade.md)
+        // ==================================================================
+        $display("--- cpBcc.W taken (coprocessor returns TF=1) ---");
+        decode_pc = 32'h0000_3000;
+        run_cpbcc(CPBCC_W(6'd0), 32'h0000_0100, 1'b1);
+        chk1("cpBcc.W: taken",         saw_branch,  1'b1);
+        chk ("cpBcc.W: target=0x3102", last_target, 32'h0000_3102);
+
+        // ==================================================================
+        // cpBcc.W not taken: coprocessor returns TF=0
+        // ==================================================================
+        $display("--- cpBcc.W not taken (coprocessor returns TF=0) ---");
+        decode_pc = 32'h0000_4000;
+        run_cpbcc(CPBCC_W(6'd0), 32'h0000_0100, 1'b0);
+        chk1("cpBcc.W: not taken", saw_branch, 1'b0);
+
+        // ==================================================================
+        // cpBcc.L taken: decode_pc=0x5000, d32=0x0001_0000 → target=0x15002
+        // TYPE={f_dir,f_ss}=011 (Figure 10-10); ext_data already the
+        // assembled 32-bit displacement, identical shape to Bcc.L.
+        // ==================================================================
+        $display("--- cpBcc.L taken (coprocessor returns TF=1) ---");
+        decode_pc = 32'h0000_5000;
+        run_cpbcc({4'hF, 3'b001, 1'b0, 2'b11, 6'd0}, 32'h0001_0000, 1'b1);
+        chk1("cpBcc.L: taken",         saw_branch,  1'b1);
+        chk ("cpBcc.L: target=0x15002", last_target, 32'h0001_5002);
 
         // ─── summary ──────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);
