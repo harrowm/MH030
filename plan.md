@@ -2510,6 +2510,102 @@ planned as its own dedicated near-term sub-phase — revisit if/when
 asked), cpTRAPcc, dedicated Coprocessor Protocol Violation test
 coverage.
 
+## Phase 281 sub-phase 4 (cpTRAPcc, a later session, `wobbly-honking-cascade.md`
+cross-repo item)
+
+Closes the fourth and last of the four coprocessor conditional
+instructions.
+
+**Encoding** (MC68030UM.pdf Figure 10-13/Table 10-1, confirmed
+directly): F-line, CpID=001, TYPE=001 (the same TYPE cpScc/cpDBcc use),
+mode=111, opmode (`f_reg`, bits[2:0]) = 010 (1 operand word) / 011 (2
+operand words) / 100 (0 operand words). The condition selector is the
+FIRST extension word's own bits[5:0] (`ext_data[5:0]`, mirroring
+cpScc's single-relevant-word convention) — any TRAPcc-handler-only
+operand words the opmode specifies are opaque to the EU (`ext_count`,
+`m68030_seq.sv`, now computes 1/2/3 total ext words per-opmode) and are
+never represented in `ext_data` at all, matching the manual's own text
+("not explicitly used by the MC68030").
+
+**Reused the cpBcc/cpDBcc/cpScc `cpcc_*` FSM unchanged a third time**
+— only the start-trigger condition needed one more broadening.
+
+**Completion** (10.2.2.4.2): TF=1 → initiate exception processing;
+TF=0 → next instruction. Per Table 8-1, cpTRAPcc shares vector 7
+(Format $2/`FMT_INST`) with plain TRAPcc/TRAPV — rather than building
+any new exception-request plumbing, TF=1 asserts the EXISTING
+`eu_trapv_req` output directly (`cptrapcc_taken_w` OR'd into its
+assign). **A new one-shot debounce was needed that plain TRAPV never
+required**: `eu_trapv_req` for plain TRAPcc/TRAPV is `ex_valid &&
+ex_is_trapv` with no debounce at all, safe because that instruction
+resolves and retires within 1-2 cycles; cpTRAPcc's own `ex_valid` stays
+asserted across the ENTIRE multi-cycle CIR wait, so an undebounced
+version would either fire before TF is known or re-fire every stall
+cycle once it is — solved with the identical one-shot
+raw/`_fired_r`/debounced-`_w` shape `chk_trap`/`cpsr_fmt_err_w`/
+`cpcc_protoviol_w` already established.
+
+**A genuine Icarus declaration-order problem, not previously hit by
+this plan item**: `ex_will_except` (a combinational `assign` used at
+line ~1731, near the very top of `eu_seq_execute.svh`) needed to
+include the new debounced pulse, but the natural place to compute it
+(alongside `cpcc_branch_taken`/`cpdbcc_*`/`cpscc_*`, ~3500 lines later,
+depending on the `cpcc_resp_done` wire declared there) is textually
+*after* its own first use — Icarus enforces "declared before used" even
+for a plain module-level `wire`/continuous-assign (not just the
+procedural-block case this project has hit before). Fixed by moving
+`ex_is_cptrapcc`'s own declaration and the ENTIRE `cptrapcc_taken_raw`/
+`_fired_r`/`_w` computation up to right after `cpcc_protoviol_raw`
+(~line 758, already the established "declared early for `ex_mem_stall`"
+zone this file uses for exactly this class of problem), expanding its
+own condition inline from `cpcc_resp_r`/`eu_coproc_ack`/
+`eu_coproc_rdata` directly (all of which — usefully — are ALSO already
+available that early) instead of depending on the later `cpcc_resp_done`
+convenience wire.
+
+**A deliberate, documented correctness gap**: `dec_is_cptrapcc` is
+NOT included in `dec_is_flow_chg`'s own decode-time OR-list (unlike
+plain `dec_is_trapv`, which IS included unconditionally — safe there
+only because `dec_is_trapv` itself is already gated on `eval_cc` having
+already resolved true at decode time). cpTRAPcc's own outcome isn't
+known until long after decode, so correctly recognizing it as a T0
+"change of flow" instruction only when TF=1 would need deferring the
+trace decision the same way everything else about this instruction is
+deferred — a real additional mechanism, not attempted here. Net effect:
+T0 tracing will NOT fire for a taken cpTRAPcc (a narrow, likely
+rarely-exercised edge case — T0 tracing interacting with the
+transcendentally-rare combination of "tracing enabled" + "cpTRAPcc
+executed" + "condition true"). Documented here rather than silently
+left broken; revisit if ever actually needed.
+
+**Testing**: `tb/ctrl_flow_tb.sv` gained a `CPTRAPCC` (opmode=100, 0
+operand words) constant, `run_cptrapcc()` (delegates to `run_cpbcc()`),
+a new `saw_trapv` latch (mirrors `saw_branch`'s own shape, watching
+`eu_trapv_req`), and 2 checks (TF=1 fires, TF=0 doesn't). Both passed
+on the first run.
+
+**Files**: `rtl/eu_seq_decode.svh` (`dec_is_cptrapcc`, 1 new decode
+arm), `rtl/m68030_seq.sv` (`is_cptrapcc`, 3 new per-opmode `ext_count`
+entries), `rtl/eu_seq_execute.svh` (`ex_is_cptrapcc`/`cptrapcc_taken_*`
+moved to the early declaration zone, `eu_trapv_req`/`ex_will_except`
+extended), `tb/ctrl_flow_tb.sv` (new tests).
+
+**`make test`: 37/37 clean, zero regressions. `make cosim_grp`: 8/8
+clean.** Full 124-suite Harte sweep (Verilator backend) re-run and
+confirmed bit-identical to the pre-existing baseline.
+
+**This closes real decode/implementation work for all four coprocessor
+conditional instructions** (cpBcc.W/.L, cpDBcc, cpScc Dn-direct,
+cpTRAPcc). **Remaining, deliberately scoped-out items for this plan
+item**: memory-EA cpScc (deferred indefinitely); dedicated Coprocessor
+Protocol Violation test coverage (the mechanism is wired and has been
+since sub-phase 1, but no test has yet driven an unrecognized response
+primitive through it); the T0-tracing gap noted above; and, per the
+plan's own original scoping, a genuine cross-repo cosim using a live
+MH882 instance as the coprocessor (every sub-phase so far used the
+same testbench-side CIR stub this project's own cpSAVE/cpRESTORE
+precedent already established, not a live coprocessor).
+
 ## To Do
 
 No outstanding plan of any kind remains for RTL correctness as of Phase

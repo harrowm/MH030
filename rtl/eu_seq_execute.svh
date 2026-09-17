@@ -755,6 +755,31 @@
     end
     wire cpcc_protoviol_w = cpcc_protoviol_raw && !cpcc_protoviol_fired_r;
 
+    // cpTRAPcc -- declared early (with ex_is_cptrapcc itself, normally
+    // captured alongside ex_is_cpbcc/etc. much later in this file) because
+    // ex_will_except (below) needs the debounced cptrapcc_taken_w pulse,
+    // and Icarus requires a plain wire's declaration to textually precede
+    // any reference to it, even in an unrelated continuous assign (the
+    // same "declaration after use" requirement this project has hit
+    // before). Expanded inline from the Condition-CIR response bits
+    // directly (cpcc_resp_done's own equivalent expression, declared much
+    // later alongside cpcc_branch_taken/cpdbcc_*/cpscc_* -- not reused
+    // here for the identical reason) rather than depending on that later
+    // wire.
+    logic        ex_is_cptrapcc;
+    wire         cptrapcc_taken_raw = cpcc_resp_r && eu_coproc_ack &&
+                                      !eu_coproc_rdata[30] &&
+                                      (eu_coproc_rdata[28:17] == 12'h0) &&
+                                      !eu_coproc_rdata[31] &&
+                                      ex_is_cptrapcc && eu_coproc_rdata[16];
+    logic        cptrapcc_taken_fired_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                     cptrapcc_taken_fired_r <= 1'b0;
+        else if (!ex_valid)             cptrapcc_taken_fired_r <= 1'b0;
+        else if (cptrapcc_taken_raw)    cptrapcc_taken_fired_r <= 1'b1;
+    end
+    wire         cptrapcc_taken_w = cptrapcc_taken_raw && !cptrapcc_taken_fired_r;
+
     // MMU instruction FSM state — declared early for ex_mem_stall
     logic        pflush_start_r, pflush_req_r;
     logic        pflush_all_r;
@@ -1730,7 +1755,8 @@
     logic ex_will_except;
     assign ex_will_except = ex_valid && (ex_is_trap || ex_is_trapv || ex_is_illegal ||
                                           ex_is_priv || ex_is_linea || ex_is_linef) ||
-                             chk_trap || div_trap || eu_fmt_err_req || eu_cpviol_req || bkpt_trap_w;
+                             chk_trap || div_trap || eu_fmt_err_req || eu_cpviol_req ||
+                             cptrapcc_taken_w || bkpt_trap_w;
 
     // Phase 150 Stage 1 (plan.md): mem_berr-driven dispatch race, the same
     // hazard class as ex_will_except's own gap above but for a BUS ERROR
@@ -1842,6 +1868,9 @@
     // cpScc (Dn-direct only) -- same FSM reuse, completion action is a
     // byte-sized FF/00 write instead of a decrement.
     logic        ex_is_cpscc;
+    // ex_is_cptrapcc is declared early (near cpcc_protoviol_raw above) --
+    // ex_will_except needs the debounced cptrapcc_taken_w pulse computed
+    // from it, and Icarus requires that declared before use.
     logic [31:0] ex_decode_pc;
     assign ex_decode_pc_out = ex_decode_pc;
     // Memory-access EX signals
@@ -1923,6 +1952,7 @@
             ex_is_cpbcc       <= 1'b0;
             ex_is_cpdbcc      <= 1'b0;
             ex_is_cpscc       <= 1'b0;
+            ex_is_cptrapcc    <= 1'b0;
             ex_cpcc_sel       <= 6'h0;
             ex_cpcc_disp      <= 32'h0;
             ex_decode_pc      <= 32'h0;
@@ -2060,6 +2090,7 @@
             ex_is_cpbcc       <= 1'b0;
             ex_is_cpdbcc      <= 1'b0;
             ex_is_cpscc       <= 1'b0;
+            ex_is_cptrapcc    <= 1'b0;
             ex_is_mem_rd      <= 1'b0;
             ex_is_mem_wr      <= 1'b0;
             ex_is_lea         <= 1'b0;
@@ -2202,6 +2233,7 @@
             ex_is_cpbcc       <= dec_is_cpbcc;
             ex_is_cpdbcc      <= dec_is_cpdbcc;
             ex_is_cpscc       <= dec_is_cpscc;
+            ex_is_cptrapcc    <= dec_is_cptrapcc;
             ex_cpcc_sel       <= dec_cpcc_sel;
             ex_cpcc_disp      <= dec_branch_disp;
             ex_decode_pc      <= decode_pc;
@@ -3415,7 +3447,8 @@
             cpcc_sel_r   <= 6'h0;
         end else begin
             if (!cpcc_start_r && !cpcc_wr_r && !cpcc_resp_r && !cpcc_abort_r &&
-                instr_ack && (dec_is_cpbcc || dec_is_cpdbcc || dec_is_cpscc)) begin
+                instr_ack && (dec_is_cpbcc || dec_is_cpdbcc || dec_is_cpscc ||
+                              dec_is_cptrapcc)) begin
                 cpcc_start_r <= 1'b1;
                 cpcc_sel_r   <= dec_cpcc_sel;
             end else if (cpcc_start_r) begin
@@ -3491,6 +3524,15 @@
     // shape as cpdbcc_wr_en, fires exactly once at cpcc_resp_done.
     wire        cpscc_wr_en = cpcc_resp_done && ex_is_cpscc;
     wire [7:0]  cpscc_byte  = eu_coproc_rdata[16] ? 8'hFF : 8'h00;
+
+    // cpTRAPcc completion (10.2.2.4.2): TF=1 -> initiate exception
+    // processing via the EXISTING dec_is_trapv/eu_trapv_req path (Table
+    // 8-1: cpTRAPcc/TRAPcc/TRAPV share vector 7, Format $2/FMT_INST) --
+    // cptrapcc_taken_w itself (and its own one-shot debounce) is computed
+    // early, near cpcc_protoviol_raw, for Icarus declaration-order
+    // reasons; see that declaration's own comment. TF=0 -> next
+    // instruction (nothing to do; any operand words were already skipped
+    // via ext_count).
 
     // -----------------------------------------------------------------------
     // BKPT breakpoint-acknowledge dispatch FSM (Phase 157 Stage 3; live
@@ -5822,7 +5864,10 @@
     // -----------------------------------------------------------------------
     assign eu_trap_req    = ex_valid && ex_is_trap;
     assign eu_trap_num    = ex_trap_num;
-    assign eu_trapv_req   = ex_valid && ex_is_trapv;
+    // cptrapcc_taken_w joins plain TRAPV -- Table 8-1: cpTRAPcc/TRAPcc/
+    // TRAPV share vector 7 (Format $2/FMT_INST), and this project's
+    // existing eu_trapv_req/VEC_TRAPV wiring is exactly that vector+frame.
+    assign eu_trapv_req   = (ex_valid && ex_is_trapv) || cptrapcc_taken_w;
     assign eu_illegal_req = ex_valid && ex_is_illegal;
     assign eu_stop        = stop_r;
 

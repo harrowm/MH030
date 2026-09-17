@@ -49,6 +49,8 @@
     logic        dec_is_cpdbcc;    // cpDBcc: shares the cpBcc's own cpcc_* FSM
                                     // and dec_branch_disp/dec_cpcc_sel fields
     logic        dec_is_cpscc;     // cpScc, Dn-direct only (see decode arm)
+    logic        dec_is_cptrapcc;  // cpTRAPcc: TF=1 reuses dec_is_trapv's own
+                                    // exception path (see cptrapcc_taken_w)
     logic [5:0]  dec_cpcc_sel;     // condition selector written to Condition CIR
                                     // (shared field: cpBcc/cpDBcc/cpScc/cpTRAPcc)
     logic        dec_reads_ccr;    // stall if pending CCR write in EX or WB
@@ -361,6 +363,7 @@
         dec_is_cpbcc     = 1'b0;
         dec_is_cpdbcc    = 1'b0;
         dec_is_cpscc     = 1'b0;
+        dec_is_cptrapcc  = 1'b0;
         dec_cpcc_sel     = 6'h0;
         dec_branch_cond  = 4'h0;
         dec_branch_disp  = 32'h0;
@@ -6269,6 +6272,33 @@
                         dec_cpcc_sel    = ext_data[5:0];
                         dec_dst_reg     = {1'b0, f_reg};   // Dn, read live via rd_b_data (upper 3 bytes preserved)
                         dec_reads_dst   = 1'b1;
+                        dec_needs_ext   = 1'b1;
+                    end else if (f_dn == 3'b001 && {f_dir, f_ss} == 3'b001 &&
+                                 f_mode == 3'b111 &&
+                                 (f_reg == 3'b010 || f_reg == 3'b011 ||
+                                  f_reg == 3'b100)) begin
+                        // cpTRAPcc: TYPE=001 (shared with cpScc/cpDBcc),
+                        // mode=111, opmode(f_reg)=010(1 operand word)/
+                        // 011(2 operand words)/100(0 operand words)
+                        // (Figure 10-13/Table 10-1). Condition selector is
+                        // the FIRST extension word's own bits[5:0] --
+                        // ext_data[5:0], mirroring cpScc's own single-
+                        // relevant-word convention (any TRAPcc-handler-
+                        // only operand words per opmode are opaque to the
+                        // EU, skipped entirely via ext_count,
+                        // m68030_seq.sv -- never represented in ext_data
+                        // at all, since nothing here ever reads them).
+                        // On TF=1, reuses the EXISTING dec_is_trapv/
+                        // eu_trapv_req exception path directly (Table 8-1:
+                        // cpTRAPcc/TRAPcc/TRAPV share vector 7, Format $2/
+                        // FMT_INST) -- see cptrapcc_taken_w,
+                        // eu_seq_execute.svh, for how TF (known only
+                        // after the CIR round-trip, unlike plain TRAPcc's
+                        // own eval_cc-at-decode-time resolution) gates it.
+                        dec_valid       = 1'b1;
+                        dec_is_cptrapcc = 1'b1;
+                        dec_unit        = UNIT_NONE;
+                        dec_cpcc_sel    = ext_data[5:0];
                         dec_needs_ext   = 1'b1;
                     end else if (f_dn == 3'b001) begin
                         // FPU coprocessor: cpid=1, any ppp or EA mode 4-7.

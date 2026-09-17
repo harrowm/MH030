@@ -192,6 +192,15 @@ module ctrl_flow_tb;
         end
     end
 
+    // Latch eu_trapv_req (Phase 281 sub-phase 4, cpTRAPcc's own one-shot
+    // debounced pulse) so it can be checked after run_cpbcc's own drain
+    // cycles, the same reason saw_branch exists.
+    logic saw_trapv;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)             saw_trapv <= 1'b0;
+        else if (eu_trapv_req)  saw_trapv <= 1'b1;
+    end
+
     // ─── Instruction encodings ────────────────────────────────────────────────
     localparam [15:0] NOP         = 16'h4E71;
     localparam [15:0] RTS         = 16'h4E75;
@@ -257,6 +266,9 @@ module ctrl_flow_tb;
     function automatic [15:0] CPSCC_DN(input [2:0] dn);
         CPSCC_DN = {4'hF, 3'b001, 1'b0, 2'b01, 3'b000, dn};
     endfunction
+    // cpTRAPcc, opmode=100 (0 operand words) (Phase 281 sub-phase 4):
+    // F-line, CpID=001, TYPE=001, mode=111 (Figure 10-13/Table 10-1).
+    localparam [15:0] CPTRAPCC = {4'hF, 3'b001, 1'b0, 2'b01, 3'b111, 3'b100};
     function automatic [15:0] MOVE_L(input [2:0] dm, input [2:0] dn);
         MOVE_L = {4'h2, dn, 3'b000, 3'b000, dm};
     endfunction
@@ -333,6 +345,7 @@ module ctrl_flow_tb;
         ext_data    = disp;
         ext_valid   = 1'b1;
         saw_branch  = 1'b0;
+        saw_trapv   = 1'b0;
         repeat(200) begin
             @(posedge clk);
             if (instr_ack) break;
@@ -370,6 +383,13 @@ module ctrl_flow_tb;
     task automatic run_cpscc(input logic [15:0] w0, input logic [5:0] sel,
                              input logic tf);
         run_cpbcc(w0, {26'h0, sel}, tf);
+    endtask
+
+    // cpTRAPcc: identical CIR dialog and single-extension-word shape to
+    // cpScc (condition selector only, no operand-word content the EU
+    // itself ever reads).
+    task automatic run_cptrapcc(input logic [5:0] sel, input logic tf);
+        run_cpbcc(CPTRAPCC, {26'h0, sel}, tf);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);
@@ -884,6 +904,19 @@ module ctrl_flow_tb;
         run_cpscc(CPSCC_DN(3'd6), 6'd0, 1'b0);
         chk1("cpScc TF=0: no branch",   saw_branch, 1'b0);
         chk ("cpScc TF=0: D6=0x44556600", dut.u_rf.d_reg[6], 32'h4455_6600);
+
+        // ==================================================================
+        // cpTRAPcc, opmode=100 (0 operand words) (Phase 281 sub-phase 4,
+        // wobbly-honking-cascade.md): TF=1 -> eu_trapv_req fires (reuses
+        // the existing TRAPcc/TRAPV vector-7 path). TF=0 -> no trap.
+        // ==================================================================
+        $display("--- cpTRAPcc TF=1: trap fires ---");
+        run_cptrapcc(6'd0, 1'b1);
+        chk1("cpTRAPcc TF=1: eu_trapv_req fired", saw_trapv, 1'b1);
+
+        $display("--- cpTRAPcc TF=0: no trap ---");
+        run_cptrapcc(6'd0, 1'b0);
+        chk1("cpTRAPcc TF=0: eu_trapv_req not fired", saw_trapv, 1'b0);
 
         // ─── summary ──────────────────────────────────────────────────────────
         repeat(4) @(posedge clk);

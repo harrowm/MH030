@@ -56,40 +56,43 @@ Keep each module under ~3000 lines. Do not put everything in one file.
 - MOVEP byte-interleaved (individual byte cycles, address increments by 2)
 
 **Coprocessor conditional instructions (cpBcc/cpDBcc/cpScc/cpTRAPcc) —
-IN PROGRESS, cpBcc/cpDBcc/cpScc(Dn-direct) done (Phase 281,
-`wobbly-honking-cascade.md` cross-repo item)**: Phase 157/199
-implemented the CIR access bus protocol itself and cpSAVE/cpRESTORE's
-own full state-transfer handshake. This item was originally documented
-here as a deliberate scope boundary (Phase 248 item #7) because
-meaningfully testing it needs a real attached coprocessor evaluating
-genuine condition predicates — MH882 (`/Users/malcolm/MH882`, this
-project's own standalone MC68881/68882 companion FPU implementation),
-once its own Phase 10 gave it real 32-predicate Condition CIR logic, is
-exactly that missing piece, closing the original blocker. **cpBcc.W/.L,
-cpDBcc, and cpScc (Dn-direct only — memory-EA cpScc deferred) are now
-decoded and implemented** (`dec_is_cpbcc`/`dec_is_cpdbcc`/
-`dec_is_cpscc`, `rtl/eu_seq_decode.svh`; the shared `cpcc_*` CIR
-dispatch FSM, `rtl/eu_seq_execute.svh` — cpDBcc and cpScc both reuse
-this FSM completely unchanged from cpBcc, only their own completion
-actions differ) — see `plan.md` Phase 281 (all 3 sub-phases so far) for
-the full protocol/encoding derivation, the response-word bit-layout
-resolution (read directly from MH882's own tested `response_word()`
-rather than the manual's self-contradictory OCR'd prose), and cpDBcc's
-own genuine new problem (a dedicated FSM-completion register-write port
-for Dn's decrement, since its timing can't go through the normal
-single-cycle ALU→WB pipeline plain DBcc uses — cpScc's own Dn-direct
-write reuses this same dedicated-port pattern). Coprocessor Protocol
+ALL FOUR DECODED/IMPLEMENTED (Phase 281, `wobbly-honking-cascade.md`
+cross-repo item; memory-EA cpScc deliberately excluded)**: Phase
+157/199 implemented the CIR access bus protocol itself and
+cpSAVE/cpRESTORE's own full state-transfer handshake. This item was
+originally documented here as a deliberate scope boundary (Phase 248
+item #7) because meaningfully testing it needs a real attached
+coprocessor evaluating genuine condition predicates — MH882
+(`/Users/malcolm/MH882`, this project's own standalone MC68881/68882
+companion FPU implementation), once its own Phase 10 gave it real
+32-predicate Condition CIR logic, is exactly that missing piece,
+closing the original blocker. **cpBcc.W/.L, cpDBcc, cpScc (Dn-direct
+only — memory-EA cpScc deferred), and cpTRAPcc are now decoded and
+implemented** (`dec_is_cpbcc`/`dec_is_cpdbcc`/`dec_is_cpscc`/
+`dec_is_cptrapcc`, `rtl/eu_seq_decode.svh`; the shared `cpcc_*` CIR
+dispatch FSM, `rtl/eu_seq_execute.svh` — cpDBcc/cpScc/cpTRAPcc all
+reuse this FSM completely unchanged from cpBcc, only their own
+completion actions differ) — see `plan.md` Phase 281 (all 4
+sub-phases) for the full protocol/encoding derivation, the
+response-word bit-layout resolution (read directly from MH882's own
+tested `response_word()` rather than the manual's self-contradictory
+OCR'd prose), cpDBcc's own dedicated FSM-completion register-write
+port for Dn's decrement (reused by cpScc's own Dn-direct write), and
+cpTRAPcc's own reuse of the EXISTING `eu_trapv_req` path (Table 8-1:
+cpTRAPcc/TRAPcc/TRAPV share vector 7) plus the one-shot debounce and
+genuine Icarus declaration-order fix that needed. Coprocessor Protocol
 Violation (vector 13, MC68030UM.pdf §10.5.1.1/§10.5.4) is likewise
 wired end-to-end (`eu_cpviol_req`, `m68030_exc.sv`'s new `VEC_CPVIOL`)
 — mirroring `eu_fmt_err_req`'s existing shape — but not yet directly
 tested (no dedicated coverage of an unrecognized primitive triggering
-it yet). Memory-EA cpScc and real cpTRAPcc remain NOT YET implemented
-(confirmed via grep — zero occurrences of cpTRAPcc anywhere in `rtl/`)
-— see `plan.md` Phase 281's own "Remaining sub-phases" for what's left
-(cpTRAPcc reuses the existing `dec_is_trapv`/`eu_trapv_req` path
-directly; dedicated Protocol Violation coverage last; memory-EA cpScc
-deferred indefinitely, not currently planned as its own near-term
-sub-phase).
+it yet). **Remaining, deliberately scoped-out items** (see `plan.md`
+Phase 281 sub-phase 4's own closing section): memory-EA cpScc
+(deferred indefinitely); dedicated Protocol Violation test coverage;
+a narrow T0-tracing gap (cpTRAPcc's own outcome isn't known at decode
+time, so a taken cpTRAPcc won't trigger T0 trace — documented, not
+silently dropped); and a genuine cross-repo cosim using a live MH882
+instance (every sub-phase used a testbench-side CIR stub instead,
+matching this project's own cpSAVE/cpRESTORE precedent).
 
 ## S-State Signal Timing (Critical)
 
@@ -723,10 +726,11 @@ itself. **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
 cover any 68020+-only family, coprocessor conditionals included, so this count is unaffected
-by Phase 281). **One active cross-repo plan item as of Phase 281** (`plan.md`'s own Phase 281
-section, `wobbly-honking-cascade.md`): coprocessor conditional instructions — cpBcc.W/.L,
-cpDBcc, and cpScc(Dn-direct) done, cpTRAPcc/dedicated-Protocol-Violation-coverage remaining
-(memory-EA cpScc deferred indefinitely). No other outstanding plan of any kind remains. Permanently out of scope by design, not started
+by Phase 281). **Cross-repo plan item as of Phase 281** (`plan.md`'s own Phase 281 section,
+`wobbly-honking-cascade.md`): coprocessor conditional instructions — cpBcc.W/.L, cpDBcc,
+cpScc(Dn-direct), and cpTRAPcc all done; dedicated Protocol-Violation test coverage remains
+(memory-EA cpScc deferred indefinitely, not currently planned). No other outstanding plan of
+any kind remains. Permanently out of scope by design, not started
 (re-confirmed, do not re-suggest): STATUS's other 3 sub-cases + REFILL#; PTEST's DSACK-breadth
 exclusion + I-cache CEI's per-line-only limitation (pre-existing architecture boundaries, not
 bugs).
