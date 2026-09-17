@@ -6,6 +6,18 @@ sim/
 
 # Compiled binaries
 tools/m68ksim
+tools/mustest
+
+# Verilator/build output directories
+obj_harte_vbatch/
+obj_mustest/
+
+# Throwaway test scripts / scratch cosim binaries
+tb/mustest_main_trace.cpp
+tests/*.bin
+
+# WinUAE reference trace logs
+winuae/tests/*_ref.log
 
 # Python bytecode
 scripts/__pycache__/
