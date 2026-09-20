@@ -2706,3 +2706,26 @@ continue-vs-terminate decision `cback_ok` drives has not been checked.
 Investigate by re-reading `rtl/biu_burst_ctrl.sv`'s own beat-advance
 logic (`ST_BURST_S6`/`ST_BWRITE_S6` in `rtl/biu_cycle_gen.sv`) the same
 way the CBACK gap was found, before assuming either way.
+
+**New, OPEN bug found via mackerel-030f integration testing (a later
+session), not yet root-caused in this repo**
+(`project_skiptx_branch_target_regwrite_bug.md`): the first instruction
+fetched at a taken conditional branch's own target can have its
+destination-register decode corrupted — confirmed via direct
+`eu_regfile.sv` write-port tracing that a `MOVE.L #imm,D1` sitting
+exactly at a `BEQ.S` branch target never writes D1 at all, instead
+producing a spurious write to D4 (an unrelated register from several
+instructions earlier) carrying garbage data. Reproduced identically
+across three different immediate values and two independent debug
+builds; confirmed not a ROM-encoding bug (opcode bytes independently
+re-verified and cleanly fetched) and not related to any BERR/exception
+path (`berr_n` confirmed to never assert during the sequence). See the
+project file for the full repro, exact signal traces, and a suggested
+first debugging step (a small standalone `m68030_top`-only testbench
+forcing `BEQ.S` taken directly into a `MOVE.L #imm,Dn`, inspecting
+`eu_seq_decode.svh`'s own destination-register capture across the
+redirect the same way Track 1's Phase 254-255 fix was diagnosed) —
+plausibly a third instance of the same "stale `dec_*` field right after
+a redirect" bug shape Track 1 already found and fixed twice for
+RTS/RTR/RTE and CMPM, this time for a plain taken branch rather than a
+multi-phase-stall redirect.
