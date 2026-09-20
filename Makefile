@@ -188,6 +188,9 @@ $(SIM)/cache:         $(TOP_SRCS) tb/cache_tb.sv | tb/common_helpers.svh $(SIM)
 $(SIM)/stall_fsm:     $(TOP_SRCS) tb/stall_fsm_tb.sv | tb/common_helpers.svh $(SIM)
 	$(IVCOMP)
 
+$(SIM)/minrepro:      $(TOP_SRCS) tb/minrepro_tb.sv | tb/common_helpers.svh $(SIM)
+	$(IVCOMP)
+
 $(SIM)/mmu_xlate:     $(TOP_SRCS) tb/mmu_xlate_tb.sv | $(SIM)
 	$(IVCOMP)
 
@@ -269,6 +272,14 @@ ALL_TESTS := \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/ext_count_overlap $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate
+
+# tb/minrepro_tb.sv: a real, currently-FAILING regression test for
+# project_skiptx_branch_target_regwrite_bug.md (an open, unfixed bug --
+# see that file). Deliberately NOT added to ALL_TESTS above, so `make
+# test` stays green (37/37) until the real fix lands -- run it directly
+# via `make sim/minrepro && vvp sim/minrepro` (expect FAIL until fixed;
+# it should show PASS immediately once the real fix is in place, with no
+# other changes needed to this test itself).
 
 # ── Phase 74: Musashi reference log ─────────────────────────────────────────
 MUSASHI_DIR := tools/musashi
