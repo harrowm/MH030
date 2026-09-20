@@ -2708,24 +2708,37 @@ logic (`ST_BURST_S6`/`ST_BWRITE_S6` in `rtl/biu_cycle_gen.sv`) the same
 way the CBACK gap was found, before assuming either way.
 
 **New, OPEN bug found via mackerel-030f integration testing (a later
-session), not yet root-caused in this repo**
-(`project_skiptx_branch_target_regwrite_bug.md`): the first instruction
-fetched at a taken conditional branch's own target can have its
-destination-register decode corrupted — confirmed via direct
-`eu_regfile.sv` write-port tracing that a `MOVE.L #imm,D1` sitting
-exactly at a `BEQ.S` branch target never writes D1 at all, instead
-producing a spurious write to D4 (an unrelated register from several
-instructions earlier) carrying garbage data. Reproduced identically
-across three different immediate values and two independent debug
-builds; confirmed not a ROM-encoding bug (opcode bytes independently
-re-verified and cleanly fetched) and not related to any BERR/exception
-path (`berr_n` confirmed to never assert during the sequence). See the
-project file for the full repro, exact signal traces, and a suggested
-first debugging step (a small standalone `m68030_top`-only testbench
-forcing `BEQ.S` taken directly into a `MOVE.L #imm,Dn`, inspecting
-`eu_seq_decode.svh`'s own destination-register capture across the
-redirect the same way Track 1's Phase 254-255 fix was diagnosed) —
-plausibly a third instance of the same "stale `dec_*` field right after
-a redirect" bug shape Track 1 already found and fixed twice for
-RTS/RTR/RTE and CMPM, this time for a plain taken branch rather than a
-multi-phase-stall redirect.
+session), root cause now precisely identified, not yet fixed**
+(`project_skiptx_branch_target_regwrite_bug.md`, revised after further
+cycle-by-cycle tracing superseded the file's own original branch-redirect
+theory): **not actually a branch-specific bug.** A multi-extension-word
+instruction (reproduced with `MOVE.L #imm,Dn`) whose extension words
+aren't yet sitting in the prefetch queue — i.e. must be freshly fetched
+from the bus, taking multiple cycles — is vulnerable: while the
+sequencer waits (`need_ext`-shaped stall), the IFU's own queue head
+(`instr_word`/`q[0]`) keeps advancing and exposes the instruction's own
+*second* extension word as if it were a fresh opcode. Decode (purely
+combinational off `instr_word`) mis-decodes that data word as a real
+instruction with its own (different, coincidental) destination register
+and its own (coincidentally similar) extension-word wait; when *that*
+spurious wait resolves, `instr_ack` fires and the DEC→EX latch commits
+the spurious decode's wrong destination register/data instead of the
+real instruction's own. Confirmed via full per-cycle `dec_*`/`ex_*`/
+`wb_*` tracing (not just register-file writes) exactly which cycle the
+wrong value gets latched, and confirmed the real DEC→EX latch has no
+protection holding the *original* opcode's own decoded destination
+register steady across an extension-word wait. A branch redirect is
+simply the easiest way to force "extension words not pre-buffered"
+(queue flush) — the same corruption would occur for any instruction
+whose extension words require a fresh fetch, branch or not. See the
+project file for the exact per-cycle trace, ruling-out of every special-
+FSM writeback path, and fix-approach candidates (latch the original
+decode at opcode-fetch time; or have the IFU withhold exposing an
+instruction's own extension words as `instr_word` until the whole
+instruction is consumed) — either needs full Harte re-validation before
+landing, since it touches the core DEC→EX handoff shared by every
+instruction. Also flagged: this class may not be caught by the existing
+124-suite Harte sweep at all, since it specifically requires an
+extension-word fetch that isn't pre-buffered, which single-instruction
+Harte vectors may never naturally exercise — worth checking whether the
+harness construction always pre-warms the queue.
