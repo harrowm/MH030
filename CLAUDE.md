@@ -720,7 +720,39 @@ burst mode). No dedicated module-level regression added — the fix is
 directly exercised and visually verified via the new Figure 7-39 diagram
 itself. **Closes `project_cback_beat0_only_sampling_bug.md` in full.**
 
-**Current state**: `make test` 37/37, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
+**Phase 282 (branch-redirect stale-in-flight-fetch bug, a later session,
+`project_skiptx_branch_target_regwrite_bug.md`, IMPLEMENTED AND
+VERIFIED)**: found via mackerel-030f integration testing (a separate
+ULX3S FPGA SoC project using this repo's `rtl/` as a git dependency) — a
+taken branch's redirect correctly flushed the IFU's own prefetch queue
+but a bus read already dispatched, before the flush, for the abandoned
+fall-through path was never discarded, silently corrupting the next real
+instruction's own decode once it completed. Root-caused deeper than
+initially suspected: `biu_arbiter.sv` holds `grant_ifu` for a whole bus
+cycle, and `biu_icache_if.sv`'s disabled-cache bypass path wires
+`cg_addr = ifu_addr` live/unlatched into `biu_cycle_gen.sv`'s own
+`cyc_addr`/`ext_a` (unlike its own already-fixed *enabled*-cache path,
+Phase 128) — so the old `m68030_ifu.sv` code, by updating `fetch_addr_r`
+immediately on every redirect, could mutate the address on the real
+external bus pins mid-cycle, after AS/DS were already asserted for the
+old address. Fixed entirely within `m68030_ifu.sv`: a new
+`fetch_abort_pend_r`/`pending_pc_r` pair holds `fetch_addr_r`/
+`fetch_pend_r`/`skip_first_r` stable across a redirect whenever a fetch
+is genuinely still outstanding, letting that bus cycle complete naturally
+and discarding its result before switching to the real target — no epoch
+counter or new BIU port needed. Found and fixed one piece of fallout
+while verifying: `tb/ifu_tb.sv`'s IFU-12a/12a2 had a fixed cycle-count
+timing budget that no longer reliably covers the now-variable (but
+bounded) extra delay a redirect can incur landing mid an unrelated
+ambient fetch — fixed with a `wait_bus_err_r()` polling task mirroring
+the file's own existing `wait_valid()` convention. `tb/minrepro_tb.sv`
+(the dedicated regression built to reproduce this bug) now passes and is
+in `ALL_TESTS`. Full mandatory gate clean (`make test` 38/38), Harte
+bit-identical to baseline — confirming the corpus's own harness never
+exercised this exact race. **Closes
+`project_skiptx_branch_target_regwrite_bug.md` in full.**
+
+**Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't

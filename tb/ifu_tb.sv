@@ -195,6 +195,20 @@ module ifu_tb;
         end
     endtask
 
+    // project_skiptx_branch_target_regwrite_bug.md's fix: a write_pc may
+    // land mid-flight of some unrelated ambient fetch, adding a variable
+    // (bounded) extra delay before the real target's own fetch chain even
+    // begins -- poll the internal bus_err_r latch directly instead of
+    // assuming a fixed cycle budget from write_pc to fault.
+    task wait_bus_err_r(input int max_cycles);
+        integer tmout;
+        tmout = max_cycles;
+        while (!u_ifu.bus_err_r && tmout > 0) begin
+            @(posedge clk_4x); #1;
+            tmout = tmout - 1;
+        end
+    endtask
+
     task write_pc(input logic [31:0] addr);
         pc_wr_data = addr;
         pc_wr_en   = 1'b1;
@@ -396,6 +410,18 @@ module ifu_tb;
         // immediately, since need_ext is asserted the whole time decode
         // sits blocked on it.
         // ================================================================
+        // Settle: project_skiptx_branch_target_regwrite_bug.md's fix means
+        // a redirect landing while a fetch is still genuinely outstanding
+        // (IFU-10 issues two back-to-back write_pc calls, the second
+        // landing before the first's own fetch could complete) no longer
+        // instantly cancels it -- the real BIU can't cancel an in-flight
+        // bus cycle either, so m68030_ifu.sv now deliberately holds
+        // fetch_addr_r/fetch_pend_r stable and waits for that stale
+        // cycle's own ack/berr before dispatching the next real fetch
+        // (silently discarding the stale response). Drain that one extra
+        // BIU_LAT-ish delay here so it doesn't eat into IFU-12a's own
+        // timing budget below.
+        repeat(BIU_LAT + 2) @(posedge clk_4x); #1;
         $display("--- IFU-12: instruction-fetch BERR pending-until-use ---");
 
         // IFU-12a: a first fetch (0x5000) succeeds, immediately triggering
@@ -410,7 +436,16 @@ module ifu_tb;
         stub_add(32'h0000_5000, 32'h1111_2222, 1'b0);
         stub_add(32'h0000_5004, 32'h0, 1'b1);
         write_pc(32'h0000_5000);
-        repeat(2*BIU_LAT+6) @(posedge clk_4x); #1;
+        // project_skiptx_branch_target_regwrite_bug.md's fix means this
+        // write_pc may itself land while the IFU's own continuous ambient
+        // prefetch has some earlier, now-irrelevant fetch genuinely in
+        // flight -- real hardware can't cancel that either, so
+        // m68030_ifu.sv now holds and swallows it before dispatching the
+        // real 0x5000 fetch, an inherently variable (bounded by BIU_LAT)
+        // extra delay. Poll u_ifu.bus_err_r directly (not the gated
+        // `bus_err` output, which this test deliberately expects to stay
+        // low) rather than assuming a fixed cycle budget.
+        wait_bus_err_r(BIU_LAT + 2*BIU_LAT + 10);
         check("IFU-12a: fault stays PENDING -- decode is still 2 words behind and doesn't need it yet",
               !bus_err);
         check32("IFU-12a: decode_pc still at 0x5000 (nothing drained, not actually needed yet)",

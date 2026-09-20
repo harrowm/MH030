@@ -2707,9 +2707,9 @@ Investigate by re-reading `rtl/biu_burst_ctrl.sv`'s own beat-advance
 logic (`ST_BURST_S6`/`ST_BWRITE_S6` in `rtl/biu_cycle_gen.sv`) the same
 way the CBACK gap was found, before assuming either way.
 
-**OPEN bug found via mackerel-030f integration testing (a later session),
-root cause CONFIRMED via direct `q_cnt`/`drain` signal tracing, now with
-a committed minimal regression test, still not fixed**
+**FIXED AND VERIFIED bug found via mackerel-030f integration testing (a
+later session), root cause CONFIRMED via direct `q_cnt`/`drain` signal
+tracing, then fixed and verified in a follow-on session**
 (`project_skiptx_branch_target_regwrite_bug.md`, third revision — the
 file's own original branch-redirect theory and its first revision
 ("`instr_word` advances past the opcode during a `need_ext` wait") were
@@ -2741,17 +2741,35 @@ SSP initialization at address 0 caused a different, much louder failure
 that's easy to confuse for the real bug) — both documented in the test file's
 own comments as a caution for anyone touching it further.
 
-`make sim/minrepro && vvp sim/minrepro` now reliably reproduces the bug
-in well under a second, deliberately not part of `ALL_TESTS`/`make test`
-(which stays 37/37 green) since it currently — correctly — fails. See
-the project file for the full per-cycle trace, all seven reproduction
-attempts (six failed, one succeeded), and the concrete fix approach
-(tag each dispatched fetch with the redirect epoch it belongs to;
-discard fetch results tagged with a stale epoch) for the real fix
-session — once fixed, `tb/minrepro_tb.sv` should flip to PASS unchanged
-and move into `ALL_TESTS` (`make test` becomes 38/38) as part of that
-same change. Also flagged: 124/124 Harte suites passing to date suggests
-this class may not be exercised by that corpus at all, since it needs
-both a live speculative fetch in flight across a redirect AND a
-registered-memory-timing detail Harte's own harness may not model
-either.
+**Fix (a later session)**: tracing the real address path while
+implementing the originally-proposed "epoch tag" idea found a deeper,
+more fundamental defect than mere ack-misattribution — `biu_arbiter.sv`
+holds `grant_ifu` for a whole bus cycle, and `biu_icache_if.sv`'s
+disabled-cache bypass path (`cg_addr = ifu_addr`, live/unlatched, unlike
+its own already-fixed *enabled*-cache path's `cg_single_addr_r`/
+`ic_burst_addr_r` latches, Phase 128) feeds straight into
+`biu_cycle_gen.sv`'s own live `cyc_addr`/`ext_a` — meaning the old
+`m68030_ifu.sv` code, by updating `fetch_addr_r` (=`ifu_addr`)
+immediately on every redirect, could silently mutate the address on the
+*real external bus pins* mid-cycle, after AS/DS were already asserted
+for the old address. Fixed entirely within `m68030_ifu.sv`: a new
+`fetch_abort_pend_r`/`pending_pc_r` pair means a redirect landing while a
+fetch is genuinely still outstanding now leaves `fetch_addr_r`/
+`fetch_pend_r`/`skip_first_r` completely untouched (the queue itself
+still flushes immediately) — letting that bus cycle run to its natural
+completion with a stable address, then discarding its eventual
+`ifu_ack`/`ifu_berr` unconditionally before switching over to the real
+target. No epoch counter or new BIU port needed. Found and fixed one
+piece of fallout while verifying: `tb/ifu_tb.sv`'s IFU-12a/12a2 had a
+fixed cycle-count timing budget that no longer reliably covers the now-
+variable (but bounded) extra delay a redirect can incur landing mid an
+unrelated ambient fetch — fixed with a `wait_bus_err_r()` polling task
+mirroring the file's own existing `wait_valid()` convention, not a hack.
+`tb/minrepro_tb.sv` flips to PASS unchanged and is now in `ALL_TESTS`
+(`make test`: 38/38). Full 124-suite Tom Harte sweep confirmed
+bit-identical to baseline (`PASS 702142 FAIL 2` documented ASL.b
+anomaly, `SKIP 281221 TIMEOUT 0`) — confirming the corpus's own harness
+never exercised this exact race, so this closes a real gap Harte itself
+is structurally blind to. See the project file's own "Fix (implemented)"
+section for the full derivation. **Closes
+`project_skiptx_branch_target_regwrite_bug.md` in full.**

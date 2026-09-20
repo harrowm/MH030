@@ -1,9 +1,21 @@
 # Bug: a redirect doesn't discard an already-in-flight speculative fetch for the abandoned fall-through path, corrupting the next instruction's own decode
 
-**Status: OPEN, root cause confirmed, minimal regression test now
-committed (`tb/minrepro_tb.sv`, deliberately not in `ALL_TESTS`/`make
-test` since it currently — correctly — FAILS). Not yet fixed. Run it
-directly: `make sim/minrepro && vvp sim/minrepro`.**
+**Status: FIXED AND VERIFIED. `m68030_ifu.sv` now holds `fetch_addr_r`/
+`fetch_pend_r`/`skip_first_r` completely stable across a redirect
+(`pc_wr_en`) whenever a bus fetch is genuinely still outstanding at that
+moment, instead of immediately switching them to the new target. The
+outstanding cycle is left running to its natural completion (real
+silicon can't cancel an S-state bus cycle already in progress either),
+and its eventual `ifu_ack`/`ifu_berr` is discarded (`fetch_abort_pend_r`)
+rather than filled into the just-flushed queue or misattributed to
+whatever the IFU has since re-armed for. `tb/minrepro_tb.sv` now PASSES
+and has been moved into `ALL_TESTS` (`make test`: 38/38). Full mandatory
+gate clean; full 124-suite Tom Harte sweep bit-identical to baseline
+(`PASS 702142 FAIL 2` documented ASL.b anomaly, `SKIP 281221 TIMEOUT 0`).
+See "Fix (implemented)" below for the full mechanism and why the fix
+lives in `m68030_ifu.sv` rather than `biu_icache_if.sv`'s own
+already-existing `same_req`/`abandoned_r` mechanism (Phase 128), which
+only covers the cache/MMU-*enabled* path.**
 
 ## Summary (second revision — supersedes both earlier theories in this file's own history)
 
@@ -179,33 +191,96 @@ that can produce a false "FAIL" for the wrong reason, so anyone touching
 this test should re-verify a genuine PASS after any setup change, not
 just trust a FAIL matches the intended failure mode.
 
-Run it: `make sim/minrepro && vvp sim/minrepro` (expect `FAIL` until the
-real fix lands; deliberately not part of `ALL_TESTS`/`make test`, which
-stays 37/37 green).
+Run it: `make sim/minrepro && vvp sim/minrepro`. Now part of `ALL_TESTS`/
+`make test` (38/38) since the fix below landed — PASSes reliably.
 
-## Suggested next steps for the real fix session
+## Fix (implemented)
 
-1. **Fix approach**: tag each dispatched fetch with the redirect epoch
-   it belongs to (e.g. a small counter incremented on every `pc_wr_en`),
-   and discard (don't push into `q[]`) any fetch result that arrives
-   tagged with a stale epoch. This is more surgical than either
-   candidate this file previously proposed (latching decode state, or
-   withholding `instr_word` advancement) — it fixes the actual defect
-   (a stale bus-cycle result surviving a flush) rather than working
-   around its downstream symptom.
-2. Confirm real 68030 silicon's own documented behavior here for
-   reference (MC68030UM.pdf's own IFU/prefetch section) — real hardware
-   cannot abort an in-flight bus cycle either, so real silicon likely
-   has its own explicit mechanism for tagging/discarding stale prefetch
-   results across a redirect; worth checking whether the manual
-   describes this explicitly before designing the fix from scratch.
-3. Once fixed, `tb/minrepro_tb.sv` should flip to PASS with no changes
-   of its own needed — move it from its standalone Makefile target into
-   `ALL_TESTS` (`make test` becomes 38/38) as part of the same change.
-4. Re-run the full mandatory gate (`make test`) and a full Harte sweep
-   (`make sim/harte_vbatch`) before considering the fix done — and
-   specifically check whether Harte's own harness construction ever
-   exercises a taken branch with a live speculative fall-through fetch
-   in flight, since 124/124 suites passing to date suggests it may not
-   (this bug's own reproduction needed a registered-memory-timing detail
-   Harte's own harness may not model either).
+While reading `m68030_ifu.sv` to implement the epoch-tagging idea this
+file originally proposed, a deeper, more fundamental problem surfaced
+that made a simpler fix both necessary and sufficient — tracing the real
+address path confirmed the bug is not just "a stale ack gets
+misattributed," it's that **the address driven onto the real external bus
+pins during an ordinary (cache/MMU-disabled) instruction fetch is never
+latched for the duration of the bus cycle at all**:
+
+- `biu_arbiter.sv` holds `grant_ifu` asserted for the *entire* bus cycle
+  once granted (by design — see its own header comment), regardless of
+  what `ifu_req`/`ifu_addr` do afterward.
+- `biu_icache_if.sv`'s disabled-cache bypass path (`!icache_en && !tc_e`,
+  the default reset state and this repo's own most common configuration)
+  wires `cg_addr = ifu_addr` **combinationally, live, unlatched** — unlike
+  its own *enabled*-cache path, which already latches the dispatched
+  address into `cg_single_addr_r`/`ic_burst_addr_r` specifically to avoid
+  this class of bug (Phase 128, see that file's own `abandoned_r`/
+  `same_req` comments).
+- `biu_cycle_gen.sv`'s own `cyc_addr = ifu_addr` (for the IFU grant case)
+  is likewise live, and every S-state re-asserts `ext_a = cyc_addr`
+  combinationally.
+
+Chained together: `m68030_ifu.sv`'s old `pc_wr_en` handler updated
+`fetch_addr_r` (which IS `ifu_addr`) immediately on every redirect, even
+while a fetch was still genuinely in-flight — meaning the address on the
+**real external bus pins could mutate mid-cycle**, after AS/DS were
+already asserted for the old address. The previously-documented "stale
+ack gets pushed into the queue" symptom is a direct consequence of this:
+the old bus cycle keeps running (real hardware can't cancel it either),
+using whatever address happens to be live at each S-state, and eventually
+asserts `ifu_ack` — landing back on an IFU that has, by then, re-armed
+`fetch_pend_r` for the real new target, causing the misattribution this
+file originally traced in detail.
+
+**The fix**: `m68030_ifu.sv`'s `pc_wr_en` branch now checks whether a
+fetch is genuinely still outstanding (`fetch_pend_r && !ifu_ack &&
+!ifu_berr`) at the moment of redirect. If so, it deliberately leaves
+`fetch_addr_r`/`fetch_pend_r`/`skip_first_r` **completely untouched** —
+letting the already-committed bus cycle run to its natural completion
+with a stable, correct address — and instead sets a new `fetch_abort_pend_r`
+flag plus latches the real target into a new `pending_pc_r` register. The
+queue (`q[]`/`q_cnt`) is still flushed immediately, same as before. Once
+that outstanding cycle's own `ifu_ack`/`ifu_berr` finally arrives (checked
+first, ahead of the ordinary fill/error branches, in the main non-redirect
+path), its data/fault is discarded unconditionally — no queue fill, no
+`bus_err_r` latch — and only then does `fetch_addr_r`/`skip_first_r` switch
+over to `pending_pc_r`, with `fetch_pend_r` left at 0 so the ordinary
+ambient fetch-issue logic dispatches the real fetch on a later cycle, same
+as an ordinary post-flush restart. If no fetch was outstanding (or its
+ack/berr lands the very same cycle as the redirect, fully retiring it
+before any address-mutation risk), the switchover happens immediately,
+exactly as before this fix.
+
+This is more surgical than the originally-proposed "epoch tag every
+fetch" design (which would have fixed only the misattribution symptom,
+not the underlying live-address-mutation defect) and needed no new BIU
+port or cross-module signal — the entire fix is local to `m68030_ifu.sv`.
+It was NOT applied inside `biu_icache_if.sv`'s own bypass path (mirroring
+its already-existing `same_req`/`abandoned_r` mechanism) because the
+address-latching defect is really an `m68030_ifu.sv`-side contract
+violation (an unlatched, freely-mutating `ifu_addr` output during a
+committed bus cycle) that would need fixing regardless of which
+downstream module consumes it.
+
+**Fallout found and fixed while verifying**: `tb/ifu_tb.sv`'s own
+IFU-12a/12a2 (instruction-fetch-BERR-pending-until-use) started failing
+after this fix — not a regression, but a stale timing assumption. The
+IFU's own continuous ambient prefetching means a `write_pc()` call can
+now always land mid-flight of some unrelated, already-in-progress
+background fetch, adding a variable (bounded by `BIU_LAT`) extra delay
+before the real target's own fetch chain even begins — exactly mirroring
+real hardware's own equivalent limitation. IFU-12a's fixed `repeat(2*BIU_LAT+6)`
+cycle budget no longer reliably covered this variable delay. Fixed by
+adding a `wait_bus_err_r()` polling task (mirroring the file's own
+existing `wait_valid()` convention) that polls the internal `bus_err_r`
+latch directly rather than assuming a fixed cycle count from `write_pc`
+to fault — a general, correct fix for the test's own now-inherently-
+variable timing, not a hack.
+
+**Verification**: `tb/minrepro_tb.sv` flips from FAIL to PASS with no
+changes to the test itself; moved into `ALL_TESTS` (`make test`: 38/38,
+was 37/37). Full 124-suite Tom Harte sweep via
+`make sim/harte_vbatch` + `scripts/run_harte_batch.py --backend
+verilator`: bit-identical to baseline, `PASS 702142 FAIL 2` (documented
+ASL.b anomaly) `SKIP 281221 TIMEOUT 0` — confirming (as this file's own
+earlier revision suspected) that the Harte corpus's own harness
+construction never exercises this exact race, so this fix closes a real
+gap the corpus itself is structurally blind to.

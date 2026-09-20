@@ -128,6 +128,16 @@ module m68030_ifu (
     logic [31:0] bus_err_addr_r;
     logic [15:0] held_word_r;      // Phase 147: overflow stash (see below)
     logic        held_valid_r;
+    // project_skiptx_branch_target_regwrite_bug.md fix: a redirect while a
+    // fetch is genuinely still in flight for the (now-abandoned) old
+    // address cannot cancel that bus cycle -- see the pc_wr_en branch
+    // below for why fetch_addr_r/fetch_pend_r are deliberately left
+    // untouched in that case instead. fetch_abort_pend_r marks that this
+    // module is waiting for that cycle's own ack/berr to swallow it;
+    // pending_pc_r latches the real redirect target to switch to once it
+    // does.
+    logic        fetch_abort_pend_r;
+    logic [31:0] pending_pc_r;
 
     // -----------------------------------------------------------------------
     // Combinational outputs
@@ -243,30 +253,81 @@ module m68030_ifu (
             bus_err_addr_r <= 32'h0;
             held_word_r    <= 16'h0;
             held_valid_r   <= 1'b0;
+            fetch_abort_pend_r <= 1'b0;
+            pending_pc_r       <= 32'h0;
 
         end else if (pc_wr_en) begin
             // Flush queue and restart from new PC.
-            // fetch_pend_r cleared to 0 so any in-flight fetch is abandoned;
-            // ifu_ack guarded by fetch_pend_r, so stale data is ignored.
-            // The drain-only branch on the next cycle will set fetch_pend_r=1.
+            //
+            // project_skiptx_branch_target_regwrite_bug.md: a fetch that is
+            // genuinely still outstanding right now (bus cycle dispatched,
+            // ack/berr not yet arrived) cannot be cancelled -- real 68030
+            // silicon can't abort an S-state bus cycle already in progress
+            // either, and biu_arbiter.sv holds grant_ifu (hence keeps
+            // biu_cycle_gen driving the external address bus straight from
+            // this module's own fetch_addr_r, live/unlatched in the
+            // cache-disabled bypass path) for the WHOLE cycle regardless of
+            // what fetch_pend_r/fetch_addr_r do afterward. Changing
+            // fetch_addr_r here would silently mutate the address on the
+            // real bus pins mid-cycle (AS/DS already asserted for the OLD
+            // address); merely dropping fetch_pend_r here (an earlier,
+            // insufficient fix attempt) still lets that cycle's own
+            // eventual ack arrive later and get misattributed to whatever
+            // fetch_pend_r has since been re-armed for. Instead: leave
+            // fetch_addr_r/fetch_pend_r/skip_first_r completely alone so
+            // the outstanding cycle runs to its natural completion
+            // unmolested, latch the real target in pending_pc_r, and set
+            // fetch_abort_pend_r so the main (non-redirect) branch below
+            // swallows that cycle's own ack/berr instead of filling the
+            // (already-flushed) queue with it once it finally arrives.
             q[0] <= 16'h0; q[1] <= 16'h0; q[2] <= 16'h0;
             q[3] <= 16'h0; q[4] <= 16'h0; q[5] <= 16'h0; q[6] <= 16'h0;
             q_cnt          <= 3'd0;
             decode_pc_r    <= pc_wr_data;
-            fetch_addr_r   <= {pc_wr_data[31:2], 2'b00};  // longword-align
-            skip_first_r   <= pc_wr_data[1];               // 1: PC = long_base + 2
-            fetch_pend_r   <= 1'b0;
             initialized_r  <= 1'b1;
             bus_err_r      <= 1'b0;
             bus_err_addr_r <= 32'h0;
             held_word_r    <= 16'h0;
             held_valid_r   <= 1'b0;
 
+            if (fetch_pend_r && !ifu_ack && !ifu_berr) begin
+                // A bus cycle is genuinely still in flight for the
+                // (now-abandoned) old address -- hold it stable.
+                fetch_abort_pend_r <= 1'b1;
+                pending_pc_r       <= pc_wr_data;
+            end else begin
+                // No fetch outstanding, or its ack/berr lands this very
+                // cycle (fully retiring it) -- safe to switch immediately,
+                // exactly as before this fix.
+                fetch_addr_r   <= {pc_wr_data[31:2], 2'b00};  // longword-align
+                skip_first_r   <= pc_wr_data[1];               // 1: PC = long_base + 2
+                fetch_pend_r   <= 1'b0;
+                fetch_abort_pend_r <= 1'b0;
+            end
+
         end else begin
             // Always advance decode_pc for consumed words (2 bytes each)
             decode_pc_r <= decode_pc_r + {29'h0, dn, 1'b0};
 
-            if (ifu_berr && fetch_pend_r && !bus_err_r) begin
+            if (fetch_abort_pend_r && (ifu_ack || ifu_berr)) begin
+                // The bus cycle left running (deliberately untouched) by
+                // the pc_wr_en branch above for the abandoned old address
+                // has now completed. Its data/fault belongs to an
+                // instruction stream we no longer want -- discard it
+                // entirely (no queue fill, no bus_err_r latch) and only
+                // now switch fetch_addr_r/skip_first_r over to the real
+                // redirect target. fetch_pend_r stays 0 so the ordinary
+                // fetch-issue logic below dispatches the real fetch on a
+                // later cycle, same as an ordinary post-flush restart.
+                fetch_abort_pend_r <= 1'b0;
+                fetch_addr_r  <= {pending_pc_r[31:2], 2'b00};
+                skip_first_r  <= pending_pc_r[1];
+                fetch_pend_r  <= 1'b0;
+                q[0] <= qd[0]; q[1] <= qd[1]; q[2] <= qd[2];
+                q[3] <= qd[3]; q[4] <= qd[4]; q[5] <= qd[5]; q[6] <= qd[6];
+                q_cnt <= q_cnt_d;
+
+            end else if (ifu_berr && fetch_pend_r && !bus_err_r) begin
                 // Bus error: latch fault address, stop fetching
                 bus_err_r      <= 1'b1;
                 bus_err_addr_r <= fetch_addr_r;

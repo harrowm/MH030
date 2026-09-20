@@ -271,15 +271,15 @@ ALL_TESTS := \
     $(SIM)/special_instr $(SIM)/ea_extended $(SIM)/cmpm \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/ext_count_overlap $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
-    $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate
+    $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate \
+    $(SIM)/minrepro
 
-# tb/minrepro_tb.sv: a real, currently-FAILING regression test for
-# project_skiptx_branch_target_regwrite_bug.md (an open, unfixed bug --
-# see that file). Deliberately NOT added to ALL_TESTS above, so `make
-# test` stays green (37/37) until the real fix lands -- run it directly
-# via `make sim/minrepro && vvp sim/minrepro` (expect FAIL until fixed;
-# it should show PASS immediately once the real fix is in place, with no
-# other changes needed to this test itself).
+# tb/minrepro_tb.sv: regression test for
+# project_skiptx_branch_target_regwrite_bug.md -- now FIXED (m68030_ifu.sv
+# holds fetch_addr_r/fetch_pend_r stable across a redirect while a fetch is
+# genuinely still in flight, instead of letting the eventual stale ack get
+# misattributed to whatever the IFU has since re-armed for). Moved into
+# ALL_TESTS above now that it passes (make test: 38/38).
 
 # ── Phase 74: Musashi reference log ─────────────────────────────────────────
 MUSASHI_DIR := tools/musashi
