@@ -2708,37 +2708,43 @@ logic (`ST_BURST_S6`/`ST_BWRITE_S6` in `rtl/biu_cycle_gen.sv`) the same
 way the CBACK gap was found, before assuming either way.
 
 **New, OPEN bug found via mackerel-030f integration testing (a later
-session), root cause now precisely identified, not yet fixed**
-(`project_skiptx_branch_target_regwrite_bug.md`, revised after further
-cycle-by-cycle tracing superseded the file's own original branch-redirect
-theory): **not actually a branch-specific bug.** A multi-extension-word
-instruction (reproduced with `MOVE.L #imm,Dn`) whose extension words
-aren't yet sitting in the prefetch queue — i.e. must be freshly fetched
-from the bus, taking multiple cycles — is vulnerable: while the
-sequencer waits (`need_ext`-shaped stall), the IFU's own queue head
-(`instr_word`/`q[0]`) keeps advancing and exposes the instruction's own
-*second* extension word as if it were a fresh opcode. Decode (purely
-combinational off `instr_word`) mis-decodes that data word as a real
-instruction with its own (different, coincidental) destination register
-and its own (coincidentally similar) extension-word wait; when *that*
-spurious wait resolves, `instr_ack` fires and the DEC→EX latch commits
-the spurious decode's wrong destination register/data instead of the
-real instruction's own. Confirmed via full per-cycle `dec_*`/`ex_*`/
-`wb_*` tracing (not just register-file writes) exactly which cycle the
-wrong value gets latched, and confirmed the real DEC→EX latch has no
-protection holding the *original* opcode's own decoded destination
-register steady across an extension-word wait. A branch redirect is
-simply the easiest way to force "extension words not pre-buffered"
-(queue flush) — the same corruption would occur for any instruction
-whose extension words require a fresh fetch, branch or not. See the
-project file for the exact per-cycle trace, ruling-out of every special-
-FSM writeback path, and fix-approach candidates (latch the original
-decode at opcode-fetch time; or have the IFU withhold exposing an
-instruction's own extension words as `instr_word` until the whole
-instruction is consumed) — either needs full Harte re-validation before
-landing, since it touches the core DEC→EX handoff shared by every
-instruction. Also flagged: this class may not be caught by the existing
-124-suite Harte sweep at all, since it specifically requires an
-extension-word fetch that isn't pre-buffered, which single-instruction
-Harte vectors may never naturally exercise — worth checking whether the
-harness construction always pre-warms the queue.
+session), root cause now CONFIRMED via direct `q_cnt`/`drain` signal
+tracing, not yet fixed, not yet reproduced in isolation**
+(`project_skiptx_branch_target_regwrite_bug.md`, second revision — the
+file's own original branch-redirect theory AND its first revision
+("`instr_word` advances past the opcode during a `need_ext` wait") were
+both superseded by this confirmed mechanism): a taken branch's redirect
+correctly flushes the IFU's own queue (`q[]<=0`/`q_cnt<=0` on `pc_wr_en`)
+but does **not** discard the *result* of a bus read that was already
+dispatched, before the flush, for the abandoned fall-through path — that
+read completes normally and gets pushed into the freshly-flushed queue
+anyway, indistinguishable from a genuine fetch of the real redirect
+target. Confirmed directly via `dut.u_cpu.u_ifu.q_cnt`/
+`dut.u_cpu.seq_drain` tracing armed on the exact `pc_wr_en_common`
+redirect event in the original repro: `q_cnt` genuinely goes to 0 right
+after the flush, then a stray byte from the *abandoned* fall-through
+instruction (not the real redirect target) appears in the queue several
+cycles later, gets mis-decoded as a fresh opcode, and — critically —
+that spurious decode's own (wrong, coincidental) `drain` value eats 2
+real queue words on its own bogus dispatch, silently consuming the real
+opcode and/or its real first extension word. Everything decoded after
+that point is reading misaligned, stolen-from-the-real-instruction data,
+which is what produces the wrong-register-write symptom this file
+originally reported. Six separate attempts to reproduce this in an
+isolated `tb/stall_fsm_tb.sv` test (matching branch shape, opcode
+misalignment, wait-state timing, the full original instruction sequence,
+registered-vs-combinational memory timing, and 8-bit-port DSACK timing)
+all failed to trigger it — current working theory is that the bug needs
+the IFU to have already dispatched a speculative fall-through fetch at
+the exact moment the branch resolves, which depends on the prefetch
+queue's own fill level, itself shaped by a long, specific instruction
+history the isolated attempts don't reproduce. See the project file for
+the full per-cycle trace, the six failed reproduction attempts, and a
+concrete fix approach (tag each dispatched fetch with the redirect epoch
+it belongs to; discard fetch results tagged with a stale epoch) —
+reproducing this in a fast, controlled test is the recommended first
+step before attempting that fix, rather than validating only against the
+slow full mackerel-030f simulation. Also flagged: 124/124 Harte suites
+passing to date suggests this class may not be exercised by that corpus
+at all, since it specifically needs a live speculative fetch in flight
+across a redirect.
