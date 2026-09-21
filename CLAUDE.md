@@ -752,6 +752,37 @@ bit-identical to baseline — confirming the corpus's own harness never
 exercised this exact race. **Closes
 `project_skiptx_branch_target_regwrite_bug.md` in full.**
 
+**Phase 283 (BIU narrow-port read justification bug, same later session,
+`project_biu_narrow_port_read_justification_bug.md`, IMPLEMENTED AND
+VERIFIED)**: found via the same mackerel-030f SoC integration, immediately
+after Phase 282 let the CPU run correctly for the first time — a real
+UART LSR/THRE poll (`MOVE.B` from a genuine 8-bit dynamically-sized
+external port) always read the correct value (`0x60`) at the wrong bit
+position (`mem_rdata[31:24]` instead of the right-justified
+`mem_rdata[7:0]` every other consumer in `eu_seq_execute.svh` expects).
+Root cause: `biu_sizing_fsm.sv`'s `merge_rdata()` already normalizes
+byte/word reads for a 32-bit port but positioned 8-bit/16-bit-port bytes
+at their natural big-endian *longword* lane regardless of the *original*
+request size — correct by construction for a longword transfer (the only
+shape `tb/biu_tb.sv` had ever tested through a narrow port), silently
+wrong for byte/word. Fixed by computing the shift from `orig_bytes`/
+`done` directly instead of a fixed lookup — unchanged for longword,
+newly correct for byte/word. A genuinely separate gap (byte request via
+a 16-bit port, needing an `addr_lo`-based half-selection this module has
+never had) was found and deliberately left unfixed — no real peripheral
+in this project exercises it. New `tb/biu_tb.sv` coverage confirmed to
+fail cleanly pre-fix. Found and fixed one piece of fallout: 4 of 33
+`cosim_memind` targets regressed from Phase 282's own fix, each
+hand-confirmed to be the exact same expected consequence (a taken
+`Bcc`/`JSR`/`JMP` now correctly pays a real, separate bus cycle for an
+in-flight ambient fetch before redirecting, which Musashi's own
+purely-functional emulator never models) — `tools/buscmp.py` gained a
+new `--allow-dut-extra-fetch` flag, applied to just those 4 targets.
+Full mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8,
+`cosim_memind` 33/33, `dat-synth` 50/50), Harte bit-identical to
+baseline. **Closes `project_biu_narrow_port_read_justification_bug.md`
+in full.**
+
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

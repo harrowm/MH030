@@ -509,7 +509,7 @@ buscmp-memind10: $(SIM)/cosim_grp winuae/tests/memind10_ref.log tests/memind10.h
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind10.hex +grp=memind10 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind10.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind10.log winuae/tests/memind10_ref.log \
-	    --reads-only --dut-may-continue --allow-adjacent-swap
+	    --reads-only --dut-may-continue --allow-adjacent-swap --allow-dut-extra-fetch
 buscmp-memind11: $(SIM)/cosim_grp winuae/tests/memind11_ref.log tests/memind11.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind11.hex +grp=memind11 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind11.log || true
@@ -622,7 +622,7 @@ buscmp-memind30: $(SIM)/cosim_grp winuae/tests/memind30_ref.log tests/memind30.h
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind30.hex +grp=memind30 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind30.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind30.log winuae/tests/memind30_ref.log \
-	    --dut-may-continue
+	    --dut-may-continue --allow-dut-extra-fetch
 # memind31 (10-item backlog Stage 9b, plan.md): JSR's own genuine
 # memory-indirect EA -- same outer-write shape as PEA's own memind arm,
 # but pushes the return PC (not the resolved EA) and jumps to the
@@ -638,7 +638,7 @@ buscmp-memind31: $(SIM)/cosim_grp winuae/tests/memind31_ref.log tests/memind31.h
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind31.hex +grp=memind31 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind31.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind31.log winuae/tests/memind31_ref.log \
-	    --dut-may-continue
+	    --dut-may-continue --allow-dut-extra-fetch
 # memind32-35 (general ALU-with-EA-source genuine indirect stage, plan.md):
 # ADD.L (register write), DIVU.W (word-sized memory operand, exercises the
 # memind read-size + timing fixes), CMP.L (no register write at all, flags
@@ -669,7 +669,7 @@ buscmp-memind34: $(SIM)/cosim_grp winuae/tests/memind34_ref.log tests/memind34.h
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind34.hex +grp=memind34 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind34.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind34.log winuae/tests/memind34_ref.log \
-	    --dut-may-continue
+	    --dut-may-continue --allow-dut-extra-fetch
 buscmp-memind35: $(SIM)/cosim_grp winuae/tests/memind35_ref.log tests/memind35.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind35.hex +grp=memind35 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind35.log || true
@@ -699,7 +699,7 @@ buscmp-memind36: $(SIM)/cosim_grp winuae/tests/memind36_ref.log tests/memind36.h
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind36.hex +grp=memind36 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind36.log || true
 	python3 tools/buscmp.py /tmp/_dut_memind36.log winuae/tests/memind36_ref.log \
-	    --dut-may-continue
+	    --dut-may-continue --allow-dut-extra-fetch
 buscmp-memind37: $(SIM)/cosim_grp winuae/tests/memind37_ref.log tests/memind37.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind37.hex +grp=memind37 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind37.log || true

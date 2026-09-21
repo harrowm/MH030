@@ -2773,3 +2773,42 @@ never exercised this exact race, so this closes a real gap Harte itself
 is structurally blind to. See the project file's own "Fix (implemented)"
 section for the full derivation. **Closes
 `project_skiptx_branch_target_regwrite_bug.md` in full.**
+
+**BIU narrow-port read justification bug (same later session,
+`project_biu_narrow_port_read_justification_bug.md`, FIXED AND
+VERIFIED)**: found via the same mackerel-030f SoC integration — after the
+branch-redirect fix above let the CPU run correctly for the first time,
+a real UART LSR/THRE poll (`MOVE.B (5,A1),D2` from an 8-bit dynamically-
+sized external port) never worked, always reading THRE as clear. Traced
+the real value (`0x60`, correct) all the way from the UART core's own
+`lsr` register through `biu_sizing_fsm`/`biu_cache_if` to `m68030_eu`'s
+`mem_rdata` input -- landing at `mem_rdata[31:24]` instead of the
+right-justified `mem_rdata[7:0]` every other consumer in
+`eu_seq_execute.svh` expects. Root cause: `biu_sizing_fsm.sv`'s
+`merge_rdata()` already normalizes byte/word reads to right-justified
+for a 32-bit port, but the 8-bit/16-bit-port branches positioned each
+byte at its natural big-endian *longword* lane regardless of the
+*original* request size -- correct by construction for a longword
+transfer (all four lanes fill either way, matching every existing
+`tb/biu_tb.sv` test, which only ever exercised longword transfers
+through narrow ports), silently wrong for byte/word. Fixed by computing
+the shift from `orig_bytes`/`done` directly instead of a fixed lookup --
+reduces to the exact same shifts as before for `orig_bytes==4`, newly
+right-justifies `orig_bytes==1/2`. Deliberately left unfixed: a BYTE
+request via a 16-bit port (needs an `addr_lo`-based half-selection this
+module has never had; no real peripheral in this project exercises it).
+New `tb/biu_tb.sv` coverage (byte-via-8-bit, word-via-8-bit,
+word-via-16-bit) confirmed to fail cleanly pre-fix, pass post-fix.
+**Found and fixed a related test-tooling gap while running the full
+mandatory gate**: 4 of 33 `cosim_memind` targets (memind10/30/31/34/36)
+regressed from the branch-redirect fix above, each hand-confirmed
+against its own `.s` source to be the exact same expected consequence
+(a taken `Bcc` or unconditional `JSR`/`JMP` now correctly lets an
+in-flight ambient fetch complete as its own real, separate bus cycle
+before the redirect, which Musashi's own purely-functional emulator
+never models) -- `tools/buscmp.py` gained a new `--allow-dut-extra-fetch`
+flag (mirroring the existing `--allow-adjacent-swap` precedent) applied
+to just those 4 targets. Full mandatory gate clean (`make test` 38/38),
+`cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50, Harte
+bit-identical to baseline. **Closes
+`project_biu_narrow_port_read_justification_bug.md` in full.**

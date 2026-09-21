@@ -1417,6 +1417,41 @@ module biu_tb;
         check32("LW write/readback 8-bit port", rdata, 32'h1122_3344);
         test_mem_sel = MUX_FAST;
 
+        // ===================================================================
+        // project_biu_narrow_port_read_justification_bug.md: a byte or word
+        // read serviced by a genuinely 8-bit/16-bit external port (i.e. one
+        // that needs biu_sizing_fsm.sv's own dynamic-sizing sub-cycle
+        // machinery at all, unlike the LW cases above which happen to fill
+        // every lane regardless of justification) used to come back
+        // top-justified instead of right-justified -- found via a real
+        // mackerel-030f SoC UART integration failure (a byte LSR read
+        // landed at rdata[31:24] instead of rdata[7:0], so BTST always
+        // tested the wrong byte lane and read it as always-zero).
+        // ===================================================================
+        $display("--- Byte read (SIZ=01) from 8-bit port ---");
+        u_mem8.mem[6] = 32'h1122_3344;   // byte $00000018 = $11
+        test_mem_sel = MUX_8;
+        eu_read(.addr(32'h0000_0018), .fc(3'b101), .siz(2'b01), .is_op(1'b1),
+                .rdata(rdata), .timeout_cycles(300));
+        check32("Byte read 8-bit port right-justified", rdata, 32'h0000_0011);
+        test_mem_sel = MUX_FAST;
+
+        $display("--- Word read (SIZ=10) from 8-bit port ---");
+        u_mem8.mem[7] = 32'hAABB_CCDD;   // bytes $0000001C-1F = AA BB CC DD
+        test_mem_sel = MUX_8;
+        eu_read(.addr(32'h0000_001C), .fc(3'b101), .siz(2'b10), .is_op(1'b1),
+                .rdata(rdata), .timeout_cycles(400));
+        check32("Word read 8-bit port right-justified", rdata, 32'h0000_AABB);
+        test_mem_sel = MUX_FAST;
+
+        $display("--- Word read (SIZ=10) from 16-bit port ---");
+        u_mem16.mem[9] = 32'h6789_ABCD;   // bytes $00000024-27
+        test_mem_sel = MUX_16;
+        eu_read(.addr(32'h0000_0024), .fc(3'b101), .siz(2'b10), .is_op(1'b1),
+                .rdata(rdata), .timeout_cycles(300));
+        check32("Word read 16-bit port right-justified", rdata, 32'h0000_6789);
+        test_mem_sel = MUX_FAST;
+
         $display("--- Word read (SIZ=10) from 32-bit port ---");
         // SIZ=10 means word (16-bit); from a 32-bit port, one cycle
         // Byte $00000020 = word_addr 8 upper halfword

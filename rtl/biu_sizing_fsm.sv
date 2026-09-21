@@ -243,23 +243,52 @@ module biu_sizing_fsm (
         done = orig_bytes - cur_bytes;
 
         // Extract the piece from the raw data based on port width
-        // and shift it to the correct position in the result
+        // and shift it to the correct position in the result.
+        //
+        // project_biu_narrow_port_read_justification_bug.md fix: the 8-bit
+        // and 16-bit branches below used to position each byte at its
+        // natural big-endian LONGWORD lane (byte 0 at [31:24] ... byte 3
+        // at [7:0]) regardless of the ORIGINAL request size -- correct by
+        // construction for a longword transfer (all 4 lanes end up
+        // filled, matching tb/biu_tb.sv's own existing passing tests),
+        // but WRONG for a byte or word read from a genuinely 8-bit/16-bit
+        // external port: the result never got right-justified into
+        // [7:0]/[15:0], unlike the 32-bit-port branch just below, which
+        // already does this correctly. Every OTHER consumer of mem_rdata
+        // in eu_seq_execute.svh (MOVEP's own mem_rdata[7:0] extraction,
+        // etc.) universally expects the right-justified convention. Fixed
+        // by computing the shift from orig_bytes/done directly instead of
+        // a fixed lane-position lookup -- this reduces to the exact same
+        // (already-correct) shifts as before for orig_bytes==4, and newly
+        // right-justifies the orig_bytes==1/2 cases.
         case (port)
             2'b01: begin  // 16-bit port: data on D[31:16]
-                case (done[1:0])
-                    2'b00: piece = {raw[31:16], 16'h0};  // bytes 0,1 → top
-                    2'b10: piece = {16'h0, raw[31:16]};  // bytes 2,3 → bottom
-                    default: piece = raw;
-                endcase
+                if (orig_bytes >= 3'd2) begin
+                    // Word or longword original request: this port always
+                    // transfers exactly 2 bytes per beat (matches next_siz/
+                    // needs_more's own xfer=2 convention for this port),
+                    // so the piece's own final bit position is a clean
+                    // function of how many bytes are left after it lands.
+                    piece = {16'h0, raw[31:16]} << (8 * (orig_bytes - 3'd2 - done));
+                end else begin
+                    // orig_bytes==1: a genuine BYTE request serviced by a
+                    // 16-bit port. Which half of this port's own D[31:16]
+                    // response holds the real byte is peripheral- and
+                    // address-dependent (the 32-bit-port branch below
+                    // threads addr_lo through for exactly this reason;
+                    // this port width never has), and no real peripheral
+                    // in this project exercises the combination -- left
+                    // exactly as before (not fixed, not worsened). See
+                    // this bug's own project file, "Deliberately not
+                    // fixed" section.
+                    piece = raw;
+                end
             end
-            2'b10: begin  // 8-bit port: data on D[31:24]
-                case (done[1:0])
-                    2'b00: piece = {raw[31:24], 24'h0};        // byte 0 → top
-                    2'b01: piece = {8'h0, raw[31:24], 16'h0};  // byte 1
-                    2'b10: piece = {16'h0, raw[31:24], 8'h0};  // byte 2
-                    2'b11: piece = {24'h0, raw[31:24]};        // byte 3
-                    default: piece = raw;
-                endcase
+            2'b10: begin  // 8-bit port: data on D[31:24] -- always exactly
+                // 1 byte per beat (next_siz/needs_more's own xfer=1 for
+                // this port, unconditionally), so no orig_bytes guard is
+                // needed here the way the 16-bit branch above needs one.
+                piece = {24'h0, raw[31:24]} << (8 * (orig_bytes - 3'd1 - done));
             end
             default: begin  // 32-bit port: normalize byte/word from big-endian lane
                 case ({orig_siz, addr_lo})

@@ -30,6 +30,29 @@ Options:
                       it does not mask a genuine data-value mismatch, since
                       it only fires on an EXACT transposition of the next
                       cycle, never a value substitution.
+    --allow-dut-extra-fetch
+                      project_skiptx_branch_target_regwrite_bug.md's own
+                      fix (m68030_ifu.sv): a redirect (branch OR an
+                      unconditional JSR/JMP -- the IFU has no decode
+                      awareness, so it speculatively prefetches past ANY
+                      instruction the same way) landing while an ambient
+                      readahead fetch into the abandoned fall-through path
+                      is still genuinely in flight now correctly lets that
+                      real bus cycle complete before dispatching the real
+                      target, rather than letting the old (buggy) code's
+                      mid-cycle address mutation silently fold the two into
+                      one transaction. This is a real, unavoidable 68030
+                      bus-cycle cost (single bus master, can't dispatch two
+                      overlapping cycles) that Musashi's own reference
+                      trace never shows at all, since Musashi is a purely
+                      functional emulator with no genuine bus-cycle-level
+                      speculative-prefetch model. Tolerates exactly one
+                      DUT-only READ cycle (never a write -- an extra write
+                      would be a real bug, not a discarded prefetch) whose
+                      immediate successor realigns with REF's current
+                      cycle, at each point it's needed -- does not mask a
+                      genuine data-value mismatch on the cycles that DO
+                      get compared.
 
 Exit codes:
     0  All compared cycles match.
@@ -133,6 +156,8 @@ def main():
                    help='Allow DUT to have extra trailing cycles (IFU prefetch after halt)')
     p.add_argument('--allow-adjacent-swap', action='store_true',
                    help='Tolerate two adjacent cycles appearing in swapped order')
+    p.add_argument('--allow-dut-extra-fetch', action='store_true',
+                   help='Tolerate a genuine extra DUT-only ambient-prefetch READ cycle')
     args = p.parse_args()
 
     dut = parse_log(args.dut, skip=args.skip + args.skip_dut,
@@ -143,52 +168,70 @@ def main():
                     max_cycles=args.max)
 
     ctx = 5  # context lines before/after mismatch
-    n_common = min(len(dut), len(ref))
     swapped_at = set()
+    extra_dut_at = set()
 
-    i = 0
-    while i < n_common:
-        d, r = dut[i], ref[i]
+    def fmt(c):
+        return (f"BUS {c[0]} {c[1]:08x} {c[2]:08x} fc={c[3]} siz={c[4]}"
+                if c else '<missing>')
+
+    def report_mismatch(di, ri):
+        print(f"FAIL  mismatch at DUT cycle {di+1}, REF cycle {ri+1}:")
+        lo_d, lo_r = max(0, di - ctx), max(0, ri - ctx)
+        hi_d = min(len(dut), di + ctx + 1)
+        hi_r = min(len(ref), ri + ctx + 1)
+        for j in range(lo_d, hi_d):
+            marker = '>>' if j == di else '  '
+            print(f"  DUT{marker} [{j+1:4d}] {fmt(dut[j])}")
+        for j in range(lo_r, hi_r):
+            marker = '>>' if j == ri else '  '
+            print(f"  REF{marker} [{j+1:4d}] {fmt(ref[j])}")
+
+    di = 0
+    ri = 0
+    while di < len(dut) and ri < len(ref):
+        d, r = dut[di], ref[ri]
         if d != r:
-            if (args.allow_adjacent_swap and i + 1 < n_common and
-                    dut[i] == ref[i + 1] and dut[i + 1] == ref[i]):
-                swapped_at.add(i + 1)  # 1-indexed cycle number of the pair's first line
-                i += 2
+            if (args.allow_adjacent_swap and di + 1 < len(dut) and ri + 1 < len(ref) and
+                    dut[di] == ref[ri + 1] and dut[di + 1] == ref[ri]):
+                swapped_at.add(ri + 1)  # 1-indexed REF cycle number of the pair's first line
+                di += 2
+                ri += 2
                 continue
-            print(f"FAIL  mismatch at cycle {i+1}:")
-            lo = max(0, i - ctx)
-            hi = min(len(dut), len(ref), i + ctx + 1)
-            for j in range(lo, hi):
-                marker_d = '>>' if j == i else '  '
-                marker_r = '>>' if j == i else '  '
-                rd = dut[j] if j < len(dut) else None
-                rr = ref[j] if j < len(ref) else None
-                fmt = lambda c: (f"BUS {c[0]} {c[1]:08x} {c[2]:08x} fc={c[3]} siz={c[4]}"
-                                 if c else '<missing>')
-                print(f"  DUT{marker_d} [{j+1:4d}] {fmt(rd)}")
-                print(f"  REF{marker_r} [{j+1:4d}] {fmt(rr)}")
+            if (args.allow_dut_extra_fetch and d[0] == 'R' and
+                    di + 1 < len(dut) and dut[di + 1] == r):
+                extra_dut_at.add(di + 1)  # 1-indexed DUT cycle number of the tolerated extra
+                di += 1
+                continue
+            report_mismatch(di, ri)
             sys.exit(1)
-        i += 1
+        di += 1
+        ri += 1
 
     if swapped_at:
-        print(f"NOTE  {len(swapped_at)} adjacent-swap pair(s) tolerated at cycle(s) "
+        print(f"NOTE  {len(swapped_at)} adjacent-swap pair(s) tolerated at REF cycle(s) "
               f"{sorted(swapped_at)}")
+    if extra_dut_at:
+        print(f"NOTE  {len(extra_dut_at)} extra DUT-only fetch(es) tolerated at DUT cycle(s) "
+              f"{sorted(extra_dut_at)}")
 
-    n_dut, n_ref = len(dut), len(ref)
-    if n_dut != n_ref:
-        if args.dut_may_continue and n_dut > n_ref:
-            print(f"OK    {n_ref} cycles match (DUT has {n_dut - n_ref} extra trailing cycles)")
+    n_dut_left, n_ref_left = len(dut) - di, len(ref) - ri
+    if n_dut_left != n_ref_left:
+        if args.dut_may_continue and n_dut_left > n_ref_left:
+            print(f"OK    {ri} cycles match (DUT has {n_dut_left - n_ref_left} extra trailing cycles)")
             sys.exit(0)
-        print(f"FAIL  length mismatch: DUT={n_dut} cycles, REF={n_ref} cycles")
-        if n_dut > n_ref:
-            extra = dut[n_ref:n_ref + ctx]
+        print(f"FAIL  length mismatch: DUT={len(dut)} cycles, REF={len(ref)} cycles "
+              f"(after {di - ri} tolerated extra DUT cycle(s))")
+        if n_dut_left > n_ref_left:
+            extra = dut[di + n_ref_left:di + n_ref_left + ctx]
         else:
-            extra = ref[n_dut:n_dut + ctx]
+            extra = ref[ri + n_dut_left:ri + n_dut_left + ctx]
         for c in extra:
-            print(f"  extra: BUS {c[0]} {c[1]:08x} {c[2]:08x} fc={c[3]} siz={c[4]}")
+            print(f"  extra: {fmt(c)}")
         sys.exit(2)
 
-    print(f"OK    {n_dut} cycles match")
+    print(f"OK    {ri} cycles match" +
+          (f" ({di - ri} extra DUT ambient-fetch cycle(s) tolerated)" if di != ri else ""))
     sys.exit(0)
 
 
