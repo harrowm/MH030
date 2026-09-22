@@ -2812,3 +2812,87 @@ to just those 4 targets. Full mandatory gate clean (`make test` 38/38),
 `cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50, Harte
 bit-identical to baseline. **Closes
 `project_biu_narrow_port_read_justification_bug.md` in full.**
+
+**Phase 284 (two real-hardware combinational feedback loops,
+`project_biu_dcache_hit_combinational_loop.md` +
+`project_eu_stall_redirect_combinational_loop.md`, FIXED AND VERIFIED --
+see CLAUDE.md's own condensed writeup for the full derivation)**: the
+first-ever real ECP5-85K FPGA synthesis run against this design found
+`$glbnet$clk_4x` achieves only ~1.66 MHz real max frequency against a
+100 MHz target. Found and fixed two genuine, previously-invisible
+combinational loops: `biu_cache_if.sv`'s `CI_IDLE` D-cache-hit
+fast-path (Phase 247 item #10), and `eu_seq_execute.svh`/
+`eu_seq_preview.svh`'s `ex_redirect_pending`-via-`stall_base` loop
+(narrowed via a new `ex_redirect_pending_older`, protecting Bug 2's
+own original fix, `plan.md.old2:4497-4570`, throughout). Both verified
+independently and together: full mandatory gate clean, Harte
+bit-identical to baseline, all four originally-flagged Verilator
+`UNOPTFLAT` warnings gone. **Re-synthesis with both fixes in place still
+only reached 1.78 MHz** -- neither loop was ever the dominant
+contributor. Reading `nextpnr`'s own critical-path report directly
+found the real bottleneck: a single 562.30 ns, ~3600-hop **acyclic**
+combinational chain spanning nearly the entire design (BIU state --
+cache -- dynamic-bit/CAS2 -- register file -- address ALU carry chain
+-- write-data steering -- external bus -- peripheral), no register
+boundary anywhere in it. This is not a loop bug; it's a direct
+consequence of this project's own S-state-FSM / zero-delay-simulation
+design premise never having been checked against real propagation
+delay before. Closing it for real needs genuine pipelining -- tracked
+as a new effort below, Phase 285.
+
+## Phase 285: real-hardware timing closure via pipelining (SCOPING, not started)
+
+**Goal**: get `$glbnet$clk_4x` closer to a usable real frequency (ideally
+approaching the 100 MHz target, but any large, multi-MHz-order
+improvement over the current 1.78 MHz is meaningful progress) by breaking
+the ~562 ns critical combinational chain found in Phase 284 into
+pipelined stages, **without changing any externally-visible S-state
+cycle count** -- this project's own "no cheating cycles" rule
+(CLAUDE.md) applies just as much to a pipelining fix as to any other
+change: real 68030 silicon's own bus timing must still be matched
+exactly, cycle for cycle, from the outside.
+
+**Why this is a much bigger effort than Phase 284**: Phase 284's two
+loops were narrow, single-node fixes. The Phase 284 critical path report
+shows the bottleneck is structural -- an entire instruction's worth of
+combinational logic (cache hit/miss decision, dynamic-bit-swap muxing,
+CAS2 sub-cycle logic, register-file read, address-register ALU update,
+write-data lane steering, external-bus muxing, peripheral decode) all
+settles within one single `clk_4x` edge, by design, because the whole
+RTL was written against zero-delay simulation semantics. There is almost
+certainly not just one long path -- likely many paths of comparable
+depth through the same general dataflow (state -> cache -> regfile ->
+ALU -> bus), any of which could become the new critical path once the
+worst one is broken.
+
+**Not yet done, first steps for a future session**:
+1. Get a **fuller picture of the critical-path population**, not just
+   the single worst path -- e.g. `nextpnr --report` JSON output, or
+   sweeping `-Ncrit`-style repeated critical-path dumps after
+   iteratively excluding the previous worst path, to see whether there
+   are 2-3 dominant paths or dozens of comparably-bad ones. This
+   determines whether a handful of targeted pipeline-register insertions
+   could get most of the benefit, or whether this needs a systematic,
+   whole-datapath repipelining pass.
+2. For whichever path(s) turn out to dominate, identify a place to split
+   them where a pipeline register can be inserted **without changing the
+   number of `clk_4x` cycles a real bus observer would see** -- e.g. if
+   an existing S-state already spans multiple `clk_4x` ticks (this
+   design runs at 4x the external bus frequency specifically to give
+   "4 clean ticks per external clock cycle," per CLAUDE.md's own Design
+   Constraints), there may be slack within a single S-state's own
+   multi-tick window to move part of this combinational work one tick
+   earlier or later without it ever becoming externally observable.
+   This needs to be verified per-path, not assumed.
+3. Decide, with the user, whether the practical goal for this hardware
+   bring-up is actually 100 MHz (full real-68030 speed) or a much lower
+   but still useful real clock (e.g. low-single-digit MHz, sufcient to
+   demonstrate correct real-hardware operation while this larger effort
+   proceeds separately) -- these have very different risk/effort
+   tradeoffs and the user should choose deliberately rather than this
+   being assumed.
+4. Whatever the chosen approach, the same verification discipline as
+   every other phase applies: full mandatory gate, Harte bit-identical
+   to baseline, and a fresh real FPGA synthesis run to confirm the
+   achieved frequency actually improved before considering any step
+   done.

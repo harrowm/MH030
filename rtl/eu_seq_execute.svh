@@ -964,6 +964,40 @@
     logic ex_redirect_pending;
     assign ex_redirect_pending = branch_taken ||
         (ex_valid && (ex_is_jsr || ex_is_bsr || ex_is_rts || ex_is_rtr || ex_is_rte));
+    // project_eu_stall_redirect_combinational_loop.md fix: a second,
+    // narrower signal for the two COMBINATIONAL consumers of
+    // ex_redirect_pending (ex_mem_stall's own BKPT term below, and
+    // preview_ok in eu_seq_preview.svh) -- both are gated on a condition
+    // (dec_is_bkpt; dec_is_mem_rd||dec_is_mem_wr) that is structurally
+    // mutually exclusive, for the SAME dec_valid/q[0] decode slot, with
+    // dec_is_branch (an opcode can't be both a BKPT/mem-op and a branch
+    // at once) -- so whenever either consumer's own gate is true,
+    // ex_redirect_pending's own branch_taken term can ONLY be nonzero
+    // via branch_taken's OTHER constituent signals (ex_dbcc_taken,
+    // cpcc_branch_taken, cpdbcc_branch_taken, ex_jmp_taken, ex_jsr_taken,
+    // ex_bsr_taken, ex_rts_taken, ex_rtr_taken, ex_rte_taken -- every one
+    // of them ex_*-prefixed, i.e. about an OLDER instruction already in
+    // EX, never q[0]'s own current decode), never dec_branch_taken
+    // itself. dec_branch_taken is exactly the one term that closes a
+    // real combinational loop (dec_branch_taken -> branch_taken ->
+    // ex_redirect_pending -> ex_mem_stall -> stall_base -> stall ->
+    // dec_branch_taken, confirmed via Verilator's own UNOPTFLAT trace
+    // and a real ECP5 nextpnr hold-violation report) -- dropping ONLY
+    // that one term, declared+assigned here (this is placed after
+    // branch_taken's own assign further down purely for readability;
+    // Icarus's own forward-reference limitation for this file, per
+    // ex_redirect_pending's own comment above, applies to referencing a
+    // not-yet-assigned wire, not to a used-before-declared bare `logic`
+    // -- ex_redirect_pending_older is declared here, early, and used by
+    // ex_mem_stall's own assign below; only its own assign statement,
+    // which needs ex_jmp_taken/ex_dbcc_taken/etc, lives later in the
+    // file where those are already available) preserves every genuine
+    // case the original Bug-2 fix needed (an older JSR/BSR/RTS/RTR/RTE/
+    // DBcc/cpBcc/cpDBcc redirecting is a completely different pipeline
+    // stage from q[0]'s own decode, never mutually exclusive with
+    // dec_is_bkpt/dec_is_mem_rd/dec_is_mem_wr) while removing the one
+    // term that was never actually load-bearing for either consumer.
+    logic ex_redirect_pending_older;
     // cmpm_stall declared above (near CMPM state registers)
     // tas_read_ack: hold pipeline stall on the cycle the TAS read ack fires (before
     // tas_run_r becomes 1) so EX doesn't release prematurely. Gated by !tas_after_write_r
@@ -1029,7 +1063,7 @@
                           // match on that stale word stall/dispatch here.
                           (dec_valid && dec_is_bkpt && !bkpt_start_r && !bkpt_run_r &&
                            !bkpt_wait_replacement_r && !bkpt_subst_active_r &&
-                           !ex_redirect_pending) ||
+                           !ex_redirect_pending_older) ||
                           cpsr_start_r || cpsr_run_r ||
                           cpsr_mem_fmt_r || cpsr_cir_wr_r || cpsr_cir_echo_r ||
                           cpsr_abort_r || cpsr_xfer_cir_r || cpsr_xfer_mem_r ||
@@ -5273,6 +5307,19 @@
                            cpdbcc_branch_taken |
                            ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
                            ex_rts_taken | ex_rtr_taken | ex_rte_taken;
+
+    // ex_redirect_pending_older's own actual assign -- see its
+    // declaration (near ex_redirect_pending, above) for the full
+    // derivation. Exactly branch_taken's own formula with the
+    // dec_branch_taken term dropped (every other term is ex_*-prefixed,
+    // about an older, already-in-EX instruction), OR'd with the same
+    // "still waiting on its own mem_ack" term ex_redirect_pending
+    // itself already has.
+    assign ex_redirect_pending_older = ex_dbcc_taken | cpcc_branch_taken |
+                           cpdbcc_branch_taken |
+                           ex_jmp_taken | ex_jsr_taken | ex_bsr_taken |
+                           ex_rts_taken | ex_rtr_taken | ex_rte_taken |
+                           (ex_valid && (ex_is_jsr || ex_is_bsr || ex_is_rts || ex_is_rtr || ex_is_rte));
 
     assign branch_target = dec_branch_taken                         ? (decode_pc    + 32'd2 + dec_branch_disp)
                          : ex_dbcc_taken                            ? (ex_decode_pc + 32'd2 + ex_dbcc_disp)

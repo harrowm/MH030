@@ -783,6 +783,60 @@ Full mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8,
 baseline. **Closes `project_biu_narrow_port_read_justification_bug.md`
 in full.**
 
+**Phase 284 (two real-hardware combinational feedback loops, a later session,
+`project_biu_dcache_hit_combinational_loop.md` +
+`project_eu_stall_redirect_combinational_loop.md`, FIXED AND VERIFIED, but
+see the important caveat below)**: the very first real ECP5-85K FPGA
+synthesis + place-and-route run ever performed against this design
+(mackerel-030f SoC bring-up on real ULX3S hardware) found the CPU core
+achieves only ~1.66 MHz real max frequency for `$glbnet$clk_4x` against a
+100 MHz target — invisible to this project's entire simulation-only
+verification history, which models zero gate/routing propagation delay.
+A dedicated Explore-agent RTL trace found Verilator's own `UNOPTFLAT`
+warnings (`preview_ok`, `ex_redirect_pending`, `rd_a_sel`, `rd_b_sel`) all
+sit in one strongly-connected component closing through exactly one
+no-register-boundary node: `biu_cache_if.sv`'s `CI_IDLE` state serving a
+D-cache hit purely combinationally (a Phase 247 item #10 latency
+optimization). Removed entirely — the pre-existing, unmodified, registered
+`CI_HIT` path (already there, never touched) now handles every D-cache hit
+one cycle later, matching how the I-cache has always worked. Re-synthesis
+showed no meaningful improvement (1.73 MHz), revealing a SECOND, separate
+loop confined to `eu_seq_execute.svh`/`eu_seq_preview.svh`: `ex_mem_stall`'s
+BKPT-hazard term read `ex_redirect_pending`, which depends on
+`branch_taken` → `dec_branch_taken` → `stall` → `stall_base` → directly
+back into `ex_mem_stall`. This loop protects a real, previously-fixed bug
+("Bug 2", `plan.md.old2:4497-4570`), so the term couldn't simply be
+deleted — but `dec_is_bkpt`/`dec_is_mem_rd`/`dec_is_mem_wr` (this loop's
+own two combinational consumers' gating conditions) are structurally
+mutually exclusive with `dec_is_branch` for the same decode slot, so
+`dec_branch_taken` — the one term closing the loop — was provably never
+load-bearing for either consumer. Fixed via a new, narrower
+`ex_redirect_pending_older` (exactly `branch_taken`'s formula minus
+`dec_branch_taken`) feeding just those two consumers; `ex_redirect_pending`
+itself untouched for its one safe, already-registered consumer. Full
+mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8, `cosim_memind`
+33/33, `dat-synth` 50/50), Harte bit-identical to baseline including a
+dedicated re-run of JSR/RTS/BSR/RTR/RTE (Bug 2's own original suites, all
+100%, confirming no reintroduction). Both fixes together eliminate every
+`UNOPTFLAT` warning Verilator can detect. **Important — this did NOT
+solve the real-hardware timing problem**: re-synthesis with both fixes in
+place gave `1.78 MHz`, barely different from baseline. Both loops were
+genuine bugs worth fixing on their own merits, but neither was ever the
+dominant contributor. The real bottleneck, found by reading `nextpnr`'s
+own critical-path report directly: a single **562.30 ns** (189.84 ns
+logic + 372.46 ns routing), ~3600-hop **acyclic** combinational chain
+spanning nearly the entire design (BIU cycle-gen state → cache interface
+→ dynamic-bit/CAS2 logic → register file → address ALU full carry chain →
+write-data steering → external bus → peripheral) with no register
+boundary anywhere in it — a direct, previously-unchecked consequence of
+this project's S-state-FSM / zero-delay-simulation design premise, not a
+loop bug at all. Closing it needs genuine pipelining, scoped separately
+(see Phase 285+ below). **Closes both
+`project_biu_dcache_hit_combinational_loop.md` and
+`project_eu_stall_redirect_combinational_loop.md` in full** as the real,
+narrow bugs they were — the larger real-hardware frequency problem remains
+open, tracked under a new plan.
+
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

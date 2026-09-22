@@ -1431,6 +1431,33 @@ module biu_cache_if (
             // from by-then-latched idx_r/woff_r/addr_r -- same "harmless
             // catch-up" reasoning Track A's own writeup already established.
             CI_IDLE: begin
+                // project_biu_dcache_hit_combinational_loop.md fix: the
+                // combinational D-cache-hit fast path that used to live
+                // here (`else if (eu_req && eu_rw && dhit) eu_ack=1;
+                // eu_rdata=...`, plan.md Phase 247 item #10) closed a
+                // genuine, real-hardware combinational feedback loop --
+                // eu_addr (hence dhit, hence this eu_ack/eu_rdata) is
+                // itself a function of THIS SAME CYCLE's own mem_ack/
+                // mem_rdata via preview_ok/dyn_bit_get_Dn/
+                // ex_redirect_pending, so this response fed directly back
+                // into its own inputs with no register anywhere in the
+                // loop. Harmless in Verilator's own event-driven
+                // simulator (UNOPTFLAT just iterates to a fixed point
+                // with zero modeled delay) but a real ECP5 FPGA synthesis
+                // found ~17ns of real accumulated LUT+routing delay in
+                // one pass around it -- severe hold violations, ~1.66MHz
+                // real achievable frequency against a 100MHz target.
+                // Removed entirely; the always_ff block above still
+                // unconditionally transitions to CI_HIT on a hit
+                // (line ~478), and CI_HIT's own always_comb arm (below)
+                // already correctly delivers eu_ack/eu_rdata one cycle
+                // later from latched idx_r/woff_r/addr_r -- the exact
+                // registered path this fast path was added to shortcut,
+                // completely unmodified and still fully wired. This also
+                // brings the D-cache back in line with how the I-cache
+                // has always worked (biu_icache_if.sv's own IC_HIT is
+                // likewise the only place its hit response is ever
+                // asserted, never combinationally in IC_IDLE).
                 if (eu_req && !eu_rw && !tc_e) begin
                     sf_addr  = eu_addr;
                     sf_fc    = eu_fc;
@@ -1438,9 +1465,6 @@ module biu_cache_if (
                     sf_siz   = eu_siz;
                     sf_wdata = eu_wdata;
                     sf_req   = 1'b1;
-                end else if (eu_req && eu_rw && dhit) begin
-                    eu_ack   = 1'b1;
-                    eu_rdata = extract_rd(data_d[idx][woff], eu_siz, eu_addr[1:0]);
                 end
             end
 

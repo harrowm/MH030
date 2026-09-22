@@ -693,7 +693,18 @@
                                     mem_rmw_final_ack || tas_final_ack || cas_final_ack ||
                                     cas2_final_ack;
 
-    assign preview_ok = preview_current_ready && !ex_redirect_pending &&
+    // project_eu_stall_redirect_combinational_loop.md fix: uses
+    // ex_redirect_pending_older, not ex_redirect_pending itself --
+    // dec_branch_taken (ex_redirect_pending's own one problematic term,
+    // see its declaration in eu_seq_execute.svh) is structurally
+    // guaranteed 0 whenever preview_ok's own later dec_is_mem_rd/
+    // dec_is_mem_wr/preview_is_write gate is satisfied for the SAME
+    // dec_valid/q[0] slot (an opcode can't be both a branch and a
+    // memory op), so it was never actually load-bearing here either --
+    // dropping it breaks a real combinational loop this signal was part
+    // of (confirmed via Verilator's own UNOPTFLAT trace and a real
+    // ECP5 nextpnr hold-violation report) without changing behavior.
+    assign preview_ok = preview_current_ready && !ex_redirect_pending_older &&
                         dec_valid &&
                         // Track 2 Stage 2.2: NEXT may now be an ordinary
                         // read OR a plain register-source write (never
