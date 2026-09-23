@@ -1,4 +1,4 @@
-# D-cache `data_d` BRAM-inference investigation (Phase 285, Phase A — PARTIAL: real RTL fixes shipped, BRAM mapping still not achieved)
+# D-cache `data_d` BRAM-inference investigation (Phase 285, Phase A — RESOLVED: real BRAM mapping achieved)
 
 ## Context
 
@@ -138,31 +138,101 @@ against the library's own matching rules
 cost trade-off. The specific remaining requirement (possibly related to
 the rules file's own `rdinit zero;`/`init no_undef;` clauses, since
 `data_d` has no explicit reset/init value at all) was not identified
-before this investigation's own time budget for this specific sub-
-problem was exhausted.
+before this investigation's own initial time budget for this specific
+sub-problem was exhausted — **later resolved, see below.** A cost-based
+explanation was directly ruled out first: re-running with
+`-logic-cost-ram` overridden to progressively larger values, up to an
+extreme 1,000,000, produced zero change in the outcome.
+
+## Fix 4 (the real resolution): the read had to be registered, not just consolidated
+
+Two research angles, both explicitly requested rather than continuing to
+guess: a web search for known Yosys/ECP5 BRAM-inference gotchas, and a
+from-scratch minimal reproduction built up incrementally from a working
+case to find exactly where the BRAM decision breaks.
+
+The web search surfaced `YosysHQ/yosys#3400` — a maintainer's own
+answer to an extremely similar "same-clock read+write doesn't map to
+DP16KD" symptom, suggesting `(* no_rw_check *)`. Applied to `data_d`'s
+own declaration first; **empirically did not fix it** (confirmed via
+the same isolated repro this whole investigation used throughout).
+
+The real answer came from re-running the exact pass sequence
+`synth_lattice` actually uses (found via `help synth_lattice`/`help
+memory`: `memory -nomap -no-rw-check -bram <rules>` then a separate
+`memory_libmap -lib <rules>` — the earlier manual diagnostic had been
+missing `memory_dff`, one of `memory`'s own constituent passes). Its
+own diagnostic output was unambiguous: `Checking read port `\data_d'[0]
+... no output FF found. Checking read port address `\data_d'[0] ... no
+address FF found.` `data_d_rd` (feeding both `merge_wr`'s own old-value
+argument and `eu_rdata`'s own `CI_HIT` use) was **purely
+combinational** — but every port in DP16KD's own template
+(`brams_16kd.txt`) requires `clock anyedge`: real block RAM read ports
+are physically synchronous silicon, and Yosys cannot map an
+asynchronous read onto one, no matter how the write side is shaped.
+Confirmed directly: registering that one read (nothing else changed)
+was what actually got `memory_libmap` to report `mapping memory ...
+via $__PDPW16KD_` instead of `using FF mapping`, in isolation.
+
+The real fix required two separate signals, since the two consumers
+need the read at genuinely different moments:
+
+- **`data_d_rd_hit`** (Port B, `data_d`'s own dedicated read-only port):
+  `data_d_rd_hit <= data_d[idx][woff];`, unconditional every tick, keyed
+  off the *live*, pre-latch `idx`/`woff` (not `idx_r`/`woff_r`) — this
+  settles exactly one tick after *any* dispatch, matching `CI_HIT`'s own
+  pre-existing, Phase-284-established one-cycle-later hit latency
+  exactly. `eu_rdata`'s own `CI_HIT` use now reads this directly — zero
+  timing change.
+- **`data_d_rd_write_r`**: `merge_wr`'s own old-value need is different
+  — it's needed at `CI_WRITE`'s own `sf_ack_rise`, many ticks after
+  dispatch, keyed off `idx_r`/`woff_r` specifically (which may no longer
+  match the *live* `idx`/`woff` by then). Rather than a third BRAM read
+  port (DP16KD only has 2 total, both already spoken for by Port A and
+  Port B), this is an ordinary register, latched exactly once — on
+  `CI_WRITE`'s own first active tick (`in_ci_write_r` edge-detects this)
+  — directly from `data_d_rd_hit`'s own already-correct value at that
+  exact moment (one tick after the `CI_IDLE`→`CI_WRITE` dispatch edge,
+  precisely when `data_d_rd_hit` holds *this* dispatch's own old value)
+  — then held stable for the rest of `CI_WRITE`'s own multi-tick
+  duration (safe: `idx_r`/`woff_r`, and therefore `data_d[idx_r]
+  [woff_r]`'s own content, cannot change during this window — this
+  project's own single-outstanding-bus-transaction model guarantees
+  nothing else can write it meanwhile).
+
+`(* no_rw_check *)` was removed once the fix above was confirmed
+sufficient on its own (verified empirically, with and without the
+attribute) — with each port now doing exactly one thing (Port A
+write-only, Port B read-only), there's no same-port read-during-write
+ambiguity left for it to resolve.
 
 ## Verification
 
-All 3 fixes shipped so far are independently verified correct: full
-mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8, `cosim_memind`
-33/33, `dat-synth` 50/50), full 124-suite Harte sweep bit-identical to
-baseline (`PASS 702142 FAIL 2`), `tb/cache_tb.sv`'s own dedicated D-cache
-suite clean including D-10 (burst-miss read, directly exercising the
-trickle sequencer's own correctness: a different word offset within the
-same burst-filled line, accessed later, correctly hits with 0 bus
-cycles — proof the background trickle genuinely completes and populates
-the array correctly).
+All 4 fixes are independently verified correct: full mandatory gate
+clean (`make test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33,
+`dat-synth` 50/50), full 124-suite Harte sweep bit-identical to baseline
+(`PASS 702142 FAIL 2`), `tb/cache_tb.sv`'s own dedicated D-cache suite
+clean including D-10 (burst-miss read, directly exercising the trickle
+sequencer's own correctness: a different word offset within the same
+burst-filled line, accessed later, correctly hits with 0 bus cycles) and
+D-11 (write-hit while frozen, directly exercising `data_d_rd_write_r`'s
+own correctness: the merged, partially-updated value lands correctly
+and the entry stays cached). **`data_d` genuinely maps to a real DP16KD
+BRAM primitive** — confirmed directly via an isolated Yosys run
+(`memory_libmap` reports `mapping memory biu_cache_if.data_d via
+$__PDPW16KD_`), not just inferred from the absence of a warning.
 
 ## Status
 
-The RTL is now measurably cleaner and more correct than before this
-investigation (a single, explicitly-arbitrated write port instead of 7
-scattered ones; no read duplication) — worth keeping regardless of the
-BRAM outcome. But the original goal (moving `data_d`'s 2,048 failing
-endpoints off the critical-endpoint population via real BRAM inference)
-is **not yet achieved**. Real timing impact from this specific
-investigation has not yet been measured via a full synthesis run.
-`tag_d`, `valid_d` (this same module), and the I-cache's own equivalent
-arrays (`biu_icache_if.sv`) were deliberately not attempted this session
-— see `plan.md`'s own Phase 285 section for how to prioritize picking
-this back up.
+`data_d`'s BRAM-inference goal is achieved: the RTL is both correct
+(fully re-verified) and maps to real hardware block RAM instead of
+2,048 flip-flops plus their own wide read-select/tag-compare logic.
+Real timing impact (the actual achieved `clk_4x` frequency with this
+fix in place) has not yet been measured via a full synthesis + P&R run
+— that's the next concrete step. `tag_d`, `valid_d` (this same module,
+small, lower priority per Phase 285's own module-level breakdown), and
+the I-cache's own equivalent arrays (`biu_icache_if.sv`, likely the
+single largest remaining opportunity, same 25.6%-vs-23.3%-of-the-
+problem scale as `data_d` itself) were deliberately not attempted this
+session — see `plan.md`'s own Phase 285 section for how to prioritize
+picking this back up.

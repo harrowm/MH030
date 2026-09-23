@@ -208,6 +208,25 @@ module biu_cache_if (
     // cache HIT).
     logic        valid_d [0:15][0:3];
     logic [26:0] tag_d   [0:15];
+    // project_cache_bram_inference.md fix: an earlier attempt at this
+    // fix added a (* no_rw_check *) attribute here, following a real
+    // Yosys/ECP5 maintainer's own answer (github.com/YosysHQ/yosys#3400)
+    // to a similar-looking "using FF mapping" symptom -- same-clock
+    // same-address read-during-write requires memory_libmap to PROVE a
+    // specific resolved value, and it falls back to flip-flops whenever
+    // it can't. Empirically confirmed (isolated Yosys repro, with and
+    // without the attribute) that this was never actually the fix for
+    // THIS array: the real root cause was that data_d_rd (the read used
+    // for both merge_wr's own old-value and eu_rdata's own CI_HIT use)
+    // was purely combinational, and every DP16KD port template requires
+    // `clock anyedge` -- real block RAM read ports are physically
+    // synchronous silicon (see memory_dff's own "no output/address FF
+    // found" diagnostic, which pointed straight at this). Registering
+    // that read (data_d_rd_hit, its own declaration below) was what
+    // actually fixed it; with a real registered port on each side (Port
+    // A write-only, Port B read-only -- see their own declarations),
+    // there's no same-port read-during-write ambiguity left for
+    // no_rw_check to resolve at all, so it isn't needed and was removed.
     logic [31:0] data_d  [0:15][0:3];
 
     // project_cache_bram_inference.md fix: data_d previously had 7
@@ -516,17 +535,55 @@ module biu_cache_if (
     // requester's result by then.
     wire dhit_r = dcache_en && d_size_ok_r && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !xl_ci_r;
 
-    // project_cache_bram_inference.md fix: a single shared read of
-    // data_d[idx_r][woff_r], reused by both merge_wr's own old-value
-    // argument below and eu_rdata's own extract_rd() in the output
-    // always_comb further down -- previously two independent reads of
-    // the same address from two different processes. DP16KD's own
-    // template (brams_16kd.txt) supports at most 2 total ports, each
-    // doing either a read or a write ("srsw"); four separate accesses
-    // (2 reads + Port A + Port B writes) was one too many for Yosys's
-    // memory_share pass to merge down to 2, even though every access
-    // individually collected cleanly.
-    wire [31:0] data_d_rd = data_d[idx_r][woff_r];
+    // project_cache_bram_inference.md fix: Port B, data_d's own single
+    // dedicated read port -- registered, not combinational. Found via
+    // a Yosys github issue (YosysHQ/yosys#3400) directly matching this
+    // symptom: memory_dff's own diagnostic ("no output FF found", "no
+    // address FF found") confirmed the real, final root cause was that
+    // data_d_rd was purely combinational, but every DP16KD port
+    // template requires `clock anyedge` -- real block RAM read ports
+    // are physically synchronous silicon, and Yosys can't map an
+    // asynchronous read onto one. Confirmed empirically: registering
+    // this exact read (nothing else changed) was what finally got
+    // memory_libmap to report `mapping memory ... via $__PDPW16KD_`
+    // instead of `using FF mapping` in an isolated repro.
+    //
+    // Keyed off the LIVE idx/woff (not idx_r/woff_r), so it settles
+    // exactly one tick after ANY dispatch -- matching CI_HIT's own
+    // pre-existing, Phase-284-established one-cycle-later hit latency
+    // exactly, zero timing change for eu_rdata's own CI_HIT use below.
+    logic [31:0] data_d_rd_hit;
+    always_ff @(posedge clk_4x) begin
+        data_d_rd_hit <= data_d[idx][woff];
+    end
+
+    // merge_wr's own old-value need (CI_WRITE, sf_ack_rise, many ticks
+    // after dispatch) is different: it needs data_d[idx_r][woff_r]'s
+    // own value, not the live idx/woff (which may have moved on to an
+    // unrelated later dispatch by then). Rather than a second BRAM read
+    // port (DP16KD only has 2 total, both already spoken for by Port A
+    // and Port B above), latch data_d_rd_hit's own value into an
+    // ordinary register exactly once, on CI_WRITE's own first active
+    // tick (in_ci_write_r edge-detects this) -- that's precisely the
+    // tick data_d_rd_hit holds THIS dispatch's own old value (one tick
+    // after the CI_IDLE->CI_WRITE dispatch edge, matching idx_r/woff_r
+    // themselves becoming stable) -- then hold it there, since
+    // idx_r/woff_r (and therefore data_d[idx_r][woff_r]'s own content,
+    // this project's own single-outstanding-bus-transaction model
+    // guarantees nothing else can write it meanwhile) don't change for
+    // the rest of CI_WRITE's own multi-tick duration.
+    logic [31:0] data_d_rd_write_r;
+    logic        in_ci_write_r;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            in_ci_write_r <= 1'b0;
+        end else begin
+            in_ci_write_r <= (state == CI_WRITE);
+            if (state == CI_WRITE && !in_ci_write_r) begin
+                data_d_rd_write_r <= data_d_rd_hit;
+            end
+        end
+    end
 
     // project_cache_bram_inference.md fix: the main FSM's own write
     // decision (main_wr_*), gets priority for data_d's own single,
@@ -597,7 +654,7 @@ module biu_cache_if (
         end else if (state == CI_WRITE && sf_ack_rise && dhit_r) begin
             // Write-hit: write-through cache-array update.
             main_wr_en   = 1'b1;
-            main_wr_data = merge_wr(data_d_rd, wdata_r, siz_r, addr_r[1:0]);
+            main_wr_data = merge_wr(data_d_rd_write_r, wdata_r, siz_r, addr_r[1:0]);
         end else if (state == CI_WRITE && sf_ack_rise && !dhit_r && wa_en &&
                      !dfreeze_en && siz_r == 2'b00 && addr_r[1:0] == 2'b00) begin
             // Write-allocate on an aligned longword write-miss.
@@ -1554,7 +1611,7 @@ module biu_cache_if (
 
             CI_HIT: begin
                 // Serve directly from cache; no sf_req
-                eu_rdata = extract_rd(data_d_rd, siz_r, addr_r[1:0]);
+                eu_rdata = extract_rd(data_d_rd_hit, siz_r, addr_r[1:0]);
                 eu_ack = 1'b1;
             end
 

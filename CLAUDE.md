@@ -885,9 +885,9 @@ preview-port infrastructure). 100 MHz remains the target, not a
 guarantee. **Closes the write-data-specific investigation; the larger
 real-hardware frequency problem remains open, Phase A next.**
 
-**Phase A progress (D-cache `data_d` BRAM inference, same later session,
-`project_cache_bram_inference.md`, PARTIAL — 3 real RTL fixes shipped,
-BRAM mapping not yet achieved)**: `data_d`'s 7 scattered write sites
+**Phase A (D-cache `data_d` BRAM inference, same later session,
+`project_cache_bram_inference.md`, RESOLVED — real BRAM mapping
+achieved)**: `data_d`'s 7 scattered write sites
 (the root cause Yosys's own `Replacing memory` warning flagged,
 responsible for 2,048 of the 9,040 design-wide failing endpoints)
 consolidated into one shared write port, with the one genuinely
@@ -911,15 +911,39 @@ collide — fixed via explicit RTL arbitration (main FSM always wins;
 trickle retries on collision, never skipping a word) rather than
 relying on inference. Full mandatory gate clean, Harte bit-identical,
 `cache_tb`'s own D-10 test directly validates the trickle sequencer.
-**Remaining, unresolved**: even with a clean 1-write+1-read shape
-exactly matching DP16KD's 2-port template, `memory_libmap` still
-chooses FF mapping — confirmed NOT a cost/size heuristic (ruled out via
-an extreme `-logic-cost-ram` override, zero effect) but some other,
-unidentified structural mismatch against the library rules file. The
-3 RTL fixes are kept (genuinely cleaner, more correct RTL regardless),
-but the original goal -- moving these 2,048 endpoints off the critical
-population via real BRAM -- is not yet achieved. `tag_d`/`valid_d` and
-the I-cache's own equivalent arrays not yet attempted.
+A first attempt at fixing the remaining "still using FF mapping"
+mystery added `(* no_rw_check *)` (following a Yosys/ECP5 maintainer's
+own answer to a similar-looking GitHub issue, YosysHQ/yosys#3400) —
+empirically confirmed NOT the fix. The real root cause, found by
+re-running `synth_lattice`'s own exact internal pass sequence (`help
+synth_lattice`/`help memory` — the earlier manual diagnostic had been
+missing `memory_dff`): `memory_dff`'s own diagnostic (`no output FF
+found`, `no address FF found`) showed the shared read (`data_d_rd`,
+feeding both `merge_wr`'s own old-value argument and `eu_rdata`'s own
+`CI_HIT` use) was purely combinational -- but every DP16KD port
+template requires `clock anyedge`, since real block RAM read ports are
+physically synchronous silicon. **Fix 4**: split into `data_d_rd_hit`
+(Port B, a genuine registered read port, keyed off the *live*
+`idx`/`woff` so it settles exactly one tick after any dispatch --
+zero timing change for `CI_HIT`) and `data_d_rd_write_r` (an ordinary
+register, not a third BRAM port -- latched once from `data_d_rd_hit`
+on `CI_WRITE`'s own first active tick via an edge-detected
+`in_ci_write_r`, then held stable for `merge_wr`'s own later use at
+`sf_ack_rise`, safe because this project's own single-outstanding-bus-
+transaction model guarantees `data_d[idx_r][woff_r]`'s content can't
+change in between). `(* no_rw_check *)` was removed once confirmed
+unnecessary (each port now does exactly one thing, no same-port
+read-during-write ambiguity left). Full mandatory gate clean (`make
+test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50),
+Harte bit-identical, `cache_tb`'s own D-10 (trickle) and D-11
+(write-hit-while-frozen, directly exercising `data_d_rd_write_r`) both
+clean. **Confirmed directly via an isolated Yosys run**: `memory_libmap`
+reports `mapping memory biu_cache_if.data_d via $__PDPW16KD_` instead
+of `using FF mapping`. Real timing impact (achieved `clk_4x` frequency)
+not yet measured via a full synthesis + P&R run -- next step.
+`tag_d`/`valid_d` (small, lower priority) and the I-cache's own
+equivalent arrays (likely the next-largest opportunity) not yet
+attempted.
 
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
