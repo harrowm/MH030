@@ -287,11 +287,21 @@ biu_icache_if.data_i via $__PDPW16KD_`.
 Both `data_d` and `data_i`'s BRAM-inference goals are achieved: the RTL
 is correct (fully re-verified for both) and both map to real hardware
 block RAM instead of flip-flops plus wide read-select/tag-compare
-logic. `data_d`'s own real-hardware timing impact has been confirmed at
-the synthesis-resource level (DP16KD count, LUT/FF reduction) in the
-full design; a full synthesis + place-and-route run to get the actual
-achieved `clk_4x` frequency with both fixes together is in progress as
-of this writing. `tag_d`/`valid_d` and `tag_i`/`valid_i` (both modules,
-small, lower priority per Phase 285's own module-level breakdown — the
-64-bit-per-line `data_d`/`data_i` arrays dominate that share by a wide
-margin) were deliberately not attempted this session.
+logic.
+
+**Real-hardware timing impact confirmed, and it's genuinely positive**:
+a full synthesis + place-and-route run with the `data_d` fix alone (the
+`data_i` fix landed just after this run was launched) achieved
+`$glbnet$clk_4x` = **2.39 MHz, up from the 1.79 MHz Phase 285 baseline —
+a ~33% improvement from this one fix alone.** This is a real, measured
+result, not just a resource-usage inference — and a meaningfully
+different outcome from this session's earlier `wdata_hold_r` attempt
+(project_write_data_critical_path.md), which was also fully verified
+correct but had *zero* measured frequency effect. A second run with
+both `data_d` and `data_i` fixes together is in progress to measure the
+combined effect.
+
+`tag_d`/`valid_d` and `tag_i`/`valid_i` (both modules, small, lower
+priority per Phase 285's own module-level breakdown — the 64-bit-per-
+line `data_d`/`data_i` arrays dominate that share by a wide margin)
+were deliberately not attempted this session.
