@@ -2840,59 +2840,206 @@ design premise never having been checked against real propagation
 delay before. Closing it for real needs genuine pipelining -- tracked
 as a new effort below, Phase 285.
 
-## Phase 285: real-hardware timing closure via pipelining (SCOPING, not started)
+## Phase 285: real-hardware timing closure via pipelining (SCOPING, informed by real measurement)
 
-**Goal**: get `$glbnet$clk_4x` closer to a usable real frequency (ideally
-approaching the 100 MHz target, but any large, multi-MHz-order
-improvement over the current 1.78 MHz is meaningful progress) by breaking
-the ~562 ns critical combinational chain found in Phase 284 into
-pipelined stages, **without changing any externally-visible S-state
-cycle count** -- this project's own "no cheating cycles" rule
-(CLAUDE.md) applies just as much to a pipelining fix as to any other
-change: real 68030 silicon's own bus timing must still be matched
-exactly, cycle for cycle, from the outside.
+**Goal**: run this design at a real 25 MHz external bus frequency
+(`$glbnet$clk_4x` = 100 MHz, this design's own 4x-oversampling
+convention), the same ballpark as real 68030 silicon (16-50 MHz),
+**without changing any externally-visible S-state cycle count** --
+this project's own "no cheating cycles" rule (CLAUDE.md) applies just as
+much to a pipelining fix as to any other change.
 
-**Why this is a much bigger effort than Phase 284**: Phase 284's two
-loops were narrow, single-node fixes. The Phase 284 critical path report
-shows the bottleneck is structural -- an entire instruction's worth of
-combinational logic (cache hit/miss decision, dynamic-bit-swap muxing,
-CAS2 sub-cycle logic, register-file read, address-register ALU update,
-write-data lane steering, external-bus muxing, peripheral decode) all
-settles within one single `clk_4x` edge, by design, because the whole
-RTL was written against zero-delay simulation semantics. There is almost
-certainly not just one long path -- likely many paths of comparable
-depth through the same general dataflow (state -> cache -> regfile ->
-ALU -> bus), any of which could become the new critical path once the
-worst one is broken.
+### Investigation performed this session (2026-09-22)
 
-**Not yet done, first steps for a future session**:
-1. Get a **fuller picture of the critical-path population**, not just
-   the single worst path -- e.g. `nextpnr --report` JSON output, or
-   sweeping `-Ncrit`-style repeated critical-path dumps after
-   iteratively excluding the previous worst path, to see whether there
-   are 2-3 dominant paths or dozens of comparably-bad ones. This
-   determines whether a handful of targeted pipeline-register insertions
-   could get most of the benefit, or whether this needs a systematic,
-   whole-datapath repipelining pass.
-2. For whichever path(s) turn out to dominate, identify a place to split
-   them where a pipeline register can be inserted **without changing the
-   number of `clk_4x` cycles a real bus observer would see** -- e.g. if
-   an existing S-state already spans multiple `clk_4x` ticks (this
-   design runs at 4x the external bus frequency specifically to give
-   "4 clean ticks per external clock cycle," per CLAUDE.md's own Design
-   Constraints), there may be slack within a single S-state's own
-   multi-tick window to move part of this combinational work one tick
-   earlier or later without it ever becoming externally observable.
-   This needs to be verified per-path, not assumed.
-3. Decide, with the user, whether the practical goal for this hardware
-   bring-up is actually 100 MHz (full real-68030 speed) or a much lower
-   but still useful real clock (e.g. low-single-digit MHz, sufcient to
-   demonstrate correct real-hardware operation while this larger effort
-   proceeds separately) -- these have very different risk/effort
-   tradeoffs and the user should choose deliberately rather than this
-   being assumed.
-4. Whatever the chosen approach, the same verification discipline as
-   every other phase applies: full mandatory gate, Harte bit-identical
-   to baseline, and a fresh real FPGA synthesis run to confirm the
-   achieved frequency actually improved before considering any step
-   done.
+**Step 1 -- get the real critical-path population, not just the worst
+path.** `nextpnr --report ... --detailed-timing-report` produces a JSON
+timing report with `detailed_net_timings`: real per-register worst-case
+arrival-time data for every register endpoint in the design (13,463 of
+them for this build), not just the single worst path a plain synthesis
+log shows. This is the tool to reach for whenever a fuller picture of
+the timing population (not just the #1 offender) is needed -- described
+in `nextpnr-ecp5 --help` but never used by this project before this
+session.
+
+**Finding 1 (superseded by Finding 3 below, kept for the record)**: the
+initial read of this data showed only 145 endpoints exceeding 400 ns,
+all of the identical shape (peripheral write-data registers -- SPI/
+UART/SDRAM/LED), suggesting one shared upstream write-data chain was
+the dominant bottleneck. Traced it to `biu_cycle_gen.sv`'s own
+`ext_d_out = ... blc_wdata` being driven live/combinationally all the
+way from `eu_seq_execute.svh`'s `mem_wdata` (an EU-side ALU/regfile
+result), through `biu_sizing_fsm.sv`'s and `biu_cache_if.sv`'s own
+matching "dispatch-cycle live-passthrough" fast-path arms (the same
+"skip the register on the very first dispatch tick" pattern Phase 284
+already found and fixed once, for a different signal), with zero
+register anywhere in the chain.
+
+**Fix attempted**: `biu_cycle_gen.sv` gained a new `wdata_hold_r`
+register, capturing `blc_wdata` during `sphase==SP_S2` (the real write
+cycle's own AS-only state) and used for `ext_d_out` from `SP_S3` onward
+instead of the live wire -- exploiting the real, confirmed 1-tick gap
+every reachable write-shaped cycle type (WRITE, RMW-write, CAS2 W1/W2)
+has between S2 and S3/S4 in this file's own state-transition table.
+Burst-write (`ST_BWRITE_*`) deliberately excluded via the existing
+`is_burst_write` signal -- its own `ST_BWRITE_S6->S4` loop-back never
+revisits S2 for beats 2-4, which would have made `wdata_hold_r` go
+stale; confirmed via a real `make test` regression
+(`tb/biu_tb.sv`'s own "MOVE16 burst write" tests, which drive
+`eu_m16_req` directly at this module's own port -- exercised by the
+mandatory gate even though `eu_m16_req` is hardwired to `1'b0` in
+`m68030_top.sv` and thus permanently unreachable from the real
+integrated chip, MOVE16 having been removed entirely, Phase 250 F8).
+Full mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8,
+`cosim_memind` 33/33, `dat-synth` 50/50), Harte bit-identical to
+baseline.
+
+**Finding 2 -- the fix, while correct, had zero measured effect.**
+Re-synthesis gave `1.79 MHz`, unchanged. Re-reading the new critical
+path showed why: `wdata_hold_r` ITSELF is now in the critical cluster
+(~556 ns), because the value feeding it was never actually settled
+ahead of time -- `s_state` is still the starting point of the exact
+same chain feeding the new register's own `D` input. **Lesson: adding a
+register downstream of a combinational chain only helps if the chain's
+own source has already settled by an *earlier* clock edge than the one
+the new register captures on.** Here it hadn't -- the underlying value
+was still reactively recomputing on the very same edge.
+
+**Finding 3 -- the real root cause: `dyn_bit_get_Dn`, a deliberate,
+architecturally-necessary same-cycle reaction to `mem_ack`.**
+`eu_seq_execute.svh:2509`: `dyn_bit_get_Dn = ... mem_ack && ...` --
+live, combinational, no register. The instant a dynamic-bit
+instruction's own memory read of its target register *number*
+completes, this fires the same tick and immediately selects
+`rd_a_sel`/`rd_b_sel`, which drives `rd_b_data`, which flows through
+`ex_an_base` -> `ex_an_new` -> the ALU's own `alu_dst` (via the
+documented "same-register auto-update" special case,
+`eu_seq_execute.svh:4072`, e.g. `ADDA.L (A0)+,A0`) -> the ALU result ->
+write-data -> the pins, all within the tick `mem_ack` asserts. This is
+exactly the mechanism [[feedback_post_ack_signal_reuse]] documents --
+it exists specifically to preserve the real-silicon-matching zero-gap
+back-to-back bus timing Track 1-3 spent ~20 phases building. It is not
+a bug and not simply pipelineable: the target register *number*
+literally does not exist before the memory read completes, so there is
+nothing to "preview" one cycle early the way the other 16 special-FSM
+families can. Real 68030 silicon has the identical sequential
+dependency -- it simply has custom-gate propagation delay fast enough
+to fit within its own clock period, which FPGA LUT fabric cannot match
+at the same logical depth.
+
+**Finding 4 -- the scale of the real gap: 67% of the whole design fails
+a 100 MHz budget, not just one chain.** Computed directly from the same
+per-endpoint data: of 13,487 register endpoints, **9,040 (67.0%)**
+exceed the 10 ns period a real 100 MHz `clk_4x` needs. Median endpoint
+delay is 16.3 ns -- over 1.5x the budget, and that's the median, not an
+outlier. This rules out "find and fix the one worst chain" as a viable
+strategy on its own; reaching 100 MHz needs systemic register insertion
+across a large fraction of the datapath.
+
+**Finding 5 -- but the 9,040 failing endpoints are NOT evenly spread.**
+Module-level breakdown of every failing (>10 ns) endpoint:
+
+| Module | Failing endpoints | Share |
+|---|---|---|
+| `u_cpu.u_eu.u_seq` (decode/hazard/16 special FSMs) | 2,860 | 31.6% |
+| `u_cpu.u_biu.u_cache` (D-cache interface) | 2,316 | 25.6% |
+| `u_cpu.u_biu.u_icache` (I-cache interface) | 2,107 | 23.3% |
+| `u_cpu.u_eu.u_rf` (register file) | 593 | 6.6% |
+| `u_cpu.u_ifu` | 255 | 2.8% |
+| `u_cpu.u_biu.u_mmu` (ATC) | 223 | 2.5% |
+| `u_cpu.u_biu.u_cg` (cycle_gen) | 207 | 2.3% |
+| `u_cpu.u_biu.u_sf` (sizing_fsm) | 138 | 1.5% |
+| `u_cpu.u_biu.u_cg.u_bc` (burst_ctrl) | 131 | 1.4% |
+| `u_cpu.u_exc` | 81 | 0.9% |
+| peripherals (sdram/spi/uart/misc) | ~90 | ~1% |
+
+**80.6% of all failing endpoints live in just 3 modules** (`u_seq` +
+`u_cache` + `u_icache`). This turns "pipeline the whole design" into a
+prioritized, 3-phase plan.
+
+### Phase A (next, highest leverage, bounded risk): D-cache + I-cache -> real BRAM
+
+`u_cache` (2,316) + `u_icache` (2,107) = **4,423 endpoints, 48.9% of the
+entire failing population**, plausibly explained in full by the
+already-confirmed BRAM-inference gap: `data_d`/`tag_d`/`valid_d` and
+`data_i`/`tag_i`/`valid_i` fall back to flip-flops (`Warning: Replacing
+memory ... with list of registers`, confirmed via a synthesis-only
+Yosys run), not BRAM. Every one of those ~2,000+ storage bits gets its
+own wide combinational read-select mux (16 lines x 4 words) plus
+tag-compare logic -- thousands of individually-slow endpoints from one
+structural cause. A real ECP5 `DP16KD` block has a dedicated,
+hard-wired synchronous read port; using it eliminates this whole class
+at once, no general LUT fabric or routing involved.
+
+Root cause already diagnosed (read directly from `biu_cache_if.sv`'s
+own `data_d` write sites): each array has multiple distinct write sites
+(burst-fill from separate per-beat registers, byte/word merge-writes
+via `merge_wr()`, full-longword writes) instead of one canonical
+single-write-port pattern, which breaks Yosys's `memory_bram` template
+matching. Fix: consolidate each array to a single muxed write port
+(computing which source is active combinationally, feeding one write).
+This directly reuses the timing model Phase 284 already established --
+D-cache hit already costs 1 registered cycle (`CI_HIT`), matching a
+real BRAM's own natural synchronous-read latency, so this should be a
+clean fit, not a new cycle-count negotiation.
+
+**Not yet started.** Also plausibly reduces placement congestion
+generally (routing delay dominates the worst paths found so far, and
+congestion correlates with logic density), which could improve *other*
+modules' timing as a side effect -- worth a full re-measurement
+(fresh `nextpnr --report`) after this phase alone, before scoping
+Phase C's own real extent.
+
+### Phase B (small, lower priority): MMU ATC + peripheral long tail
+
+`u_mmu`'s 223 failing endpoints are the ATC -- an associative,
+CAM-like structure (needs parallel compare across all entries), not a
+plain indexed array, so BRAM conversion doesn't directly apply here.
+Small enough (2.5%) to defer; revisit only if still a problem after
+Phase A. Peripheral/misc (~90 endpoints, ~1%) is noise-level.
+
+### Phase C (hard part, ~Track-1-3-scale effort): `eu_seq` restructuring
+
+2,860 failing endpoints (31.6%) in the sequencer. Two genuinely
+different problem shapes needing different treatment, not yet
+separated out (module-level counts don't distinguish them):
+
+1. **Genuinely runtime-reactive, same-cycle `mem_ack` dependencies**
+   (the `dyn_bit_get_Dn` shape from Finding 3; likely siblings
+   `cas_get_du_r`/`cas2_get_du1_r`/`cas2_get_du2_r` have the identical
+   shape). Cannot be pipelined without either accepting a real extra
+   cycle for that specific instruction shape (a narrow, deliberate,
+   documented deviation from Track 3's own zero-gap guarantee, for
+   probably 3-5 rare instruction families) or accepting they stay slow.
+   **Needs explicit user sign-off before touching** -- this walks back
+   a hard-won Track 3 property for a narrow case, not a decision to
+   make unilaterally.
+2. **Statically-known-ahead-of-dispatch logic that has simply never
+   been staged** -- ordinary decode -> regfile -> ALU -> write-data
+   dispatch with no runtime data dependency, just unregistered
+   combinational depth. Fixable by extending the *existing* preview-port
+   infrastructure (`rd_prev_a`/`rd_prev_b`, `eu_new_dispatch` --
+   Track 1-3's own proven pattern for 16 special-FSM families) to also
+   cover the general/ordinary dispatch path.
+
+Realistically structured the same way Track 3 was: one instruction-
+family/mechanism at a time, each with its own dedicated cosim hazard
+test and full mandatory-gate + Harte verification before the next.
+Given Track 3 itself was ~20 phases for a comparable-scale problem,
+**Phase C alone is realistically comparable in size to Track 1-3's
+entire multi-hundred-phase history.** Not yet started; not yet even
+sub-scoped into "which of the 2,860 endpoints are category 1 vs 2" --
+that categorization is itself real work for whenever Phase C begins,
+likely easier to do accurately once Phase A's own real impact has
+shifted/reduced the remaining population.
+
+### Honest bottom line
+
+- Phase A is well-scoped, bounded, and should be done first -- both for
+  its own ~49% impact and because it changes the picture Phase C needs
+  to solve.
+- Phase C is a multi-phase, multi-session effort of Track-3 scale, and
+  part of it requires a real architectural trade-off decision (accepting
+  a narrow cycle-count exception) that isn't a unilateral call.
+- 100 MHz is the target, not a guarantee -- re-measure via a fresh real
+  `nextpnr --report` after each phase, exactly like every other phase in
+  this project's history, rather than assume.

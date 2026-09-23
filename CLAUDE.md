@@ -837,6 +837,54 @@ loop bug at all. Closing it needs genuine pipelining, scoped separately
 narrow bugs they were — the larger real-hardware frequency problem remains
 open, tracked under a new plan.
 
+**Phase 285 (write-data critical path investigation, same later session,
+`project_write_data_critical_path.md`, INVESTIGATED, partial fix
+shipped, real scoping done)**: used `nextpnr --report
+... --detailed-timing-report` for the first time in this project's
+history — real per-register worst-case arrival time for every one of
+13,463 endpoints, not just the single worst path a plain log shows.
+Found and fixed a real unregistered dispatch-cycle write-data
+passthrough (`biu_cycle_gen.sv`'s new `wdata_hold_r`, capturing
+`blc_wdata` at `sphase==SP_S2` for use from `SP_S3` onward, excluding
+`is_burst_write` — its own `ST_BWRITE_S6→S4` loop-back never revisits
+S2, confirmed via a real `make test` regression before the exclusion was
+added). Full mandatory gate clean, Harte bit-identical — but **re-
+synthesis showed zero frequency improvement** (1.79 MHz, unchanged):
+the new register itself joined the critical cluster, because the value
+feeding it was never actually settled ahead of the capture edge — a
+register only helps if its source settled on an *earlier* clock edge,
+which this one hadn't. Root-caused to `dyn_bit_get_Dn`
+(`eu_seq_execute.svh:2509`, `... mem_ack && ...`, live/combinational): a
+deliberate, architecturally-necessary same-cycle reaction that lets a
+dynamic-bit instruction (BCHG/BCLR/BSET/BTST, indexed EA) immediately
+use the target register *number* it just read from memory, preserving
+the real-silicon-matching zero-gap back-to-back timing Track 1-3 spent
+~20 phases building — not a bug, not previewable (the register number
+doesn't exist before the read completes; real 68030 silicon has the
+identical dependency, just with much faster custom-gate propagation).
+Computed the real scale of the gap directly from the per-endpoint data:
+**67.0% of all 13,487 endpoints (9,040) exceed the 10 ns budget a real
+100 MHz `clk_4x` needs** — ruling out "fix the one worst chain" as a
+viable strategy. Found the 9,040 failing endpoints are NOT evenly
+spread: **80.6% live in just 3 modules** — `eu_seq` (31.6%), D-cache
+interface (25.6%), I-cache interface (23.3%). This reframes the problem
+into a prioritized 3-phase plan (`plan.md`'s own Phase 285 section):
+**Phase A** (next, not started) — D-cache + I-cache → real BRAM, 48.9%
+of the failing population in one bounded, well-understood fix (the
+arrays already fall back to flip-flops per Yosys's own `Replacing
+memory` warnings, root-caused to multiple write sites per array instead
+of one canonical single-write-port pattern); **Phase B** (small,
+deferred) — MMU ATC, a genuine CAM structure BRAM doesn't apply to;
+**Phase C** (hard part, comparable in scope to Track 1-3's entire
+multi-hundred-phase history, needs explicit user sign-off before
+starting) — `eu_seq`'s own 2,860 failing endpoints, a mix of genuinely
+runtime-reactive mechanisms (like `dyn_bit_get_Dn`, needing a narrow,
+deliberate cycle-count exception) and statically-known dispatch logic
+that's simply never been staged (fixable by extending the existing
+preview-port infrastructure). 100 MHz remains the target, not a
+guarantee. **Closes the write-data-specific investigation; the larger
+real-hardware frequency problem remains open, Phase A next.**
+
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

@@ -662,6 +662,12 @@ module biu_cycle_gen #(
         .wdata_out(blc_wdata)
     );
 
+    // project_write_data_critical_path.md fix: wdata_hold_r (declared
+    // here, assigned further down once sphase/SP_S2 are available -- see
+    // that assign's own comment for the full derivation) registers
+    // blc_wdata one tick ahead of when ext_d_out needs it.
+    logic [31:0] wdata_hold_r;
+
     // -----------------------------------------------------------------------
     // Burst state decode signals fed to biu_burst_ctrl
     // -----------------------------------------------------------------------
@@ -1130,6 +1136,50 @@ module biu_cycle_gen #(
 
             default: sphase = SP_NONE;
         endcase
+    end
+
+    // project_write_data_critical_path.md fix: real ECP5 FPGA synthesis
+    // found blc_wdata's own upstream chain (cyc_wdata -- for an ordinary
+    // write, eu_seq_execute.svh's mem_wdata, itself often a live EU-side
+    // ALU/regfile combinational result -- through biu_sizing_fsm.sv's own
+    // dispatch-cycle live-passthrough arm, through biu_cache_if.sv's own
+    // matching arm, through this module's own cyc_wdata mux and u_blc's
+    // byte-lane steering) has NO register anywhere in it before reaching
+    // ext_d_out and the real output pins -- a single ~562ns combinational
+    // chain (nextpnr's own critical-path report), the dominant real-
+    // hardware timing bottleneck shared by every write-data-consuming
+    // peripheral register in the design. Real 68030 write timing already
+    // has slack for this: SP_S2 (AS asserted, real S1) and SP_S3 (data
+    // placed + DS asserted) are separate, full clk_4x-tick states for
+    // every reachable write-shaped cycle type (WRITE, RMW-write, CAS2
+    // W1/W2 -- confirmed directly from this module's own state_nxt
+    // transition table above, each unconditionally visiting S2 for
+    // exactly one tick before S3/S4). wdata_hold_r captures blc_wdata's
+    // already-settled value during that SP_S2 tick, one tick before
+    // ext_d_out needs it -- a plain register insertion, not a timing
+    // change: the value was already stable by S2 (the EU holds
+    // mem_req/mem_wdata constant from dispatch until ack), so sampling
+    // it one tick early changes nothing observable on the real bus.
+    //
+    // Burst-write (ST_BWRITE_*) is deliberately EXCLUDED (gated via
+    // is_burst_write at the two ext_d_out sites below, not here) --
+    // its own ST_BWRITE_S6->S4 loop-back never revisits S2 for beats
+    // 2-4, so wdata_hold_r would go stale (confirmed via a real `make
+    // test` regression: tb/biu_tb.sv's own "MOVE16 burst write" tests
+    // drive eu_m16_req directly at this module's own port, bypassing
+    // m68030_top.sv's hardwired-0 tie-off, so this path IS exercised by
+    // the mandatory gate even though it's permanently unreachable from
+    // the real integrated chip, MOVE16 having been removed entirely,
+    // Phase 250 F8). Not worth the added risk of also correctly timing
+    // a refresh for burst-write's own per-beat data mux (bc_m16_wdata_
+    // mux, indexed by a beat counter that itself only updates the tick
+    // AFTER the S6->S4 transition) -- burst-write keeps reading live
+    // blc_wdata, completely unchanged from before this fix. Burst READ
+    // (ST_BURST_*) never uses ext_d_out at all (cyc_rw gates it to
+    // 32'h0 regardless), so it needs no such exclusion.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                  wdata_hold_r <= 32'h0;
+        else if (sphase == SP_S2)    wdata_hold_r <= blc_wdata;
     end
 
     // Next-state logic
@@ -1631,14 +1681,25 @@ module biu_cycle_gen #(
                     ext_as_n = 1'b0;
                     ext_ds_n  = 1'b0;   // DS asserts for all cycles incl. IACK
                     ext_d_oe  = !cyc_rw;
-                    ext_d_out = cyc_rw ? 32'h0 : blc_wdata;
+                    // project_write_data_critical_path.md fix: wdata_hold_r
+                    // (registered at SP_S2, one tick earlier -- see its own
+                    // declaration/assign comments), not live blc_wdata.
+                    ext_d_out = cyc_rw ? 32'h0 : wdata_hold_r;
                 end
                 SP_S4, SP_S5: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz; ext_rw = cyc_rw;
                     ext_as_n = 1'b0;
                     ext_ds_n  = 1'b0;
                     ext_d_oe  = !cyc_rw;
-                    ext_d_out = cyc_rw ? 32'h0 : blc_wdata;
+                    // is_burst_write: see wdata_hold_r's own declaration
+                    // comment -- burst-write's per-beat data (beats 2-4,
+                    // looped via ST_BWRITE_S6->S4) is never refreshed
+                    // into wdata_hold_r, so it keeps reading live
+                    // blc_wdata here, completely unchanged from before
+                    // this fix. Burst-write's own FIRST beat also lands
+                    // here (S0->S2->S4, skipping S3) -- same exclusion
+                    // covers it too, for the same reason.
+                    ext_d_out = cyc_rw ? 32'h0 : (is_burst_write ? blc_wdata : wdata_hold_r);
                 end
                 SP_S6: begin
                     ext_a = cyc_addr; ext_fc = cyc_fc; ext_siz = cyc_siz;
