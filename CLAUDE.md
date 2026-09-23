@@ -885,6 +885,42 @@ preview-port infrastructure). 100 MHz remains the target, not a
 guarantee. **Closes the write-data-specific investigation; the larger
 real-hardware frequency problem remains open, Phase A next.**
 
+**Phase A progress (D-cache `data_d` BRAM inference, same later session,
+`project_cache_bram_inference.md`, PARTIAL — 3 real RTL fixes shipped,
+BRAM mapping not yet achieved)**: `data_d`'s 7 scattered write sites
+(the root cause Yosys's own `Replacing memory` warning flagged,
+responsible for 2,048 of the 9,040 design-wide failing endpoints)
+consolidated into one shared write port, with the one genuinely
+simultaneous 4-word write (`CI_D_BURST0`'s full-CBACK-success
+completion) restructured into an immediate write of the CPU's own
+requested word plus a background `dtrickle_*` sequencer for the other
+3 (found and fixed a real gap via a genuine `make test` regression
+before excluding the permanently-unreachable `is_burst_write` case
+correctly). Found via a minimal isolated Yosys repro that a write
+nested inside an async-reset `if/else` defeats `memory_collect`
+regardless of upstream logic — the actual write must live in its own
+reset-free process; avoided a genuine simulation/synthesis mismatch
+risk (bridging blocking-assigned locals between two clocked processes)
+by rebuilding the write-decision as a true `always_comb` reading only
+already-registered/live signals. Merged two duplicate reads
+(`eu_rdata`'s and `merge_wr`'s, same address) into one shared wire. A
+real synthesis run's own `MEMORY_SHARE` log showed Yosys's SAT-based
+port-sharing check couldn't prove the resulting two write ports (main
+FSM + trickle) mutually exclusive even though they structurally can't
+collide — fixed via explicit RTL arbitration (main FSM always wins;
+trickle retries on collision, never skipping a word) rather than
+relying on inference. Full mandatory gate clean, Harte bit-identical,
+`cache_tb`'s own D-10 test directly validates the trickle sequencer.
+**Remaining, unresolved**: even with a clean 1-write+1-read shape
+exactly matching DP16KD's 2-port template, `memory_libmap` still
+chooses FF mapping — confirmed NOT a cost/size heuristic (ruled out via
+an extreme `-logic-cost-ram` override, zero effect) but some other,
+unidentified structural mismatch against the library rules file. The
+3 RTL fixes are kept (genuinely cleaner, more correct RTL regardless),
+but the original goal -- moving these 2,048 endpoints off the critical
+population via real BRAM -- is not yet achieved. `tag_d`/`valid_d` and
+the I-cache's own equivalent arrays not yet attempted.
+
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

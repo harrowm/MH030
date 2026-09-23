@@ -2535,6 +2535,21 @@ module biu_tb;
                     cache_eu_rdata, 32'hAAAA_0000);
             @(posedge clk_4x); #1;
             dc_burst_ack_tb = 1'b0;
+            // project_cache_bram_inference.md fix: words other than the
+            // one actually requested (woff_r=0 here) now land via the
+            // dtrickle_* background sequencer, up to a few clk_4x ticks
+            // after the burst itself completes (a real BRAM write port
+            // can only write one address per cycle) -- wait for it to
+            // finish before inspecting internal cache-array state
+            // directly. Externally-visible behavior (eu_ack/eu_rdata
+            // timing, already checked above) is completely unaffected;
+            // this is purely this white-box test's own internal-state
+            // check needing to wait for a state that now settles a few
+            // ticks later, the same class of update this project's own
+            // history makes whenever a deliberate internal-timing change
+            // shifts when non-externally-observable state settles.
+            while (u_cache.dtrickle_active_r) @(posedge clk_4x);
+            #1;
             check("CIIN-burst: word 0 (CIIN=1) NOT cached",
                   u_cache.valid_d[u_cache.idx_r][0] === 1'b0);
             check("CIIN-burst: word 1 (CIIN=0) IS cached",

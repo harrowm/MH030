@@ -210,6 +210,92 @@ module biu_cache_if (
     logic [26:0] tag_d   [0:15];
     logic [31:0] data_d  [0:15][0:3];
 
+    // project_cache_bram_inference.md fix: data_d previously had 7
+    // independent non-blocking write sites scattered across this file's
+    // own big FSM always_ff (confirmed directly in Yosys's own synth
+    // log: 7 distinct numbered $mem2reg_wr ports for \data_d, far more
+    // than ECP5's DP16KD BRAM's own 2-write-port maximum -- explaining
+    // the `Warning: Replacing memory \data_d with list of registers`
+    // fallback to flip-flops, which Phase 285's own real-hardware
+    // timing investigation found responsible for 2,048 of the design's
+    // 9,040 failing (>10ns) endpoints, 22.7% of the whole design's own
+    // real timing-closure problem. Consolidated to a single write port
+    // (Port A, "data_d_wr_*") covering every site except the one
+    // genuinely simultaneous 4-word write (CI_D_BURST0's own full-
+    // CBACK-success completion, a rare, opt-in DBE=1 burst-D-cache-fill
+    // case) -- that one case gets its own separate, independent second
+    // write port (Port B, "dtrickle_*", declared further below near its
+    // own dedicated small sequencer) so Yosys can infer a true-dual-
+    // port BRAM.
+    //
+    // A first implementation attempt computed data_d_wr_en/idx/woff/
+    // data via blocking assignment WITHIN this file's own big, reset-
+    // wrapped FSM always_ff (the same "next-state logic inside the
+    // clocked process" idiom this project uses elsewhere) and performed
+    // the actual write at the end of that SAME process. Empirically
+    // confirmed (a minimal isolated Yosys repro, /tmp/minimal_bram_
+    // test.v during this investigation) that this does NOT let Yosys's
+    // memory_collect infer a clean write port at all -- nesting the
+    // final `data_d[...] <= ...;` inside an `if (!rst_n) ... else
+    // begin ... end` structure defeats it, regardless of how the
+    // address/data/enable are computed upstream. The actual write must
+    // live in its own process with no enclosing reset branch. data_d
+    // itself was never explicitly reset anyway (only valid_d gates
+    // whether its contents are ever read), so this loses nothing.
+    //
+    // data_d_wr_en/idx/woff/data are therefore genuine combinational
+    // wires (driven by a dedicated always_comb, declared/assigned
+    // further below near state's own declaration for the usual Icarus
+    // forward-reference reason), computed directly from already-
+    // registered signals (state, idx_r, woff_r, vtag_r, siz_r, addr_r,
+    // wdata_r) and live inputs (sf_ack_rise, dc_burst_ack, dc_burst_
+    // beat, dc_burst_rdataN, ciin, dcache_en, xl_ci_r, d_size_ok_r,
+    // dfreeze_en, dhit_r, wa_en) -- deliberately NOT from this file's
+    // own big FSM always_ff's own blocking-assigned locals, since
+    // bridging a blocking-assigned signal from one clocked process into
+    // a DIFFERENT clocked process is a genuine simulation/synthesis
+    // mismatch risk (undefined relative execution order between two
+    // always blocks triggered by the same edge; a real FPGA build would
+    // synthesize the source as an actual register, valid one tick later
+    // than a same-edge simulation read might suggest). The always_comb
+    // mirrors each site's own exact gating condition -- verify against
+    // the corresponding state's own body in the main FSM below if this
+    // ever needs updating, since the two are independent copies by
+    // necessity, not derived from a shared source.
+    logic        data_d_wr_en;
+    logic [3:0]  data_d_wr_idx;
+    logic [1:0]  data_d_wr_woff;
+    logic [31:0] data_d_wr_data;
+
+    // Port B: a small, independent background sequencer, dedicated
+    // entirely to CI_D_BURST0's own full-CBACK-success completion (the
+    // one write site that genuinely needs 4 different word-offsets
+    // written on the same real event -- see CI_D_BURST0's own comment
+    // for the full derivation). The CPU's own requested word (woff_r)
+    // is written immediately via Port A above, same cycle as before,
+    // with zero externally-visible timing change (fill_rdata_r already
+    // forwards it directly from dc_burst_rdataN, independent of
+    // data_d). This sequencer writes all 4 words (0..3) unconditionally
+    // over up to 4 more clk_4x ticks -- redundantly re-writing whichever
+    // one word Port A already wrote is harmless (same address, same
+    // value) and keeps this sequencer simple (no "skip this offset"
+    // logic needed). Pure background operation: state is already back
+    // at CI_IDLE the instant the fill completes (unchanged), and any
+    // access to a not-yet-trickled word correctly misses (valid_d for
+    // that word stays/goes to 0 until its own trickle write lands) --
+    // exactly the same "gradual, per-word validation" shape the
+    // pre-existing degraded/non-CBACK burst path (CI_D_FILL_1B/2B/3B)
+    // already established. dtrickle_start itself is assigned further
+    // below (near state's own declaration) for the same Icarus
+    // forward-reference reason this file's other similar signals
+    // already document.
+    logic        dtrickle_start;
+    logic        dtrickle_active_r;
+    logic [1:0]  dtrickle_next_r;
+    logic [3:0]  dtrickle_idx_r;
+    logic [31:0] dtrickle_rdata_r [0:3];
+    logic        dtrickle_ok_r    [0:3];
+
     // Extract byte/word from raw longword into EU-convention LSB position.
     // The cache always fetches full longwords; the EU expects byte in [7:0],
     // word in [15:0], longword in [31:0].
@@ -304,6 +390,11 @@ module biu_cache_if (
     } ci_state_t;
 
     ci_state_t state;
+
+    // project_cache_bram_inference.md fix: see dtrickle_start's own
+    // early bare declaration (near dtrickle_active_r) for why this is
+    // split into an early declaration + late assign.
+    assign dtrickle_start = (state == CI_D_BURST0) && dc_burst_ack && (dc_burst_beat == 2'd3);
 
     // Latched request parameters
     logic [31:0] addr_r, wdata_r, fill_base_r;
@@ -424,6 +515,131 @@ module biu_cache_if (
     // broadcast, which could show a different, concurrently in-flight
     // requester's result by then.
     wire dhit_r = dcache_en && d_size_ok_r && valid_d[idx_r][woff_r] && (tag_d[idx_r] == vtag_r) && !xl_ci_r;
+
+    // project_cache_bram_inference.md fix: a single shared read of
+    // data_d[idx_r][woff_r], reused by both merge_wr's own old-value
+    // argument below and eu_rdata's own extract_rd() in the output
+    // always_comb further down -- previously two independent reads of
+    // the same address from two different processes. DP16KD's own
+    // template (brams_16kd.txt) supports at most 2 total ports, each
+    // doing either a read or a write ("srsw"); four separate accesses
+    // (2 reads + Port A + Port B writes) was one too many for Yosys's
+    // memory_share pass to merge down to 2, even though every access
+    // individually collected cleanly.
+    wire [31:0] data_d_rd = data_d[idx_r][woff_r];
+
+    // project_cache_bram_inference.md fix: the main FSM's own write
+    // decision (main_wr_*), gets priority for data_d's own single,
+    // shared physical write port. Each branch mirrors one of the 7
+    // sites' own exact original gating condition, verified directly
+    // against that site's own body in the main FSM below -- keep the
+    // two in sync if either ever changes.
+    //
+    // Originally this fed data_d_wr_en/idx/woff/data directly, with a
+    // SEPARATE second write port (Port B) for the burst-fill trickle
+    // sequencer (dtrickle_*) below. Yosys's own memory_share pass
+    // (its SAT-based port-sharing check, run during a real synthesis
+    // attempt) could not prove the two ports mutually exclusive ("SAT
+    // solver: sharing of port 0 with port 1 is not possible") -- almost
+    // certainly a conservative, tool-level limitation (SAT-based
+    // combinational equivalence checking reasons about the write-enable
+    // logic in isolation, not the real reachable FSM state space this
+    // design's own arbiter/state machine actually restricts it to), but
+    // Yosys won't merge automatically either way, and ECP5's DP16KD
+    // BRAM only has 2 total ports for 3 accesses (2 writes + 1 read) to
+    // share. Fixed by explicitly arbitrating in RTL instead of relying
+    // on inference: the trickle sequencer now shares this SAME single
+    // write port, gated so the main FSM always wins any theoretical
+    // collision (see the priority-mux below and the trickle's own
+    // gated-advance logic further down).
+    reg  [3:0]  main_wr_idx;
+    reg  [1:0]  main_wr_woff;
+    reg  [31:0] main_wr_data;
+    reg         main_wr_en;
+    always_comb begin
+        main_wr_en   = 1'b0;
+        main_wr_idx  = idx_r;
+        main_wr_woff = woff_r;
+        main_wr_data = 32'd0;
+        if (state == CI_D_MISS && sf_ack_rise && dcache_en && !xl_ci_r &&
+            d_size_ok_r && !dfreeze_en && !ciin) begin
+            // Ordinary single-word read-miss fill.
+            main_wr_en   = 1'b1;
+            main_wr_data = sf_rdata;
+        end else if (state == CI_D_BURST0 && dc_burst_ack && dc_burst_beat == 2'd3) begin
+            // Full-CBACK-success burst fill: only the CPU's own requested
+            // word (woff_r) here -- the other 3 go through dtrickle_*
+            // (arbitrated onto this same port) instead.
+            main_wr_en = 1'b1;
+            case (woff_r)
+                2'd0: main_wr_data = dc_burst_rdata0;
+                2'd1: main_wr_data = dc_burst_rdata1;
+                2'd2: main_wr_data = dc_burst_rdata2;
+                default: main_wr_data = dc_burst_rdata3;
+            endcase
+        end else if (state == CI_D_BURST0 && dc_burst_ack && dc_burst_beat != 2'd3) begin
+            // Degraded burst fallback, beat 0.
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd0;
+            main_wr_data = dc_burst_rdata0;
+        end else if (state == CI_D_FILL_1B && dc_burst_ack) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd1;
+            main_wr_data = dc_burst_rdata0;
+        end else if (state == CI_D_FILL_2B && dc_burst_ack) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd2;
+            main_wr_data = dc_burst_rdata0;
+        end else if (state == CI_D_FILL_3B && dc_burst_ack) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd3;
+            main_wr_data = dc_burst_rdata0;
+        end else if (state == CI_WRITE && sf_ack_rise && dhit_r) begin
+            // Write-hit: write-through cache-array update.
+            main_wr_en   = 1'b1;
+            main_wr_data = merge_wr(data_d_rd, wdata_r, siz_r, addr_r[1:0]);
+        end else if (state == CI_WRITE && sf_ack_rise && !dhit_r && wa_en &&
+                     !dfreeze_en && siz_r == 2'b00 && addr_r[1:0] == 2'b00) begin
+            // Write-allocate on an aligned longword write-miss.
+            main_wr_en   = 1'b1;
+            main_wr_data = wdata_r;
+        end
+    end
+
+    // Final, single-port arbitration: the main FSM always wins; the
+    // trickle sequencer only gets the port on a cycle the main FSM
+    // isn't using it (see the trickle's own gated-advance logic further
+    // down, which only advances dtrickle_next_r on a cycle it actually
+    // got to write -- so it never skips a word).
+    always_comb begin
+        if (main_wr_en) begin
+            data_d_wr_en   = 1'b1;
+            data_d_wr_idx  = main_wr_idx;
+            data_d_wr_woff = main_wr_woff;
+            data_d_wr_data = main_wr_data;
+        end else if (dtrickle_active_r) begin
+            data_d_wr_en   = 1'b1;
+            data_d_wr_idx  = dtrickle_idx_r;
+            data_d_wr_woff = dtrickle_next_r;
+            data_d_wr_data = dtrickle_rdata_r[dtrickle_next_r];
+        end else begin
+            data_d_wr_en   = 1'b0;
+            data_d_wr_idx  = idx_r;
+            data_d_wr_woff = woff_r;
+            data_d_wr_data = 32'd0;
+        end
+    end
+
+    // The actual write: deliberately its own process, with NO reset
+    // branch (data_d was never explicitly reset anyway) -- see
+    // data_d_wr_en's own declaration comment for why this specifically
+    // (not just consolidating to one write statement) is what lets
+    // Yosys infer a real BRAM write port here. This is now data_d's
+    // ONLY write anywhere in this file -- both the main FSM and the
+    // trickle sequencer are arbitrated onto it above.
+    always_ff @(posedge clk_4x) begin
+        if (data_d_wr_en) data_d[data_d_wr_idx][data_d_wr_woff] <= data_d_wr_data;
+    end
 
     integer k, m;
 
@@ -702,7 +918,13 @@ module biu_cache_if (
                             // before this fix.
                             fill_rdata_r <= extract_rd(sf_rdata, siz_r, addr_r[1:0]);
                             if (!ciin) begin
-                                data_d[idx_r][woff_r] <= sf_rdata; // full, genuinely-fetched longword
+                                // project_cache_bram_inference.md fix: the
+                                // actual data_d write for this site now
+                                // lives in the dedicated always_comb/
+                                // always_ff pair near data_d_wr_en's own
+                                // declaration (mirrors this exact
+                                // condition -- sf_rdata is the value
+                                // written, full, genuinely-fetched longword).
                                 // A tag mismatch means this line's other 3
                                 // word slots belong to a completely
                                 // different, now-replaced address --
@@ -860,10 +1082,20 @@ module biu_cache_if (
                         if (dc_burst_beat == 2'd3) begin
                             // Full 4-beat burst: CBACK# was asserted, all
                             // four words arrived in this one request.
-                            data_d[idx_r][0] <= dc_burst_rdata0;
-                            data_d[idx_r][1] <= dc_burst_rdata1;
-                            data_d[idx_r][2] <= dc_burst_rdata2;
-                            data_d[idx_r][3] <= dc_burst_rdata3;
+                            // project_cache_bram_inference.md fix: a real
+                            // BRAM write port can only write one address
+                            // per cycle, so only the CPU's own requested
+                            // word (woff_r) is written here -- via the
+                            // dedicated always_comb/always_ff pair near
+                            // data_d_wr_en's own declaration (Port A),
+                            // which mirrors this exact condition, same
+                            // cycle, zero timing change. The other 3 words
+                            // are handed to the dtrickle_* background
+                            // sequencer (Port B, dtrickle_start
+                            // combinationally derived from this exact
+                            // state+condition, see its own declaration
+                            // comment) to write over the following up to
+                            // 4 ticks.
                             case (woff_r)
                                 2'd0: fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
                                 2'd1: fill_rdata_r <= extract_rd(dc_burst_rdata1, siz_r, addr_r[1:0]);
@@ -878,19 +1110,24 @@ module biu_cache_if (
                             // data in a long word is not cachable"), and
                             // biu_burst_ctrl.sv now captures it per-beat
                             // (dc_burst_ciinN) even though all four words
-                            // still arrive via one combined ack. data_d
-                            // above is written unconditionally (harmless --
-                            // invalid entries are never read); tag_d is
-                            // always replaced too (harmless if every word
-                            // ends up invalid -- valid_d already gates hit
-                            // detection). Only the per-word valid_d bits are
-                            // gated, individually, by that word's own
-                            // captured CIIN.
+                            // still arrive via one combined ack. tag_d is
+                            // always replaced (harmless if every word ends
+                            // up invalid -- valid_d already gates hit
+                            // detection). project_cache_bram_inference.md
+                            // fix: valid_d for the 3 words NOT written this
+                            // cycle is explicitly CLEARED (not left as
+                            // whatever it was) -- tag_d changes to this new
+                            // line's own tag THIS SAME CYCLE, so a stale
+                            // valid_d bit left over from whatever line
+                            // previously occupied this slot would otherwise
+                            // false-hit against old, not-yet-overwritten
+                            // data_d content until dtrickle's own later
+                            // write actually lands.
                             tag_d[idx_r]      <= vtag_r;
-                            valid_d[idx_r][0] <= !dc_burst_ciin0;
-                            valid_d[idx_r][1] <= !dc_burst_ciin1;
-                            valid_d[idx_r][2] <= !dc_burst_ciin2;
-                            valid_d[idx_r][3] <= !dc_burst_ciin3;
+                            valid_d[idx_r][0] <= (woff_r == 2'd0) ? !dc_burst_ciin0 : 1'b0;
+                            valid_d[idx_r][1] <= (woff_r == 2'd1) ? !dc_burst_ciin1 : 1'b0;
+                            valid_d[idx_r][2] <= (woff_r == 2'd2) ? !dc_burst_ciin2 : 1'b0;
+                            valid_d[idx_r][3] <= (woff_r == 2'd3) ? !dc_burst_ciin3 : 1'b0;
                             // Bus-pipelining-overlap plan.md, Track D Stage
                             // D2: goes straight to CI_IDLE, not CI_DONE --
                             // same pattern as Stage D0/D1 above.
@@ -906,7 +1143,10 @@ module biu_cache_if (
                             // (this request's own beat 0) actually arrived —
                             // fall back to individually re-requesting the
                             // remaining three words.
-                            data_d[idx_r][0] <= dc_burst_rdata0;
+                            // project_cache_bram_inference.md fix: the
+                            // data_d write for this site (word 0) now
+                            // lives in the dedicated always_comb/always_ff
+                            // pair near data_d_wr_en's own declaration.
                             if (woff_r == 2'd0) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
                             degraded_ciin_r[0] <= dc_burst_ciin0;
                             state           <= CI_D_FILL_1B;
@@ -1010,7 +1250,9 @@ module biu_cache_if (
 
                 CI_D_FILL_1B: begin
                     if (dc_burst_ack) begin
-                        data_d[idx_r][1] <= dc_burst_rdata0;
+                        // project_cache_bram_inference.md fix: data_d
+                        // write for word 1 now in the dedicated pair near
+                        // data_d_wr_en's own declaration.
                         if (woff_r == 2'd1) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
                         degraded_ciin_r[1] <= dc_burst_ciin0;
                         state           <= CI_D_FILL_2B;
@@ -1023,7 +1265,9 @@ module biu_cache_if (
                 end
                 CI_D_FILL_2B: begin
                     if (dc_burst_ack) begin
-                        data_d[idx_r][2] <= dc_burst_rdata0;
+                        // project_cache_bram_inference.md fix: data_d
+                        // write for word 2 now in the dedicated pair near
+                        // data_d_wr_en's own declaration.
                         if (woff_r == 2'd2) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
                         degraded_ciin_r[2] <= dc_burst_ciin0;
                         state           <= CI_D_FILL_3B;
@@ -1036,7 +1280,9 @@ module biu_cache_if (
                 end
                 CI_D_FILL_3B: begin
                     if (dc_burst_ack) begin
-                        data_d[idx_r][3] <= dc_burst_rdata0;
+                        // project_cache_bram_inference.md fix: data_d
+                        // write for word 3 now in the dedicated pair near
+                        // data_d_wr_en's own declaration.
                         if (woff_r == 2'd3) fill_rdata_r <= extract_rd(dc_burst_rdata0, siz_r, addr_r[1:0]);
                         // 10-item backlog Stage 3 (plan.md): per-beat CIIN,
                         // same reasoning as CI_D_BURST0's own full-success
@@ -1077,7 +1323,9 @@ module biu_cache_if (
                             // exception, "write cycles that hit... cause the
                             // entry to be updated even when the cache is
                             // frozen."
-                            data_d[idx_r][woff_r] <= merge_wr(data_d[idx_r][woff_r], wdata_r, siz_r, addr_r[1:0]);
+                            // project_cache_bram_inference.md fix: data_d
+                            // write (merge_wr result) now in the dedicated
+                            // pair near data_d_wr_en's own declaration.
                         end else if (wa_en && !dfreeze_en) begin
                             // Phase 158 Stage 4b: write-allocation on a
                             // write MISS, manual §6.1.2.1/Figure 6-4
@@ -1103,7 +1351,10 @@ module biu_cache_if (
                             // is intentionally not replicated.
                             if (siz_r == 2'b00 && addr_r[1:0] == 2'b00) begin
                                 tag_d[idx_r]           <= vtag_r;
-                                data_d[idx_r][woff_r]  <= wdata_r;
+                                // project_cache_bram_inference.md fix:
+                                // data_d write (wdata_r) now in the
+                                // dedicated pair near data_d_wr_en's own
+                                // declaration.
                                 for (m = 0; m < 4; m++)
                                     valid_d[idx_r][m] <= (m == woff_r);
                             end else begin
@@ -1202,6 +1453,47 @@ module biu_cache_if (
         end
     end
 
+    // project_cache_bram_inference.md fix: the background trickle
+    // sequencer for CI_D_BURST0's own full-CBACK-success completion --
+    // see dtrickle_start's own declaration comment for the full
+    // derivation. Its actual data_d write is arbitrated onto the SAME
+    // single physical write port the main FSM uses (see main_wr_en/
+    // the final arbitration always_comb above) -- Yosys's own
+    // memory_share couldn't prove two separate write ports here were
+    // mutually exclusive, so this shares one explicitly instead.
+    // Advancing dtrickle_next_r (and this word's own valid_d bit) is
+    // gated on `!main_wr_en`: on a cycle the main FSM also wants the
+    // port, the main FSM wins (see the arbitration always_comb) and
+    // the trickle simply waits, retrying the SAME dtrickle_next_r word
+    // next cycle -- so it never advances past a word it didn't
+    // actually get to write. Deliberately a separate always_ff (not
+    // folded into the main one above) so dtrickle_active_r/
+    // dtrickle_next_r have exactly one owner each, with dtrickle_start
+    // (a plain combinational expression, not a register) as the only
+    // signal crossing from the main block's own state machine.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            dtrickle_active_r <= 1'b0;
+            dtrickle_next_r   <= 2'd0;
+        end else if (dtrickle_start) begin
+            dtrickle_active_r  <= 1'b1;
+            dtrickle_next_r    <= 2'd0;
+            dtrickle_idx_r     <= idx_r;
+            dtrickle_rdata_r[0] <= dc_burst_rdata0;
+            dtrickle_rdata_r[1] <= dc_burst_rdata1;
+            dtrickle_rdata_r[2] <= dc_burst_rdata2;
+            dtrickle_rdata_r[3] <= dc_burst_rdata3;
+            dtrickle_ok_r[0]    <= !dc_burst_ciin0;
+            dtrickle_ok_r[1]    <= !dc_burst_ciin1;
+            dtrickle_ok_r[2]    <= !dc_burst_ciin2;
+            dtrickle_ok_r[3]    <= !dc_burst_ciin3;
+        end else if (dtrickle_active_r && !main_wr_en) begin
+            valid_d[dtrickle_idx_r][dtrickle_next_r] <= dtrickle_ok_r[dtrickle_next_r];
+            if (dtrickle_next_r == 2'd3) dtrickle_active_r <= 1'b0;
+            dtrickle_next_r <= dtrickle_next_r + 2'd1;
+        end
+    end
+
     // Output logic
     always_comb begin
         eu_rdata = 32'h0;
@@ -1262,7 +1554,7 @@ module biu_cache_if (
 
             CI_HIT: begin
                 // Serve directly from cache; no sf_req
-                eu_rdata = extract_rd(data_d[idx_r][woff_r], siz_r, addr_r[1:0]);
+                eu_rdata = extract_rd(data_d_rd, siz_r, addr_r[1:0]);
                 eu_ack = 1'b1;
             end
 
