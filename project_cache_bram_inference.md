@@ -1,4 +1,4 @@
-# D-cache `data_d` BRAM-inference investigation (Phase 285, Phase A — RESOLVED: real BRAM mapping achieved)
+# D-cache/I-cache `data_d`/`data_i` BRAM-inference investigation (Phase 285, Phase A — RESOLVED: real BRAM mapping achieved for both)
 
 ## Context
 
@@ -206,7 +206,7 @@ attribute) — with each port now doing exactly one thing (Port A
 write-only, Port B read-only), there's no same-port read-during-write
 ambiguity left for it to resolve.
 
-## Verification
+## Verification (data_d)
 
 All 4 fixes are independently verified correct: full mandatory gate
 clean (`make test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33,
@@ -222,17 +222,76 @@ BRAM primitive** — confirmed directly via an isolated Yosys run
 (`memory_libmap` reports `mapping memory biu_cache_if.data_d via
 $__PDPW16KD_`), not just inferred from the absence of a warning.
 
+**Confirmed again in the full design context**, not just in isolation: a
+real `synth_lattice` run against the whole `mackerel_030f` SoC reports
+`mapping memory mackerel_030f.u_cpu.u_biu.u_cache.data_d via
+$__PDPW16KD_`, DP16KD count 2→3, and resource usage dropped
+substantially as predicted: LUT4 51,525→47,610 (-7.6%), TRELLIS_FF
+13,569→11,626 (-14.3%).
+
+## Extension: `biu_icache_if.sv`'s `data_i` (same session, same fix, one real difference)
+
+Applied the identical, now-proven fix to the I-cache's own equivalent
+array — flagged by the identical `Replacing memory \data_i with list of
+registers` warning, and per Phase 285's own module-level breakdown, a
+comparably large share of the design's own failing-endpoint population
+(23.3% vs `data_d`'s 25.6%). Genuinely simpler in one respect: this
+module is read-only from software's own perspective (no write-hit/
+`merge_wr` equivalent at all), so only one registered read
+(`data_i_rd_hit`, mirroring `data_d_rd_hit` exactly) is needed, not two.
+
+**One real, new correctness issue found and fixed along the way**:
+`valid_i` is per-LINE here, unlike `data_d`'s own per-WORD `valid_d`.
+The original code committed `tag_i`/`valid_i` in the same cycle as the
+(atomic, 4-simultaneous) full-CBACK-success write. Splitting that write
+across Port A (the requested word, immediate) and a background trickle
+sequencer (`itrickle_*`, the other 3 words) the same way `data_d` was
+fixed would have left a real window where `valid_i` claims the whole
+line is valid while 3 of its 4 words are still mid-trickle — a later
+access to any of those *other* words would hit and read genuinely
+stale/uninitialized `data_i` content. Fixed by moving `tag_i`/`valid_i`'s
+own commit to the trickle sequencer's own final step instead of the
+main FSM's dispatch-completion cycle — `itrickle_tag_r`/
+`itrickle_valid_ok_r` latch the values needed for that commit (`vtag_r`,
+`!ciin`) at `itrickle_start`, since `ciin` itself is only meaningful
+right at burst completion, not several ticks later when the trickle
+actually finishes.
+
+**A real test-coverage gap found while verifying**: none of
+`tb/cache_tb.sv`'s own existing I-cache tests (I-1 through I-6) exercise
+`IC_BURST0`'s own full-CBACK-success path at all — every one uses
+IBE=0 (the non-burst, sequential `IC_SINGLE_0..3` fill), meaning the new
+`itrickle_*` mechanism was entirely untested by the regression suite as
+shipped. Found `tb/biu_tb.sv`'s own dedicated `u_icache`-instance test
+(`P-ICI-B`) does exercise a full 4-beat burst directly, but checked
+`valid_i` immediately after `ic_burst_ack` (one cycle too soon for the
+new deferred-commit timing) and never checked the other 3 words'
+own content at all. Fixed both: waits for
+`u_icache.itrickle_active_r` to clear before inspecting internal state
+(external `ifu_ack`/`ifu_rdata` timing, already checked, is completely
+unaffected), and added direct checks that all 3 non-requested words
+landed correctly (mirroring `data_d`'s own D-10 test).
+
+## Verification (data_i)
+
+Full mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8,
+`cosim_memind` 33/33, `dat-synth` 50/50), full Harte sweep bit-identical
+to baseline, `tb/biu_tb.sv`'s own extended `P-ICI-B` test directly
+proving the trickle sequencer populates all 4 words correctly and
+`valid_i` only commits once it's genuinely safe to. Confirmed via an
+isolated Yosys run: `memory_libmap` reports `mapping memory
+biu_icache_if.data_i via $__PDPW16KD_`.
+
 ## Status
 
-`data_d`'s BRAM-inference goal is achieved: the RTL is both correct
-(fully re-verified) and maps to real hardware block RAM instead of
-2,048 flip-flops plus their own wide read-select/tag-compare logic.
-Real timing impact (the actual achieved `clk_4x` frequency with this
-fix in place) has not yet been measured via a full synthesis + P&R run
-— that's the next concrete step. `tag_d`, `valid_d` (this same module,
-small, lower priority per Phase 285's own module-level breakdown), and
-the I-cache's own equivalent arrays (`biu_icache_if.sv`, likely the
-single largest remaining opportunity, same 25.6%-vs-23.3%-of-the-
-problem scale as `data_d` itself) were deliberately not attempted this
-session — see `plan.md`'s own Phase 285 section for how to prioritize
-picking this back up.
+Both `data_d` and `data_i`'s BRAM-inference goals are achieved: the RTL
+is correct (fully re-verified for both) and both map to real hardware
+block RAM instead of flip-flops plus wide read-select/tag-compare
+logic. `data_d`'s own real-hardware timing impact has been confirmed at
+the synthesis-resource level (DP16KD count, LUT/FF reduction) in the
+full design; a full synthesis + place-and-route run to get the actual
+achieved `clk_4x` frequency with both fixes together is in progress as
+of this writing. `tag_d`/`valid_d` and `tag_i`/`valid_i` (both modules,
+small, lower priority per Phase 285's own module-level breakdown — the
+64-bit-per-line `data_d`/`data_i` arrays dominate that share by a wide
+margin) were deliberately not attempted this session.

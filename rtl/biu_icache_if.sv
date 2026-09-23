@@ -170,6 +170,29 @@ module biu_icache_if (
     logic [24:0] tag_i   [0:15];
     logic [31:0] data_i  [0:15][0:3];
 
+    // project_cache_bram_inference.md fix: same BRAM-inference fix
+    // biu_cache_if.sv's own data_d already got (Phase 285 Phase A) --
+    // data_i was flagged by Yosys's own `Replacing memory \data_i with
+    // list of registers` for the identical reasons (many scattered
+    // write sites; a purely combinational read). Simpler here than the
+    // D-cache case: this module is genuinely read-only from software's
+    // own perspective (no write-hit/merge_wr equivalent at all), so only
+    // one registered read is needed, not two. Port A (arbitrated write,
+    // all sites) + Port B (a dedicated registered read) is data_i's own
+    // complete port budget, fitting DP16KD's 2-port limit directly.
+    logic        data_i_wr_en;
+    logic [3:0]  data_i_wr_idx;
+    logic [1:0]  data_i_wr_woff;
+    logic [31:0] data_i_wr_data;
+
+    // Port B: the one dedicated, registered read port. Keyed off the
+    // live idx/woff (not idx_r/woff_r), so it settles exactly one tick
+    // after any dispatch -- matching IC_HIT's own pre-existing one-
+    // cycle-later hit latency exactly, zero timing change. The actual
+    // always_ff lives further below (near idx/woff's own declaration)
+    // for the usual Icarus forward-reference reason.
+    logic [31:0] data_i_rd_hit;
+
     // cg_ack is a 1-tick pulse — edge detect for safety (mirrors
     // biu_cache_if.sv's own sf_ack_rise technique). ic_burst_ack is already
     // a registered one-tick pulse from biu_burst_ctrl.sv itself (see its
@@ -284,6 +307,165 @@ module biu_icache_if (
     // in-flight transaction (idx_r/woff_r/vtag_r, latched at dispatch) is
     // servicing? False means the requester has moved on — see abandoned_r.
     wire same_req = ifu_req && (idx == idx_r) && (woff == woff_r) && (vtag == vtag_r);
+
+    // project_cache_bram_inference.md fix: data_i_rd_hit's own actual
+    // always_ff (declared earlier, near data_i itself, for the usual
+    // Icarus forward-reference reason -- idx/woff weren't available
+    // there yet).
+    always_ff @(posedge clk_4x) begin
+        data_i_rd_hit <= data_i[idx][woff];
+    end
+
+    // project_cache_bram_inference.md fix: the write-decision logic
+    // (Port A) -- mirrors biu_cache_if.sv's own identical mechanism.
+    // Each branch reproduces one of this module's own 9 single-word
+    // write sites' exact original gating condition (verify against the
+    // corresponding state's own body in the main FSM below if this
+    // ever needs updating -- the two are independent copies by
+    // necessity). The genuinely simultaneous 4-word write (IC_BURST0's
+    // own full-CBACK-success completion) writes only the requested
+    // word (woff_r) here; the other 3 go through itrickle_* (Port B's
+    // own write side is instead used purely for the dedicated read
+    // above, so the trickle shares Port A too, arbitrated the same way
+    // biu_cache_if.sv's own dtrickle_* shares its Port A).
+    logic        main_wr_en;
+    logic [3:0]  main_wr_idx;
+    logic [1:0]  main_wr_woff;
+    logic [31:0] main_wr_data;
+    always_comb begin
+        main_wr_en   = 1'b0;
+        main_wr_idx  = idx_r;
+        main_wr_woff = woff_r;
+        main_wr_data = 32'd0;
+        if (state == IC_BURST0 && ic_burst_ack && ic_burst_beat == 2'd3) begin
+            // Full-CBACK-success burst fill: only the requested word here.
+            main_wr_en = 1'b1;
+            case (woff_r)
+                2'd0: main_wr_data = ic_burst_rdata0;
+                2'd1: main_wr_data = ic_burst_rdata1;
+                2'd2: main_wr_data = ic_burst_rdata2;
+                default: main_wr_data = ic_burst_rdata3;
+            endcase
+        end else if (state == IC_BURST0 && ic_burst_ack && ic_burst_beat != 2'd3) begin
+            // Degraded burst fallback, beat 0.
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd0;
+            main_wr_data = ic_burst_rdata0;
+        end else if (state == IC_FILL_1B && ic_burst_ack) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd1;
+            main_wr_data = ic_burst_rdata0;
+        end else if (state == IC_FILL_2B && ic_burst_ack) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd2;
+            main_wr_data = ic_burst_rdata0;
+        end else if (state == IC_FILL_3B && ic_burst_ack) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd3;
+            main_wr_data = ic_burst_rdata0;
+        end else if (state == IC_SINGLE_0 && cg_ack_rise) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd0;
+            main_wr_data = cg_rdata;
+        end else if (state == IC_SINGLE_1 && cg_ack_rise) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd1;
+            main_wr_data = cg_rdata;
+        end else if (state == IC_SINGLE_2 && cg_ack_rise) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd2;
+            main_wr_data = cg_rdata;
+        end else if (state == IC_SINGLE_3 && cg_ack_rise) begin
+            main_wr_en   = 1'b1;
+            main_wr_woff = 2'd3;
+            main_wr_data = cg_rdata;
+        end
+    end
+
+    // project_cache_bram_inference.md fix: the background trickle
+    // sequencer for IC_BURST0's own full-CBACK-success completion --
+    // mirrors biu_cache_if.sv's own dtrickle_* mechanism, with one real
+    // difference this module's own per-LINE (not per-word, unlike
+    // biu_cache_if.sv's own per-word valid_d) valid_i requires: tag_i/
+    // valid_i can NOT be committed immediately (same cycle as the
+    // requested word's own immediate write) the way the old, atomic
+    // 4-simultaneous-write code did -- a later access to a DIFFERENT
+    // word in this same line would then see valid_i=1 (the whole line
+    // "valid") while 3 of its 4 words are still mid-trickle, reading
+    // genuinely stale/uninitialized data_i content. tag_i/valid_i are
+    // therefore committed HERE, on the trickle's own final step
+    // instead -- itag_r/ivalid_ok_r latch the values needed for that
+    // commit (vtag_r, !ciin) at itrickle_start, since ciin itself is
+    // only meaningful right at burst completion, not several ticks
+    // later when the trickle actually finishes.
+    wire itrickle_start = (state == IC_BURST0) && ic_burst_ack && (ic_burst_beat == 2'd3);
+
+    logic        itrickle_active_r;
+    logic [1:0]  itrickle_next_r;
+    logic [3:0]  itrickle_idx_r;
+    logic [24:0] itrickle_tag_r;
+    logic        itrickle_valid_ok_r;
+    logic [31:0] itrickle_rdata_r [0:3];
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            itrickle_active_r <= 1'b0;
+            itrickle_next_r   <= 2'd0;
+        end else if (itrickle_start) begin
+            itrickle_active_r   <= 1'b1;
+            itrickle_next_r     <= 2'd0;
+            itrickle_idx_r       <= idx_r;
+            itrickle_tag_r       <= vtag_r;
+            itrickle_valid_ok_r  <= !ciin;
+            itrickle_rdata_r[0]  <= ic_burst_rdata0;
+            itrickle_rdata_r[1]  <= ic_burst_rdata1;
+            itrickle_rdata_r[2]  <= ic_burst_rdata2;
+            itrickle_rdata_r[3]  <= ic_burst_rdata3;
+        end else if (itrickle_active_r && !main_wr_en) begin
+            if (itrickle_next_r == 2'd3) begin
+                itrickle_active_r <= 1'b0;
+                if (itrickle_valid_ok_r) begin
+                    tag_i[itrickle_idx_r]   <= itrickle_tag_r;
+                    valid_i[itrickle_idx_r] <= 1'b1;
+                end
+            end
+            itrickle_next_r <= itrickle_next_r + 2'd1;
+        end
+    end
+
+    // Final, single-port arbitration onto data_i's own single physical
+    // write port: the main FSM always wins; the trickle only gets the
+    // port on a cycle the main FSM isn't using it, and never advances
+    // past a word it didn't actually get to write (gated above via
+    // `!main_wr_en`).
+    always_comb begin
+        if (main_wr_en) begin
+            data_i_wr_en   = 1'b1;
+            data_i_wr_idx  = main_wr_idx;
+            data_i_wr_woff = main_wr_woff;
+            data_i_wr_data = main_wr_data;
+        end else if (itrickle_active_r) begin
+            data_i_wr_en   = 1'b1;
+            data_i_wr_idx  = itrickle_idx_r;
+            data_i_wr_woff = itrickle_next_r;
+            data_i_wr_data = itrickle_rdata_r[itrickle_next_r];
+        end else begin
+            data_i_wr_en   = 1'b0;
+            data_i_wr_idx  = idx_r;
+            data_i_wr_woff = woff_r;
+            data_i_wr_data = 32'd0;
+        end
+    end
+
+    // The actual write: its own process, with no reset branch (data_i
+    // was never explicitly reset anyway -- only valid_i gates whether
+    // its contents are ever meaningfully read) -- see
+    // biu_cache_if.sv's own data_d_wr_en declaration comment for why
+    // this specifically (not just consolidating to one write
+    // statement) is what lets Yosys infer a real BRAM write port here.
+    always_ff @(posedge clk_4x) begin
+        if (data_i_wr_en) data_i[data_i_wr_idx][data_i_wr_woff] <= data_i_wr_data;
+    end
 
     integer k;
 
@@ -420,29 +602,23 @@ module biu_icache_if (
                         if (ic_burst_beat == 2'd3) begin
                             // Full 4-beat burst: CBACK# was asserted, all
                             // four words arrived in this one request.
-                            data_i[idx_r][0] <= ic_burst_rdata0;
-                            data_i[idx_r][1] <= ic_burst_rdata1;
-                            data_i[idx_r][2] <= ic_burst_rdata2;
-                            data_i[idx_r][3] <= ic_burst_rdata3;
+                            // project_cache_bram_inference.md fix: only
+                            // the requested word writes here (via Port A,
+                            // the dedicated always_comb/always_ff pair
+                            // near data_i_wr_en's own declaration); the
+                            // other 3 words, and tag_i/valid_i's own
+                            // commit, are handled by the itrickle_*
+                            // background sequencer (see its own
+                            // declaration comment for why tag_i/valid_i
+                            // specifically can't commit on this same
+                            // cycle, unlike the D-cache's own per-word
+                            // valid_d).
                             case (woff_r)
                                 2'd0: fill_rdata_r <= ic_burst_rdata0;
                                 2'd1: fill_rdata_r <= ic_burst_rdata1;
                                 2'd2: fill_rdata_r <= ic_burst_rdata2;
                                 2'd3: fill_rdata_r <= ic_burst_rdata3;
                             endcase
-                            // Phase 158 Stage 7: ciin checked once, for the
-                            // whole line -- same "not true per-beat CIIN"
-                            // documented simplification as biu_cache_if.sv's
-                            // own identical burst-completion gate. (A
-                            // translated CI page never reaches this state at
-                            // all -- see IC_XLATE's own dispatch decision,
-                            // docs/cache.md fix, plan.md §Phase 246 -- so
-                            // ciin alone is still the right and complete
-                            // gate here.)
-                            if (!ciin) begin
-                                tag_i[idx_r]   <= vtag_r;
-                                valid_i[idx_r] <= 1'b1;
-                            end
                             state          <= IC_DONE;
                             ic_burst_req_r <= 1'b0;
                         end else begin
@@ -450,7 +626,9 @@ module biu_icache_if (
                             // (this request's own beat 0) actually arrived —
                             // fall back to individually re-requesting the
                             // remaining three words.
-                            data_i[idx_r][0] <= ic_burst_rdata0;
+                            // project_cache_bram_inference.md fix: data_i
+                            // write for word 0 now in the dedicated pair
+                            // near data_i_wr_en's own declaration.
                             if (woff_r == 2'd0) fill_rdata_r <= ic_burst_rdata0;
                             state           <= IC_FILL_1B;
                             ic_burst_addr_r <= fill_base_r + 32'd4;
@@ -491,7 +669,9 @@ module biu_icache_if (
                 IC_FILL_1B: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (ic_burst_ack) begin
-                        data_i[idx_r][1] <= ic_burst_rdata0;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 1 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd1) fill_rdata_r <= ic_burst_rdata0;
                         state           <= IC_FILL_2B;
                         ic_burst_addr_r <= fill_base_r + 32'd8;
@@ -505,7 +685,9 @@ module biu_icache_if (
                 IC_FILL_2B: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (ic_burst_ack) begin
-                        data_i[idx_r][2] <= ic_burst_rdata0;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 2 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd2) fill_rdata_r <= ic_burst_rdata0;
                         state           <= IC_FILL_3B;
                         ic_burst_addr_r <= fill_base_r + 32'd12;
@@ -519,7 +701,9 @@ module biu_icache_if (
                 IC_FILL_3B: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (ic_burst_ack) begin
-                        data_i[idx_r][3] <= ic_burst_rdata0;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 3 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd3) fill_rdata_r <= ic_burst_rdata0;
                         // Phase 158 Stage 7: same "checked once, at final
                         // completion" ciin gate as IC_BURST0's own full-
@@ -564,7 +748,9 @@ module biu_icache_if (
                 IC_SINGLE_0: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
-                        data_i[idx_r][0] <= cg_rdata;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 0 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd0) fill_rdata_r <= cg_rdata;
                         state            <= IC_SINGLE_1;
                         cg_single_addr_r <= fill_base_r + 32'd4;
@@ -579,7 +765,9 @@ module biu_icache_if (
                 IC_SINGLE_1: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
-                        data_i[idx_r][1] <= cg_rdata;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 1 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd1) fill_rdata_r <= cg_rdata;
                         state            <= IC_SINGLE_2;
                         cg_single_addr_r <= fill_base_r + 32'd8;
@@ -593,7 +781,9 @@ module biu_icache_if (
                 IC_SINGLE_2: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
-                        data_i[idx_r][2] <= cg_rdata;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 2 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd2) fill_rdata_r <= cg_rdata;
                         state            <= IC_SINGLE_3;
                         cg_single_addr_r <= fill_base_r + 32'd12;
@@ -607,7 +797,9 @@ module biu_icache_if (
                 IC_SINGLE_3: begin
                     if (!same_req) abandoned_r <= 1'b1;
                     if (cg_ack_rise) begin
-                        data_i[idx_r][3] <= cg_rdata;
+                        // project_cache_bram_inference.md fix: data_i
+                        // write for word 3 now in the dedicated pair near
+                        // data_i_wr_en's own declaration.
                         if (woff_r == 2'd3) fill_rdata_r <= cg_rdata;
                         // Phase 158 Stage 7: ciin, checked once at the
                         // line's final word -- the I-cache's own valid_i is
@@ -724,7 +916,7 @@ module biu_icache_if (
                     // on in the one cycle between dispatch and this HIT
                     // resolving, don't hand back a now-stale ack either.
                     if (same_req) begin
-                        ifu_rdata = data_i[idx_r][woff_r];
+                        ifu_rdata = data_i_rd_hit;
                         ifu_ack   = 1'b1;
                     end
                 end

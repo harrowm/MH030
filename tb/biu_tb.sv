@@ -4644,8 +4644,31 @@ module biu_tb;
                 check("P-ICI-B (control): CI=0 fetch completed", icache_ifu_ack);
                 check32("P-ICI-B (control): CI=0 fetch returned word 0 of the burst",
                         icache_ifu_rdata, 32'h0B0B_0000);
+                // project_cache_bram_inference.md fix: words other than
+                // the one actually requested now land via the itrickle_*
+                // background sequencer, which also defers tag_i/valid_i's
+                // own commit to its own final step (valid_i is per-LINE
+                // here, unlike the D-cache's own per-word valid_d, so it
+                // genuinely cannot commit until all 4 words have actually
+                // landed) -- wait for it to finish before inspecting
+                // internal cache-array state directly. Externally-visible
+                // behavior (ifu_ack/ifu_rdata timing, already checked
+                // above) is completely unaffected.
+                while (u_icache.itrickle_active_r) @(posedge clk_4x);
+                #1;
                 check("P-ICI-B (control): CI=0 fetch DID populate the cache line",
                       u_icache.valid_i[icif_ifu_addr_tb[7:4]]);
+                // Direct proof the itrickle_* background sequencer
+                // genuinely wrote the other 3 words, not just the one
+                // requested via Port A -- mirrors biu_cache_if.sv's own
+                // D-10 test (its own dedicated proof for the identical
+                // mechanism there).
+                check32("P-ICI-B (control): trickle populated word 1",
+                        u_icache.data_i[icif_ifu_addr_tb[7:4]][1], 32'h0B0B_0001);
+                check32("P-ICI-B (control): trickle populated word 2",
+                        u_icache.data_i[icif_ifu_addr_tb[7:4]][2], 32'h0B0B_0002);
+                check32("P-ICI-B (control): trickle populated word 3",
+                        u_icache.data_i[icif_ifu_addr_tb[7:4]][3], 32'h0B0B_0003);
                 icif_ifu_req_tb = 1'b0;
 
                 tc_icache_tb   = 32'h0;

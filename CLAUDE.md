@@ -939,11 +939,35 @@ Harte bit-identical, `cache_tb`'s own D-10 (trickle) and D-11
 (write-hit-while-frozen, directly exercising `data_d_rd_write_r`) both
 clean. **Confirmed directly via an isolated Yosys run**: `memory_libmap`
 reports `mapping memory biu_cache_if.data_d via $__PDPW16KD_` instead
-of `using FF mapping`. Real timing impact (achieved `clk_4x` frequency)
-not yet measured via a full synthesis + P&R run -- next step.
-`tag_d`/`valid_d` (small, lower priority) and the I-cache's own
-equivalent arrays (likely the next-largest opportunity) not yet
-attempted.
+of `using FF mapping`. **Confirmed again in the full design**: a real
+`synth_lattice` run against the whole `mackerel_030f` SoC reports
+`mapping memory mackerel_030f.u_cpu.u_biu.u_cache.data_d via
+$__PDPW16KD_`, DP16KD count 2→3, LUT4 -7.6%, TRELLIS_FF -14.3%.
+
+**Extended the identical, now-proven fix to `biu_icache_if.sv`'s own
+`data_i`** (same session): genuinely simpler in one respect (read-only
+from software, no write-hit/`merge_wr` equivalent, so only one
+registered read is needed) but with one real, new correctness issue
+found and fixed: `valid_i` is per-LINE (unlike `data_d`'s own per-word
+`valid_d`), so `tag_i`/`valid_i`'s own commit had to move from the main
+FSM's own dispatch-completion cycle to the `itrickle_*` sequencer's own
+final step instead (`itrickle_tag_r`/`itrickle_valid_ok_r` latch
+`vtag_r`/`!ciin` at `itrickle_start`) — committing immediately, the way
+a naive port of the `data_d` fix would have, would leave a real window
+where the whole line claims valid while 3 of its 4 words are still
+mid-trickle. Also found a real test-coverage gap: none of
+`tb/cache_tb.sv`'s own existing I-cache tests exercise `IC_BURST0`'s own
+full-CBACK-success path at all (all use IBE=0); found and extended
+`tb/biu_tb.sv`'s own dedicated `P-ICI-B` test instead (which does
+exercise a full burst) to wait for the trickle to finish and directly
+check all 3 non-requested words landed correctly. Full mandatory gate
+clean, Harte bit-identical, confirmed via isolated Yosys run
+(`mapping memory biu_icache_if.data_i via $__PDPW16KD_`). Both `data_d`
+and `data_i` now genuinely map to real BRAM. `tag_d`/`valid_d` and
+`tag_i`/`valid_i` (both modules, small, lower priority) not yet
+attempted; a full synthesis + P&R run with both fixes together, to get
+the actual achieved `clk_4x` frequency, is in progress as of this
+writing.
 
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
