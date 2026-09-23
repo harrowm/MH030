@@ -293,13 +293,27 @@ logic.
 a full synthesis + place-and-route run with the `data_d` fix alone (the
 `data_i` fix landed just after this run was launched) achieved
 `$glbnet$clk_4x` = **2.39 MHz, up from the 1.79 MHz Phase 285 baseline —
-a ~33% improvement from this one fix alone.** This is a real, measured
+a ~33% improvement from this one fix alone.** A second run with both
+`data_d` and `data_i` fixes together achieved **2.46 MHz** — a further,
+smaller gain from the I-cache fix on top (`data_i` is a somewhat smaller
+share of the failing population than `data_d`, 23.3% vs 25.6%, so a
+smaller incremental gain is expected). **Combined: 1.79 MHz → 2.46 MHz,
+~37% real improvement from Phase A overall.** This is a real, measured
 result, not just a resource-usage inference — and a meaningfully
 different outcome from this session's earlier `wdata_hold_r` attempt
 (project_write_data_critical_path.md), which was also fully verified
-correct but had *zero* measured frequency effect. A second run with
-both `data_d` and `data_i` fixes together is in progress to measure the
-combined effect.
+correct but had *zero* measured frequency effect.
+
+**Honest framing**: this confirms the BRAM-inference approach genuinely
+works and was worth doing, but Phase A was never expected to reach
+100 MHz on its own — `data_d`/`data_i` together were only ~49% of the
+failing-endpoint population Phase 285 mapped, and achieved frequency is
+set by the single worst remaining path, not an average. The remaining
+gap to 100 MHz is dominated by Phase C (`eu_seq`, 31.6% of the failing
+population, including the `dyn_bit_get_Dn` architectural dependency
+found during the write-data investigation) — a much larger effort,
+scoped but not started, needing explicit user sign-off before beginning
+given it includes a real cycle-count trade-off decision.
 
 `tag_d`/`valid_d` and `tag_i`/`valid_i` (both modules, small, lower
 priority per Phase 285's own module-level breakdown — the 64-bit-per-

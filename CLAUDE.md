@@ -963,11 +963,19 @@ exercise a full burst) to wait for the trickle to finish and directly
 check all 3 non-requested words landed correctly. Full mandatory gate
 clean, Harte bit-identical, confirmed via isolated Yosys run
 (`mapping memory biu_icache_if.data_i via $__PDPW16KD_`). Both `data_d`
-and `data_i` now genuinely map to real BRAM. `tag_d`/`valid_d` and
+and `data_i` now genuinely map to real BRAM. **Real-hardware measurement
+confirms this genuinely helps**: `data_d` alone measured `clk_4x`
+1.79→2.39 MHz (+33%) in a real synthesis+P&R run; both fixes together
+measured **2.46 MHz (+37% combined)**. This is a real, measured result —
+a meaningfully different outcome from this session's earlier
+`wdata_hold_r` attempt, which was fully verified correct but had zero
+frequency effect. Phase A was never expected to reach 100 MHz alone
+(`data_d`/`data_i` are only ~49% of the failing-endpoint population);
+the remaining gap is dominated by Phase C (`eu_seq`, 31.6%, including
+the `dyn_bit_get_Dn` architectural dependency), a much larger effort
+needing explicit sign-off before starting. `tag_d`/`valid_d` and
 `tag_i`/`valid_i` (both modules, small, lower priority) not yet
-attempted; a full synthesis + P&R run with both fixes together, to get
-the actual achieved `clk_4x` frequency, is in progress as of this
-writing.
+attempted.
 
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
