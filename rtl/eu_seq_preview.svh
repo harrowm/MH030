@@ -682,16 +682,49 @@
     // the identical `dec_is_mem_rd` suppression Track 3 #12 already
     // relied on) -- safe from this regression shape structurally, not
     // just by coincidence.
-    logic preview_current_ready;
-    assign preview_current_ready = (ex_valid && (ex_is_mem_rd || ex_is_mem_wr) && no_special_bus_op &&
+    // project_eu_pipeline_cutpoints.md restructuring: split into an
+    // "ordinary" term (the shallow, common-case read/write final-ack
+    // check) and a "special" term (the OR of all 16 multi-cycle FSMs'
+    // own final-ack signals, several of which are themselves deeper
+    // live compares -- e.g. cas_final_ack's own cas_z_r). Purely a
+    // regrouping for synthesis-balance experimentation -- functionally
+    // identical to the single flat OR chain this replaces (OR is
+    // associative/commutative; no term's value or timing semantics
+    // changed). Unverified whether this measurably helps real
+    // synthesis; kept if the measurement shows benefit, reverted
+    // otherwise, per this project's own established
+    // measure-don't-assume precedent (see
+    // feedback_downstream_register_needs_upstream_slack.md).
+    logic preview_ready_ordinary;
+    assign preview_ready_ordinary = ex_valid && (ex_is_mem_rd || ex_is_mem_wr) && no_special_bus_op &&
                                      mem_ack && !ex_mem_stall && !ex_is_move_reg_idx_dst &&
-                                     !ex_is_pmove64) ||
-                                    movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
+                                     !ex_is_pmove64;
+
+    logic preview_ready_special;
+    assign preview_ready_special = movem_last || cmp2_final_ack || movep_last || addx_mem_final_ack ||
                                     bf_mem_final_ack || pack_mem_final_ack || pmove64_final_ack ||
                                     cpsr_final_ack || bcds_final_ack || move_mm_final_ack ||
                                     cmpm_final_ack || memind_inner_final_ack || memind_outer_final_ack ||
                                     mem_rmw_final_ack || tas_final_ack || cas_final_ack ||
                                     cas2_final_ack;
+
+    logic preview_current_ready;
+    assign preview_current_ready = preview_ready_ordinary || preview_ready_special;
+
+    // project_eu_pipeline_cutpoints.md restructuring: the same flat
+    // 14-term AND chain, regrouped into balanced sub-groups (same
+    // rationale/caveats as preview_ready_ordinary/special above --
+    // AND is associative/commutative, functionally identical result).
+    // Declared/assigned here, ahead of preview_ok's own use of
+    // preview_any_hazard below, matching this project's established
+    // forward-reference-safety convention.
+    logic preview_hazard_grp1, preview_hazard_grp2, preview_hazard_grp3;
+    assign preview_hazard_grp1 = hazard_ex || hazard_wb || hazard_ccr || movem_hazard || movep_hazard;
+    assign preview_hazard_grp2 = bf_hazard || pack_hazard || move_mm_hazard || cmpm_hazard ||
+                                  memind_addr_hazard;
+    assign preview_hazard_grp3 = memind_wr_hazard || mem_rmw_hazard || cas_hazard || need_ext;
+    logic preview_any_hazard;
+    assign preview_any_hazard = preview_hazard_grp1 || preview_hazard_grp2 || preview_hazard_grp3;
 
     // project_eu_stall_redirect_combinational_loop.md fix: uses
     // ex_redirect_pending_older, not ex_redirect_pending itself --
@@ -723,7 +756,4 @@
                         // else), so that restriction no longer applies --
                         // indexed-EA preview is now unconditional on what
                         // CURRENT is doing with its own ports.
-                        !hazard_ex && !hazard_wb && !hazard_ccr && !movem_hazard && !movep_hazard &&
-                        !bf_hazard && !pack_hazard && !move_mm_hazard && !cmpm_hazard &&
-                        !memind_addr_hazard && !memind_wr_hazard && !mem_rmw_hazard &&
-                        !cas_hazard && !need_ext;
+                        !preview_any_hazard;

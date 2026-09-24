@@ -3043,3 +3043,67 @@ shifted/reduced the remaining population.
 - 100 MHz is the target, not a guarantee -- re-measure via a fresh real
   `nextpnr --report` after each phase, exactly like every other phase in
   this project's history, rather than assume.
+
+### Phase C re-scoping (a later session, `project_eu_pipeline_cutpoints.md`, read-only investigation)
+
+After Phase A landed (real BRAM for `data_d`/`data_i`, 1.79->2.46MHz
+measured), re-ran the module-level failing-endpoint breakdown against
+the fresh `timing_report.json`: total failing endpoints dropped
+9,040->4,886 (-46%, confirming Phase A's benefit was broader than just
+the cache modules), but `u_seq`'s own count barely moved (2,860->2,972)
+-- meaning its *share* of what remains jumped to 60.8%. Per-cell
+synthesized names (`wb_result_TRELLIS_FF_...`-style) were investigated
+and found **not reliable signal attribution** -- ABC9 names newly
+created intermediate LUT/mux cells after the nearest still-traceable
+ancestor register, which can be many hops removed from the real cause;
+only the hierarchical instance-path prefix survives accurately.
+
+Cross-checked against nextpnr's own single worst `critical_paths[0]`
+(3249 hops): **both** endpoints trace back to
+`u_cpu.u_biu.u_cache.addr_r` -- the same whole-system chain Phase 284
+already found (BIU cycle-gen -> cache interface -> register file ->
+address ALU -> write-data steering -> external bus), not something
+newly isolated to `eu_seq`.
+
+A dedicated read-only trace (`project_eu_pipeline_cutpoints.md`) found
+the real shape is worse than this plan's own prior framing: `mem_addr`'s
+dispatch mux (`eu_seq_execute.svh:5669`) has EVERY arm already
+registered (`preview_addr` continuously computed from
+`rd_prev_a`/`rd_prev_b`, every special-FSM arm a genuine `_r` flop) --
+the mux inputs are not the depth problem. **The mux select,
+`preview_ok`, is** -- gated on a ~17-way OR of every family's own
+`*_final_ack`, every single one ANDed with `mem_ack` (THIS cycle's
+ack), further ANDed with a ~14-term hazard chain. This is not
+`dyn_bit_get_Dn`'s 5-family exception -- **it is the literal Track 1-3
+zero-gap dispatch mechanism itself**, for every instruction pair in the
+machine. Genuinely pipelining "ack arrives -> next address computed"
+would insert a real gap cycle between every consecutive bus cycle for
+every instruction, directly reversing Track 1-3's ~20-phase achievement
+-- a much bigger ask than this plan's prior "5 special families need
+sign-off" framing anticipated. TAS/CAS/CAS2's own bus-lock timing
+depends on this exact path's precise cycle behavior -- explicitly
+off-limits for any restructuring here.
+
+**Only one low-risk, no-behavior-change lever found**: `preview_ok`'s
+own flat boolean structure -- the 17-way OR (`preview_current_ready`)
+and the 14-term hazard AND-chain -- restructured into balanced
+sub-groups instead of one flat chain (the same bug shape as the
+already-documented `feedback_elseif_priority_chain.md`). Pure
+regrouping, functionally identical (OR/AND are associative), unverified
+whether it measurably helps real synthesis until actually measured.
+Implemented (`preview_ready_ordinary`/`preview_ready_special`,
+`preview_hazard_grp1/2/3`, `rtl/eu_seq_preview.svh`) and verified: full
+mandatory gate clean (`make test` 38/38, `cosim_grp` 8/8,
+`cosim_memind` 33/33, `dat-synth` 50/50), Harte bit-identical to
+baseline. Real synthesis+P&R measurement in progress to confirm whether
+this actually moves `clk_4x`'s achieved frequency (per this project's
+own established precedent -- `wdata_hold_r`, Phase 285, was equally
+verified-correct and had zero measured effect).
+
+**Bottom line, revised**: there is no clean, Phase-A-scale fix
+remaining for `eu_seq`. The dominant chain is the deliberate, central
+zero-gap dispatch mechanism itself, not a narrow local optimization.
+Actually reducing what's computed same-cycle (true pipelining) is
+understood to be a much bigger effort than previously scoped and needs
+fresh, explicit user sign-off on a redefined Phase C before any further
+RTL changes beyond the logic-restructuring already done here.

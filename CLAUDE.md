@@ -977,6 +977,42 @@ needing explicit sign-off before starting. `tag_d`/`valid_d` and
 `tag_i`/`valid_i` (both modules, small, lower priority) not yet
 attempted.
 
+**Phase C re-scoping (a later session, `project_eu_pipeline_cutpoints.md`,
+read-only trace + one restructuring fix)**: after Phase A (D/I-cache BRAM,
+2.46MHz measured), re-checked the module-level failing-endpoint breakdown --
+total dropped 9,040->4,886 (-46%), but `eu_seq`'s own share rose to 60.8% of
+what remains. Found per-cell synthesized names (e.g. `wb_result_TRELLIS_FF_
+...`) are **not reliable signal attribution** -- ABC9 names new intermediate
+LUT/mux cells after the nearest still-traceable ancestor register, which can
+be many hops removed from the real cause; only the hierarchical instance-path
+prefix is trustworthy. nextpnr's own worst `critical_paths[0]` (3249 hops)
+has both endpoints tracing to `u_cpu.u_biu.u_cache.addr_r` -- the same
+whole-system chain Phase 284 already found, not something eu_seq-local.
+
+A dedicated RTL trace found the real shape is bigger than `plan.md`'s prior
+framing: `mem_addr`'s dispatch mux has every arm already registered --
+`preview_ok` (the mux *select*) is the depth problem, gated on a 17-way OR of
+every family's own same-cycle `mem_ack`-dependent final-ack signal ANDed with
+a 14-term hazard chain. This is not `dyn_bit_get_Dn`'s narrow 5-family
+exception -- **it is the literal Track 1-3 zero-gap dispatch mechanism
+itself**, for every instruction pair in the machine. Genuinely pipelining it
+would insert a gap cycle between every consecutive bus cycle for every
+instruction, reversing Track 1-3's ~20-phase achievement -- a much bigger ask
+than previously scoped, needing fresh explicit sign-off before attempting.
+TAS/CAS/CAS2's bus-lock timing depends on this exact path -- off-limits for
+any restructuring pass.
+
+One low-risk, no-behavior-change lever implemented: `preview_ok`'s flat
+17-way OR and 14-term hazard AND-chain (`rtl/eu_seq_preview.svh`) regrouped
+into balanced sub-groups (`preview_ready_ordinary`/`preview_ready_special`,
+`preview_hazard_grp1/2/3`) -- pure regrouping (OR/AND associative), no
+behavior change. Full mandatory gate clean, Harte bit-identical. Real
+synthesis measurement pending to see if it actually moves `clk_4x` (per this
+project's own precedent, `wdata_hold_r`/Phase 285 was equally
+verified-correct with zero measured effect -- logical correctness doesn't
+predict timing impact). **No further RTL changes toward true pipelining
+without fresh user sign-off** -- see `project_eu_pipeline_cutpoints.md`.
+
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
