@@ -117,8 +117,12 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_MOVEQ) || (dec_uop.uclass == UC_ADDQ)
                         || (dec_uop.uclass == UC_SHIFT)
                         || (dec_uop.uclass == UC_MULDIV)
-                        || (dec_uop.uclass == UC_BRANCH))
+                        || (dec_uop.uclass == UC_BRANCH)
+                        || (dec_uop.uclass == UC_SCC)
+                        || (dec_uop.uclass == UC_DBCC))
                        && ((dec_uop.uclass == UC_BRANCH)
+                           || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
+                           || (dec_uop.uclass == UC_DBCC)
                            || (dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
                                            : (dec_uop.dst_kind == US_DREG
@@ -495,7 +499,12 @@ module mh030p_core (
     reg  cond_true;
     always_comb begin
         case (ex_uop.cond)
-            4'h0, 4'h1: cond_true = 1'b1;                 // BRA, BSR
+            // 0000 = T, 0001 = F. For a BRANCH the 0001 encoding is BSR,
+            // which is always taken -- that is handled where the branch is
+            // resolved, NOT here, because for Scc and DBcc 0001 genuinely
+            // means FALSE. Treating them alike made DBF never decrement.
+            4'h0: cond_true = 1'b1;                       // T
+            4'h1: cond_true = 1'b0;                       // F
             4'h2: cond_true = !cc_c && !cc_z;             // HI
             4'h3: cond_true =  cc_c ||  cc_z;             // LS
             4'h4: cond_true = !cc_c;                      // CC
@@ -514,11 +523,32 @@ module mh030p_core (
     end
 
     wire ex_is_branch = ex_valid && (ex_uop.uclass == UC_BRANCH);
-    assign redirect    = ex_is_branch && cond_true && !stall_ex;
+    wire ex_is_scc    = ex_valid && (ex_uop.uclass == UC_SCC);
+    wire ex_is_dbcc   = ex_valid && (ex_uop.uclass == UC_DBCC);
+
+    // DBcc: a TRUE condition falls through untouched. A false one decrements
+    // the low word of Dn and branches unless that reaches -1. Note the
+    // decrement happens on the word only -- the upper half of Dn is
+    // preserved, which is what makes it a loop counter rather than a
+    // longword subtract.
+    wire [15:0] dbcc_next   = ex_dst[15:0] - 16'd1;
+    wire        dbcc_dec    = ex_is_dbcc && !cond_true;
+    wire        dbcc_branch = dbcc_dec && (dbcc_next != 16'hFFFF);
+
+    // BSR (cond 0001) is unconditional despite the encoding meaning FALSE
+    // everywhere else.
+    wire branch_taken = ex_is_branch && ((ex_uop.cond == 4'h1) || cond_true);
+    assign redirect   = !stall_ex && (branch_taken || dbcc_branch);
     // The 68k branch base is the address of the instruction plus 2.
     assign redirect_pc = ex_pc + 32'd2 + ex_uop.imm;
 
-    assign ex_commit = (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
+    // Scc writes a byte: all ones or all zeroes, upper bytes untouched.
+    wire [31:0] scc_result  = {ex_dst[31:8], {8{cond_true}}};
+    wire [31:0] dbcc_result = {ex_dst[31:16], dbcc_next};
+
+    assign ex_commit = ex_is_scc                ? scc_result
+                     : ex_is_dbcc               ? dbcc_result
+                     : (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
                                               : ex_result;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -533,8 +563,10 @@ module mh030p_core (
             wb_valid   <= ex_valid;
             wb_reg     <= ex_uop.dst_reg;
             wb_data    <= ex_commit;
+            // DBcc writes Dn only when it actually decrements.
             wb_writes  <= ex_valid && ex_uop.writes_reg && !ex_is_branch
-                                       && !ex_uop.writes_mem;
+                                   && !ex_uop.writes_mem
+                                   && (!ex_is_dbcc || dbcc_dec);
             wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch;
             wb_ccr     <= {3'b000,
                            ex_uop.x_unchanged ? ccr_r[4] : ex_x,

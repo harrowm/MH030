@@ -864,6 +864,8 @@ module mh030p_decode (
                 uop.x_unchanged = 1'b1;
             end else if (g5_is_dbcc) begin
                 uop.uclass      = UC_DBCC;
+                // 16-bit displacement in the following extension word.
+                uop.imm         = {{16{ext[15]}}, ext[15:0]};
                 // The decrement is a real ALU subtract in the reference
                 // decoder (unit=ALU, alu_op=SUB), not a bespoke path.
                 uop.unit        = UU_ALU;
@@ -1289,6 +1291,7 @@ module mh030p_decode (
         // zero, in which case one extension word follows.
         uop.ext_words     = (uop.uclass == UC_BRANCH)
                           ? ((instr[7:0] == 8'h00) ? 3'd1 : 3'd0)
+                          : (uop.uclass == UC_DBCC) ? 3'd1   // displacement word
                           : ea_words_total;
 
         if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX)) begin

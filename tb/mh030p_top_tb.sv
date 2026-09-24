@@ -110,6 +110,36 @@ module mh030p_top_tb;
         chk("D1 = 2 (skipped)",   dut.u_core.u_rf.regs[1], 32'd2);
         chk("D2 = 4 (at target)", dut.u_core.u_rf.regs[2], 32'd4);
 
+        // ── DBcc loop and Scc ──────────────────────────────────────────────
+        // A DBcc loop is the real test of the redirect path: it takes the
+        // branch repeatedly and must terminate at exactly -1.
+        //   MOVEQ #3,D3        D3 = 3
+        //   MOVEQ #0,D4        D4 = 0
+        // L: ADDQ.L #1,D4      D4 += 1          (0x5284)
+        //   DBF D3,L           loop while D3.W != -1  (0x51CB + disp)
+        //   ST  D5             Scc always-true -> D5 low byte = 0xFF
+        for (i = 0; i < 256; i++) begin prog[i] = 16'h4E71; ram[i] = 32'h0; end
+        prog[0] = MOVEQ(3, 8'd3);
+        prog[1] = MOVEQ(4, 8'd0);
+        prog[2] = 16'h5284;                 // ADDQ.L #1,D4   <- loop body at 4
+        prog[3] = 16'h51CB;                 // DBF D3,<disp>
+        prog[4] = 16'hFFFE;                 // disp = -2 -> target = 6 + 2 - 2 = 6? see below
+        prog[5] = 16'h50C5;                 // ST D5
+
+        // DBF is at byte 6; its base is 6+2 = 8, so a target of byte 4 (the
+        // loop body) needs disp = 4 - 8 = -4.
+        prog[4] = 16'hFFFC;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (200) @(negedge clk_4x);
+
+        // D3 counts 3,2,1,0 then -1 terminates: body runs 4 times.
+        chk("DBF loop count",  dut.u_core.u_rf.regs[4], 32'd4);
+        chk("DBF terminates",  dut.u_core.u_rf.regs[3], 32'h0000_FFFF);
+        chk("ST sets byte",    dut.u_core.u_rf.regs[5][7:0] | 32'h0, 32'h0000_00FF);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");
