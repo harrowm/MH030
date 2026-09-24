@@ -41,6 +41,9 @@ module mh030p_core_tb;
     logic [31:0] mem_rdata = 32'h0;
     logic        mem_ack   = 1'b0;
     logic [31:0] ram [0:1023];
+    logic [31:0] pc_in = 32'h0;
+    wire         redirect;
+    wire [31:0]  redirect_pc;
 
     always_ff @(posedge clk_4x) begin
         mem_ack <= 1'b0;
@@ -56,6 +59,7 @@ module mh030p_core_tb;
         .instr(instr), .ext(ext), .q3(q3),
         .instr_valid(instr_valid), .instr_ready(instr_ready),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
+        .pc_in(pc_in), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),
         .mem_rdata(mem_rdata), .mem_ack(mem_ack),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
@@ -63,6 +67,14 @@ module mh030p_core_tb;
     );
 
     int fails = 0;
+    // Capture the first redirect so its target arithmetic can be asserted.
+    logic [31:0] branch_pc_seen = 32'hFFFF_FFFF;
+    logic [31:0] branch_pc_expect = 32'hFFFF_FFFF;
+    always @(posedge clk_4x)
+        if (rst_n && redirect && branch_pc_seen === 32'hFFFF_FFFF) begin
+            branch_pc_seen   <= redirect_pc;
+            branch_pc_expect <= dut.ex_pc + 32'd2 + 32'd2;   // BRA.B +2
+        end
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
         if (got === exp) $display("PASS  %-26s = %08h", name, got);
@@ -79,6 +91,7 @@ module mh030p_core_tb;
         @(negedge clk_4x);
         instr = iw; ext = e; instr_valid = 1'b1;
         while (!instr_ready) @(negedge clk_4x);
+        pc_in = pc_in + 32'd2;
     endtask
 
     task automatic bubble(input int n);
@@ -207,6 +220,42 @@ module mh030p_core_tb;
         // drain has to outlast it -- 12 cycles left the last DIVU.W still
         // running and its result uncommitted.
         bubble(50);
+        chk("MULU.W 6*7",      dut.u_rf.regs[0],  32'd42);
+        chk("DIVU.W 40/5",     dut.u_rf.regs[2],  32'h0000_0008);
+        chk("DIVU.W 45/7",     dut.u_rf.regs[4],  32'h0003_0006);
+
+        // ── Branches ───────────────────────────────────────────────────────
+        // A taken branch must squash the two instructions behind it. The
+        // squashed MOVEQ would set D7 to 0x55; if the flush fails it lands
+        // and the check catches it.
+        //   BRA.B  0110 0000 dddddddd
+        //   BEQ.B  0110 0111 dddddddd
+        // What can be checked WITHOUT a fetch unit is the squash: the
+        // instructions already in ID and AG behind a taken branch must not
+        // commit. Whether execution resumes at the right ADDRESS cannot be
+        // checked here -- this harness feeds instructions in sequence and
+        // never re-fetches from redirect_pc, so it cannot tell a correct
+        // two-instruction squash from an over-squash. That needs the IF
+        // stage, and the redirect_pc arithmetic is asserted separately below.
+        issue(MOVEQ(7, 8'h11));           // D7 = 0x11
+        issue(16'h6002);                  // BRA.B, taken
+        issue(MOVEQ(7, 8'h55));           // must be squashed
+        issue(MOVEQ(7, 8'h66));           // must be squashed
+        bubble(12);
+        chk("BRA squashes behind", dut.u_rf.regs[7], 32'h0000_0011);
+
+        // Not-taken conditional: nothing is squashed.
+        issue(MOVEQ(1, 8'h01));           // D1 = 1 -> Z clear
+        issue(16'h6702);                  // BEQ.B +2 -> NOT taken (Z=0)
+        issue(MOVEQ(5, 8'h33));           // must RUN
+        bubble(12);
+        chk("BEQ not taken",      dut.u_rf.regs[5], 32'h0000_0033);
+
+        // redirect_pc arithmetic, checked directly: the 68k branch base is
+        // the address of the branch plus 2.
+        chk("redirect_pc base",  branch_pc_seen, branch_pc_expect);
+
+        bubble(4);
 
         chk("MULU.W 6*7",      dut.u_rf.regs[0],  32'd42);
         chk("DIVU.W 40/5",     dut.u_rf.regs[2],  32'h0000_0008);

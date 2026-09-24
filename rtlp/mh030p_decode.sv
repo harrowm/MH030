@@ -930,6 +930,13 @@ module mh030p_decode (
             uop.unit        = UU_NONE;
             uop.siz         = UZ_LONG;   // reference decoder: siz=long
             uop.cond        = f_cond;     // 0000 = BRA, 0001 = BSR
+            // Displacement: the 8-bit field in the opcode, or the following
+            // extension word when that field is zero (Bcc.W). The 0xFF escape
+            // (Bcc.L, 68020+) is not claimed here. imm carries it because a
+            // branch has no other use for that field.
+            uop.imm         = (instr[7:0] == 8'h00)
+                            ? {{16{ext[15]}}, ext[15:0]}
+                            : {{24{instr[7]}}, instr[7:0]};
             uop.x_unchanged = 1'b1;
         end
 

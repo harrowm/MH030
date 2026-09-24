@@ -56,6 +56,14 @@ module mh030p_core (
     input  wire        instr_valid,
     output wire        instr_ready,   // core can accept an instruction this cycle
 
+    // Program counter and redirect. There is no fetch unit yet, so the caller
+    // supplies the address of the instruction it is offering and the core
+    // asks for a redirect when a branch is taken. This is the interface a
+    // real IF stage will drive.
+    input  wire [31:0] pc_in,
+    output wire        redirect,
+    output wire [31:0] redirect_pc,
+
     // Memory port -- registered request, registered ack (plan A4).
     output reg         mem_req,
     output reg  [31:0] mem_addr,
@@ -104,11 +112,13 @@ module mh030p_core (
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
                         || (dec_uop.uclass == UC_MOVEQ) || (dec_uop.uclass == UC_ADDQ)
                         || (dec_uop.uclass == UC_SHIFT)
-                        || (dec_uop.uclass == UC_MULDIV))
-                       && (dec_pure_wr
-                           ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
-                           : (dec_uop.dst_kind == US_DREG
-                              || dec_uop.dst_kind == US_AREG))
+                        || (dec_uop.uclass == UC_MULDIV)
+                        || (dec_uop.uclass == UC_BRANCH))
+                       && ((dec_uop.uclass == UC_BRANCH)
+                           || (dec_pure_wr
+                               ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
+                               : (dec_uop.dst_kind == US_DREG
+                                  || dec_uop.dst_kind == US_AREG)))
                        && (!dec_uop.reads_mem || dec_ea_ok);
 
     // ── Stage registers ─────────────────────────────────────────────────────
@@ -118,6 +128,7 @@ module mh030p_core (
     // down beside the bus request.
     reg        mem_got;
     reg [31:0] mem_hold;
+    reg [31:0] ag_pc, ex_pc;
     // Which register the B port carried; needed by the interlock below.
     wire ag_mem = ag_uop.reads_mem || ag_uop.writes_mem;
     wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
@@ -195,8 +206,12 @@ module mh030p_core (
             ag_valid <= 1'b0;
             ag_uop   <= uop_clear();
         end else if (!stall_ex && !stall_ag) begin
-            ag_valid <= instr_valid && dec_executable;
+            // A taken branch squashes whatever is behind it.
+            ag_valid <= instr_valid && dec_executable && !redirect;
             ag_uop   <= dec_uop;
+            ag_pc    <= pc_in;
+        end else if (redirect) begin
+            ag_valid <= 1'b0;
         end
     end
 
@@ -292,7 +307,8 @@ module mh030p_core (
             mem_siz  <= UZ_LONG;
             mem_wdata<= 32'h0;
         end else if (!stall_ex) begin
-            ex_valid <= ag_valid && !stall_ag;   // bubble while AG is held
+            ex_valid <= ag_valid && !stall_ag && !redirect;
+            ex_pc    <= ag_pc;
             ex_uop   <= ag_uop;
             ex_a     <= ag_a;
             ex_b     <= ag_b;
@@ -414,6 +430,38 @@ module mh030p_core (
     wire ex_x = (use_md || use_mv) ? ccr_r[4] : use_shf ? shf_x : ccr_r[4];
 
     // MOVEA writes all 32 bits, sign-extending a word source.
+    // ── Branch resolution, in EX where the CCR is settled ───────────────────
+    // Resolved rather than predicted: this core has no predictor, so a taken
+    // branch squashes whatever is behind it in ID and AG. That is a real
+    // two-cycle penalty per taken branch, and the reason a predictor
+    // eventually earns its place.
+    wire cc_n = ccr_r[3], cc_z = ccr_r[2], cc_v = ccr_r[1], cc_c = ccr_r[0];
+    reg  cond_true;
+    always_comb begin
+        case (ex_uop.cond)
+            4'h0, 4'h1: cond_true = 1'b1;                 // BRA, BSR
+            4'h2: cond_true = !cc_c && !cc_z;             // HI
+            4'h3: cond_true =  cc_c ||  cc_z;             // LS
+            4'h4: cond_true = !cc_c;                      // CC
+            4'h5: cond_true =  cc_c;                      // CS
+            4'h6: cond_true = !cc_z;                      // NE
+            4'h7: cond_true =  cc_z;                      // EQ
+            4'h8: cond_true = !cc_v;                      // VC
+            4'h9: cond_true =  cc_v;                      // VS
+            4'hA: cond_true = !cc_n;                      // PL
+            4'hB: cond_true =  cc_n;                      // MI
+            4'hC: cond_true = (cc_n == cc_v);             // GE
+            4'hD: cond_true = (cc_n != cc_v);             // LT
+            4'hE: cond_true = (cc_n == cc_v) && !cc_z;    // GT
+            default: cond_true = (cc_n != cc_v) || cc_z;  // LE
+        endcase
+    end
+
+    wire ex_is_branch = ex_valid && (ex_uop.uclass == UC_BRANCH);
+    assign redirect    = ex_is_branch && cond_true && !stall_ex;
+    // The 68k branch base is the address of the instruction plus 2.
+    assign redirect_pc = ex_pc + 32'd2 + ex_uop.imm;
+
     wire [31:0] ex_commit = (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
                                               : ex_result;
 
@@ -429,8 +477,8 @@ module mh030p_core (
             wb_valid   <= ex_valid;
             wb_reg     <= ex_uop.dst_reg;
             wb_data    <= ex_commit;
-            wb_writes  <= ex_valid && ex_uop.writes_reg;
-            wb_upd_ccr <= ex_valid && ex_uop.updates_ccr;
+            wb_writes  <= ex_valid && ex_uop.writes_reg && !ex_is_branch;
+            wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch;
             wb_ccr     <= {3'b000,
                            ex_uop.x_unchanged ? ccr_r[4] : ex_x,
                            ex_n, ex_z, ex_v, ex_c};
