@@ -77,6 +77,7 @@ module eu_seq_tb;
     logic        shf_x_in, shf_n, shf_z, shf_v, shf_c, shf_x;
 
     // Mul/div ↔ seq wires
+    logic        md_div_start, md_div_busy;
     logic [31:0] md_src, md_dst, md_result_lo, md_result_hi;
     logic [2:0]  md_op;
     logic        md_n, md_z, md_v, md_c, md_div_by_zero;
@@ -191,6 +192,8 @@ module eu_seq_tb;
         .md_v           (md_v),
         .md_c           (md_c),
         .md_div_by_zero (md_div_by_zero),
+        .md_div_start   (md_div_start),
+        .md_div_busy    (md_div_busy),
         .bcd_src        (bcd_src),
         .bcd_dst        (bcd_dst),
         .bcd_op         (bcd_op),
@@ -306,6 +309,10 @@ module eu_seq_tb;
     );
 
     eu_mul_div u_md (
+        .clk_4x     (clk_4x),
+        .rst_n      (rst_n),
+        .div_start  (md_div_start),
+        .div_busy   (md_div_busy),
         .src        (md_src),
         .dst        (md_dst),
         .op         (md_op),

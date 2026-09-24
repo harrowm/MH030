@@ -216,7 +216,13 @@ module eu_tb;
         // Check at posedge+#1 immediately after DIVU enters EX (before instr_valid deasserted clears EX).
         instr_word = DIVU_D1_D0; instr_valid = 1'b1;
         ext_data = 32'h0; ext_valid = 1'b0;
-        @(posedge clk_4x); #1; // DIVU → EX; div_trap fires now
+        @(posedge clk_4x); #1; // DIVU → EX; the divider starts here
+        // eu_mul_div is a sequential divider now, so div_by_zero is reported
+        // from an operand-latched register rather than combinationally --
+        // div_trap therefore arrives one tick later than it used to. (The
+        // zero-divisor case is short-circuited, so it is exactly one tick;
+        // a real division would take 32.)
+        @(posedge clk_4x); #1;
         check("EU-6: div_trap asserted", div_trap);
         instr_valid = 1'b0;
         @(posedge clk_4x); #1; // EX → bubble; drain

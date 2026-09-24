@@ -9,6 +9,17 @@ module eu_mul_div_tb;
     logic [31:0] src = 0, dst = 0;
     logic [2:0]  op  = 0;
 
+    // Sequential divider handshake (see rtl/eu_mul_div.sv's own header).
+    // Multiply stays combinational, so the multiply tests below are
+    // unaffected by the clock; apply() just drives a start pulse and waits
+    // for div_busy to fall, which is a no-op for a multiply op.
+    logic clk_4x = 1'b0;
+    logic rst_n  = 1'b0;
+    logic div_start = 1'b0;
+    logic div_busy;
+
+    always #5 clk_4x = ~clk_4x;
+
     logic [31:0] result_lo, result_hi;
     logic        n_out, z_out, v_out, c_out, div_by_zero;
 
@@ -21,6 +32,10 @@ module eu_mul_div_tb;
         DIV_SW = 3'h5;
 
     eu_mul_div u_md (
+        .clk_4x     (clk_4x),
+        .rst_n      (rst_n),
+        .div_start  (div_start),
+        .div_busy   (div_busy),
         .src        (src),
         .dst        (dst),
         .op         (op),
@@ -46,11 +61,22 @@ module eu_mul_div_tb;
     endtask
 
     task apply(input logic [2:0] o, input logic [31:0] s, input logic [31:0] d);
-        op = o; src = s; dst = d; #1;
+        op = o; src = s; dst = d;
+        @(negedge clk_4x);
+        div_start = 1'b1;
+        @(negedge clk_4x);
+        div_start = 1'b0;
+        // Wait out the iteration (immediate for multiply and for the
+        // short-circuited divide-by-zero / DIVS.L-overflow cases).
+        while (div_busy) @(negedge clk_4x);
+        #1;
     endtask
 
     initial begin
         $display("=== eu_mul_div unit tests ===");
+        repeat (2) @(negedge clk_4x);
+        rst_n = 1'b1;
+        @(negedge clk_4x);
 
         // ================================================================
         // A: MULU.W — unsigned 16×16→32

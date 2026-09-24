@@ -249,6 +249,8 @@ module m68030_eu (
     logic [31:0] md_src, md_dst, md_result_lo, md_result_hi;
     logic [2:0]  md_op;
     logic        md_n, md_z, md_v, md_c, md_div_by_zero;
+    // Sequential-divider handshake (see rtl/eu_mul_div.sv's own header).
+    logic        md_div_start, md_div_busy;
 
     // -----------------------------------------------------------------------
     // Internal wires: eu_seq ↔ eu_bcd
@@ -341,6 +343,8 @@ module m68030_eu (
         .md_v         (md_v),
         .md_c         (md_c),
         .md_div_by_zero(md_div_by_zero),
+        .md_div_start  (md_div_start),
+        .md_div_busy   (md_div_busy),
         .bcd_src      (bcd_src),
         .bcd_dst      (bcd_dst),
         .bcd_op       (bcd_op),
@@ -632,6 +636,10 @@ module m68030_eu (
     // eu_mul_div — purely combinational
     // -----------------------------------------------------------------------
     eu_mul_div u_md (
+        .clk_4x     (clk_4x),
+        .rst_n      (rst_n),
+        .div_start  (md_div_start),
+        .div_busy   (md_div_busy),
         .src        (md_src),
         .dst        (md_dst),
         .op         (md_op),

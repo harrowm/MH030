@@ -1026,6 +1026,14 @@
     // itself is the correct, independent "give up now" signal regardless
     // of which path detected the fault.
     wire mem_abort = mem_berr || exc_active;
+
+    // Declared here, assigned much further down (beside div_trap_raw, where
+    // ex_unit and div_started_r are both in scope): "this EX instruction is a
+    // divide whose operand read has already completed". Both ex_mem_stall just
+    // below and mem_req far below need it, and Icarus cannot forward-reference
+    // ex_unit/div_started_r from here -- the same declare-early/assign-late
+    // pattern eu_seq.sv's own header documents for the WB signals.
+    logic div_mem_operand_done;
     assign ex_mem_stall = tas_run_r || tas_read_ack || tas_memind_pending_r ||
                           // Phase 251 item 2: genuine one-cycle gap between
                           // the memind FSM's own inner-read completion and
@@ -1087,7 +1095,15 @@
                            !cas2_rd2_r && !cas2_get_du1_r && !cas2_wr1_r &&
                            !cas2_get_du2_r && !cas2_wr2_r && !cas2_dc1_wr_r && !cas2_dc2_wr_r &&
                            !cas2_after_r && !ex_cas2_done_r &&
-                           (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack && !mem_abort) ||
+                           (ex_is_mem_rd || ex_is_mem_wr) && !mem_ack && !mem_abort &&
+                           // A memory-source divide stops "waiting for memory"
+                           // the moment its operand read acks -- from then on it
+                           // is the sequential divider that holds EX, via
+                           // md_div_busy/ex_internal_stall. Without this the
+                           // instruction would wait forever for a second ack
+                           // that (correctly) never comes, now that the matching
+                           // guard on mem_req stops the read being re-issued.
+                           !div_mem_operand_done) ||
                           rtr_stall || rte_stall || cmpm_stall || stop_r || reset_run_r;
 
     // ex_berr_abort_wb: true the cycle *after* a fault collapses ex_mem_stall
@@ -1549,7 +1565,17 @@
     logic [15:0] internal_stall_cnt_r;
     logic       internal_stall_resolving_r;
     logic       ex_internal_stall;
-    assign ex_internal_stall = (internal_stall_cnt_r != 16'd0) || internal_stall_resolving_r;
+    // md_div_busy joins this signal rather than getting a stall shape of its
+    // own: ex_internal_stall already means exactly "hold the EX latches, bubble
+    // WB", which is precisely what an in-flight sequential divide needs. For
+    // DIVS.L/DIVU.L Dn,Dn the 352/304-tick artificial stall above already
+    // dwarfs the divider's own 32 ticks, so those instructions' cycle counts
+    // are completely unchanged; the word and memory-source forms, which have
+    // no artificial stall entry, genuinely do get slower here -- and in the
+    // direction of the manual (DIVU.W is 44 clocks on real silicon, and this
+    // RTL was computing it combinationally in ~3).
+    assign ex_internal_stall = (internal_stall_cnt_r != 16'd0) || internal_stall_resolving_r
+                            || md_div_busy;
 
     logic hazard_ex, hazard_wb, hazard_ccr, hazard_usp, need_ext, stall;
     assign hazard_ex  = ex_valid && ex_writes_reg && (
@@ -5200,9 +5226,43 @@
     // only registers one cycle later (see that signal's own comment); the
     // correct moment is memind_outer_done_r, matching dyn_bit_get_Dn's
     // own identically-corrected timing.
-    assign div_trap_raw = (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src && md_div_by_zero)
-                    || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && !ex_is_memind && mem_ack && md_div_by_zero)
-                    || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && ex_is_memind && memind_outer_done_r && md_div_by_zero);
+    // ── Sequential-divider start ───────────────────────────────────────────
+    // "Operands are genuinely valid now" is the exact same three-way
+    // predicate div_trap_raw below already had to derive (register-direct:
+    // immediately; memory-source: at mem_ack; memind: at memind_outer_done_r),
+    // so it is reused rather than re-derived -- if one is right, both are.
+    // The one-shot mirrors chk_trap_fired_r/div_trap_fired_r's own established
+    // pattern in this file, for the same reason: ex_valid is held high for the
+    // whole stall, so a level condition would re-trigger every tick.
+    logic div_operands_valid, div_started_r;
+    assign div_operands_valid =
+           (ex_valid && (ex_unit == UNIT_DIV) && !ex_is_mem_src)
+        || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && !ex_is_memind && mem_ack)
+        || (ex_valid && (ex_unit == UNIT_DIV) && ex_is_mem_src && ex_is_memind && memind_outer_done_r);
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                  div_started_r <= 1'b0;
+        else if (!ex_valid)          div_started_r <= 1'b0;
+        else if (div_operands_valid) div_started_r <= 1'b1;
+    end
+
+    assign md_div_start = div_operands_valid && !div_started_r;
+
+    // See the declaration far above for why this is split from its use.
+    assign div_mem_operand_done = (ex_unit == UNIT_DIV) && div_started_r;
+
+
+    // Now that eu_mul_div is sequential, the divide unit's own COMPLETION is
+    // the single source of truth for when md_div_by_zero is meaningful --
+    // replacing the three-way "when are the operands valid" case analysis this
+    // assign used to carry (register-direct immediately / memory-source at
+    // mem_ack / memind at memind_outer_done_r). Those three cases are still
+    // exactly where the divide STARTS -- see div_operands_valid above, which
+    // inherited them verbatim -- but the flag must be read one tick later, from
+    // the operand-latched register, because for a memory-source divide `src` is
+    // already stale by then (alu_mem_tb's DIVU-01/DIVS-01 caught precisely this).
+    assign div_trap_raw = ex_valid && (ex_unit == UNIT_DIV)
+                       && div_started_r && !md_div_busy && md_div_by_zero;
     assign div_trap = div_trap_raw && !div_trap_fired_r;
     // CHK: trap on reg/imm comparison, memory-source ack, or CHK2 second-read ack.
     assign chk_trap_raw = (ex_valid && ex_is_chk && !ex_is_mem_rd && (chk_below_w || chk_above_w))
@@ -5613,7 +5673,23 @@
                        cas_write_r || bcds_run_r ||
                        cas2_rd2_r || cas2_wr1_r || cas2_wr2_r ||
                        cpsr_mem_fmt_r || cpsr_xfer_mem_r ||
-                       (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr));
+                       // !div_started_r: a memory-source divide's operand read
+                       // has already completed by the time the sequential
+                       // divider is iterating, but ex_valid/ex_is_mem_rd stay
+                       // asserted for that whole stall -- without this guard the
+                       // read is re-issued every bus cycle for the duration
+                       // (cosim_memind25 caught exactly this, and it is the same
+                       // failure mode the artificial-stall whitelist above
+                       // documents for the ~168-352 tick MUL/DIV.L stalls, which
+                       // is why that whitelist excludes memory-source forms).
+                       // The (ex_unit == UNIT_DIV) qualification is load-bearing,
+                       // not belt-and-braces: div_started_r only self-clears on
+                       // !ex_valid, and Track 1-3's zero-gap dispatch means
+                       // ex_valid can stay high straight through into the NEXT
+                       // instruction -- an unqualified guard suppressed that
+                       // instruction's own read instead and hung the sim.
+                       (no_special_bus_op && ex_valid && (ex_is_mem_rd || ex_is_mem_wr)
+                        && !div_mem_operand_done);
     assign mem_new_dispatch = preview_ok;
     assign mem_rw    = preview_ok    ? !preview_is_write   // Track 2 Stage 2.2: preview may now be a write
                      : movem_run_r    ? movem_load_r

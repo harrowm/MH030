@@ -238,7 +238,13 @@ module alu_mem_tb;
         end
         instr_valid = 1'b0;
         ext_valid   = 1'b0;
-        repeat(15) @(posedge clk);
+        // Settle window. instr_ack fires when decode consumes the
+        // instruction, not when WB commits, so this tail has to cover the
+        // longest remaining EX. Raised from 15 when eu_mul_div became a
+        // sequential divider (32 ticks of iteration after the operands
+        // arrive); DIVU-01/DIVS-01 were checking D7/D2 before the divide
+        // had written back.
+        repeat(60) @(posedge clk);
     endtask
 
     task automatic set_dn(input logic [2:0] n, input logic [31:0] val);

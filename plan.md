@@ -3107,3 +3107,173 @@ Actually reducing what's computed same-cycle (true pipelining) is
 understood to be a much bigger effort than previously scoped and needs
 fresh, explicit user sign-off on a redefined Phase C before any further
 RTL changes beyond the logic-restructuring already done here.
+
+---
+
+# MH030-P — a deliberately pipelined core (new initiative, planning closed 2026-09-23)
+
+The incremental-timing-fix track above is **closed**. After Phase C was
+re-scoped and found to be the Track 1-3 zero-gap dispatch mechanism
+itself rather than a bounded `eu_seq`-local bug, the user decided to stop
+patching timing and design a genuinely staged core instead, with MH030's
+existing RTL kept green as the functional/cycle-accurate golden
+reference.
+
+**The full plan lives at `~/.claude/plans/purrfect-beaming-valley.md`**
+(same convention as `wobbly-honking-cascade.md` /
+`silent-copper-latch.md`). It is the authority on phases and gates; this
+section is only the decision record.
+
+**Four scope decisions taken and approved:**
+
+1. **Bus fidelity: protocol-exact, timing-free.** Per-cycle signal
+   sequencing (ECS/OCS, AS/DS stagger, SIZ/FC, DSACK handshake, RMC,
+   burst continuity) stays exactly as the manual specifies and as MH030
+   implements it. The *spacing between* bus cycles may differ. This is
+   the single deliberate, signed-off divergence from MH030.
+2. **Parallel core** at `rtlp/` (top `mh030p_top`), MH030's own `rtl/`
+   frozen and kept green — not an in-place transformation, not a
+   clean-room rewrite.
+3. **Target 25-50 MHz `clk_4x`**, not 100 MHz. The "100 MHz" figure was
+   never a protocol requirement: in the FPGA there is no real 25 MHz
+   external bus (every peripheral runs on `clk_4x` too), so the genuine
+   goal is instruction throughput on an ECP5-85K.
+4. **Staged: integer core first**, MMU/caches brought into the pipeline
+   later.
+
+**Hard evidence for the diagnosis**, from the post-Phase-A
+`impl/timing_report.json`: TRELLIS_COMB 54,344/83,640 (65% full) but
+TRELLIS_FF only 9,367/83,640 (**11% full**), DP16KD 4/208. A **5.8:1
+LUT:FF ratio** (a well-pipelined core sits near 1.5:1) is the
+combinational-cone signature in hard numbers — and it also means the fix
+is affordable: ~74k unused flip-flops and 204 unused BRAMs are available
+to spend on register boundaries. Pipelining this design was never
+resource-constrained; it was simply never attempted.
+
+**Why this is tractable: most verification transfers unchanged.**
+`scripts/run_harte.py` compares architectural state only
+(`--timeout-cycles` is a budget, not an assertion), and
+`tools/buscmp.py` compares the bus *transaction sequence*, not cycle
+timing — so the full 124-suite Harte corpus, `cosim_grp`,
+`cosim_memind` and `dat-synth` all carry over as-is. What does NOT carry
+over: `tb/biu_tb.sv` / `tb/stall_fsm_tb.sv` cycle-count assertions and
+`timing_diagrams/`, which stay owned by `rtl/`. A new dual-core
+differential testbench (both tops, same memory image, compare
+architectural state at retire plus the bus transaction sequence) becomes
+the primary safety net, with MH030 as the golden model.
+
+**Non-negotiable process rule**: every phase closes with BOTH the test
+gate green AND a real measured Fmax number. `wdata_hold_r` (Phase 285)
+was fully verified correct and had *zero* frequency effect, and the
+`preview_ok` regrouping was never measured at all — measurement is not
+optional. **P2's first real Fmax number is a genuine go/no-go** on the
+whole effort.
+
+## MH030-P P0 — scripted Fmax measurement + the sequential divider
+
+**`scripts/measure_fmax.py` (new)**: `run` (full synthesis + P&R with the
+KNOWN-GOOD unrestricted `synth_lattice` recipe, then analyse) and `analyze`
+(an existing report, no synthesis). There was no timing target before this,
+and the wrong recipe had already cost two measurements.
+
+A methodology correction it forced: `detailed_net_timings`' per-endpoint
+`delay` is that net's own **routing delay, not a cumulative arrival time**.
+The "per-endpoint worst-case arrival / 9,040 failing endpoints" figure quoted
+by earlier sessions is therefore *not reproducible* from this report, and is
+not repeated. What the report genuinely contains -- and what the script now
+reports -- is the fully enumerated worst path with per-hop delay, type and
+hierarchical attribution.
+
+**P0 FINDING: the worst path was not what the narrative assumed.**
+Re-analysing the existing post-Phase-A report:
+
+| Module (hierarchical prefix) | Worst-path delay | Share | Hops |
+|---|---|---|---|
+| `u_cpu.u_eu.u_md` | 191.18 ns | **47.0%** | 1920 |
+| `u_cpu.u_eu.u_seq` | 169.34 ns | 41.6% | 1196 |
+| `<top>` | 24.27 ns | 6.0% | 106 |
+| `u_cpu.u_biu.u_cache` (+`data_d`) | 19.31 ns | 4.7% | 25 |
+
+Total 406.99 ns / 3249 hops, 64.5% routing / 35.3% logic. The `u_md` portion
+is a repeating ~60-hop / ~4 ns block about 30 times over -- a restoring-
+division array. A design-wide cross-check (total net routing delay by prefix,
+all 24,602 net-endpoints) says something different and equally important:
+`u_seq` is 43.6% design-wide across 9,992 endpoints while `u_md` is only 5.3%
+across 750. The two are complementary: **`u_md` binds the current number,
+`u_seq` is the systemic problem**. Fixing the divider raises Fmax until the
+next path binds; it does not remove the case for the rewrite.
+
+**The fix (`rtl/eu_mul_div.sv`)**: it was `// purely combinational` by its own
+first line -- four independent 32-bit dividers each instantiating both `/` and
+`%` (eight divide operators), all evaluating every cycle and feeding the
+writeback mux. Statically that is a register-to-register path that must settle
+in one clock; functionally it never needed to, because the EU already holds
+DIVS.L/DIVU.L stalled for 352/304 ticks to match real 68030 cycle counts. It
+is a multicycle path in all but structure. Replaced by ONE shared sequential
+restoring-division engine (one 32-bit compare+subtract per tick, 32 ticks),
+computing the *identical* mathematical values -- same truncate-toward-zero
+signed semantics, same overflow rules, same flags -- so every Harte-verified
+behaviour is preserved exactly. Multiply stays combinational (it maps to
+MULT18X18D DSPs, only 5 of 156 in use). Handshake: `div_start`/`div_busy`,
+threaded through `m68030_eu.sv`/`eu_seq.sv`; `md_div_busy` joins
+`ex_internal_stall`, which already means exactly "freeze EX latches, bubble
+WB". For DIVS.L/DIVU.L Dn,Dn the existing 352/304-tick stall dwarfs the
+divider's 32, so those cycle counts are unchanged; word and memory-source
+forms genuinely do get slower, in the direction of the manual (DIVU.W is 44
+clocks on real silicon; this RTL was computing it combinationally in ~3).
+
+**Three real bugs found while integrating, none obvious statically:**
+
+1. **Operand-derived flags must be latched with the operands.** A first
+   attempt left `div_by_zero` combinational, reasoning it depends only on the
+   divisor and never on an iteration. Wrong: for a memory-source divide `src`
+   is only valid on the `mem_ack` tick, and the result is now consumed ~32
+   ticks later, when `src` reads stale (often zero) -- producing a spurious
+   divide-by-zero trap that aborted the instruction. Caught by `alu_mem_tb`'s
+   DIVU-01/DIVS-01. Every divide output is now registered, latched at
+   `div_start`, and `div_busy` asserts even in the short-circuited cases so
+   the consumer always sees a settled value. `div_trap_raw` correspondingly
+   now fires on the divider's own *completion* rather than at the three-way
+   operand-validity predicate it used to carry -- that predicate still decides
+   when the divide *starts* (`div_operands_valid` inherited it verbatim).
+2. **Holding `ex_valid` through a stall re-issues the memory request.** The
+   generic `mem_req` term is `ex_valid && (ex_is_mem_rd || ex_is_mem_wr)`, so
+   a memory-source divide re-read its operand every bus cycle for the whole
+   stall -- `cosim_memind25` showed four reads of `0x208` where the reference
+   had one. This is the identical failure mode the artificial-stall whitelist
+   already documents (and the reason that whitelist excludes memory-source
+   forms). Guarded with `div_mem_operand_done`. The matching guard on
+   `ex_mem_stall` is equally necessary: without it the instruction waited
+   forever for a second ack that now correctly never comes.
+3. **The guard must be qualified by `ex_unit == UNIT_DIV`.** `div_started_r`
+   only self-clears on `!ex_valid`, and Track 1-3's zero-gap dispatch means
+   `ex_valid` can stay high straight into the *next* instruction -- an
+   unqualified guard suppressed that instruction's own read and hung the sim.
+
+**Testbench consequences (three, all genuine expectation updates, not RTL
+bugs)**: `alu_mem_tb`'s `run_instr` settle window raised 15 -> 60 ticks
+(`instr_ack` fires when decode consumes the instruction, not when WB commits,
+so DIVU-01/DIVS-01 were checking the destination before the divide wrote
+back); `eu_tb`'s EU-6 now checks `div_trap` one tick later (the divide unit
+reports it, rather than combinational logic); `eu_seq_tb` needed the new ports
+wired (leaving `md_div_busy` undriven made `ex_internal_stall` an `x` that
+corrupted unrelated tests, including cpSAVE/cpRESTORE).
+
+**`tools/buscmp.py` gains `--allow-fetch-interleave`**, applied to the three
+divide-based cosim targets (`memind25`, `memind33`, `memind40`). It compares
+the program-fetch stream and the data stream **independently**, and both must
+still match exactly and in order -- nothing is skipped or tolerated, unlike
+`--allow-dut-extra-fetch`. Only cross-stream interleaving is relaxed, because
+the longer divide lets the IFU prefetch queue run further ahead before a
+dependent data cycle issues, and Musashi is purely functional and never models
+prefetch overlap at all. Hand-verified per target before applying (memind25:
+24 fetches + 13 data cycles byte-identical; memind33: 12 + 5; memind40:
+26 + 10). A first attempt generalised `--allow-dut-extra-fetch` to skip a
+*run* of reads instead -- wrong model, since those fetches are not extra but
+merely reordered, and consuming them broke the later alignment.
+
+**Verification**: `make test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33,
+`dat-synth` 50/50, and a full 124-suite Harte sweep at
+`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- **bit-identical to baseline**
+(the 2 are the documented ASL.b corpus anomaly). Real synthesis measurement
+launched via `scripts/measure_fmax.py run --tag seqdiv`.

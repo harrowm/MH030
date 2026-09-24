@@ -587,8 +587,18 @@ buscmp-memind24: $(SIM)/cosim_grp winuae/tests/memind24_ref.log tests/memind24.h
 buscmp-memind25: $(SIM)/cosim_grp winuae/tests/memind25_ref.log tests/memind25.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind25.hex +grp=memind25 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind25.log || true
+# --allow-fetch-interleave: memind25 divides, and eu_mul_div.sv's divider is
+# sequential now (MH030-P P0 finding: it was 47% of the worst ECP5 critical
+# path). The extra ~32 ticks let the IFU prefetch queue run further ahead
+# before the next instruction's own data write issues, so two instruction
+# fetches overtake that write. NOT waved through: the flag compares the
+# program-fetch stream and the data stream independently and BOTH must still
+# match exactly and in order -- here that is 24 fetches and 13 data cycles,
+# byte-identical on both sides. Only the cross-stream interleaving differs,
+# and Musashi (purely functional) never models prefetch overlap at all, so
+# its interleaving is not a specification.
 	python3 tools/buscmp.py /tmp/_dut_memind25.log winuae/tests/memind25_ref.log \
-	    --dut-may-continue
+	    --dut-may-continue --allow-fetch-interleave
 # memind28 (10-item backlog Stage 9a, plan.md): LEA's own genuine
 # memory-indirect EA, ([bd,An],Xn,od) with fi_iis!=0 -- the first family
 # beyond MOVE/MOVEA to support it. LEA never dereferences its own final
@@ -663,8 +673,12 @@ buscmp-memind32: $(SIM)/cosim_grp winuae/tests/memind32_ref.log tests/memind32.h
 buscmp-memind33: $(SIM)/cosim_grp winuae/tests/memind33_ref.log tests/memind33.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind33.hex +grp=memind33 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind33.log || true
+# --allow-fetch-interleave: DIVU.W via genuine memory-indirect EA, so the same
+# cause as memind25/memind40 -- the sequential divider lets prefetch run ahead
+# of the dependent store. Both streams still match exactly (12 fetches, 5 data
+# cycles); only their interleaving differs.
 	python3 tools/buscmp.py /tmp/_dut_memind33.log winuae/tests/memind33_ref.log \
-	    --dut-may-continue
+	    --dut-may-continue --allow-fetch-interleave
 buscmp-memind34: $(SIM)/cosim_grp winuae/tests/memind34_ref.log tests/memind34.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind34.hex +grp=memind34 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind34.log || true
@@ -743,8 +757,13 @@ buscmp-memind39: $(SIM)/cosim_grp winuae/tests/memind39_ref.log tests/memind39.h
 buscmp-memind40: $(SIM)/cosim_grp winuae/tests/memind40_ref.log tests/memind40.hex
 	$(VVP) $(SIM)/cosim_grp +hexfile=tests/memind40.hex +grp=memind40 2>&1 \
 	    | grep "^BUS" > /tmp/_dut_memind40.log || true
+# --allow-fetch-interleave: same cause as memind25 above -- memind40 runs two
+# real divides, and the sequential divider lets prefetch run further ahead of
+# the dependent data cycles. Both streams still match exactly (26 fetches, 10
+# data cycles); only their interleaving differs. --allow-adjacent-swap is no
+# longer needed once the streams are compared separately.
 	python3 tools/buscmp.py /tmp/_dut_memind40.log winuae/tests/memind40_ref.log \
-	    --dut-may-continue --allow-adjacent-swap
+	    --dut-may-continue --allow-fetch-interleave
 # memind41 (docs/*.md review, plan.md §Phase 247 item #9): CAS/CAS2 real
 # bus-trace cosim test against Musashi -- the first ever built for either
 # instruction. Closes the actual root cause behind the Dc/Du-swap decode bug

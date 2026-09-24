@@ -119,6 +119,12 @@ module eu_seq (
     input  logic        md_v,
     input  logic        md_c,
     input  logic        md_div_by_zero,
+    // Sequential-divider handshake (see rtl/eu_mul_div.sv's own header).
+    // md_div_start is a 1-tick pulse raised once the divide operands are
+    // genuinely valid; md_div_busy freezes EX (via ex_internal_stall) until
+    // the result registers are loaded.
+    output logic        md_div_start,
+    input  logic        md_div_busy,
 
     // BCD datapath
     output logic [7:0]  bcd_src,

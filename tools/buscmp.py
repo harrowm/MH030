@@ -141,6 +141,62 @@ def parse_log(path, skip=0, reads_only=False, addr_mask=None, max_cycles=None):
     return cycles
 
 
+def _fmt(c):
+    return (f"BUS {c[0]} {c[1]:08x} {c[2]:08x} fc={c[3]} siz={c[4]}"
+            if c else '<missing>')
+
+
+def compare_interleaved(dut, ref, dut_may_continue):
+    """Compare the program-fetch stream and the data stream independently.
+
+    Both streams must match exactly, in order; only how they INTERLEAVE may
+    differ. This is the right model when an instruction's execution time
+    changes (e.g. eu_mul_div.sv's sequential divider) and the IFU prefetch
+    queue therefore runs further ahead before a dependent data cycle issues,
+    so fetches overtake it. Musashi is purely functional and never models
+    prefetch overlap at all, so its interleaving is not a specification.
+
+    This is deliberately NOT the same as --allow-dut-extra-fetch: nothing is
+    skipped or tolerated here. Every fetch and every data cycle still has to
+    be present, correct and correctly ordered WITHIN its own stream -- a
+    genuinely wrong address, value, size or ordering is caught exactly as
+    before. Only cross-stream ordering is relaxed.
+    """
+    def split(cycles):
+        prog = [c for c in cycles if c[3] == '110']
+        data = [c for c in cycles if c[3] != '110']
+        return prog, data
+
+    dut_prog, dut_data = split(dut)
+    ref_prog, ref_data = split(ref)
+
+    ok = True
+    for label, d, r in (("program-fetch", dut_prog, ref_prog),
+                        ("data", dut_data, ref_data)):
+        n = min(len(d), len(r))
+        for i in range(n):
+            if d[i] != r[i]:
+                print(f"FAIL  {label} stream differs at index {i+1}:")
+                print(f"  DUT  {_fmt(d[i])}")
+                print(f"  REF  {_fmt(r[i])}")
+                ok = False
+                break
+        else:
+            if len(r) > len(d):
+                print(f"FAIL  {label} stream: DUT ended early "
+                      f"({len(d)} vs REF {len(r)})")
+                ok = False
+            elif len(d) > len(r) and not dut_may_continue:
+                print(f"FAIL  {label} stream: DUT has {len(d)-len(r)} extra "
+                      f"cycle(s) and --dut-may-continue was not given")
+                ok = False
+
+    if ok:
+        print(f"OK    {len(ref_prog)} program fetch(es) and {len(ref_data)} "
+              f"data cycle(s) match; cross-stream interleaving tolerated")
+    return 0 if ok else 1
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -156,6 +212,10 @@ def main():
                    help='Allow DUT to have extra trailing cycles (IFU prefetch after halt)')
     p.add_argument('--allow-adjacent-swap', action='store_true',
                    help='Tolerate two adjacent cycles appearing in swapped order')
+    p.add_argument('--allow-fetch-interleave', action='store_true',
+                   help='compare program-fetch and data streams independently; '
+                        'both must match exactly, only their interleaving may '
+                        'differ (prefetch overlap Musashi does not model)')
     p.add_argument('--allow-dut-extra-fetch', action='store_true',
                    help='Tolerate a genuine extra DUT-only ambient-prefetch READ cycle')
     args = p.parse_args()
@@ -166,6 +226,9 @@ def main():
     ref = parse_log(args.ref, skip=args.skip + args.skip_ref,
                     reads_only=args.reads_only, addr_mask=args.addr_mask,
                     max_cycles=args.max)
+
+    if args.allow_fetch_interleave:
+        sys.exit(compare_interleaved(dut, ref, args.dut_may_continue))
 
     ctx = 5  # context lines before/after mismatch
     swapped_at = set()

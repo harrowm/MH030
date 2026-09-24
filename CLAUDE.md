@@ -1036,6 +1036,49 @@ background). **No further RTL changes toward true pipelining without
 fresh scoping** -- this note stays authoritative until the rewrite
 planning produces its own scope.
 
+**MH030-P — pipelined-core rewrite (planning CLOSED and approved, 2026-09-23;
+plan at `~/.claude/plans/purrfect-beaming-valley.md`)**: the incremental-timing-
+fix track is closed. Four approved scope decisions: bus fidelity is
+**protocol-exact, timing-free** (per-cycle signal sequencing stays exactly as
+the manual specifies; the *spacing between* bus cycles may differ — the one
+signed-off divergence); a **parallel core** at `rtlp/` with `rtl/` frozen and
+used as the golden model; target **25-50 MHz `clk_4x`**, not 100 MHz; **integer
+core first**. Hard evidence: TRELLIS_COMB 54,344/83,640 but TRELLIS_FF only
+9,367/83,640 — a **5.8:1 LUT:FF ratio** where a pipelined core sits near 1.5:1,
+with ~74k spare FFs and 204 spare BRAMs to spend. Most verification transfers
+unchanged (Harte compares architectural state only; `buscmp.py` compares the bus
+*transaction sequence*, not cycle timing).
+
+**MH030-P P0 (IMPLEMENTED AND VERIFIED)**: `scripts/measure_fmax.py` (new —
+there was no timing target before, and the wrong recipe had already cost two
+measurements; `run` uses the KNOWN-GOOD unrestricted `synth_lattice`, `analyze`
+re-reads an existing report). Its first finding contradicted the standing
+narrative: the worst critical path is **47.0% `u_cpu.u_eu.u_md`** (191.18 ns of
+406.99 ns, 1920 hops) vs 41.6% `u_seq` — `rtl/eu_mul_div.sv` was `// purely
+combinational` with four independent 32-bit dividers, eight divide operators,
+all evaluating every cycle. A design-wide cross-check keeps this honest:
+`u_seq` is 43.6% of total routing design-wide while `u_md` is only 5.3%, so
+`u_md` **binds the current number** while `u_seq` is the **systemic** problem —
+complementary, and the rewrite's case is unchanged. Replaced with one shared
+**sequential** restoring-division engine (one 32-bit compare+subtract per tick,
+32 ticks) computing *identical* values; multiply stays combinational (DSPs).
+`div_start`/`div_busy` handshake; `md_div_busy` joins `ex_internal_stall`.
+DIVS.L/DIVU.L Dn,Dn cycle counts are unchanged (the existing 352/304-tick
+artificial stall dwarfs 32); word and memory-source forms get slower, toward
+the manual. Three real integration bugs found (see `plan.md`): operand-derived
+flags must be latched WITH the operands (a stale `src` caused spurious
+divide-by-zero traps); holding `ex_valid` through the stall re-issued the
+memory request every bus cycle; and that guard must be qualified by
+`ex_unit == UNIT_DIV` because `div_started_r` lingers into the next instruction
+under zero-gap dispatch. Also new: `tools/buscmp.py --allow-fetch-interleave`,
+applied to the 3 divide-based cosim targets, which compares the program-fetch
+and data streams **independently** — both must still match exactly and in
+order, only cross-stream interleaving is relaxed (the longer divide lets the
+IFU prefetch further ahead; Musashi never models prefetch overlap).
+Also **permanently not reproducible**: earlier sessions' "9,040 failing
+endpoints" figure — `detailed_net_timings`' per-endpoint `delay` is that net's
+own *routing delay*, not a cumulative arrival time.
+
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
