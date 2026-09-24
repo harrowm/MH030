@@ -1082,11 +1082,31 @@ path is now routing-dominated (82.5%) with no single dominator (`u_seq` 26.0%,
 outlook recorded at the pivot**: the estimate then was that bounded fixes cap
 at 3-5 MHz and that genuine pipelining would be needed to reach 10-20 MHz --
 one bounded fix reached 14.24 MHz. The 25-50 MHz target now looks plausibly
-reachable via further bounded fixes (the `tag_d`/`valid_d`/`tag_i`/`valid_i`
-arrays, which 960 synthesis "conflicting drivers" warnings point straight at;
-the MMU ATC; `eu_alu`'s carry chain) before committing to the rewrite. Not an
+reachable via further bounded fixes before committing to the rewrite. Not an
 argument the rewrite is wrong -- `u_seq` is still 43.6% of design-wide routing
--- but a genuine decision point for the user.
+-- but a genuine decision point. **The user chose to continue with bounded
+fixes (2026-09-24).**
+
+**Bounded fix 2 — multiply-driven cache arrays (a real hardware bug,
+IMPLEMENTED AND VERIFIED)**: the 960 "conflicting drivers" warnings were
+**not** a BRAM-inference issue, and the arrays they name must **not** be
+converted to BRAM -- `tag_i` is 400 bits, `tag_d` 432, `valid_d` 64, `valid_i`
+16, against a 16 Kbit DP16KD, so flip-flops are correct. The real bug:
+`tag_i`/`valid_i` were each assigned from **two different `always_ff` blocks**
+(Phase A's `itrickle` sequencer and the main FSM), and `valid_d` likewise
+(`dtrickle` + main FSM) -- two `$dff` cells driving one net. A benign race in
+simulation; two physical flip-flops shorted onto one net in synthesis, which
+**would not work on real hardware**. `data_d` had already been given a single
+arbitrated write port for exactly this reason; the others were missed.
+`tag_d` has one writer, which is why it never appeared in the warnings. Fixed
+by giving each array exactly one assigning `always_ff`: the trickle sequencers
+keep sole ownership of their own `*_active_r`/`*_next_r`, and their array
+commits move into the main FSM block at LOWEST priority, so a CACR invalidate
+or concurrent fill correctly overrides an in-flight trickle. New permanent
+gate **`make lint-drivers`** (`sv2v` + `yosys -p "proc; check"`, ~37s) --
+`check` must run after `proc`, since a plain `proc; opt_clean` finds nothing.
+Verified end-to-end: 480 warnings pre-fix (400+64+16, exactly the array
+dimensions), 0 after, and a whole-RTL sweep reports 0 problems.
 
 Also **permanently not reproducible**: earlier sessions' "9,040 failing
 endpoints" figure — `detailed_net_timings`' per-endpoint `delay` is that net's
