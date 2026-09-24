@@ -103,7 +103,8 @@ module mh030p_core (
     wire dec_executable = dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
                         || (dec_uop.uclass == UC_MOVEQ) || (dec_uop.uclass == UC_ADDQ)
-                        || (dec_uop.uclass == UC_SHIFT))
+                        || (dec_uop.uclass == UC_SHIFT)
+                        || (dec_uop.uclass == UC_MULDIV))
                        && (dec_pure_wr
                            ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
                            : (dec_uop.dst_kind == US_DREG
@@ -129,6 +130,19 @@ module mh030p_core (
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
                     && !mem_got;
 
+    // Divide is multi-cycle: rtl/eu_mul_div.sv iterates one 32-bit
+    // compare+subtract per tick rather than instantiating a combinational
+    // division array. Multiply stays combinational (it maps to DSPs), so only
+    // the divide needs a handshake. div_started is cleared when the
+    // instruction actually leaves EX, which is what makes div_start a
+    // one-shot rather than a level that re-triggers every stalled cycle --
+    // the same shape the (An)+ side effect already had to be fixed for.
+    wire ex_is_div = ex_valid && (ex_uop.unit == UU_DIV);
+    reg  div_started;
+    wire md_div_start = ex_is_div && !div_started;
+    wire md_div_busy;
+    wire ex_wait_div  = ex_is_div && (!div_started || md_div_busy);
+
     // Address-base interlock. AG needs the base register a full stage before
     // EX does, so a producer still in EX has nothing to forward yet. Rather
     // than add a third forwarding level for a dependency that is rare (An is
@@ -146,7 +160,7 @@ module mh030p_core (
     // NOT freeze EX: the producer it is waiting for IS in EX, so holding EX
     // as well deadlocks -- the interlock can never clear. It holds ID/AG and
     // lets EX drain, inserting a bubble.
-    wire stall_ex = ex_wait_mem;
+    wire stall_ex = ex_wait_mem || ex_wait_div;
     wire stall_ag = ag_base_busy;
 
     assign instr_ready = !stall_ex && !stall_ag;
@@ -364,6 +378,19 @@ module mh030p_core (
     );
 
     // MOVE/MOVEQ pass the source through, sized.
+    wire [31:0] md_lo, md_hi;
+    wire md_n, md_z, md_v, md_c, md_dbz;
+    eu_mul_div u_md (
+        .clk_4x(clk_4x), .rst_n(rst_n),
+        .div_start(md_div_start), .div_busy(md_div_busy),
+        .src(ex_src), .dst(ex_dst),
+        // md_op is 3 bits; the uop keeps it in the shared 4-bit alu_op field.
+        .op(ex_uop.alu_op[2:0]),
+        .result_lo(md_lo), .result_hi(md_hi),
+        .n_out(md_n), .z_out(md_z), .v_out(md_v), .c_out(md_c),
+        .div_by_zero(md_dbz)
+    );
+
     wire [31:0] mv_result = (ex_uop.siz == UZ_BYTE) ? {ex_dst[31:8],  ex_src[7:0]}
                           : (ex_uop.siz == UZ_WORD) ? {ex_dst[31:16], ex_src[15:0]}
                                                     : ex_src;
@@ -375,13 +402,16 @@ module mh030p_core (
 
     wire use_shf = (ex_uop.unit == UU_SHF);
     wire use_mv  = (ex_uop.unit == UU_MOVE);
+    wire use_md  = (ex_uop.unit == UU_MUL) || (ex_uop.unit == UU_DIV);
 
-    wire [31:0] ex_result = use_shf ? shf_result : use_mv ? mv_result : alu_result;
-    wire ex_n = use_shf ? shf_n : use_mv ? mv_n : alu_n;
-    wire ex_z = use_shf ? shf_z : use_mv ? mv_z : alu_z;
-    wire ex_v = use_shf ? shf_v : use_mv ? 1'b0 : alu_v;
-    wire ex_c = use_shf ? shf_c : use_mv ? 1'b0 : alu_c;
-    wire ex_x = use_shf ? shf_x : ccr_r[4];
+    wire [31:0] ex_result = use_md  ? md_lo
+                          : use_shf ? shf_result
+                          : use_mv  ? mv_result : alu_result;
+    wire ex_n = use_md ? md_n : use_shf ? shf_n : use_mv ? mv_n : alu_n;
+    wire ex_z = use_md ? md_z : use_shf ? shf_z : use_mv ? mv_z : alu_z;
+    wire ex_v = use_md ? md_v : use_shf ? shf_v : use_mv ? 1'b0 : alu_v;
+    wire ex_c = use_md ? md_c : use_shf ? shf_c : use_mv ? 1'b0 : alu_c;
+    wire ex_x = (use_md || use_mv) ? ccr_r[4] : use_shf ? shf_x : ccr_r[4];
 
     // MOVEA writes all 32 bits, sign-extending a word source.
     wire [31:0] ex_commit = (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
@@ -414,6 +444,12 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)            ccr_r <= 8'h0;
         else if (wb_upd_ccr)   ccr_r <= wb_ccr;
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)          div_started <= 1'b0;
+        else if (!stall_ex)  div_started <= 1'b0;   // instruction leaving EX
+        else if (ex_is_div)  div_started <= 1'b1;
     end
 
     // One-cycle history of the commit, for the second forwarding level.

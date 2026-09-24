@@ -63,8 +63,6 @@ module mh030p_core_tb;
     );
 
     int fails = 0;
-
-
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
         if (got === exp) $display("PASS  %-26s = %08h", name, got);
@@ -106,6 +104,14 @@ module mh030p_core_tb;
     endfunction
     function automatic logic [15:0] ANDL(input int n, input int y);
         ANDL = 16'hC080 | (n << 9) | y;
+    endfunction
+    //   MULU.W Dy,Dn    1100 nnn0 11 000 yyy
+    //   DIVU.W Dy,Dn    1000 nnn0 11 000 yyy
+    function automatic logic [15:0] MULUW(input int n, input int y);
+        MULUW = 16'hC0C0 | (n << 9) | y;
+    endfunction
+    function automatic logic [15:0] DIVUW(input int n, input int y);
+        DIVUW = 16'h80C0 | (n << 9) | y;
     endfunction
     function automatic logic [15:0] LSLL(input int c, input int n);
         LSLL = 16'hE188 | (c << 9) | n;
@@ -180,11 +186,31 @@ module mh030p_core_tb;
         issue(16'h2687);                  // MOVE.L D7,(A3)   -> ram[A3] = 0x2A
         issue(16'h26C7);                  // MOVE.L D7,(A3)+  -> ram[A3] then A3 += 4
 
-        bubble(10);                    // let the pipeline drain
-
+        bubble(10);
         chk("mem wr (A3)",     ram[32'h44 >> 2],  32'h0000_002A);
-        chk("mem wr (A3)+",    ram[32'h44 >> 2],  32'h0000_002A);  // same addr, rewritten
         chk("A3 after wr inc", dut.u_rf.regs[11], 32'h0000_0048);
+
+        // ── Multiply and divide ────────────────────────────────────────────
+        // The divider is sequential (one compare+subtract per tick), so these
+        // exercise the EX stall and the one-shot start as well as the maths.
+        issue(MOVEQ(0, 8'd6));
+        issue(MOVEQ(1, 8'd7));
+        issue(MULUW(0, 1));               // D0 = 6 * 7 = 42
+        issue(MOVEQ(2, 8'd40));
+        issue(MOVEQ(3, 8'd5));
+        issue(DIVUW(2, 3));               // D2 = {rem 0, quot 8} = 0x00000008
+        issue(MOVEQ(4, 8'd45));
+        issue(MOVEQ(5, 8'd7));
+        issue(DIVUW(4, 5));               // 45/7 = 6 rem 3 -> 0x00030006
+
+        // A sequential divide takes ~33 ticks once it reaches EX, so the
+        // drain has to outlast it -- 12 cycles left the last DIVU.W still
+        // running and its result uncommitted.
+        bubble(50);
+
+        chk("MULU.W 6*7",      dut.u_rf.regs[0],  32'd42);
+        chk("DIVU.W 40/5",     dut.u_rf.regs[2],  32'h0000_0008);
+        chk("DIVU.W 45/7",     dut.u_rf.regs[4],  32'h0003_0006);
 
         $display("");
         if (fails == 0) begin
