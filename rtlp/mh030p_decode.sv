@@ -558,6 +558,17 @@ module mh030p_decode (
                     uop.dst_kind   = US_MEM;
                     uop.writes_mem = 1'b1;
                     uop.writes_reg = 1'b0;
+                    // The uop carries ONE effective address. When the source
+                    // is a register the EA field is free, so the destination
+                    // EA goes there and a register->memory MOVE becomes
+                    // executable. A memory-to-memory MOVE needs two addresses
+                    // and cannot be expressed this way; it stays unexecutable
+                    // (the core's own scope check rejects it) rather than
+                    // silently using the wrong one.
+                    if (!ea_src_ok) begin
+                        uop.ea_mode = ea_dst_mode_w;
+                        uop.ea_reg  = rn_dst_an;
+                    end
                 end else begin
                     uop.dst_kind   = dst_is_dn ? US_DREG : US_AREG;
                     uop.dst_reg    = dst_is_dn ? rn_dst_dn : rn_dst_an;

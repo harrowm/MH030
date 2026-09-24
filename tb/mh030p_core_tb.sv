@@ -37,6 +37,7 @@ module mh030p_core_tb;
     wire [31:0] mem_addr;
     wire        mem_rw;
     wire [1:0]  mem_siz;
+    wire [31:0] mem_wdata;
     logic [31:0] mem_rdata = 32'h0;
     logic        mem_ack   = 1'b0;
     logic [31:0] ram [0:1023];
@@ -45,7 +46,8 @@ module mh030p_core_tb;
         mem_ack <= 1'b0;
         if (mem_req && !mem_ack) begin
             mem_ack   <= 1'b1;
-            mem_rdata <= ram[mem_addr[11:2]];
+            if (mem_rw) mem_rdata            <= ram[mem_addr[11:2]];
+            else        ram[mem_addr[11:2]]  <= mem_wdata;
         end
     end
 
@@ -54,7 +56,8 @@ module mh030p_core_tb;
         .instr(instr), .ext(ext), .q3(q3),
         .instr_valid(instr_valid), .instr_ready(instr_ready),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
-        .mem_siz(mem_siz), .mem_rdata(mem_rdata), .mem_ack(mem_ack),
+        .mem_siz(mem_siz), .mem_wdata(mem_wdata),
+        .mem_rdata(mem_rdata), .mem_ack(mem_ack),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
@@ -164,12 +167,24 @@ module mh030p_core_tb;
         issue(16'hDA93);                  // ADD.L  (A3),D5  -> D5 = 16 + ram[0x40]
         issue(16'h2C1B);                  // MOVE.L (A3)+,D6 -> D6 = ram[0x40], A3 += 4
 
-        bubble(8);                     // let the pipeline drain
-
+        bubble(8);
         chk("D4 = (A3)",       dut.u_rf.regs[4],  32'hDEAD_0001);
         chk("D5 = 16+(A3)",    dut.u_rf.regs[5],  32'hDEAD_0011);
         chk("D6 = (A3)+",      dut.u_rf.regs[6],  32'hDEAD_0001);
         chk("A3 post-inc",     dut.u_rf.regs[11], 32'h0000_0044);
+
+        // ── Memory WRITES: register source, memory destination ─────────────
+        //   MOVE.L Dn,(An)    0010 aaa1 00 000 nnn
+        //   MOVE.L Dn,(An)+   0010 aaa0 11 000 nnn  -> dst mode 011
+        issue(MOVEQ(7, 8'h2A));           // D7 = 0x2A
+        issue(16'h2687);                  // MOVE.L D7,(A3)   -> ram[A3] = 0x2A
+        issue(16'h26C7);                  // MOVE.L D7,(A3)+  -> ram[A3] then A3 += 4
+
+        bubble(10);                    // let the pipeline drain
+
+        chk("mem wr (A3)",     ram[32'h44 >> 2],  32'h0000_002A);
+        chk("mem wr (A3)+",    ram[32'h44 >> 2],  32'h0000_002A);  // same addr, rewritten
+        chk("A3 after wr inc", dut.u_rf.regs[11], 32'h0000_0048);
 
         $display("");
         if (fails == 0) begin

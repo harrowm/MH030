@@ -61,6 +61,7 @@ module mh030p_core (
     output reg  [31:0] mem_addr,
     output reg         mem_rw,        // 1 = read, 0 = write
     output reg  [1:0]  mem_siz,
+    output reg  [31:0] mem_wdata,
     input  wire [31:0] mem_rdata,
     input  wire        mem_ack,
 
@@ -94,12 +95,19 @@ module mh030p_core (
                   || (dec_uop.ea_mode == UEA_ABS_W)
                   || (dec_uop.ea_mode == UEA_ABS_L);
 
+    // A pure memory WRITE (register or immediate source, memory destination)
+    // is in scope. A read-modify-write, and a memory-to-memory move, need two
+    // bus cycles or two addresses respectively and are not.
+    wire dec_pure_wr = dec_uop.writes_mem && !dec_uop.reads_mem;
+
     wire dec_executable = dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
                         || (dec_uop.uclass == UC_MOVEQ) || (dec_uop.uclass == UC_ADDQ)
                         || (dec_uop.uclass == UC_SHIFT))
-                       && (dec_uop.dst_kind == US_DREG || dec_uop.dst_kind == US_AREG)
-                       && !dec_uop.writes_mem
+                       && (dec_pure_wr
+                           ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
+                           : (dec_uop.dst_kind == US_DREG
+                              || dec_uop.dst_kind == US_AREG))
                        && (!dec_uop.reads_mem || dec_ea_ok);
 
     // ── Stage registers ─────────────────────────────────────────────────────
@@ -110,21 +118,28 @@ module mh030p_core (
     reg        mem_got;
     reg [31:0] mem_hold;
     // Which register the B port carried; needed by the interlock below.
-    wire [3:0] ag_b_sel = ag_uop.reads_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
+    wire ag_mem = ag_uop.reads_mem || ag_uop.writes_mem;
+    wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
+    wire [3:0] ag_a_sel = ag_uop.reads_mem ? ag_uop.dst_reg : ag_uop.src_reg;
 
     // EX stalls while its own memory operand is still outstanding. The whole
     // pipeline behind it holds, which is what makes the request safe to leave
     // asserted: it is dropped on ack rather than re-issued every cycle. That
     // re-issue shape is exactly the bug the sequential divider hit in rtl/.
-    wire ex_wait_mem = ex_valid && ex_uop.reads_mem && !mem_got;
+    wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
+                    && !mem_got;
 
     // Address-base interlock. AG needs the base register a full stage before
     // EX does, so a producer still in EX has nothing to forward yet. Rather
     // than add a third forwarding level for a dependency that is rare (An is
     // normally set well ahead of its use), hold AG for a cycle.
-    wire ag_base_busy = ag_valid && ag_uop.reads_mem
+    // Interlock: AG needs its operands a stage before EX does, so a producer
+    // still in EX has nothing committed to forward. Covers both the address
+    // base and, for a store, the data register.
+    wire ag_base_busy = ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
                      && ex_valid && ex_uop.writes_reg
-                     && (ex_uop.dst_reg == ag_b_sel);
+                     && ((ex_uop.dst_reg == ag_b_sel)
+                      || (ag_uop.writes_mem && (ex_uop.dst_reg == ag_a_sel)));
 
     // TWO stalls, and they must not be conflated. ex_wait_mem freezes the
     // whole pipeline, because EX itself cannot complete. ag_base_busy must
@@ -139,7 +154,7 @@ module mh030p_core (
     // ── Register file: address in ID, data in AG ────────────────────────────
     // With a memory source the B port carries the EA BASE register instead of
     // the ALU destination; the destination is forwarded in EX.
-    wire dec_mem = dec_uop.reads_mem;
+    wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem;
     wire [31:0] rf_a, rf_b;
     mh030p_regfile u_rf (
         .clk_4x   (clk_4x),
@@ -147,7 +162,12 @@ module mh030p_core (
         // Hold the read while anything downstream is stalled; see the
         // regfile header.
         .rd_en    (!stall_ex && !stall_ag),
-        .rd_a_sel (dec_mem ? dec_uop.dst_reg : dec_uop.src_reg),
+        // The A port carries the ALU destination only for a memory READ,
+        // where the source arrives from memory and the port is free. For a
+        // memory WRITE the source register IS the value to store, so it must
+        // stay on the A port -- routing it to dst_reg (unset for a memory
+        // destination) stored D0 instead.
+        .rd_a_sel (dec_uop.reads_mem ? dec_uop.dst_reg : dec_uop.src_reg),
         .rd_b_sel (dec_mem ? dec_uop.ea_reg   : dec_uop.dst_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
@@ -210,7 +230,14 @@ module mh030p_core (
     wire fwd_g_wb  = wb_valid  && wb_writes  && (wb_reg  == ag_b_sel);
     wire fwd_g_wbp = wbp_valid && wbp_writes && (wbp_reg == ag_b_sel);
 
-    wire [31:0] ag_a = rf_a;
+    // A memory WRITE consumes its store data in AG, so ag_a needs the same
+    // treatment as the address base: forward a producer that has reached WB,
+    // and interlock one that is still in EX. Without it a store used the
+    // pre-update value of the register written immediately before.
+    wire fwd_h_wb  = wb_valid  && wb_writes  && (wb_reg  == ag_a_sel);
+    wire fwd_h_wbp = wbp_valid && wbp_writes && (wbp_reg == ag_a_sel);
+
+    wire [31:0] ag_a = fwd_h_wb ? wb_data : fwd_h_wbp ? wbp_data : rf_a;
     wire [31:0] ag_b = fwd_g_wb ? wb_data : fwd_g_wbp ? wbp_data : rf_b;
 
     // ── AG: effective address, on its own adder ─────────────────────────────
@@ -229,7 +256,7 @@ module mh030p_core (
     // instruction actually leaves AG. Gating it on ag_valid alone makes it
     // level-sensitive, so every cycle EX spends stalled on memory applies the
     // increment again -- (A3)+ advanced by 12 instead of 4.
-    wire ag_an_upd = ag_valid && ag_uop.reads_mem
+    wire ag_an_upd = ag_valid && ag_mem
                   && !stall_ex && !stall_ag
                   && ((ag_uop.ea_mode == UEA_AN_POST)
                    || (ag_uop.ea_mode == UEA_AN_PRE));
@@ -249,6 +276,7 @@ module mh030p_core (
             mem_addr <= 32'h0;
             mem_rw   <= 1'b1;
             mem_siz  <= UZ_LONG;
+            mem_wdata<= 32'h0;
         end else if (!stall_ex) begin
             ex_valid <= ag_valid && !stall_ag;   // bubble while AG is held
             ex_uop   <= ag_uop;
@@ -259,10 +287,14 @@ module mh030p_core (
             // stale base, so issuing the request there sends a wrong address.
             // That is exactly what happened -- the first memory access went
             // out with addr=0 before A3 had been written.
-            mem_req  <= ag_valid && ag_uop.reads_mem && !stall_ag;
+            mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
+                                 && !stall_ag;
             mem_addr <= ag_ea;
-            mem_rw   <= 1'b1;
+            mem_rw   <= !ag_uop.writes_mem;
             mem_siz  <= ag_uop.siz;
+            // A pure write's data is the source operand, which AG already
+            // has: the A port for a register source, or the immediate.
+            mem_wdata<= (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
         end else if (mem_ack) begin
             mem_req  <= 1'b0;   // acknowledged: drop it, never re-issue
         end
