@@ -67,6 +67,15 @@ module mh030p_core_tb;
     );
 
     int fails = 0;
+
+    // Capture the first redirect so its target arithmetic can be asserted.
+    logic [31:0] branch_pc_seen   = 32'hFFFF_FFFF;
+    logic [31:0] branch_pc_expect = 32'hFFFF_FFFF;
+    always @(posedge clk_4x)
+        if (rst_n && redirect && branch_pc_seen === 32'hFFFF_FFFF) begin
+            branch_pc_seen   <= redirect_pc;
+            branch_pc_expect <= dut.ex_pc + 32'd2 + 32'd2;   // BRA.B +2
+        end
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
         if (got === exp) $display("PASS  %-26s = %08h", name, got);
