@@ -117,6 +117,8 @@ module uop_decode_equiv_tb;
 
     // ── Sweep ───────────────────────────────────────────────────────────────
     integer claimed, agreed, mismatches, old_only;
+    integer gap_by_group [0:15];
+    integer g;
     integer i;
     reg [31:0] first_bad;
 
@@ -140,6 +142,7 @@ module uop_decode_equiv_tb;
     initial begin
         $display("=== uop decode equivalence sweep (all 65536 opcodes) ===");
         claimed = 0; agreed = 0; mismatches = 0; old_only = 0;
+        for (g = 0; g < 16; g = g + 1) gap_by_group[g] = 0;
         first_bad = 32'hFFFF_FFFF;
         ext = 32'h0000_1234;      // arbitrary but fixed immediate
         rst_n = 1'b0;
@@ -202,6 +205,22 @@ module uop_decode_equiv_tb;
             probe(16'h44D0, "MOVE (A0),CCR");
             probe(16'h4190, "CHK.W (A0),D0");
             probe(16'h4E7A, "MOVEC c,Rn");
+            probe(16'hA000, "A-line trap");
+            probe(16'hAFFF, "A-line trap hi");
+            probe(16'hE8C0, "BFTST D0{..}");
+            probe(16'hEFC0, "BFINS D0{..}");
+            probe(16'h11C0, "MOVE.B D0,(xxx).W");
+            probe(16'h13FC, "MOVE.B #x,(xxx).L");
+            probe(16'h103C, "MOVE.B #x,D0");
+            probe(16'h50FC, "TRAPcc");
+            probe(16'h0108, "MOVEP.W d(Ay),Dx");
+            probe(16'h4840, "SWAP D0 (recheck)");
+            probe(16'hE8D0, "BFTST (A0)");
+            probe(16'hE8E8, "BFTST d16(A0)");
+            probe(16'hE8F0, "BFTST idx(A0)");
+            probe(16'hE8F8, "BFTST abs.W");
+            probe(16'hE8F9, "BFTST abs.L");
+            probe(16'hE8FA, "BFTST d16(PC)");
             $finish;
         end
 
@@ -259,6 +278,7 @@ module uop_decode_equiv_tb;
                 end
             end else if (old_valid) begin
                 old_only = old_only + 1;
+                gap_by_group[i[15:12]] = gap_by_group[i[15:12]] + 1;
             end
         end
 
@@ -268,6 +288,10 @@ module uop_decode_equiv_tb;
         $display("  mismatches           : %0d", mismatches);
         $display("old-only (not yet done): %0d  <- coverage gap, not a failure",
                  old_only);
+        $write("  remaining by opcode group:");
+        for (g = 0; g < 16; g = g + 1)
+            if (gap_by_group[g] != 0) $write("  %0h:%0d", g, gap_by_group[g]);
+        $display("");
         $display("");
         if (mismatches == 0) begin
             $display("=== 0 failure(s) ===");

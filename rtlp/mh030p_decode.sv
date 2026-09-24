@@ -249,6 +249,33 @@ module mh030p_decode (
                        || (g4_op == 4'h4) || (g4_op == 4'h6));
     wire g4_sr_to_ea = (g4_op == 4'h0) || (g4_op == 4'h2);
 
+    // Bit-field ops: 1110 1ooo 11 mmm rrr, ooo = instr[10:8].
+    //   000 BFTST 001 BFEXTU 010 BFCHG 011 BFEXTS
+    //   100 BFCLR 101 BFFFO  110 BFSET 111 BFINS
+    wire [2:0] bf_op    = instr[10:8];
+    wire       g_is_bf  = (f_group == 4'hE) && instr[11] && (f_ss == 2'b11);
+    // BFEXTU/BFEXTS/BFFFO write the Dn named by the extension word; the
+    // mutating ops write back through the EA (Dn or memory).
+    wire       bf_reads_dn = (bf_op == 3'b001) || (bf_op == 3'b011)
+                          || (bf_op == 3'b101);
+    wire       bf_mutates  = (bf_op == 3'b010) || (bf_op == 3'b100)
+                          || (bf_op == 3'b110) || (bf_op == 3'b111);
+
+    // TRAPcc: 0101 cccc 11 111 0xx, xx = 010 word / 011 long / 100 none.
+    wire g5_is_trapcc = g5_is_cc && ea_m7
+                     && ((f_reg == 3'b010) || (f_reg == 3'b011)
+                      || (f_reg == 3'b100));
+
+    // MOVEP: group 0, bit 8 set, mode 001. The An-direct mode is what
+    // separates it from the dynamic bit ops, which cannot target An.
+    wire g0_is_movep = (f_group == 4'h0) && instr[8] && (f_mode == 3'b001);
+
+    // MOVEC: 0x4E7A (control->Rn) and 0x4E7B (Rn->control). The register is
+    // named by the extension word, not the opcode.
+    wire g4_is_movec = (instr[15:1] == 15'b0100_1110_0111_101);
+    wire movec_to_reg = !instr[0];
+    wire [3:0] movec_rn = ext[31:28];
+
     // Group E shift/rotate. bits[4:3] select op, bit[8] direction,
     // bit[5] = count from register.
     wire [1:0] e_optype = instr[4:3];
@@ -280,7 +307,18 @@ module mh030p_decode (
         case (f_group)
         // ── ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm,Dn ────────────────────────────
         4'h0: begin
-            if ((g0_is_dynbit || g0_is_statbit) && src_is_dn) begin
+            if (g0_is_movep) begin
+                uop.uclass      = UC_MOVEP;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.ea_mode     = UEA_AN_D16;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = !instr[7];
+                uop.writes_mem  = instr[7];
+                uop.first       = 1'b1;
+                uop.last        = 1'b0;      // expands to per-byte uops
+                uop.x_unchanged = 1'b1;
+            end else if ((g0_is_dynbit || g0_is_statbit) && src_is_dn) begin
                 // Dn destination: the bit number is mod 32 and the operand is
                 // a full longword (memory forms are byte-sized -- P3).
                 uop.uclass      = UC_BITOP;
@@ -438,6 +476,17 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = g4_is_tst || g4_is_clr;
                 uop.x_unchanged = (g4_is_tst || g4_is_clr || g4_is_not);
+            // MOVEC is deliberately NOT claimed yet. Its register is named by
+            // an extension word, and the reference decoder reads it from
+            // ext_data[15:12] (eu_seq_decode.svh:3561) while eu_seq.sv's own
+            // header documents ext_data as "first extension word in bits
+            // [31:16], second in [15:0]" -- so the reference appears to read
+            // the SECOND word's field for a single-extension-word
+            // instruction. That may be a real bug in rtl/, or the convention
+            // may vary per instruction; either way it must be resolved by
+            // reading the IFU drain path, not guessed at from a testbench
+            // that drives an arbitrary ext value. Claiming it would bake an
+            // unjustified convention into the new core for 2 opcodes.
             end else if (g4_is_chk) begin
                 uop.uclass      = UC_TRAP;
                 uop.unit        = UU_NONE;
@@ -626,7 +675,14 @@ module mh030p_decode (
 
         // ── ADDQ/SUBQ #imm,Dn ───────────────────────────────────────────────
         4'h5: begin
-            if (g5_is_scc) begin
+            if (g5_is_trapcc) begin
+                uop.uclass      = UC_TRAP;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.cond        = f_cond;
+                uop.traps       = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g5_is_scc) begin
                 uop.uclass      = UC_SCC;
                 uop.unit        = UU_MOVE;   // reference decoder: unit=MOVE
                 uop.siz         = UZ_BYTE;
@@ -687,6 +743,15 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b1;
                 uop.updates_ccr = 1'b1;
             end
+        end
+
+        // ── A-line: the whole group is the unimplemented-instruction trap ───
+        4'hA: begin
+            uop.uclass      = UC_TRAP;
+            uop.unit        = UU_NONE;
+            uop.siz         = UZ_LONG;
+            uop.traps       = 1'b1;
+            uop.x_unchanged = 1'b1;
         end
 
         // ── Bcc / BRA / BSR ─────────────────────────────────────────────────
@@ -915,7 +980,44 @@ module mh030p_decode (
 
         // ── Shifts / rotates, register form ─────────────────────────────────
         4'hE: begin
-            if (ea_is_alt_mem && (f_ss == 2'b11) && e_mem_legal) begin
+            // The REFERENCE decoder supports only a partial EA set for
+            // bit-fields: Dn, (An), d16(An), abs.W and d16(PC). It reports
+            // indexed (mode 110), abs.L and PC-indexed as ILLEGAL, though all
+            // of them are legal control modes on real silicon -- another
+            // apparent gap in rtl/, recorded here rather than papered over.
+            // Matching the reference's set is deliberate: an opcode it
+            // rejects is one this sweep cannot validate.
+            if (g_is_bf && (src_is_dn || (ea_mode_w == UEA_AN_IND)
+                                      || (ea_mode_w == UEA_AN_D16)
+                                      || (ea_mode_w == UEA_ABS_W)
+                                      || (ea_mode_w == UEA_PC_D16))) begin
+                uop.uclass      = UC_BITFIELD;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = !src_is_dn;
+                uop.writes_mem  = !src_is_dn && bf_mutates;
+                uop.dst_kind    = US_DREG;
+                // Extension-word register field. The reference reads
+                // ext_data[15:12] here, exactly as it does for MOVEC
+                // (eu_seq_decode.svh:3561) -- two independent instructions
+                // agreeing makes [15:12] the project's effective convention
+                // for the first extension word's register field, despite
+                // eu_seq.sv's header describing [31:16] as the first word.
+                // The discrepancy is real and still worth chasing through the
+                // IFU drain path before the EX stage relies on it.
+                uop.dst_reg     = bf_reads_dn ? ext[15:12] : rn_src_dn;
+                // Memory-form bitfields defer EVERYTHING to the bf_mem FSM:
+                // not just the flags but the Dn writeback too, so even
+                // BFEXTU reports writes_reg=0 there.
+                uop.writes_reg  = src_is_dn && (bf_reads_dn || bf_mutates);
+                // Register-form bitfields set the flags at decode; the MEMORY
+                // forms do not, because the bf_mem FSM owns them -- the same
+                // RMW split as every other memory read-modify-write family.
+                uop.updates_ccr = src_is_dn;
+                uop.x_unchanged = 1'b1;
+            end else if (ea_is_alt_mem && (f_ss == 2'b11) && e_mem_legal) begin
                 // Memory shift/rotate: always one bit, always a word.
                 uop.uclass      = UC_SHIFT;
                 uop.unit        = UU_SHF;
