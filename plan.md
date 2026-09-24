@@ -3469,3 +3469,54 @@ which the plan names as the go/no-go for the whole rewrite.
 **Nothing about the rewrite's central question has been answered yet.** The
 existing core measures 13.78 MHz. The new one measures nothing, because
 there is nothing to measure.
+
+## MH030-P: the go/no-go measurement
+
+Both cores wrapped in an identical thin harness (`scripts/gen_fmax_wrapper.py`)
+and synthesised with the same recipe on the same part. The harness exists
+because `rtl/m68030_eu` cannot be placed standalone at all -- 35 inputs
+(450 bits) and 78 outputs against 365 pins.
+
+| | New core (P3) | Old EU | ratio |
+|---|---|---|---|
+| Fmax | **38.02 MHz** | **19.55 MHz** | 1.94x |
+| Critical path | 26.30 ns | 51.16 ns | |
+| Hops | 77 | 77 | — |
+| **Logic delay** | **8.99 ns** | **9.86 ns** | **1.10x** |
+| Routing delay | 16.79 ns | 40.78 ns | 2.43x |
+| TRELLIS_COMB | 4,618 | 29,043 | 6.3x |
+| TRELLIS_FF | 1,048 | 4,474 | |
+
+**The new core is 1.94x faster. But the reason is not what the rewrite
+predicted, and that matters more than the headline.**
+
+Logic delay is essentially the SAME (8.99 vs 9.86 ns) and both paths are 77
+hops. The entire difference is routing: 16.79 ns against 40.78 ns. Routing
+delay tracks physical spread, and the new core is **6.3x smaller** in LUTs
+because it does far less. So most of the win is "a small design places
+compactly and routes short", not "staging cut the critical path".
+
+If pipelining were the dominant effect, the new core's LOGIC delay should be
+markedly lower. It is not. That is the single most important number here and
+it is the one that argues against declaring the premise validated.
+
+Three further reasons to treat 1.94x as an upper bound:
+
+* `u_md` is **32.2%** of the old core's critical path (16.45 ns). The new
+  core has no multiply/divide unit at all. Adding one back attacks the new
+  core's path directly.
+* The new core has no exceptions, no MMU, no memory destinations, no indexed
+  or memory-indirect EA, and none of the ~20 special-instruction FSMs. Every
+  one of those adds LUTs, and LUTs are what the routing delay tracks.
+* The harness is not perfectly common-mode: the output XOR tree scales with
+  port count, 78 outputs against 9. Only 21% of the old core's path is in
+  `<top>` though, so this is a bias in the new core's favour rather than the
+  explanation.
+
+**Honest verdict: the architecture is about 2x faster at one sixth the size
+and a fraction of the functionality.** That is encouraging and it is real,
+but it is not yet evidence that the pipelining is what bought it. The test
+that would settle it is bringing the new core to rough feature parity and
+re-measuring -- if Fmax holds near 38 MHz as the LUT count grows toward the
+old core's, the premise is proven; if it decays toward 20 MHz, the gain was
+size all along.
