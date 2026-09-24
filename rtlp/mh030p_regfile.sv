@@ -16,17 +16,29 @@
 // reads to two: rd_c and rd_prev_a/b/c in the old file exist solely to serve
 // the zero-gap preview mechanism this core deliberately does not have.
 //
-// Write-during-read on the same register is resolved by the core's forwarding
-// path, not here -- this file deliberately has no internal bypass, so the
-// read port stays a plain registered read with no combinational path from
-// write data to read data.
+// The read port is WRITE-FIRST: a read issued in the same cycle as a write to
+// the same register returns the new value. That is not cosmetic. With four
+// stages the read-to-use distance is long enough that an instruction three
+// behind its producer would otherwise miss it entirely -- its read is issued
+// in the very cycle the producer commits, and by the time it reaches EX the
+// commit has fallen out of both forwarding levels. Bypassing here keeps the
+// core's forwarding at two levels instead of three.
+//
+// The bypass compares addresses and muxes write data into the READ REGISTER's
+// input, so the output is still a plain flip-flop -- no combinational path
+// from write data to read data.
 // =============================================================================
 
 module mh030p_regfile (
     input  wire        clk_4x,
     input  wire        rst_n,
 
-    // Read: address in this cycle, data out the next.
+    // Read: address in this cycle, data out the next. rd_en must go low
+    // whenever the consuming stage is stalled -- these outputs are single
+    // registers shared by the whole pipeline, so a stalled instruction's
+    // operand is otherwise overwritten by the read the NEXT instruction
+    // issues while it waits.
+    input  wire        rd_en,
     input  wire [3:0]  rd_a_sel,
     input  wire [3:0]  rd_b_sel,
     output reg  [31:0] rd_a_data,
@@ -49,15 +61,17 @@ module mh030p_regfile (
         end
     end
 
-    // Registered reads. No write-forwarding here on purpose; the core's
-    // forwarding network covers the same-cycle case.
+    // Registered, write-first reads (see the header).
+    wire hit_a = wr_en && (wr_sel == rd_a_sel);
+    wire hit_b = wr_en && (wr_sel == rd_b_sel);
+
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             rd_a_data <= 32'h0;
             rd_b_data <= 32'h0;
-        end else begin
-            rd_a_data <= regs[rd_a_sel];
-            rd_b_data <= regs[rd_b_sel];
+        end else if (rd_en) begin
+            rd_a_data <= hit_a ? wr_data : regs[rd_a_sel];
+            rd_b_data <= hit_b ? wr_data : regs[rd_b_sel];
         end
     end
 

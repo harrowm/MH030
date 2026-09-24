@@ -24,26 +24,43 @@ module mh030p_core_tb;
     logic [31:0] ext   = 32'h0;
     logic [15:0] q3    = 16'h0;
     logic        instr_valid = 1'b0;
-    wire         instr_ack;
+    wire         instr_ready;
     wire         wb_wr_en;
     wire [3:0]   wb_wr_sel;
     wire [31:0]  wb_wr_data;
     wire [7:0]   ccr_out;
 
+    // Memory model: one-cycle-latency ack, longword granular. Latency is
+    // deliberately non-zero so the EX stall and the "drop the request on ack,
+    // never re-issue" behaviour are actually exercised.
+    wire        mem_req;
+    wire [31:0] mem_addr;
+    wire        mem_rw;
+    wire [1:0]  mem_siz;
+    logic [31:0] mem_rdata = 32'h0;
+    logic        mem_ack   = 1'b0;
+    logic [31:0] ram [0:1023];
+
+    always_ff @(posedge clk_4x) begin
+        mem_ack <= 1'b0;
+        if (mem_req && !mem_ack) begin
+            mem_ack   <= 1'b1;
+            mem_rdata <= ram[mem_addr[11:2]];
+        end
+    end
+
     mh030p_core dut (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .instr(instr), .ext(ext), .q3(q3),
-        .instr_valid(instr_valid), .instr_ack(instr_ack),
+        .instr_valid(instr_valid), .instr_ready(instr_ready),
+        .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
+        .mem_siz(mem_siz), .mem_rdata(mem_rdata), .mem_ack(mem_ack),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
 
     int fails = 0;
 
-    // Commit trace: shows exactly what each instruction wrote and when.
-    always @(posedge clk_4x)
-        if (rst_n && wb_wr_en)
-            $display("    [commit @%0t] D%0d <= %08h", $time/10, wb_wr_sel, wb_wr_data);
 
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
@@ -55,9 +72,12 @@ module mh030p_core_tb;
     endtask
 
     // One instruction per cycle.
-    task automatic issue(input logic [15:0] iw);
+    // Hold the instruction until the core can take it -- the pipeline stalls
+    // whenever EX is waiting on memory.
+    task automatic issue(input logic [15:0] iw, input logic [31:0] e = 32'h0);
         @(negedge clk_4x);
-        instr = iw; instr_valid = 1'b1;
+        instr = iw; ext = e; instr_valid = 1'b1;
+        while (!instr_ready) @(negedge clk_4x);
     endtask
 
     task automatic bubble(input int n);
@@ -89,7 +109,9 @@ module mh030p_core_tb;
     endfunction
 
     initial begin
-        $display("=== mh030p_core: integer register-direct pipeline ===");
+        $display("=== mh030p_core: integer pipeline (reg-direct + memory src) ===");
+        for (int i = 0; i < 1024; i++) ram[i] = 32'h0;
+        ram[32'h40 >> 2] = 32'hDEAD_0001;
         repeat (3) @(negedge clk_4x);
         rst_n = 1'b1;
         @(negedge clk_4x);
@@ -122,8 +144,7 @@ module mh030p_core_tb;
         issue(ANDL(2, 3));            // D2 = 0x0F & 0x09 = 0x09
         issue(LSLL(1, 3));            // D3 = 9 << 1 = 18
 
-        bubble(6);                     // let the pipeline drain
-
+        bubble(6);
         chk("D0 = 5+3",        dut.u_rf.regs[0],  32'd8);
         chk("D1 = 3",          dut.u_rf.regs[1],  32'd3);
         chk("D4 = 1+D0",       dut.u_rf.regs[4],  32'd9);
@@ -131,6 +152,24 @@ module mh030p_core_tb;
         chk("D6 = 10-4",       dut.u_rf.regs[6],  32'd6);
         chk("D2 = 0x0F&0x09",  dut.u_rf.regs[2],  32'h0000_0009);
         chk("D3 = 9<<1",       dut.u_rf.regs[3],  32'd18);
+
+        // ── Memory source operands (P3) ────────────────────────────────────
+        // ram is longword granular; these all use .L so the model matches.
+        //   MOVE.L (An),Dn     0010 nnn0 00 010 aaa
+        //   ADD.L  (An),Dn     1101 nnn0 10 010 aaa
+        //   MOVE.L (An)+,Dn    0010 nnn0 00 011 aaa
+        issue(MOVEQ(3, 8'h40));           // A3 base via D3 then MOVEA
+        issue(16'h2643);                  // MOVEA.L D3,A3   -> A3 = 0x40
+        issue(16'h2813);                  // MOVE.L (A3),D4  -> D4 = ram[0x40]
+        issue(16'hDA93);                  // ADD.L  (A3),D5  -> D5 = 16 + ram[0x40]
+        issue(16'h2C1B);                  // MOVE.L (A3)+,D6 -> D6 = ram[0x40], A3 += 4
+
+        bubble(8);                     // let the pipeline drain
+
+        chk("D4 = (A3)",       dut.u_rf.regs[4],  32'hDEAD_0001);
+        chk("D5 = 16+(A3)",    dut.u_rf.regs[5],  32'hDEAD_0011);
+        chk("D6 = (A3)+",      dut.u_rf.regs[6],  32'hDEAD_0001);
+        chk("A3 post-inc",     dut.u_rf.regs[11], 32'h0000_0044);
 
         $display("");
         if (fails == 0) begin
