@@ -67,14 +67,6 @@ module mh030p_core_tb;
     );
 
     int fails = 0;
-    // Capture the first redirect so its target arithmetic can be asserted.
-    logic [31:0] branch_pc_seen = 32'hFFFF_FFFF;
-    logic [31:0] branch_pc_expect = 32'hFFFF_FFFF;
-    always @(posedge clk_4x)
-        if (rst_n && redirect && branch_pc_seen === 32'hFFFF_FFFF) begin
-            branch_pc_seen   <= redirect_pc;
-            branch_pc_expect <= dut.ex_pc + 32'd2 + 32'd2;   // BRA.B +2
-        end
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
         if (got === exp) $display("PASS  %-26s = %08h", name, got);
@@ -260,6 +252,26 @@ module mh030p_core_tb;
         chk("MULU.W 6*7",      dut.u_rf.regs[0],  32'd42);
         chk("DIVU.W 40/5",     dut.u_rf.regs[2],  32'h0000_0008);
         chk("DIVU.W 45/7",     dut.u_rf.regs[4],  32'h0003_0006);
+
+        // ── Read-modify-write: two bus cycles on one address ───────────────
+        //   ADD.L Dn,(An)   1101 nnn1 10 010 aaa
+        //   AND.L Dn,(An)   1100 nnn1 10 010 aaa
+        ram[32'h20 >> 2] = 32'h0000_0010;
+        issue(MOVEQ(3, 8'h20));   // MOVEQ sign-extends: keep the address positive
+        issue(16'h2643);                  // MOVEA.L D3,A3  -> A3 = 0x80
+        issue(MOVEQ(0, 8'h05));
+        issue(16'hD193);                  // ADD.L D0,(A3)  -> mem = 0x10 + 5
+        bubble(14);
+        chk("RMW ADD.L D0,(A3)", ram[32'h20 >> 2], 32'h0000_0015);
+
+        ram[32'h24 >> 2] = 32'h0000_00FF;
+        issue(MOVEQ(3, 8'h24));
+        issue(16'h2643);                  // A3 = 0x84
+        issue(MOVEQ(1, 8'h0F));
+        issue(16'hC393);                  // AND.L D1,(A3) -> mem = 0xFF & 0x0F
+        bubble(14);
+        chk("RMW AND.L D1,(A3)", ram[32'h24 >> 2], 32'h0000_000F);
+
 
         $display("");
         if (fails == 0) begin

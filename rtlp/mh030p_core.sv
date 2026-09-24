@@ -107,6 +107,9 @@ module mh030p_core (
     // is in scope. A read-modify-write, and a memory-to-memory move, need two
     // bus cycles or two addresses respectively and are not.
     wire dec_pure_wr = dec_uop.writes_mem && !dec_uop.reads_mem;
+    // Read-modify-write: one EA, read then write, two bus cycles. This is the
+    // first instruction shape that needs more than one pass through EX.
+    wire dec_rmw     = dec_uop.writes_mem && dec_uop.reads_mem;
 
     wire dec_executable = dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
@@ -115,10 +118,10 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_MULDIV)
                         || (dec_uop.uclass == UC_BRANCH))
                        && ((dec_uop.uclass == UC_BRANCH)
-                           || (dec_pure_wr
-                               ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
-                               : (dec_uop.dst_kind == US_DREG
-                                  || dec_uop.dst_kind == US_AREG)))
+                           || (dec_rmw     ? dec_ea_ok
+                           :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
+                                           : (dec_uop.dst_kind == US_DREG
+                                              || dec_uop.dst_kind == US_AREG)))
                        && (!dec_uop.reads_mem || dec_ea_ok);
 
     // ── Stage registers ─────────────────────────────────────────────────────
@@ -132,14 +135,28 @@ module mh030p_core (
     // Which register the B port carried; needed by the interlock below.
     wire ag_mem = ag_uop.reads_mem || ag_uop.writes_mem;
     wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
-    wire [3:0] ag_a_sel = ag_uop.reads_mem ? ag_uop.dst_reg : ag_uop.src_reg;
+    // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
+    // and the interlock track a different register than the one actually read.
+    wire [3:0] ag_a_sel = (ag_uop.reads_mem && !ag_uop.writes_mem)
+                        ? ag_uop.dst_reg : ag_uop.src_reg;
 
     // EX stalls while its own memory operand is still outstanding. The whole
     // pipeline behind it holds, which is what makes the request safe to leave
     // asserted: it is dropped on ack rather than re-issued every cycle. That
     // re-issue shape is exactly the bug the sequential divider hit in rtl/.
+    // An RMW holds EX for two bus cycles: the read, then the write of the
+    // computed value. mem_got marks the read captured, rmw_done the write
+    // acknowledged; a plain access needs only the first.
+    wire ex_rmw = ex_valid && ex_uop.reads_mem && ex_uop.writes_mem;
+    reg  rmw_wr_issued, rmw_done;
+    // Declared here so the ONE always_ff that drives the memory port can use
+    // it; assigned below once the ALU result exists. Splitting the port
+    // across two blocks would give it two drivers -- the exact fault that had
+    // to be fixed in rtl/ (see make lint-drivers).
+    wire [31:0] ex_commit;
+
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
-                    && !mem_got;
+                    && (ex_rmw ? !rmw_done : !mem_got);
 
     // Divide is multi-cycle: rtl/eu_mul_div.sv iterates one 32-bit
     // compare+subtract per tick rather than instantiating a combinational
@@ -164,7 +181,8 @@ module mh030p_core (
     wire ag_base_busy = ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
                      && ex_valid && ex_uop.writes_reg
                      && ((ex_uop.dst_reg == ag_b_sel)
-                      || (ag_uop.writes_mem && (ex_uop.dst_reg == ag_a_sel)));
+                      || ((ag_uop.writes_mem || ag_uop.reads_mem)
+                          && (ex_uop.dst_reg == ag_a_sel)));
 
     // TWO stalls, and they must not be conflated. ex_wait_mem freezes the
     // whole pipeline, because EX itself cannot complete. ag_base_busy must
@@ -192,7 +210,12 @@ module mh030p_core (
         // memory WRITE the source register IS the value to store, so it must
         // stay on the A port -- routing it to dst_reg (unset for a memory
         // destination) stored D0 instead.
-        .rd_a_sel (dec_uop.reads_mem ? dec_uop.dst_reg : dec_uop.src_reg),
+        // dst_reg only for a PLAIN memory read, where the source arrives from
+        // memory and the ALU destination is a register. For an RMW the
+        // register operand is the SOURCE and the destination is memory, so
+        // dst_reg is unset -- using it read D0 by accident.
+        .rd_a_sel ((dec_uop.reads_mem && !dec_uop.writes_mem)
+                   ? dec_uop.dst_reg : dec_uop.src_reg),
         .rd_b_sel (dec_mem ? dec_uop.ea_reg   : dec_uop.dst_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
@@ -320,11 +343,22 @@ module mh030p_core (
             mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
                                  && !stall_ag;
             mem_addr <= ag_ea;
-            mem_rw   <= !ag_uop.writes_mem;
+            // Read if the instruction reads, regardless of whether it also
+            // writes: an RMW's FIRST bus cycle is the read, and the write is
+            // turned around later from EX. Deriving this from writes_mem made
+            // every RMW start with a write.
+            mem_rw   <= ag_uop.reads_mem;
             mem_siz  <= ag_uop.siz;
             // A pure write's data is the source operand, which AG already
             // has: the A port for a register source, or the immediate.
             mem_wdata<= (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
+        end else if (ex_rmw && mem_got && !rmw_wr_issued) begin
+            // Read captured: turn the same address around as a write of the
+            // ALU result. The address is already in mem_addr, so only the
+            // direction and data change.
+            mem_req   <= 1'b1;
+            mem_rw    <= 1'b0;
+            mem_wdata <= ex_commit;
         end else if (mem_ack) begin
             mem_req  <= 1'b0;   // acknowledged: drop it, never re-issue
         end
@@ -347,7 +381,9 @@ module mh030p_core (
     // Which register each carried port holds depends on the operand shape:
     //   memory source : A = ALU destination, B = EA base
     //   otherwise     : A = ALU source,      B = ALU destination
-    wire [3:0] ex_a_sel = ex_uop.reads_mem ? ex_uop.dst_reg : ex_uop.src_reg;
+    wire ex_rmw_op = ex_uop.reads_mem && ex_uop.writes_mem;
+    wire [3:0] ex_a_sel = (ex_uop.reads_mem && !ex_uop.writes_mem)
+                        ? ex_uop.dst_reg : ex_uop.src_reg;
 
     wire fwd_a_wb  = wb_valid  && wb_writes  && (wb_reg  == ex_a_sel);
     wire fwd_a_wbp = wbp_valid && wbp_writes && (wbp_reg == ex_a_sel);
@@ -357,10 +393,18 @@ module mh030p_core (
     wire [31:0] ex_a_f = fwd_a_wb ? wb_data : fwd_a_wbp ? wbp_data : ex_a;
     wire [31:0] ex_b_f = fwd_b_wb ? wb_data : fwd_b_wbp ? wbp_data : ex_b;
 
-    wire [31:0] ex_src = ex_uop.reads_mem            ? mem_hold
+    // Which side the memory value lands on differs between the two shapes:
+    //   plain memory read (ADD.L (An),Dn) : memory is the SOURCE
+    //   read-modify-write (ADD.L Dn,(An)) : memory is the DESTINATION
+    // eu_alu computes dst OP src, so getting this backwards computes the
+    // right arithmetic on the wrong operands.
+    wire [31:0] ex_src = ex_rmw_op                   ? ex_a_f
+                       : ex_uop.reads_mem            ? mem_hold
                        : (ex_uop.src_kind == US_IMM) ? ex_uop.imm
                                                      : ex_a_f;
-    wire [31:0] ex_dst = ex_uop.reads_mem ? ex_a_f : ex_b_f;
+    wire [31:0] ex_dst = ex_rmw_op        ? mem_hold
+                       : ex_uop.reads_mem ? ex_a_f
+                                          : ex_b_f;
 
     // ── Functional units ────────────────────────────────────────────────────
     wire [31:0] alu_result, shf_result;
@@ -462,7 +506,7 @@ module mh030p_core (
     // The 68k branch base is the address of the instruction plus 2.
     assign redirect_pc = ex_pc + 32'd2 + ex_uop.imm;
 
-    wire [31:0] ex_commit = (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
+    assign ex_commit = (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
                                               : ex_result;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -477,7 +521,8 @@ module mh030p_core (
             wb_valid   <= ex_valid;
             wb_reg     <= ex_uop.dst_reg;
             wb_data    <= ex_commit;
-            wb_writes  <= ex_valid && ex_uop.writes_reg && !ex_is_branch;
+            wb_writes  <= ex_valid && ex_uop.writes_reg && !ex_is_branch
+                                       && !ex_uop.writes_mem;
             wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch;
             wb_ccr     <= {3'b000,
                            ex_uop.x_unchanged ? ccr_r[4] : ex_x,
@@ -498,6 +543,19 @@ module mh030p_core (
         if (!rst_n)          div_started <= 1'b0;
         else if (!stall_ex)  div_started <= 1'b0;   // instruction leaving EX
         else if (ex_is_div)  div_started <= 1'b1;
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            rmw_wr_issued <= 1'b0;
+            rmw_done      <= 1'b0;
+        end else if (!stall_ex) begin
+            rmw_wr_issued <= 1'b0;          // instruction leaving EX
+            rmw_done      <= 1'b0;
+        end else if (ex_rmw) begin
+            if (mem_got && !rmw_wr_issued) rmw_wr_issued <= 1'b1;
+            else if (rmw_wr_issued && mem_ack) rmw_done  <= 1'b1;
+        end
     end
 
     // One-cycle history of the commit, for the second forwarding level.
