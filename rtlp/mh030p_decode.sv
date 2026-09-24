@@ -251,6 +251,34 @@ module mh030p_decode (
     wire ea_is_alt_mem = ea_is_mem && (ea_mode_w != UEA_PC_D16)
                                    && (ea_mode_w != UEA_PC_IDX);
 
+    // Group 0 with ss == 11 is CMP2/CHK2 (f_dn 000/001/010 = B/W/L) or
+    // CAS (f_dn 101/110/111 = B/W/L); ss != 11 with f_dn == 111 is MOVES.
+    wire g0_ss11      = (f_group == 4'h0) && !instr[8] && (f_ss == 2'b11);
+    // CMP2/CHK2 takes control modes only, and the reference's own set
+    // (eu_seq_decode.svh:965) is narrower still: (An), (d16,An), (d8,An,Xn),
+    // abs.W and (d16,PC) -- no abs.L and no PC-indexed. Matched exactly, for
+    // the usual reason: an opcode the reference rejects cannot be validated.
+    wire g0_is_cmp2   = g0_ss11 && (f_dn != 3'b011) && (f_dn[2] == 1'b0)
+                     && ((ea_mode_w == UEA_AN_IND) || (ea_mode_w == UEA_AN_D16)
+                      || (ea_mode_w == UEA_AN_IDX) || (ea_mode_w == UEA_ABS_W)
+                      || (ea_mode_w == UEA_PC_D16));
+    // CAS: the reference accepts control-ALTERABLE only -- no (An)+/-(An),
+    // no PC-relative.
+    // NOTE: f_dn==110 (CAS.W) is excluded because the reference decoder
+    // rejects it while accepting CAS.B (101) and CAS.L (111). That looks like
+    // another gap in rtl/ rather than an encoding subtlety -- recorded, not
+    // claimed, since an opcode the reference rejects cannot be validated here.
+    wire g0_is_cas    = g0_ss11 && (f_dn != 3'b110)
+                     && (f_dn[2] == 1'b1) && (f_dn != 3'b100)
+                     && (ea_mode_w == UEA_AN_IND);   // reference accepts (An) only
+    // MOVES is claimed only for (An), the single-extension-word form. With a
+    // displacement there are two extension words, so the direction bit and
+    // the register field move to the other half -- the same ext_count
+    // dependency ea_disp_valid exists for. Claiming those without the
+    // ext_count chain would mean guessing at a convention.
+    wire g0_is_moves  = (f_group == 4'h0) && !instr[8] && (f_dn == 3'b111)
+                     && f_ss_valid && (ea_mode_w == UEA_AN_IND);
+
     // Group 4 sub-families, all keyed on g4_op (= instr[11:8]) plus [7:6].
     wire [1:0] g4_b76   = instr[7:6];
     wire g4_is_nbcd  = (g4_op == 4'h8) && (g4_b76 == 2'b00);
@@ -385,6 +413,63 @@ module mh030p_decode (
                 uop.writes_mem  = instr[7];
                 uop.first       = 1'b1;
                 uop.last        = 1'b0;      // expands to per-byte uops
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_cmp2) begin
+                uop.uclass      = UC_TRAP;      // CHK2 can trap
+                uop.unit        = UU_MOVE;
+                uop.siz         = (f_dn == 3'b000) ? UZ_BYTE :
+                                  (f_dn == 3'b001) ? UZ_WORD : UZ_LONG;
+                uop.src_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_cas) begin
+                uop.uclass      = UC_ATOMIC;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = UA_CMP;
+                // CAS size comes from f_dn: 101=B, 110=W, 111=L.
+                uop.siz         = (f_dn == 3'b101) ? UZ_BYTE :
+                                  (f_dn == 3'b110) ? UZ_WORD : UZ_LONG;
+                uop.src_kind    = US_MEM;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.first       = 1'b1;
+                uop.last        = 1'b0;
+            end else if (g0_is_moves) begin
+                uop.uclass      = UC_MOVEC;
+                uop.unit        = UU_MOVE;
+                uop.siz         = f_siz;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = ext[15:12];
+                uop.writes_reg  = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_statbit && ea_is_alt_mem) begin
+                // Static bit ops on memory are byte-sized and leave both the
+                // writeback and the flags to the RMW FSM.
+                uop.uclass      = UC_BITOP;
+                uop.unit        = UU_BIT;
+                uop.alu_op      = {2'b00, b_op};
+                uop.siz         = UZ_BYTE;
+                uop.src_kind    = US_IMM;
+                uop.imm         = ext;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = (b_op != 2'b00);
+                uop.writes_reg  = 1'b0;
+                // BTST writes nothing, so it claims the flags at decode; the
+                // mutating forms leave them to the RMW FSM. Same split as
+                // TST/CMPI versus the writing memory families.
+                uop.updates_ccr = (b_op == 2'b00);
                 uop.x_unchanged = 1'b1;
             end else if ((g0_is_dynbit || g0_is_statbit) && src_is_dn) begin
                 // Dn destination: the bit number is mod 32 and the operand is
@@ -807,6 +892,16 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b1;
                 uop.updates_ccr = 1'b1;
             end
+        end
+
+        // ── F-line: MMU (CpID 000), coprocessor (CpID 001) and the trap ─────
+        4'hF: begin
+            uop.uclass      = (instr[11:9] == 3'b000) ? UC_MMU :
+                              (instr[11:9] == 3'b001) ? UC_COPROC : UC_TRAP;
+            uop.unit        = UU_NONE;
+            uop.siz         = UZ_LONG;
+            uop.traps       = (instr[11:9] != 3'b000) && (instr[11:9] != 3'b001);
+            uop.x_unchanged = 1'b1;
         end
 
         // ── A-line: the whole group is the unimplemented-instruction trap ───

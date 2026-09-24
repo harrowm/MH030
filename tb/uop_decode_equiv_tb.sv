@@ -253,6 +253,14 @@ module uop_decode_equiv_tb;
             probe(16'hF000, "F-line");
             probe(16'h003C, "ORI #x,CCR");
             probe(16'h00C0, "grp0 ss11 m0");
+            probe(16'h1180, "MOVE.B D0,A0dst?");
+            probe(16'h4140, "grp4 opmode101?");
+            probe(16'h8140, "OR.W D0,D0 dir1?");
+            probe(16'hC180, "grpC sel10000?");
+            probe(16'h00D0, "CMP2.B (A0),Rn");
+            probe(16'h0ED0, "CAS.B (A0)");
+            probe(16'h0E10, "MOVES.B (A0)");
+            probe(16'h08D0, "BSET #n,(A0)");
             $finish;
         end
 
