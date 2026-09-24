@@ -1112,8 +1112,55 @@ Also **permanently not reproducible**: earlier sessions' "9,040 failing
 endpoints" figure — `detailed_net_timings`' per-endpoint `delay` is that net's
 own *routing delay*, not a cumulative arrival time.
 
-**Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
-`make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
+**MH030-P P1 (decoder + equivalence sweep, DONE to its useful limit)**: the
+pipelined core lives in `rtlp/`; `rtl/` stays the golden reference.
+`rtlp/mh030p_uop.svh` defines the micro-op (encoding choices proven through
+iverilog/sv2v/yosys with scratch compiles first -- no `typedef enum`, no
+`'0`/`'{...}` on packed structs, and every encoding shared with `rtl/`
+reproduced exactly rather than tidied). `rtlp/mh030p_decode.sv` decodes into
+33 uop classes; `tb/uop_decode_equiv_tb.sv` sweeps all 65,536 opcodes against
+the reference decoder and is in `make test` (39/39) at 1.6s, with `+probe`
+and `+gaps` diagnostics that proved far faster than guessing one convention
+per rebuild. **52,845 of 58,053 claimed, 0 mismatches**, compared on class,
+unit, op, size, writes_reg, updates_ccr, destination register and EA
+displacement/index/scale.
+
+**The remaining 5,208 are mostly NOT implementable, and that is the finding.**
+Most are the reference decoder accepting genuinely ILLEGAL encodings rather
+than rejecting them -- `MOVE.B A0,D0`, `ADDQ.B #8,A0`, `SUB.B A0,D0`,
+reserved EA mode 111/reg 101, `ORI` with `ss=11`. Each takes an Illegal
+Instruction exception on real silicon; in `rtl/` they execute. Driving the
+sweep to 100% would copy that into the new core, so the gap will not reach
+zero and should not. This is the opposite of the under-acceptance gaps below
+and arguably worse: an under-accepted opcode traps when it shouldn't, an
+over-accepted one silently executes when it should trap. The rest of the
+remainder needs `m68030_seq.sv`'s `ext_count` chain ported (the decoder sets
+`ea_disp_valid = 0` rather than emit a wrong displacement).
+
+**`rtl/` findings from the sweep**: `MOVE CCR,<ea>` memory destinations were
+missing entirely -- **FIXED**, with test `system_tb` MOVE_SR-03b. Bit-field
+EAs lack indexed/abs.L/PC-indexed -- scoped as its own phase (needs per-mode
+`ext_count`, a third `bf_spec` position, indexed address generation in the
+`bf_mem` FSM, and an `Xn` port). CAS accepts only `(An)` and not CAS.W, and
+CMP2/CHK2 has a restricted mode set -- both recorded and matched, not
+claimed. One suspected gap turned out to be **my** error, not `rtl/`'s: the
+reference reads extension-word register fields from `ext_data[15:12]` because
+`m68030_seq.sv:1160-1164` normalises a single extension word into the LOW
+half; `eu_seq.sv`'s header describes the IFU's raw layout, which the EU never
+sees. Fixing that corrected every one-word EA mode in the new decoder and
+added EA-field comparison to the sweep, verified to fail cleanly when the bug
+is reintroduced.
+
+**P1 did NOT build any pipeline** -- no registered ID/AG/OF/EX/WB boundaries,
+no forwarding, no `mh030p_top`. That is P2, which produces the first Fmax
+number for the new architecture and is the plan's stated go/no-go. **Nothing
+about the rewrite's central question has been answered**: the existing core
+measures 13.78 MHz (14.24 before the multiply-driven-array correctness fix,
+which cost ~3% and 1.1k LUTs and lands regardless), the new one measures
+nothing because there is nothing to measure.
+
+**Current state**: `make test` 39/39 (38 + the new decoder sweep), `make
+cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
 cover any 68020+-only family, coprocessor conditionals included, so this count is unaffected
