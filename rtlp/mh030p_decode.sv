@@ -1284,6 +1284,12 @@ module mh030p_decode (
         // end. Porting ext_count is its own task; until then the decoder says
         // honestly that it does not know, rather than emitting a wrong value.
         uop.ea_disp_valid = (ea_words_total == 3'd1);
+        // How far the fetch unit must drain for this instruction. Branches
+        // carry their displacement in the opcode unless the 8-bit field is
+        // zero, in which case one extension word follows.
+        uop.ext_words     = (uop.uclass == UC_BRANCH)
+                          ? ((instr[7:0] == 8'h00) ? 3'd1 : 3'd0)
+                          : ea_words_total;
 
         if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX)) begin
             uop.ea_idx_reg   = ea_xn;
