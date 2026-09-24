@@ -125,6 +125,9 @@ module uop_decode_equiv_tb;
     // ── Sweep ───────────────────────────────────────────────────────────────
     integer claimed, agreed, mismatches, old_only;
     integer gap_by_group [0:15];
+    integer gap_sample_n  [0:15];
+    reg [15:0] gap_sample [0:15][0:3];
+    integer k;
     integer g;
     integer i;
     reg [31:0] first_bad;
@@ -155,7 +158,10 @@ module uop_decode_equiv_tb;
     initial begin
         $display("=== uop decode equivalence sweep (all 65536 opcodes) ===");
         claimed = 0; agreed = 0; mismatches = 0; old_only = 0;
-        for (g = 0; g < 16; g = g + 1) gap_by_group[g] = 0;
+        for (g = 0; g < 16; g = g + 1) begin
+            gap_by_group[g] = 0;
+            gap_sample_n[g] = 0;
+        end
         first_bad = 32'hFFFF_FFFF;
         // Deliberately asymmetric between halves so that reading the WRONG
         // half of the extension word cannot accidentally compare equal.
@@ -237,6 +243,16 @@ module uop_decode_equiv_tb;
             probe(16'hE8F8, "BFTST abs.W");
             probe(16'hE8F9, "BFTST abs.L");
             probe(16'hE8FA, "BFTST d16(PC)");
+            probe(16'h1008, "MOVE.B A0,D0?");
+            probe(16'h203D, "MOVE.L m7r5,D0?");
+            probe(16'h4100, "CHK.L D0,D0");
+            probe(16'h5008, "ADDQ.B #8,A0?");
+            probe(16'h9008, "SUBX.B -(A0)");
+            probe(16'h80D0, "DIVU.W (A0),D0");
+            probe(16'hE008, "ASR.B #8,D0?");
+            probe(16'hF000, "F-line");
+            probe(16'h003C, "ORI #x,CCR");
+            probe(16'h00C0, "grp0 ss11 m0");
             $finish;
         end
 
@@ -321,6 +337,12 @@ module uop_decode_equiv_tb;
             end else if (old_valid) begin
                 old_only = old_only + 1;
                 gap_by_group[i[15:12]] = gap_by_group[i[15:12]] + 1;
+                // Keep the first few unclaimed opcodes per group so the next
+                // family to implement can be identified without guessing.
+                if (gap_sample_n[i[15:12]] < 4) begin
+                    gap_sample[i[15:12]][gap_sample_n[i[15:12]]] = i[15:0];
+                    gap_sample_n[i[15:12]] = gap_sample_n[i[15:12]] + 1;
+                end
             end
         end
 
@@ -334,6 +356,14 @@ module uop_decode_equiv_tb;
         for (g = 0; g < 16; g = g + 1)
             if (gap_by_group[g] != 0) $write("  %0h:%0d", g, gap_by_group[g]);
         $display("");
+        if ($test$plusargs("gaps"))
+            for (g = 0; g < 16; g = g + 1)
+                if (gap_by_group[g] != 0) begin
+                    $write("    group %0h first unclaimed:", g);
+                    for (k = 0; k < gap_sample_n[g]; k = k + 1)
+                        $write(" %04h", gap_sample[g][k]);
+                    $display("");
+                end
         $display("");
         if (mismatches == 0) begin
             $display("=== 0 failure(s) ===");

@@ -115,6 +115,11 @@ module mh030p_decode (
     // with the same encoding eu_bitops.sv uses (00=TST,01=CHG,10=CLR,11=SET).
     wire [1:0] b_op       = instr[7:6];
     wire       g0_is_dynbit = instr[8];
+    // ORI/ANDI/EORI to CCR (ss=00) or SR (ss=01): mode 111, reg 100.
+    wire g0_is_ccr_sr = (f_group == 4'h0) && !instr[8]
+                     && ((f_dn == 3'b000) || (f_dn == 3'b001) || (f_dn == 3'b101))
+                     && (f_mode == 3'b111) && (f_reg == 3'b100)
+                     && ((f_ss == 2'b00) || (f_ss == 2'b01));
     wire       g0_is_statbit = !instr[8] && (f_dn == 3'b100);
 
     // MULU/MULS (group C) and DIVU/DIVS (group 8), word forms: ss == 11.
@@ -128,6 +133,12 @@ module mh030p_decode (
     //   ADDX Dy,Dx = 1101 xxx1 ss00 0yyy      SUBX Dy,Dx = 1001 xxx1 ss00 0yyy
     // bit 3 picks the -(An) memory form, which is not claimed here (P3).
     wire g_xform_reg = f_dir && (instr[5:4] == 2'b00) && !instr[3];
+    // Same families with bit 3 SET are the -(Ay),-(Ax) memory forms.
+    wire g_xform_mem = f_dir && (instr[5:4] == 2'b00) && instr[3];
+    wire g_is_bcd_mem = g_xform_mem && (f_ss == 2'b00)
+                     && ((f_group == 4'hC) || (f_group == 4'h8));
+    wire g_is_x_mem   = g_xform_mem && f_ss_valid
+                     && ((f_group == 4'hD) || (f_group == 4'h9));
     wire g_is_bcd_reg = g_xform_reg && (f_ss == 2'b00)
                      && ((f_group == 4'hC) || (f_group == 4'h8));
     wire g_is_x_reg   = g_xform_reg && f_ss_valid
@@ -287,7 +298,7 @@ module mh030p_decode (
 
     // CHK: group 4, bit 8 set, opmode 110 (word) or 100 (long).
     wire g4_is_chk = instr[8] && ((g4_b76 == 2'b10) || (g4_b76 == 2'b00))
-                  && ea_src_ok && (g4_op != 4'hE);
+                  && (ea_src_ok || src_is_dn) && (g4_op != 4'hE);
 
     // MOVE to/from SR/CCR: 0x40C0/0x42C0 (from) and 0x44C0/0x46C0 (to).
     wire g4_is_sr_move = (g4_b76 == 2'b11) && !instr[8]
@@ -353,7 +364,18 @@ module mh030p_decode (
         case (f_group)
         // ── ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm,Dn ────────────────────────────
         4'h0: begin
-            if (g0_is_movep) begin
+            if (g0_is_ccr_sr) begin
+                // ORI/ANDI/EORI #imm,CCR (ss=00) and #imm,SR (ss=01).
+                uop.uclass      = UC_SYSCTL;
+                uop.unit        = UU_MOVE;
+                uop.siz         = UZ_LONG;
+                uop.src_kind    = US_IMM;
+                uop.imm         = ext;
+                uop.dst_kind    = US_SR;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_movep) begin
                 uop.uclass      = UC_MOVEP;
                 uop.unit        = UU_NONE;
                 uop.siz         = UZ_LONG;
@@ -537,10 +559,12 @@ module mh030p_decode (
                 uop.uclass      = UC_TRAP;
                 uop.unit        = UU_NONE;
                 uop.siz         = (g4_b76 == 2'b10) ? UZ_WORD : UZ_LONG;
-                uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
+                uop.src_kind    = src_is_dn ? US_DREG :
+                                  ea_is_imm  ? US_IMM  : US_MEM;
+                uop.src_reg     = rn_src_dn;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.reads_mem   = !ea_is_imm;
+                uop.reads_mem   = !ea_is_imm && !src_is_dn;
                 uop.dst_kind    = US_DREG;
                 uop.dst_reg     = rn_dn;
                 uop.writes_reg  = 1'b0;
@@ -844,6 +868,26 @@ module mh030p_decode (
                 uop.dst_reg     = rn_dn;
                 uop.writes_reg  = 1'b1;
                 uop.updates_ccr = 1'b1;
+            end else if (g_is_bcd_mem || g_is_x_mem) begin
+                // -(Ay),-(Ax): both operands predecrement through memory, so
+                // the writeback and the flags belong to the multi-cycle FSM.
+                uop.uclass      = g_is_bcd_mem ? UC_BCD : UC_ADDX;
+                uop.unit        = g_is_bcd_mem ? UU_BCD : UU_ALU;
+                uop.alu_op      = g_is_bcd_mem ? ((f_group == 4'hC) ? 4'h0 : 4'h1)
+                                               : ((f_group == 4'hD) ? UA_ADDX : UA_SUBX);
+                uop.siz         = g_is_bcd_mem ? UZ_BYTE : f_siz;
+                uop.src_kind    = US_MEM;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = UEA_AN_PRE;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = 1'b1;
+                uop.writes_reg  = 1'b0;
+                // Unlike the other memory RMW families, these DO claim the
+                // flags at decode -- the reference reports ccr=1 here.
+                uop.updates_ccr = 1'b1;
+                uop.first       = 1'b1;
+                uop.last        = 1'b0;
             end else if (g_is_exg) begin
                 uop.uclass      = UC_EXG;
                 uop.unit        = UU_NONE;   // reference decoder: unit=NONE
@@ -862,7 +906,7 @@ module mh030p_decode (
                 uop.dst_reg     = (c_exg_sel == 5'b01001) ? {1'b1, f_dn} : rn_dn;
                 uop.writes_reg  = 1'b1;
                 uop.x_unchanged = 1'b1;
-            end else if (g_is_muldiv && src_is_dn) begin
+            end else if (g_is_muldiv && (src_is_dn || ea_src_ok)) begin
                 uop.uclass      = UC_MULDIV;
                 uop.unit        = (f_group == 4'hC) ? UU_MUL : UU_DIV;
                 uop.alu_op      = g_md_op;     // md_op shares the alu_op field
@@ -872,8 +916,12 @@ module mh030p_decode (
                 // operand-size-vs-write-size distinction as MOVEA.W.
                 uop.siz         = UZ_LONG;
                 uop.sext_src    = 1'b0;
-                uop.src_kind    = US_DREG;
+                uop.src_kind    = src_is_dn ? US_DREG :
+                                  ea_is_imm ? US_IMM  : US_MEM;
                 uop.src_reg     = rn_src_dn;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = !src_is_dn && !ea_is_imm;
                 uop.dst_kind    = US_DREG;
                 uop.dst_reg     = rn_dn;
                 uop.writes_reg  = 1'b1;
@@ -1075,7 +1123,14 @@ module mh030p_decode (
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = 1'b0;
-            end else if (src_is_dn && f_ss_valid) begin
+            end else if (f_ss_valid) begin
+                // REGISTER form. instr[5:3] is NOT an EA mode here: bit 5
+                // selects the count source and bits[4:3] the operation, so
+                // testing it as one (src_is_dn) claimed only the ASL/ASR
+                // immediate forms and silently dropped every LSL/LSR/ROL/ROR/
+                // ROXL/ROXR and every register-count form -- most of group E.
+                // ss != 11 is the real register-vs-memory discriminator; the
+                // destination is always Dn from instr[2:0].
                 uop.uclass      = UC_SHIFT;
                 uop.unit        = UU_SHF;
                 uop.alu_op      = e_shf_op;
