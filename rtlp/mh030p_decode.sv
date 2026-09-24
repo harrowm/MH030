@@ -228,6 +228,27 @@ module mh030p_decode (
     wire sys_is_uspr = g4_is_sys && (instr[5:3] == 3'b101);  // MOVE USP,An
     wire sys_is_misc = g4_is_sys && (instr[5:3] == 3'b110);  // 0x4E70-0x4E77
 
+    // ADDA/SUBA/CMPA: ss == 11 in groups D/9/B. bit 8 selects the OPERAND
+    // size (0 = word, 1 = long); the write is always a full longword because
+    // the destination is An, so the word form sign-extends -- same shape as
+    // MOVEA.W.
+    wire g_is_xxxa = (f_ss == 2'b11)
+                  && ((f_group == 4'hD) || (f_group == 4'h9) || (f_group == 4'hB));
+    wire g_xxxa_word = !f_dir;
+
+    // CMPM (An)+,(An)+ : group B, dir=1, mode 001.
+    wire g_is_cmpm = (f_group == 4'hB) && f_dir && (f_mode == 3'b001) && f_ss_valid;
+
+    // CHK: group 4, bit 8 set, opmode 110 (word) or 100 (long).
+    wire g4_is_chk = instr[8] && ((g4_b76 == 2'b10) || (g4_b76 == 2'b00))
+                  && ea_src_ok && (g4_op != 4'hE);
+
+    // MOVE to/from SR/CCR: 0x40C0/0x42C0 (from) and 0x44C0/0x46C0 (to).
+    wire g4_is_sr_move = (g4_b76 == 2'b11) && !instr[8]
+                      && ((g4_op == 4'h0) || (g4_op == 4'h2)
+                       || (g4_op == 4'h4) || (g4_op == 4'h6));
+    wire g4_sr_to_ea = (g4_op == 4'h0) || (g4_op == 4'h2);
+
     // Group E shift/rotate. bits[4:3] select op, bit[8] direction,
     // bit[5] = count from register.
     wire [1:0] e_optype = instr[4:3];
@@ -417,6 +438,57 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = g4_is_tst || g4_is_clr;
                 uop.x_unchanged = (g4_is_tst || g4_is_clr || g4_is_not);
+            end else if (g4_is_chk) begin
+                uop.uclass      = UC_TRAP;
+                uop.unit        = UU_NONE;
+                uop.siz         = (g4_b76 == 2'b10) ? UZ_WORD : UZ_LONG;
+                uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = !ea_is_imm;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_dn;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = 1'b1;
+                uop.traps       = 1'b1;
+            // MOVE CCR,<ea> (0x42xx) is restricted to the Dn form here
+            // because the REFERENCE decoder only implements that one and
+            // reports every memory destination as illegal. Memory
+            // destinations are legal on 68010+/68030, so this looks like a
+            // genuine gap in rtl/ -- recorded rather than silently papered
+            // over, and deliberately not claimed, since an opcode the
+            // reference rejects is one this sweep cannot validate.
+            end else if (g4_is_sr_move
+                         && ((g4_op == 4'h2) ? src_is_dn
+                                             : (ea_is_alt_mem || src_is_dn
+                                                || (!g4_sr_to_ea && ea_src_ok)))) begin
+                uop.uclass      = UC_SYSCTL;
+                uop.unit        = UU_MOVE;
+                // MOVE #imm,CCR is byte-sized in the reference decoder (CCR
+                // is 8 bits and the immediate's high byte is ignored), while
+                // MOVE <mem>,CCR and every SR form are word-sized. Only the
+                // immediate-to-CCR combination differs.
+                uop.siz         = (ea_is_imm && (g4_op == 4'h4)) ? UZ_BYTE : UZ_WORD;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                if (g4_sr_to_ea) begin
+                    uop.src_kind    = US_SR;
+                    uop.dst_kind    = src_is_dn ? US_DREG : US_MEM;
+                    uop.dst_reg     = rn_src_dn;
+                    uop.writes_reg  = src_is_dn;
+                    uop.writes_mem  = !src_is_dn;
+                    uop.updates_ccr = 1'b0;
+                end else begin
+                    uop.src_kind    = ea_is_imm ? US_IMM :
+                                      src_is_dn ? US_DREG : US_MEM;
+                    uop.src_reg     = rn_src_dn;
+                    uop.imm         = ext;
+                    uop.reads_mem   = !ea_is_imm && !src_is_dn;
+                    uop.dst_kind    = US_SR;
+                    uop.writes_reg  = 1'b0;
+                    uop.updates_ccr = 1'b1;
+                end
+                uop.x_unchanged = 1'b1;
             end else if (g4_is_nbcd) begin
                 uop.uclass      = UC_BCD;
                 uop.unit        = UU_BCD;
@@ -563,6 +635,17 @@ module mh030p_decode (
                 uop.dst_reg     = rn_src_dn;
                 uop.writes_reg  = 1'b1;
                 uop.x_unchanged = 1'b1;
+            end else if (g5_is_cc && ea_is_alt_mem) begin
+                uop.uclass      = UC_SCC;
+                uop.unit        = UU_MOVE;
+                uop.siz         = UZ_BYTE;
+                uop.cond        = f_cond;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.writes_mem  = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.x_unchanged = 1'b1;
             end else if (g5_is_dbcc) begin
                 uop.uclass      = UC_DBCC;
                 // The decrement is a real ALU subtract in the reference
@@ -701,7 +784,68 @@ module mh030p_decode (
             // there is CMPM, already excluded by src_is_dn).
             // The sweep caught this at 0x8101 (SBCD), which the reference
             // decoder reports as unit=UU_BCD.
-            if (ea_src_ok && !f_dir && f_ss_valid) begin
+            if (g_is_xxxa && (ea_src_ok || src_is_dn || src_is_an)) begin
+                uop.uclass      = UC_ALU;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = (f_group == 4'hD) ? UA_ADD :
+                                  (f_group == 4'h9) ? UA_SUB : UA_CMP;
+                uop.siz         = UZ_LONG;
+                uop.sext_src    = g_xxxa_word;
+                if (ea_src_ok) begin
+                    uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
+                    uop.imm         = ext;
+                    uop.ea_mode     = ea_mode_w;
+                    uop.ea_reg      = rn_src_an;
+                    uop.ea_idx_reg  = ea_xn;
+                    uop.ea_idx_long = ea_xn_long;
+                    uop.ea_idx_scale= ea_xn_scl;
+                    uop.reads_mem   = !ea_is_imm;
+                end else begin
+                    uop.src_kind = src_is_dn ? US_DREG : US_AREG;
+                    uop.src_reg  = src_is_dn ? rn_src_dn : rn_src_an;
+                end
+                // CMPA compares and sets flags; ADDA/SUBA write An and do NOT
+                // touch the CCR at all.
+                uop.dst_kind    = US_AREG;
+                uop.dst_reg     = {1'b1, f_dn};
+                uop.writes_reg  = (f_group != 4'hB);
+                uop.updates_ccr = (f_group == 4'hB);
+                uop.x_unchanged = (f_group == 4'hB);
+            end else if (g_is_cmpm) begin
+                uop.uclass      = UC_ALU;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = UA_CMP;
+                uop.siz         = f_siz;
+                uop.src_kind    = US_MEM;
+                uop.ea_mode     = UEA_AN_POST;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (f_dir && ea_is_alt_mem && f_ss_valid) begin
+                // <op> Dn,<ea> with a memory destination: read-modify-write,
+                // so wr=0 and ccr=0 exactly as for the other RMW forms.
+                uop.uclass      = UC_ALU;
+                uop.unit        = UU_ALU;
+                uop.siz         = f_siz;
+                uop.alu_op      = (f_group == 4'h8) ? UA_OR  :
+                                  (f_group == 4'h9) ? UA_SUB :
+                                  (f_group == 4'hB) ? UA_EOR :
+                                  (f_group == 4'hC) ? UA_AND : UA_ADD;
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_dn;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.ea_idx_reg  = ea_xn;
+                uop.ea_idx_long = ea_xn_long;
+                uop.ea_idx_scale= ea_xn_scl;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = 1'b0;
+            end else if (ea_src_ok && !f_dir && f_ss_valid) begin
                 // <ea>,Dn with a MEMORY or IMMEDIATE source. The destination
                 // is always Dn, so dest_reg stays well defined. The Dn,<ea>
                 // direction (memory destination) is P3.

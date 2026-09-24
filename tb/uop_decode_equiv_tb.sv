@@ -190,6 +190,18 @@ module uop_decode_equiv_tb;
             probe(16'h4E48, "TRAP #8");
             probe(16'h4E4F, "TRAP #15");
             probe(16'h4E69, "MOVE USP,A1");
+            probe(16'hD0C0, "ADDA.W D0,A0");
+            probe(16'hD1C0, "ADDA.L D0,A0");
+            probe(16'h90C0, "SUBA.W D0,A0");
+            probe(16'hB0C0, "CMPA.W D0,A0");
+            probe(16'hD190, "ADD.L D0,(A0)");
+            probe(16'h8190, "OR.L D0,(A0)");
+            probe(16'hB188, "CMPM.L (A0)+,(A0)+");
+            probe(16'h50D0, "ST (A0)");
+            probe(16'h40D0, "MOVE SR,(A0)");
+            probe(16'h44D0, "MOVE (A0),CCR");
+            probe(16'h4190, "CHK.W (A0),D0");
+            probe(16'h4E7A, "MOVEC c,Rn");
             $finish;
         end
 
