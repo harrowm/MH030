@@ -1075,6 +1075,19 @@ applied to the 3 divide-based cosim targets, which compares the program-fetch
 and data streams **independently** — both must still match exactly and in
 order, only cross-stream interleaving is relaxed (the longer divide lets the
 IFU prefetch further ahead; Musashi never models prefetch overlap).
+**MEASURED: 2.46 MHz -> 14.24 MHz (5.8x)**, worst path 406.99 ns/3249 hops ->
+70.24 ns/97 hops, TRELLIS_COMB 54,344 -> 42,387 (-22%) for +174 FFs. The worst
+path is now routing-dominated (82.5%) with no single dominator (`u_seq` 26.0%,
+`u_cache` 22.7%, `u_md` 21.0%, `u_icache.data_i` 18.0%). **This changes the
+outlook recorded at the pivot**: the estimate then was that bounded fixes cap
+at 3-5 MHz and that genuine pipelining would be needed to reach 10-20 MHz --
+one bounded fix reached 14.24 MHz. The 25-50 MHz target now looks plausibly
+reachable via further bounded fixes (the `tag_d`/`valid_d`/`tag_i`/`valid_i`
+arrays, which 960 synthesis "conflicting drivers" warnings point straight at;
+the MMU ATC; `eu_alu`'s carry chain) before committing to the rewrite. Not an
+argument the rewrite is wrong -- `u_seq` is still 43.6% of design-wide routing
+-- but a genuine decision point for the user.
+
 Also **permanently not reproducible**: earlier sessions' "9,040 failing
 endpoints" figure — `detailed_net_timings`' per-endpoint `delay` is that net's
 own *routing delay*, not a cumulative arrival time.

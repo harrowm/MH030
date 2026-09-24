@@ -3275,5 +3275,37 @@ merely reordered, and consuming them broke the later alignment.
 **Verification**: `make test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33,
 `dat-synth` 50/50, and a full 124-suite Harte sweep at
 `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- **bit-identical to baseline**
-(the 2 are the documented ASL.b corpus anomaly). Real synthesis measurement
-launched via `scripts/measure_fmax.py run --tag seqdiv`.
+(the 2 are the documented ASL.b corpus anomaly).
+
+**MEASURED RESULT: 2.46 MHz -> 14.24 MHz, a 5.8x gain.** (113 min yosys +
+8.6 min nextpnr, the plain unrestricted recipe -- a genuine full ABC9 run, not
+the ~2 min invalid-recipe signature. The 960 "conflicting drivers" warnings are
+concentrated entirely in `tag_i`/`valid_i`/`valid_d`, the three cache arrays
+documented as not yet converted to BRAM, not the design-wide spray the bad
+recipe produces.)
+
+| | Before | After |
+|---|---|---|
+| `clk_4x` achieved | 2.46 MHz | **14.24 MHz** |
+| Worst path | 406.99 ns / 3249 hops | **70.24 ns / 97 hops** |
+| TRELLIS_COMB | 54,344 | **42,387** (-22%) |
+| TRELLIS_FF | 9,367 | 9,541 (+174) |
+| Routing share of worst path | 64.5% | 82.5% |
+
+Removing eight combinational divide arrays took ~12,000 LUTs out of the design
+for the cost of 174 flip-flops. The worst path is no longer depth-bound (82.5%
+routing) and has **no single dominator** left: `u_seq` 26.0%, `u_cache` 22.7%,
+`u_md` 21.0% (its own iteration loop + result mux, now a reasonable 14.74 ns),
+`u_icache.data_i` 18.0%. The path crosses 16 module transitions, i.e. it is
+still the whole-system chain Phase 284 described -- just ~6x shorter.
+
+**This materially changes the outlook recorded at the pivot.** The estimate
+then was that further bounded fixes cap around 3-5 MHz and that genuine
+pipelining of the dispatch mechanism would reach 10-20 MHz. One bounded fix
+reached 14.24 MHz, which is already inside the range that was supposed to
+require the rewrite. The 25-50 MHz target now looks plausibly reachable by
+continuing with bounded fixes (the tag/valid arrays those 960 warnings point
+straight at; the MMU ATC; `eu_alu`'s carry chain) before committing to a
+multi-hundred-phase microarchitecture rewrite. That is a decision for the user,
+not an argument that the rewrite is wrong -- `u_seq` is still 43.6% of
+design-wide routing, and nothing here addresses that.
