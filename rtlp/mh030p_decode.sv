@@ -108,6 +108,42 @@ module mh030p_decode (
                    || ((g4_op == 4'h9) && (g4_ext_sel == 3'b111)));
     wire g4_is_swap = (instr[15:3] == 13'b0100_1000_0100_0);
 
+    // Bit ops. Dynamic form is group 0 with bit 8 set (BTST/BCHG/BCLR/BSET
+    // Dn,<ea>); static form is 0x08xx (f_dn == 100, bit 8 clear) taking the
+    // bit number from an extension word. instr[7:6] selects the operation
+    // with the same encoding eu_bitops.sv uses (00=TST,01=CHG,10=CLR,11=SET).
+    wire [1:0] b_op       = instr[7:6];
+    wire       g0_is_dynbit = instr[8];
+    wire       g0_is_statbit = !instr[8] && (f_dn == 3'b100);
+
+    // MULU/MULS (group C) and DIVU/DIVS (group 8), word forms: ss == 11.
+    wire g_is_muldiv = ((f_group == 4'hC) || (f_group == 4'h8)) && (f_ss == 2'b11);
+    // md_op encoding from rtl/eu_mul_div.sv: MUL_UW=0, MUL_SW=1, DIV_UW=4, DIV_SW=5.
+    wire [3:0] g_md_op = (f_group == 4'hC) ? (f_dir ? 4'h1 : 4'h0)
+                                           : (f_dir ? 4'h5 : 4'h4);
+
+    // X-chained and BCD register forms. All share "bit 8 set, register EA":
+    //   ABCD Dy,Dx = 1100 xxx1 0000 0yyy      SBCD Dy,Dx = 1000 xxx1 0000 0yyy
+    //   ADDX Dy,Dx = 1101 xxx1 ss00 0yyy      SUBX Dy,Dx = 1001 xxx1 ss00 0yyy
+    // bit 3 picks the -(An) memory form, which is not claimed here (P3).
+    wire g_xform_reg = f_dir && (instr[5:4] == 2'b00) && !instr[3];
+    wire g_is_bcd_reg = g_xform_reg && (f_ss == 2'b00)
+                     && ((f_group == 4'hC) || (f_group == 4'h8));
+    wire g_is_x_reg   = g_xform_reg && f_ss_valid
+                     && ((f_group == 4'hD) || (f_group == 4'h9));
+
+    // EXG: group C, bit 8 set, instr[7:3] selects the register-pair flavour.
+    wire [4:0] c_exg_sel = instr[7:3];
+    wire g_is_exg = (f_group == 4'hC) && f_dir
+                 && ((c_exg_sel == 5'b01000)    // EXG Dx,Dy
+                  || (c_exg_sel == 5'b01001)    // EXG Ax,Ay
+                  || (c_exg_sel == 5'b10001));  // EXG Dx,Ay
+
+    // Group 5 with ss == 11 is Scc/DBcc rather than ADDQ/SUBQ.
+    wire g5_is_cc   = (f_ss == 2'b11);
+    wire g5_is_dbcc = g5_is_cc && (f_mode == 3'b001);
+    wire g5_is_scc  = g5_is_cc && src_is_dn;
+
     // Group E shift/rotate. bits[4:3] select op, bit[8] direction,
     // bit[5] = count from register.
     wire [1:0] e_optype = instr[4:3];
@@ -128,7 +164,22 @@ module mh030p_decode (
         case (f_group)
         // ── ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm,Dn ────────────────────────────
         4'h0: begin
-            if (g0_is_alu_imm && src_is_dn && f_ss_valid) begin
+            if ((g0_is_dynbit || g0_is_statbit) && src_is_dn) begin
+                // Dn destination: the bit number is mod 32 and the operand is
+                // a full longword (memory forms are byte-sized -- P3).
+                uop.uclass      = UC_BITOP;
+                uop.unit        = UU_BIT;
+                uop.alu_op      = {2'b00, b_op};
+                uop.siz         = UZ_LONG;
+                uop.src_kind    = g0_is_dynbit ? US_DREG : US_IMM;
+                uop.src_reg     = rn_dn;
+                uop.imm         = ext;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_src_dn;
+                uop.writes_reg  = (b_op != 2'b00);   // BTST writes nothing
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_alu_imm && src_is_dn && f_ss_valid) begin
                 uop.uclass      = UC_ALU;
                 uop.unit        = UU_ALU;
                 uop.alu_op      = g0_alu_op;
@@ -210,7 +261,28 @@ module mh030p_decode (
 
         // ── ADDQ/SUBQ #imm,Dn ───────────────────────────────────────────────
         4'h5: begin
-            if (src_is_dn && f_ss_valid) begin
+            if (g5_is_scc) begin
+                uop.uclass      = UC_SCC;
+                uop.unit        = UU_MOVE;   // reference decoder: unit=MOVE
+                uop.siz         = UZ_BYTE;
+                uop.cond        = f_cond;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_src_dn;
+                uop.writes_reg  = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g5_is_dbcc) begin
+                uop.uclass      = UC_DBCC;
+                // The decrement is a real ALU subtract in the reference
+                // decoder (unit=ALU, alu_op=SUB), not a bespoke path.
+                uop.unit        = UU_ALU;
+                uop.alu_op      = UA_SUB;
+                uop.siz         = UZ_WORD;
+                uop.cond        = f_cond;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_src_dn;
+                uop.writes_reg  = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (src_is_dn && f_ss_valid) begin
                 uop.uclass      = UC_ADDQ;
                 uop.unit        = UU_ALU;
                 uop.alu_op      = f_dir ? UA_SUB : UA_ADD;
@@ -222,6 +294,15 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b1;
                 uop.updates_ccr = 1'b1;
             end
+        end
+
+        // ── Bcc / BRA / BSR ─────────────────────────────────────────────────
+        4'h6: begin
+            uop.uclass      = UC_BRANCH;
+            uop.unit        = UU_NONE;
+            uop.siz         = UZ_LONG;   // reference decoder: siz=long
+            uop.cond        = f_cond;     // 0000 = BRA, 0001 = BSR
+            uop.x_unchanged = 1'b1;
         end
 
         // ── MOVEQ ───────────────────────────────────────────────────────────
@@ -242,6 +323,66 @@ module mh030p_decode (
 
         // ── OR / SUB / CMP+EOR / AND / ADD, register-direct ─────────────────
         4'h8, 4'h9, 4'hB, 4'hC, 4'hD: begin
+            if (g_is_bcd_reg) begin
+                uop.uclass      = UC_BCD;
+                uop.unit        = UU_BCD;
+                // eu_bcd.sv: BCD_ADD=00 (ABCD, group C), BCD_SUB=01 (SBCD).
+                uop.alu_op      = (f_group == 4'hC) ? 4'h0 : 4'h1;
+                uop.siz         = UZ_BYTE;
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_src_dn;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_dn;
+                uop.writes_reg  = 1'b1;
+                uop.updates_ccr = 1'b1;
+            end else if (g_is_x_reg) begin
+                uop.uclass      = UC_ADDX;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = (f_group == 4'hD) ? UA_ADDX : UA_SUBX;
+                uop.siz         = f_siz;
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_src_dn;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_dn;
+                uop.writes_reg  = 1'b1;
+                uop.updates_ccr = 1'b1;
+            end else if (g_is_exg) begin
+                uop.uclass      = UC_EXG;
+                uop.unit        = UU_NONE;   // reference decoder: unit=NONE
+                uop.siz         = UZ_LONG;
+                // Which side is the address register differs per flavour:
+                //   01000 EXG Dx,Dy -> both data
+                //   01001 EXG Ax,Ay -> both address
+                //   10001 EXG Dx,Ay -> Dx in bits[11:9], Ay in bits[2:0]
+                // The commit register (dec_dest_reg) is bits[11:9], which is
+                // the DATA register for the mixed form -- the sweep caught
+                // this at 0xC58A (EXG D2,A2), where an A-register guess gave
+                // dest=0xA against the reference's 2.
+                uop.src_kind    = (c_exg_sel == 5'b01000) ? US_DREG : US_AREG;
+                uop.src_reg     = (c_exg_sel == 5'b01000) ? rn_src_dn : rn_src_an;
+                uop.dst_kind    = (c_exg_sel == 5'b01001) ? US_AREG : US_DREG;
+                uop.dst_reg     = (c_exg_sel == 5'b01001) ? {1'b1, f_dn} : rn_dn;
+                uop.writes_reg  = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g_is_muldiv && src_is_dn) begin
+                uop.uclass      = UC_MULDIV;
+                uop.unit        = (f_group == 4'hC) ? UU_MUL : UU_DIV;
+                uop.alu_op      = g_md_op;     // md_op shares the alu_op field
+                // Word forms, but the WRITTEN result is a full longword: a
+                // 32-bit product for MUL, packed {remainder,quotient} for
+                // DIV. uop.siz is a write size, so it is long -- the same
+                // operand-size-vs-write-size distinction as MOVEA.W.
+                uop.siz         = UZ_LONG;
+                uop.sext_src    = 1'b0;
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_src_dn;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_dn;
+                uop.writes_reg  = 1'b1;
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
+                uop.traps       = (f_group == 4'h8);  // divide by zero
+            end else
             // dir=1 means "Dn,<ea>", whose <ea> must be MEMORY for the plain
             // ALU ops. With a register EA that encoding space belongs to
             // other families entirely: SBCD (8), SUBX (9), ABCD/EXG (C),

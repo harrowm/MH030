@@ -52,6 +52,8 @@ module uop_decode_equiv_tb;
     wire       old_valid   = `OLD.dec_valid;
     wire [2:0] old_unit    = `OLD.dec_unit;
     wire [3:0] old_alu_op  = `OLD.dec_alu_op;
+    wire [2:0] old_md_op   = `OLD.dec_md_op;
+    wire [1:0] old_bit_op  = `OLD.dec_bit_op;
     wire [1:0] old_siz     = `OLD.dec_siz;
     wire [3:0] old_src_reg = `OLD.dec_src_reg;
     // dec_dest_reg ("register to commit result into"), NOT dec_dst_reg
@@ -126,6 +128,15 @@ module uop_decode_equiv_tb;
         if (first_bad == 32'hFFFF_FFFF) first_bad = {16'h0, op};
     endtask
 
+    // Probe: dump the reference decoder's view of specific opcodes. Far
+    // faster than guessing one convention per rebuild.
+    task automatic probe(input [15:0] op, input string name);
+        begin
+            instr = op; #1;
+            $display("PROBE %-10s op=%04h valid=%b unit=%0d alu=%0d siz=%0d wr=%b ccr=%b dest=%0d", name, op, old_valid, old_unit, old_alu_op, old_siz, old_wr_reg, old_upd_ccr, old_dst_reg);
+        end
+    endtask
+
     initial begin
         $display("=== uop decode equivalence sweep (all 65536 opcodes) ===");
         claimed = 0; agreed = 0; mismatches = 0; old_only = 0;
@@ -135,6 +146,19 @@ module uop_decode_equiv_tb;
         repeat (2) @(posedge clk_4x);
         rst_n = 1'b1;
         @(posedge clk_4x);
+
+        if ($test$plusargs("probe")) begin
+            probe(16'h51C0, "SF D0");
+            probe(16'h50C0, "ST D0");
+            probe(16'h6000, "BRA");
+            probe(16'h6100, "BSR");
+            probe(16'h6600, "BNE");
+            probe(16'h51C8, "DBF D0");
+            probe(16'hC141, "EXG D0,D1");
+            probe(16'hC101, "ABCD D1,D0");
+            probe(16'hD101, "ADDX D1,D0");
+            $finish;
+        end
 
         for (i = 0; i < 65536; i = i + 1) begin
             instr = i[15:0];
@@ -156,6 +180,17 @@ module uop_decode_equiv_tb;
                     else if ((uop.unit == UU_ALU) && (uop.alu_op !== old_alu_op))
                         report(instr, "alu_op", {28'h0, uop.alu_op},
                                                 {28'h0, old_alu_op});
+                    // uop.alu_op doubles as the md_op / bit_op field for
+                    // those units, so check it there too rather than leaving
+                    // those families compared on size and flags alone.
+                    else if (((uop.unit == UU_MUL) || (uop.unit == UU_DIV))
+                             && (uop.alu_op[2:0] !== old_md_op))
+                        report(instr, "md_op", {29'h0, uop.alu_op[2:0]},
+                                               {29'h0, old_md_op});
+                    else if ((uop.unit == UU_BIT)
+                             && (uop.alu_op[1:0] !== old_bit_op))
+                        report(instr, "bit_op", {30'h0, uop.alu_op[1:0]},
+                                                {30'h0, old_bit_op});
                     else if (uop.writes_reg !== old_wr_reg)
                         report(instr, "writes_reg", {31'h0, uop.writes_reg},
                                                     {31'h0, old_wr_reg});
