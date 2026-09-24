@@ -3397,3 +3397,75 @@ absolute EAs, exercised by no current test (the Harte corpus is
 68000-captured and has no bit-field coverage at all). The new decoder
 deliberately matches the reference's restricted set and comments why, so
 nothing silently diverges in the meantime.
+
+## MH030-P P1 — STATUS: decoder complete to its useful limit
+
+### What exists
+
+- `rtlp/mh030p_uop.svh` — the micro-operation definition. Encoding choices
+  proven through iverilog/sv2v/yosys with scratch compiles *before* the file
+  was written: no `typedef enum` (Icarus demands a cast on every non-literal
+  assignment), no `'0` or `'{...}` on packed structs, constant bit-selects
+  hoisted out of `always_*`. Every encoding shared with `rtl/` (sizes, units,
+  ALU ops) is reproduced exactly, never tidied, because a second encoding
+  means a conversion layer.
+- `rtlp/mh030p_decode.sv` — combinational decoder, 33 uop classes.
+- `tb/uop_decode_equiv_tb.sv` — sweeps all 65,536 opcodes against the
+  reference decoder, in `make test` (39/39) at 1.6 s. `+probe` dumps the
+  reference's view of chosen opcodes; `+gaps` samples the first unclaimed
+  opcode per group. Both diagnostics repeatedly turned "guess one convention
+  per rebuild" into "learn a dozen in one run".
+
+### Coverage: 52,845 of 58,053 claimed, 0 mismatches
+
+Compared field by field: class, unit, ALU/md/bit op, size, writes_reg,
+updates_ccr, destination register, and EA displacement/index/scale.
+
+### The remaining 5,208 are mostly NOT implementable — this is the key finding
+
+Most of what is left is the reference decoder **accepting genuinely illegal
+encodings** instead of rejecting them:
+
+| Opcode | What it is | What `rtl/` does |
+|---|---|---|
+| `0x1008` | `MOVE.B A0,D0` — byte MOVE cannot use An | decodes as normal MOVE.B |
+| `0x5008` | `ADDQ.B #8,A0` — byte ADDQ to An | decodes, writes A0 |
+| `0x9008` | `SUB.B A0,D0` | decodes as plain SUB.B |
+| `0x203D` | mode 111 / reg 101 — reserved EA | decodes as MOVE.L |
+| `0x00C0` | `ORI` with `ss=11` — not a valid size | decodes as OR |
+
+On real silicon each takes an Illegal Instruction exception. **Driving this
+sweep to 100% would therefore be wrong** — it would copy illegal-opcode
+acceptance into the new core. The new decoder rejects all of them, so the gap
+number will not reach zero and should not. This is the opposite of the
+under-acceptance gaps below, and arguably worse: an under-accepted opcode
+traps when it should not, an over-accepted one silently executes when it
+should trap.
+
+The rest of the remainder is the `ext_count` dependency: where several
+extension words make a displacement's position ambiguous, the decoder sets
+`ea_disp_valid = 0` rather than emit a wrong value. Porting
+`m68030_seq.sv`'s ext_count chain would close MOVES with displacement, the
+multi-word MOVE forms, and MOVEC.
+
+### `rtl/` findings
+
+| Finding | Status |
+|---|---|
+| `MOVE CCR,<ea>` memory destinations missing | **FIXED**, test `system_tb` MOVE_SR-03b |
+| Bit-field EAs: no indexed/abs.L/PC-indexed | Scoped as its own phase (see above) |
+| Illegal-encoding over-acceptance | **NEW**, not fixed, see table |
+| CAS accepts only `(An)`, and not CAS.W | Recorded, matched not claimed |
+| CMP2/CHK2 restricted mode set | Recorded, matched not claimed |
+| Extension-word convention `[15:12]` | NOT a bug — `m68030_seq.sv:1160` normalises; my error |
+
+### What P1 did NOT do
+
+P1 is decode only. There are **no pipeline stages yet** — no registered
+ID/AG/OF/EX/WB boundaries, no forwarding network, no `mh030p_top`. That is
+P2, and P2 is what produces the first Fmax number for the new architecture,
+which the plan names as the go/no-go for the whole rewrite.
+
+**Nothing about the rewrite's central question has been answered yet.** The
+existing core measures 13.78 MHz. The new one measures nothing, because
+there is nothing to measure.
