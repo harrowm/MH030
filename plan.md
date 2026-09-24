@@ -3360,3 +3360,40 @@ instances. ~37 s, so it is cheap enough to run routinely. The full-design run's
 **Verification**: `make test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33,
 `dat-synth` 50/50, `lint-drivers` clean, Harte
 `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline.
+
+### Open: bit-field EA coverage gap in `rtl/` (found by the P1 sweep, NOT fixed)
+
+`rtl/eu_seq_decode.svh:5957` restricts bit-field instructions to five EA
+modes: `Dn`, `(An)`, `(d16,An)`, `(xxx).W` and `(d16,PC)`. It reports
+**indexed `(d8,An,Xn)`, `(xxx).L` and `(d8,PC,Xn)` as ILLEGAL**, though all
+three are legal control modes for BFxxx on a real 68020/68030.
+
+Unlike the `MOVE CCR,<ea>` gap fixed alongside it, this is **not a small
+change**, and the difference is worth recording so it is not mistaken for
+one later. `MOVE CCR,<ea>` was a one-line condition plus a shared body that
+already existed for the SR form. This needs four coordinated pieces:
+
+1. **`m68030_seq.sv`** — bit-field `ext_count` is currently uniform
+   (`is_bf` appears in one flat list at line 1021, with no per-mode
+   handling). Indexed needs 2 extension words like `(d16,An)`; `(xxx).L`
+   needs 3 (bf_spec plus two address words).
+2. **`eu_seq_decode.svh`** — extend the mode list, add the `Xn` register
+   read, `dec_xn_wl`/`dec_xn_scale`, and reposition `bf_spec_w` for the
+   3-word case. The existing code selects `bf_spec` from `[31:16]` vs
+   `[15:0]` on a two-way `bf_two_ext` test that a third case breaks.
+3. **The `bf_mem_run_r` FSM** — its address generation is base+displacement
+   only; indexed needs `An + Xn*scale + d8`.
+4. **Register-port allocation** — `rd_a` is the EA base, so `Xn` needs
+   `rd_b`, which the bit-field path does not currently claim.
+
+That is the same shape and roughly the same size as the per-family
+memory-indirect EA rollout phases, each of which was its own phase. It also
+touches `eu_seq_decode.svh`, which currently passes 702,142 Harte vectors,
+so it deserves a dedicated phase with its own tests rather than being
+folded into P1's decoder work.
+
+**Impact is low**: these are 68020+ bit-field forms with indexed/long
+absolute EAs, exercised by no current test (the Harte corpus is
+68000-captured and has no bit-field coverage at all). The new decoder
+deliberately matches the reference's restricted set and comments why, so
+nothing silently diverges in the meantime.
