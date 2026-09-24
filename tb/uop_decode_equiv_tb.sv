@@ -157,6 +157,13 @@ module uop_decode_equiv_tb;
             probe(16'hC141, "EXG D0,D1");
             probe(16'hC101, "ABCD D1,D0");
             probe(16'hD101, "ADDX D1,D0");
+            probe(16'h1080, "MOVE.B D0,(A0)");
+            probe(16'h10A2, "MOVE.B -(A2),(A0)");
+            probe(16'h1010, "MOVE.B (A0),D0");
+            probe(16'h2010, "MOVE.L (A0),D0");
+            probe(16'h2080, "MOVE.L D0,(A0)");
+            probe(16'h4250, "CLR.W (A0)");
+            probe(16'h0650, "ADDI.W #x,(A0)");
             $finish;
         end
 

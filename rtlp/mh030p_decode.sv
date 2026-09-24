@@ -144,6 +144,46 @@ module mh030p_decode (
     wire g5_is_dbcc = g5_is_cc && (f_mode == 3'b001);
     wire g5_is_scc  = g5_is_cc && src_is_dn;
 
+    // ── Effective address ───────────────────────────────────────────────────
+    // mode/reg straight from the opcode; mode 111 sub-selects on reg.
+    wire ea_m7 = (f_mode == 3'b111);
+    wire [3:0] ea_mode_w =
+        (f_mode == 3'b010) ? UEA_AN_IND  :
+        (f_mode == 3'b011) ? UEA_AN_POST :
+        (f_mode == 3'b100) ? UEA_AN_PRE  :
+        (f_mode == 3'b101) ? UEA_AN_D16  :
+        (f_mode == 3'b110) ? UEA_AN_IDX  :
+        (ea_m7 && (f_reg == 3'b000)) ? UEA_ABS_W  :
+        (ea_m7 && (f_reg == 3'b001)) ? UEA_ABS_L  :
+        (ea_m7 && (f_reg == 3'b010)) ? UEA_PC_D16 :
+        (ea_m7 && (f_reg == 3'b011)) ? UEA_PC_IDX : UEA_NONE;
+
+    wire ea_is_imm = ea_m7 && (f_reg == 3'b100);
+    wire ea_is_mem = (ea_mode_w != UEA_NONE);
+    wire ea_src_ok = ea_is_mem || ea_is_imm;
+
+    // Index fields live in the first extension word (bit 8 there selects full
+    // format, which is P3 -- the brief form is what is decoded here).
+    wire [3:0] ea_xn      = ext[31:28];
+    wire       ea_xn_long = ext[27];
+    wire [1:0] ea_xn_scl  = ext[26:25];
+    wire [31:0] ea_d16 = {{16{ext[31]}}, ext[31:16]};
+    wire [31:0] ea_d8  = {{24{ext[23]}}, ext[23:16]};
+
+    // Destination EA (MOVE only): the mode/reg fields are swapped relative
+    // to the source, which is a documented source of confusion in this
+    // codebase -- see feedback_read_write_field_roles_swapped.md.
+    wire ea_dm7 = (f_dst_mode == 3'b111);
+    wire [3:0] ea_dst_mode_w =
+        (f_dst_mode == 3'b010) ? UEA_AN_IND  :
+        (f_dst_mode == 3'b011) ? UEA_AN_POST :
+        (f_dst_mode == 3'b100) ? UEA_AN_PRE  :
+        (f_dst_mode == 3'b101) ? UEA_AN_D16  :
+        (f_dst_mode == 3'b110) ? UEA_AN_IDX  :
+        (ea_dm7 && (f_dst_reg == 3'b000)) ? UEA_ABS_W :
+        (ea_dm7 && (f_dst_reg == 3'b001)) ? UEA_ABS_L : UEA_NONE;
+    wire ea_dst_is_mem = (ea_dst_mode_w != UEA_NONE);
+
     // Group E shift/rotate. bits[4:3] select op, bit[8] direction,
     // bit[5] = count from register.
     wire [1:0] e_optype = instr[4:3];
@@ -196,7 +236,53 @@ module mh030p_decode (
 
         // ── MOVE / MOVEA ────────────────────────────────────────────────────
         4'h1, 4'h2, 4'h3: begin
-            if ((src_is_dn || src_is_an) && (dst_is_dn || dst_is_an)) begin
+            // Memory source and/or memory destination. MOVE.B has no An
+            // forms at all, in either direction.
+            if ((ea_src_ok || ea_dst_is_mem)
+                && !((f_movesz == 2'b01) && (src_is_an || dst_is_an))
+                && (ea_src_ok || src_is_dn || src_is_an)
+                && (ea_dst_is_mem || dst_is_dn || dst_is_an)) begin
+                uop.uclass      = UC_MOVE;
+                uop.unit        = UU_MOVE;
+                uop.siz         = dst_is_an ? UZ_LONG : f_move_siz;
+                uop.sext_src    = dst_is_an && (f_move_siz == UZ_WORD);
+
+                // Source
+                if (ea_src_ok) begin
+                    uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
+                    uop.imm         = ext;
+                    uop.ea_mode     = ea_mode_w;
+                    uop.ea_reg      = rn_src_an;
+                    uop.ea_idx_reg  = ea_xn;
+                    uop.ea_idx_long = ea_xn_long;
+                    uop.ea_idx_scale= ea_xn_scl;
+                    uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
+                    uop.reads_mem   = !ea_is_imm;
+                end else begin
+                    uop.src_kind = src_is_dn ? US_DREG : US_AREG;
+                    uop.src_reg  = src_is_dn ? rn_src_dn : rn_src_an;
+                end
+
+                // Destination
+                if (ea_dst_is_mem) begin
+                    uop.dst_kind   = US_MEM;
+                    uop.writes_mem = 1'b1;
+                    uop.writes_reg = 1'b0;
+                end else begin
+                    uop.dst_kind   = dst_is_dn ? US_DREG : US_AREG;
+                    uop.dst_reg    = dst_is_dn ? rn_dst_dn : rn_dst_an;
+                    uop.writes_reg = 1'b1;
+                end
+
+                // MOVEA never touches the CCR. Neither does a MEMORY-TO-
+                // MEMORY move at decode time: the reference decoder reports
+                // ccr=0 there because a dedicated multi-phase FSM
+                // (move_mm_run_r) owns the flag update once the read
+                // completes. reg->mem and mem->reg both do set it at decode.
+                uop.updates_ccr = !dst_is_an
+                               && !(ea_src_ok && !ea_is_imm && ea_dst_is_mem);
+                uop.x_unchanged = 1'b1;
+            end else if ((src_is_dn || src_is_an) && (dst_is_dn || dst_is_an)) begin
                 // MOVE.B has no An forms at all (byte An access is illegal).
                 if (!((f_movesz == 2'b01) && (src_is_an || dst_is_an))) begin
                     uop.uclass      = UC_MOVE;
@@ -391,7 +477,32 @@ module mh030p_decode (
             // there is CMPM, already excluded by src_is_dn).
             // The sweep caught this at 0x8101 (SBCD), which the reference
             // decoder reports as unit=UU_BCD.
-            if (src_is_dn && f_ss_valid && ((f_group == 4'hB) || !f_dir)) begin
+            if (ea_src_ok && !f_dir && f_ss_valid) begin
+                // <ea>,Dn with a MEMORY or IMMEDIATE source. The destination
+                // is always Dn, so dest_reg stays well defined. The Dn,<ea>
+                // direction (memory destination) is P3.
+                uop.uclass      = UC_ALU;
+                uop.unit        = UU_ALU;
+                uop.siz         = f_siz;
+                uop.alu_op      = (f_group == 4'h8) ? UA_OR  :
+                                  (f_group == 4'h9) ? UA_SUB :
+                                  (f_group == 4'hB) ? UA_CMP :
+                                  (f_group == 4'hC) ? UA_AND : UA_ADD;
+                uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
+                uop.imm         = ext;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.ea_idx_reg  = ea_xn;
+                uop.ea_idx_long = ea_xn_long;
+                uop.ea_idx_scale= ea_xn_scl;
+                uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
+                uop.reads_mem   = !ea_is_imm;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_dn;
+                uop.writes_reg  = (f_group != 4'hB);
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = (f_group == 4'hB);
+            end else if (src_is_dn && f_ss_valid && ((f_group == 4'hB) || !f_dir)) begin
                 uop.uclass      = UC_ALU;
                 uop.unit        = UU_ALU;
                 uop.siz         = f_siz;
