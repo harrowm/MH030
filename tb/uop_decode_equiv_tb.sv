@@ -164,6 +164,32 @@ module uop_decode_equiv_tb;
             probe(16'h2080, "MOVE.L D0,(A0)");
             probe(16'h4250, "CLR.W (A0)");
             probe(16'h0650, "ADDI.W #x,(A0)");
+            probe(16'h4450, "NEG.W (A0)");
+            probe(16'h4650, "NOT.W (A0)");
+            probe(16'h4A50, "TST.W (A0)");
+            probe(16'h4AD0, "TAS (A0)");
+            probe(16'h5250, "ADDQ.W #1,(A0)");
+            probe(16'h5350, "SUBQ.W #1,(A0)");
+            probe(16'hE2D0, "ASR.W (A0)");
+            probe(16'hE3D0, "ASL.W (A0)");
+            probe(16'h41D0, "LEA (A0),A0");
+            probe(16'h4850, "PEA (A0)");
+            probe(16'h4ED0, "JMP (A0)");
+            probe(16'h4E90, "JSR (A0)");
+            probe(16'h4E71, "NOP");
+            probe(16'h4E75, "RTS");
+            probe(16'h4E77, "RTR");
+            probe(16'h4E73, "RTE");
+            probe(16'h4E40, "TRAP #0");
+            probe(16'h4E50, "LINK A0,#x");
+            probe(16'h4E58, "UNLK A0");
+            probe(16'h48D0, "MOVEM.L r,(A0)");
+            probe(16'h4CD0, "MOVEM.L (A0),r");
+            probe(16'h4800, "NBCD D0");
+            probe(16'h4E47, "TRAP #7");
+            probe(16'h4E48, "TRAP #8");
+            probe(16'h4E4F, "TRAP #15");
+            probe(16'h4E69, "MOVE USP,A1");
             $finish;
         end
 
@@ -179,8 +205,17 @@ module uop_decode_equiv_tb;
                 if (!old_valid) begin
                     report(instr, "old-invalid", 32'h1, 32'h0);
                 end else begin
-                    // Compare the fields both decoders genuinely share.
-                    if (uop.siz !== old_siz)
+                    // TRAP's size is excluded deliberately. The reference
+                    // decoder handles TRAP #0-7 and TRAP #8-15 in two
+                    // different branches (its own comment at
+                    // eu_seq_decode.svh says so), so #0-7 inherit f_siz=word
+                    // from a shared prefix while #8-15 report long. With
+                    // unit=NONE there is no sized operand either way, so the
+                    // difference is an artifact of which branch matched, not
+                    // semantics -- dec_is_trap/dec_trap_num are correct in
+                    // both. The new decoder uses one consistent size rather
+                    // than reproducing the artifact.
+                    if ((uop.uclass != UC_TRAP) && (uop.siz !== old_siz))
                         report(instr, "siz", {30'h0, uop.siz}, {30'h0, old_siz});
                     else if (uop.unit !== old_unit)
                         report(instr, "unit", {29'h0, uop.unit}, {29'h0, old_unit});

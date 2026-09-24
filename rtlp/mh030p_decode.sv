@@ -184,6 +184,50 @@ module mh030p_decode (
         (ea_dm7 && (f_dst_reg == 3'b001)) ? UEA_ABS_L : UEA_NONE;
     wire ea_dst_is_mem = (ea_dst_mode_w != UEA_NONE);
 
+    // Control addressing modes (no Dn/An/(An)+/-(An)/#imm): what LEA, PEA,
+    // JMP and JSR accept.
+    wire ea_is_control = (ea_mode_w == UEA_AN_IND) || (ea_mode_w == UEA_AN_D16)
+                      || (ea_mode_w == UEA_AN_IDX) || (ea_mode_w == UEA_ABS_W)
+                      || (ea_mode_w == UEA_ABS_L)  || (ea_mode_w == UEA_PC_D16)
+                      || (ea_mode_w == UEA_PC_IDX);
+    // Alterable memory: everything writable, i.e. not PC-relative.
+    wire ea_is_alt_mem = ea_is_mem && (ea_mode_w != UEA_PC_D16)
+                                   && (ea_mode_w != UEA_PC_IDX);
+
+    // Group 4 sub-families, all keyed on g4_op (= instr[11:8]) plus [7:6].
+    wire [1:0] g4_b76   = instr[7:6];
+    wire g4_is_nbcd  = (g4_op == 4'h8) && (g4_b76 == 2'b00);
+    wire g4_is_pea   = (g4_op == 4'h8) && (g4_b76 == 2'b01) && ea_is_control;
+    wire g4_is_tas   = (g4_op == 4'hA) && (g4_b76 == 2'b11) && ea_is_alt_mem;
+    // MOVEM shares 0x48xx/0x4Cxx with EXT/SWAP; bit 7 set plus a non-Dn EA
+    // is what separates them (EXT/SWAP are mode 000, which MOVEM cannot use).
+    wire g4_movem_to_mem = (g4_op == 4'h8);
+    // The two directions accept DIFFERENT mode sets, which is easy to miss:
+    //   regs->mem : control alterable plus -(An), but NOT (An)+
+    //   mem->regs : control (incl. PC-relative) plus (An)+, but NOT -(An)
+    // Treating them alike claimed 61 opcodes the reference calls illegal
+    // (caught at 0x4898, MOVEM.W regs,(A0)+).
+    wire movem_dst_ok = (ea_mode_w == UEA_AN_IND) || (ea_mode_w == UEA_AN_PRE)
+                     || (ea_mode_w == UEA_AN_D16) || (ea_mode_w == UEA_AN_IDX)
+                     || (ea_mode_w == UEA_ABS_W)  || (ea_mode_w == UEA_ABS_L);
+    wire movem_src_ok = ea_is_control || (ea_mode_w == UEA_AN_POST);
+    wire g4_is_movem = ((g4_op == 4'h8) || (g4_op == 4'hC)) && instr[7]
+                     && (g4_movem_to_mem ? movem_dst_ok : movem_src_ok);
+    wire g4_is_lea   = instr[8] && (g4_b76 == 2'b11) && ea_is_control
+                     && (g4_op != 4'hE);
+    wire g4_is_jsr   = (g4_op == 4'hE) && (g4_b76 == 2'b10) && ea_is_control;
+    wire g4_is_jmp   = (g4_op == 4'hE) && (g4_b76 == 2'b11) && ea_is_control;
+
+    // 0x4E40-0x4E7F: the system/control block.
+    wire g4_is_sys   = (instr[15:6] == 10'b0100_1110_01);
+    wire [3:0] sys_lo = instr[3:0];
+    wire sys_is_trap = g4_is_sys && (instr[5:4] == 2'b00);
+    wire sys_is_link = g4_is_sys && (instr[5:3] == 3'b010);
+    wire sys_is_unlk = g4_is_sys && (instr[5:3] == 3'b011);
+    wire sys_is_usp  = g4_is_sys && (instr[5:3] == 3'b100);  // MOVE An,USP
+    wire sys_is_uspr = g4_is_sys && (instr[5:3] == 3'b101);  // MOVE USP,An
+    wire sys_is_misc = g4_is_sys && (instr[5:3] == 3'b110);  // 0x4E70-0x4E77
+
     // Group E shift/rotate. bits[4:3] select op, bit[8] direction,
     // bit[5] = count from register.
     wire [1:0] e_optype = instr[4:3];
@@ -194,6 +238,17 @@ module mh030p_decode (
                           (e_optype == 2'b01) ? (e_left ? 4'h2 : 4'h3) : // LSL/LSR
                           (e_optype == 2'b10) ? (e_left ? 4'h6 : 4'h7) : // ROXL/ROXR
                                                 (e_left ? 4'h4 : 4'h5);  // ROL/ROR
+
+    // The MEMORY shift form encodes its operation in instr[10:9], NOT in
+    // instr[4:3] like the register form, and requires instr[11] == 0.
+    // Reusing the register selector claimed 336 opcodes the reference
+    // decoder correctly calls illegal (caught at 0xE8E2).
+    wire [1:0] e_mem_optype = instr[10:9];
+    wire       e_mem_legal  = !instr[11];
+    wire [3:0] e_mem_shf_op = (e_mem_optype == 2'b00) ? (e_left ? 4'h0 : 4'h1) :
+                              (e_mem_optype == 2'b01) ? (e_left ? 4'h2 : 4'h3) :
+                              (e_mem_optype == 2'b10) ? (e_left ? 4'h6 : 4'h7) :
+                                                        (e_left ? 4'h4 : 4'h5);
 
     // ── Decode ──────────────────────────────────────────────────────────────
     always_comb begin
@@ -219,6 +274,29 @@ module mh030p_decode (
                 uop.writes_reg  = (b_op != 2'b00);   // BTST writes nothing
                 uop.updates_ccr = 1'b1;
                 uop.x_unchanged = 1'b1;
+            end else if (g0_is_alu_imm && ea_is_alt_mem && f_ss_valid) begin
+                // Immediate op on memory: read-modify-write, so wr=0/ccr=0
+                // exactly as for the group 4 memory forms above.
+                uop.uclass      = UC_ALU;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = g0_alu_op;
+                uop.siz         = f_siz;
+                uop.src_kind    = US_IMM;
+                uop.imm         = ext;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.ea_idx_reg  = ea_xn;
+                uop.ea_idx_long = ea_xn_long;
+                uop.ea_idx_scale= ea_xn_scl;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = (g0_alu_op != UA_CMP);
+                uop.writes_reg  = 1'b0;
+                // ccr=0 only when there is a memory WRITE, because then the
+                // RMW FSM owns the flag update. CMPI writes nothing, so it
+                // sets the flags at decode just like TST does.
+                uop.updates_ccr = (g0_alu_op == UA_CMP);
+                uop.x_unchanged = (g0_alu_op == UA_CMP);
             end else if (g0_is_alu_imm && src_is_dn && f_ss_valid) begin
                 uop.uclass      = UC_ALU;
                 uop.unit        = UU_ALU;
@@ -307,9 +385,138 @@ module mh030p_decode (
             end
         end
 
-        // ── NEG/NEGX/NOT/CLR/TST/EXT/SWAP, Dn ───────────────────────────────
+        // ── NEG/NEGX/NOT/CLR/TST/EXT/SWAP/TAS/NBCD ──────────────────────────
         4'h4: begin
-            if (g4_is_swap) begin
+            // Memory single-operand forms. These are read-modify-write, and
+            // the reference decoder reports wr=0 AND ccr=0 for them: the RMW
+            // FSM owns both the writeback and the flag update. TST and CLR
+            // are the exceptions -- TST never writes, and CLR never reads --
+            // so both genuinely set the flags at decode.
+            if (ea_is_alt_mem && f_ss_valid
+                && (g4_is_neg || g4_is_not || g4_is_clr
+                 || g4_is_tst || g4_is_negx)) begin
+                uop.uclass      = UC_ALU;
+                // CLR on memory goes through the MOVE unit (it writes a zero
+                // rather than reading anything); CLR on Dn uses the ALU.
+                uop.unit        = g4_is_clr ? UU_MOVE : UU_ALU;
+                uop.alu_op      = g4_is_neg  ? UA_NEG  :
+                                  g4_is_negx ? UA_NEGX :
+                                  g4_is_not  ? UA_NOT  :
+                                  g4_is_clr  ? UA_CLR  : UA_TST;
+                uop.siz         = f_siz;
+                uop.src_kind    = US_MEM;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.ea_idx_reg  = ea_xn;
+                uop.ea_idx_long = ea_xn_long;
+                uop.ea_idx_scale= ea_xn_scl;
+                uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
+                uop.reads_mem   = !g4_is_clr;
+                uop.writes_mem  = !g4_is_tst;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = g4_is_tst || g4_is_clr;
+                uop.x_unchanged = (g4_is_tst || g4_is_clr || g4_is_not);
+            end else if (g4_is_nbcd) begin
+                uop.uclass      = UC_BCD;
+                uop.unit        = UU_BCD;
+                uop.alu_op      = 4'h2;          // eu_bcd.sv BCD_NEG
+                uop.siz         = UZ_BYTE;
+                uop.updates_ccr = 1'b1;
+                if (src_is_dn) begin
+                    uop.dst_kind   = US_DREG;
+                    uop.dst_reg    = rn_src_dn;
+                    uop.writes_reg = 1'b1;
+                end else if (ea_is_alt_mem) begin
+                    uop.dst_kind   = US_MEM;
+                    uop.ea_mode    = ea_mode_w;
+                    uop.ea_reg     = rn_src_an;
+                    uop.reads_mem  = 1'b1;
+                    uop.writes_mem = 1'b1;
+                    uop.updates_ccr = 1'b0;      // RMW FSM owns the flags
+                end else begin
+                    uop.uclass = UC_UNIMPL;
+                end
+            end else if (g4_is_tas) begin
+                uop.uclass      = UC_ATOMIC;
+                uop.unit        = UU_MOVE;
+                uop.siz         = UZ_BYTE;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = 1'b1;
+            end else if (g4_is_pea) begin
+                uop.uclass      = UC_LEA;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.writes_mem  = 1'b1;          // pushes onto the stack
+            end else if (g4_is_lea) begin
+                uop.uclass      = UC_LEA;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.dst_kind    = US_AREG;
+                uop.dst_reg     = {1'b1, f_dn};
+                uop.writes_reg  = 1'b1;
+            end else if (g4_is_movem) begin
+                uop.uclass      = UC_MOVEM;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = !g4_movem_to_mem;
+                uop.writes_mem  = g4_movem_to_mem;
+                uop.first       = 1'b1;
+                uop.last        = 1'b0;          // expands to a uop sequence
+            end else if (g4_is_jsr || g4_is_jmp) begin
+                uop.uclass      = UC_JMP;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.writes_mem  = g4_is_jsr;     // pushes a return address
+            end else if (sys_is_trap) begin
+                uop.uclass      = UC_TRAP;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_WORD;
+                uop.imm         = {28'h0, sys_lo};
+                uop.traps       = 1'b1;
+            end else if (sys_is_link || sys_is_unlk) begin
+                uop.uclass      = UC_LINK;
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                uop.dst_kind    = US_AREG;
+                uop.dst_reg     = rn_src_an;
+                // LINK A7 is the one exception: linking the stack pointer
+                // itself, the An write is subsumed by the SP manipulation,
+                // so the reference reports writes_reg=0 for 0x4E57 only.
+                uop.writes_reg  = !(sys_is_link && (f_reg == 3'b111));
+                uop.reads_mem   = sys_is_unlk;
+                uop.writes_mem  = sys_is_link;
+            end else if (sys_is_usp || sys_is_uspr) begin
+                uop.uclass      = UC_SYSCTL;
+                uop.unit        = UU_MOVE;   // reference decoder: unit=MOVE
+                uop.siz         = UZ_LONG;
+                uop.src_kind    = sys_is_uspr ? US_USP : US_AREG;
+                uop.dst_kind    = sys_is_uspr ? US_AREG : US_USP;
+                uop.dst_reg     = rn_src_an;
+                uop.writes_reg  = sys_is_uspr;
+            end else if (sys_is_misc) begin
+                // 0x4E70 RESET, 71 NOP, 72 STOP, 73 RTE, 74 RTD, 75 RTS,
+                // 76 TRAPV, 77 RTR.
+                uop.unit        = UU_NONE;
+                uop.siz         = UZ_LONG;
+                case (sys_lo)
+                    4'h3, 4'h5, 4'h7: uop.uclass = UC_RETURN;   // RTE/RTS/RTR
+                    4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1; end
+                    4'h0, 4'h1, 4'h2: uop.uclass = UC_NOP;      // RESET/NOP/STOP
+                    default: uop.uclass = UC_UNIMPL;            // RTD
+                endcase
+            end else if (g4_is_swap) begin
                 uop.uclass      = UC_SWAP;
                 uop.unit        = UU_MOVE;   // reference decoder uses MOVE, not ALU
                 uop.siz         = UZ_LONG;
@@ -368,6 +575,23 @@ module mh030p_decode (
                 uop.dst_reg     = rn_src_dn;
                 uop.writes_reg  = 1'b1;
                 uop.x_unchanged = 1'b1;
+            end else if (ea_is_alt_mem && f_ss_valid) begin
+                uop.uclass      = UC_ADDQ;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = f_dir ? UA_SUB : UA_ADD;
+                uop.siz         = f_siz;
+                uop.src_kind    = US_IMM;
+                uop.imm         = f_q_imm;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.ea_idx_reg  = ea_xn;
+                uop.ea_idx_long = ea_xn_long;
+                uop.ea_idx_scale= ea_xn_scl;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = 1'b0;
             end else if (src_is_dn && f_ss_valid) begin
                 uop.uclass      = UC_ADDQ;
                 uop.unit        = UU_ALU;
@@ -547,7 +771,25 @@ module mh030p_decode (
 
         // ── Shifts / rotates, register form ─────────────────────────────────
         4'hE: begin
-            if (src_is_dn && f_ss_valid) begin
+            if (ea_is_alt_mem && (f_ss == 2'b11) && e_mem_legal) begin
+                // Memory shift/rotate: always one bit, always a word.
+                uop.uclass      = UC_SHIFT;
+                uop.unit        = UU_SHF;
+                uop.alu_op      = e_mem_shf_op;
+                uop.siz         = UZ_WORD;
+                uop.src_kind    = US_IMM;
+                uop.imm         = 32'd1;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.ea_idx_reg  = ea_xn;
+                uop.ea_idx_long = ea_xn_long;
+                uop.ea_idx_scale= ea_xn_scl;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = 1'b1;
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = 1'b0;
+            end else if (src_is_dn && f_ss_valid) begin
                 uop.uclass      = UC_SHIFT;
                 uop.unit        = UU_SHF;
                 uop.alu_op      = e_shf_op;
