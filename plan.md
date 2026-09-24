@@ -3309,3 +3309,54 @@ straight at; the MMU ATC; `eu_alu`'s carry chain) before committing to a
 multi-hundred-phase microarchitecture rewrite. That is a decision for the user,
 not an argument that the rewrite is wrong -- `u_seq` is still 43.6% of
 design-wide routing, and nothing here addresses that.
+
+## MH030-P bounded fix 2 — multiply-driven cache arrays (a real hardware bug)
+
+**Decision (2026-09-24)**: after P0 measured 14.24 MHz, the user chose to
+continue with bounded fixes rather than start the rewrite (P1).
+
+The next target was supposed to be "convert `tag_d`/`valid_d`/`tag_i`/`valid_i`
+to BRAM", which the 960 synthesis "conflicting drivers" warnings appeared to
+point at. **That framing was wrong on both counts and is corrected here.**
+These arrays are tiny -- `tag_i[0:15]` is 400 bits, `tag_d[0:15]` 432,
+`valid_d[0:15][0:3]` 64, `valid_i[0:15]` 16 -- against a 16 Kbit DP16KD, so
+BRAM is the wrong target entirely and they correctly belong in flip-flops.
+And the warnings were not about memory inference at all.
+
+**The actual bug**: `tag_i`/`valid_i` were each assigned from **two different
+`always_ff` blocks** (the `itrickle` sequencer and the main FSM), and `valid_d`
+likewise (the `dtrickle` sequencer and the main FSM). Yosys reported this as
+two `$dff` cells driving one net. In simulation it is a benign race -- the two
+blocks never fire in the same cycle -- but it synthesises to two physical
+flip-flops shorted onto one net and **would not work on real hardware**. Both
+were introduced by Phase A's own trickle sequencers: `data_d` was correctly
+given a single arbitrated write port for exactly this reason (its own comment
+says so), but `valid_d` and the I-cache's `tag_i`/`valid_i` were simply missed.
+`tag_d` has a single writer, which is precisely why it never appeared in the
+warnings -- a detail that confirms the diagnosis rather than contradicting it.
+
+**Fix**: each array now has exactly one assigning `always_ff`. The trickle
+sequencers keep sole ownership of their own `*_active_r`/`*_next_r` state;
+their array commits move into the main FSM block, reproducing each trickle
+block's own guard condition verbatim, and placed FIRST in the `else` branch so
+they hold the LOWEST priority -- a CACR invalidate or a concurrent fill
+correctly overrides an in-flight trickle, rather than a line being resurrected
+after it was invalidated. The I-cache still commits `tag_i`/`valid_i` only on
+the last trickled word, which remains deliberate: `valid_i` is per-LINE, so
+publishing earlier would claim a whole line valid while 3 of its 4 words were
+still mid-trickle.
+
+**New permanent gate: `make lint-drivers`.** `sv2v` + `yosys -p "proc; check"`
+over `TOP_SRCS`, failing on any multiply-driven signal. `check` is the pass
+that reports this and it must run after `proc` -- a plain `proc; opt_clean`
+finds nothing, which is why an initial attempt at verifying the fix wrongly
+reported zero warnings both before AND after and had to be discarded. Verified
+end-to-end by temporarily restoring the pre-fix RTL: 480 warnings (400 `tag_i`
++ 64 `valid_d` + 16 `valid_i`, exactly matching the array dimensions), then 0
+after. A whole-RTL sweep reports **0 problems**, so these were the only
+instances. ~37 s, so it is cheap enough to run routinely. The full-design run's
+960 was each warning reported twice, at module and at instance scope.
+
+**Verification**: `make test` 38/38, `cosim_grp` 8/8, `cosim_memind` 33/33,
+`dat-synth` 50/50, `lint-drivers` clean, Harte
+`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to baseline.

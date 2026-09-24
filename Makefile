@@ -5,6 +5,8 @@ SHELL     := bash
 IV       := iverilog
 VVP      := vvp
 IVFLAGS  := -g2012 -I rtl -I tb
+# oss-cad-suite yosys, used only by the `lint-drivers` target below.
+YOSYS_BIN ?= $(HOME)/oss-cad-suite/bin/yosys
 SIM      := sim
 
 # Suppress the hundreds of harmless "sorry: constant selects" lines from
@@ -867,6 +869,28 @@ run: $(SIM)/$(TEST)
 	$(VVP) $(SIM)/$(TEST)
 
 # Remove all build outputs; rm -rf sim/ clears stale binaries from any prior naming scheme
+# ── Multiple-driver lint (MH030-P) ──────────────────────────────────────────
+# Catches a signal assigned from more than one always_ff block. That is a
+# benign race in simulation -- the two blocks typically never fire in the same
+# cycle -- but it synthesises to two physical flip-flops driving one net, and
+# will NOT work on real hardware. Found the hard way: Phase A's own cache
+# trickle sequencers left tag_i/valid_i/valid_d assigned from two blocks each,
+# which the first full FPGA synthesis reported as 960 "multiple conflicting
+# drivers" warnings buried in a 20MB log.
+#
+# `check` is the pass that reports it, and it must run after `proc`; a plain
+# `proc; opt_clean` finds nothing. Needs sv2v + yosys (oss-cad-suite).
+lint-drivers:
+	@sv2v -I rtl $(TOP_SRCS) > /tmp/_mh030_lint.v
+	@$(YOSYS_BIN) -p "read_verilog /tmp/_mh030_lint.v; proc; check" 2>&1 \
+	    | grep -E "conflicting drivers" > /tmp/_mh030_lint.out || true
+	@if [ -s /tmp/_mh030_lint.out ]; then \
+	    echo "FAIL  multiple-driver lint:"; \
+	    grep -oE "conflicting drivers for [^[]*" /tmp/_mh030_lint.out \
+	        | sort | uniq -c | sort -rn; \
+	    exit 1; \
+	else echo "OK    no multiply-driven signals"; fi
+
 clean:
 	rm -rf $(SIM)
 	rm -f *.vvp *.vcd a.out

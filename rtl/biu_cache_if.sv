@@ -712,6 +712,26 @@ module biu_cache_if (
                 for (m = 0; m < 4; m++) valid_d[k][m] <= 1'b0;
             end
         end else begin
+            // ── dtrickle's own valid_d commit (single-writer consolidation) ──
+            // valid_d must have exactly ONE always_ff assigning it. It used to
+            // be written from the dtrickle block below as well, which is a
+            // harmless race in simulation (the two never fire together) but
+            // two real flip-flops driving one net in synthesis -- Yosys
+            // reported it as "multiple conflicting drivers", and it would not
+            // have worked on the actual FPGA. data_d already shared a single
+            // arbitrated write port for exactly this reason; valid_d was
+            // simply missed at the time.
+            //
+            // Condition reproduces the dtrickle block's own third branch
+            // verbatim (not reset, not the start cycle, active, and the main
+            // FSM is not using the port this cycle). Placed FIRST so it has
+            // the LOWEST priority: a CACR invalidate below, or a concurrent
+            // fill in the case statement, both correctly override it -- a
+            // line being invalidated must never be resurrected by an
+            // in-flight trickle.
+            if (dtrickle_active_r && !dtrickle_start && !main_wr_en)
+                valid_d[dtrickle_idx_r][dtrickle_next_r] <= dtrickle_ok_r[dtrickle_next_r];
+
             // CACR cache-clear operations (level-sensitive while bit asserted)
             // Phase 158 Stage 1: CD/CED were off by one bit (cacr[12]/cacr[11]
             // are really DBE/CD, not CD/CED) — fixed to cacr[11]/cacr[10].
@@ -1518,8 +1538,8 @@ module biu_cache_if (
     // the final arbitration always_comb above) -- Yosys's own
     // memory_share couldn't prove two separate write ports here were
     // mutually exclusive, so this shares one explicitly instead.
-    // Advancing dtrickle_next_r (and this word's own valid_d bit) is
-    // gated on `!main_wr_en`: on a cycle the main FSM also wants the
+    // Advancing dtrickle_next_r (and this word's own valid_d bit, now
+    // written from the main block) is gated on `!main_wr_en`: on a cycle the main FSM also wants the
     // port, the main FSM wins (see the arbitration always_comb) and
     // the trickle simply waits, retrying the SAME dtrickle_next_r word
     // next cycle -- so it never advances past a word it didn't
@@ -1545,7 +1565,12 @@ module biu_cache_if (
             dtrickle_ok_r[2]    <= !dc_burst_ciin2;
             dtrickle_ok_r[3]    <= !dc_burst_ciin3;
         end else if (dtrickle_active_r && !main_wr_en) begin
-            valid_d[dtrickle_idx_r][dtrickle_next_r] <= dtrickle_ok_r[dtrickle_next_r];
+            // This word's own valid_d bit is written by the MAIN always_ff
+            // block (search dtrickle_commit there), not here -- see that
+            // block's own comment. Two always_ff blocks assigning the same
+            // array is a benign race in simulation but two physical drivers
+            // on one net in synthesis, which is what 960 Yosys "multiple
+            // conflicting drivers" warnings were reporting.
             if (dtrickle_next_r == 2'd3) dtrickle_active_r <= 1'b0;
             dtrickle_next_r <= dtrickle_next_r + 2'd1;
         end

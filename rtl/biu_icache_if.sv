@@ -424,10 +424,12 @@ module biu_icache_if (
         end else if (itrickle_active_r && !main_wr_en) begin
             if (itrickle_next_r == 2'd3) begin
                 itrickle_active_r <= 1'b0;
-                if (itrickle_valid_ok_r) begin
-                    tag_i[itrickle_idx_r]   <= itrickle_tag_r;
-                    valid_i[itrickle_idx_r] <= 1'b1;
-                end
+                // tag_i/valid_i are committed by the MAIN always_ff block
+                // (search itrickle commit there), not here. Two always_ff
+                // blocks assigning the same array is a benign race in
+                // simulation but two physical drivers on one net in
+                // synthesis -- Yosys reported exactly that, and it would not
+                // have worked on the real FPGA.
             end
             itrickle_next_r <= itrickle_next_r + 2'd1;
         end
@@ -481,6 +483,27 @@ module biu_icache_if (
             cg_single_addr_r <= 32'h0;
             for (k = 0; k < 16; k++) valid_i[k] <= 1'b0;
         end else begin
+            // ── itrickle's own tag_i/valid_i commit (single-writer) ─────────
+            // These arrays must have exactly ONE always_ff assigning them.
+            // They used to be written from the itrickle block above too,
+            // which synthesises to two flip-flops driving one net (Yosys:
+            // "multiple conflicting drivers"). Condition reproduces that
+            // block's own commit branch verbatim: not the start cycle,
+            // active, main FSM not using the port, final word, and the line
+            // was cacheable when the fill began.
+            //
+            // Placed FIRST so it has the LOWEST priority -- a CACR
+            // invalidate below, or a concurrent fill in the case statement,
+            // both correctly override it. Committing tag+valid only on the
+            // LAST trickled word is deliberate and unchanged: valid_i is
+            // per-LINE, so publishing it earlier would claim the whole line
+            // valid while 3 of its 4 words were still mid-trickle.
+            if (itrickle_active_r && !itrickle_start && !main_wr_en
+                && (itrickle_next_r == 2'd3) && itrickle_valid_ok_r) begin
+                tag_i[itrickle_idx_r]   <= itrickle_tag_r;
+                valid_i[itrickle_idx_r] <= 1'b1;
+            end
+
             // CACR cache-clear operations (level-sensitive while asserted,
             // same convention as biu_cache_if.sv).
             if (cacr[3]) for (k = 0; k < 16; k++) valid_i[k] <= 1'b0; // CI
