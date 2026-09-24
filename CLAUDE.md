@@ -1006,12 +1006,35 @@ One low-risk, no-behavior-change lever implemented: `preview_ok`'s flat
 17-way OR and 14-term hazard AND-chain (`rtl/eu_seq_preview.svh`) regrouped
 into balanced sub-groups (`preview_ready_ordinary`/`preview_ready_special`,
 `preview_hazard_grp1/2/3`) -- pure regrouping (OR/AND associative), no
-behavior change. Full mandatory gate clean, Harte bit-identical. Real
-synthesis measurement pending to see if it actually moves `clk_4x` (per this
-project's own precedent, `wdata_hold_r`/Phase 285 was equally
-verified-correct with zero measured effect -- logical correctness doesn't
-predict timing impact). **No further RTL changes toward true pipelining
-without fresh user sign-off** -- see `project_eu_pipeline_cutpoints.md`.
+behavior change. Full mandatory gate clean, Harte bit-identical, committed
+(`ed1785c`). **Its real synthesis measurement was started, then
+deliberately killed mid-run at the user's own request -- never completed,
+result unknown; don't assume it helped or didn't.** (Two earlier attempts
+at this same measurement were also invalid and discarded: mackerel-030f's
+own `Makefile` `$(BIT)` target uses a different, restricted `-run
+begin:map_luts` + `abc -lut4` recipe meant for bitstream generation, not
+timing measurement -- it produced ~1,360 spurious "conflicting drivers"
+warnings and finished suspiciously fast (~2min vs the real ~3h+ ABC9 run);
+the plain, complete `synth_lattice -family ecp5 -top mackerel_030f` (no
+`-run` restriction) is the one that matches every prior valid
+measurement.)
+
+**Pivot decision (2026-09-23, same session, asked directly "what MHz can
+we achieve")**: given honestly, with real uncertainty flagged -- more
+Phase-A-shaped bounded fixes estimated to cap around 3-5MHz; genuine
+pipelining of `preview_ok` estimated to cap around 10-20MHz, not 100MHz,
+because Phase 284's own critical-path trace already showed the worst chain
+spans nearly the entire design, not one narrow bottleneck. **User decided
+to stop chasing incremental fixes and plan a genuine pipelined
+microarchitecture rewrite instead** -- closer to designing a new,
+deliberately-staged CPU core using MH030's existing RTL as the functional/
+cycle-accurate reference than to further timing patches. Planning not yet
+started; picks up in a fresh session. See
+`~/.claude/projects/-Users-malcolm-MH030/memory/project_mh030_pipelined_rewrite_planning.md`
+and `project_eu_pipeline_cutpoints.md` (uncommitted, still useful
+background). **No further RTL changes toward true pipelining without
+fresh scoping** -- this note stays authoritative until the rewrite
+planning produces its own scope.
 
 **Current state**: `make test` 38/38, `make cosim_grp` 8/8, `make cosim_memind` 33/33,
 `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
