@@ -76,6 +76,17 @@ $(SIM)/eu_shifter: rtl/eu_shifter.sv                 tb/eu_shifter_tb.sv | $(SIM
 $(SIM)/eu_mul_div: rtl/eu_mul_div.sv                 tb/eu_mul_div_tb.sv | $(SIM)
 	$(IVCOMP)
 
+# MH030-P: the pipelined integer core (P2).
+$(SIM)/mh030p_core: rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
+                    rtlp/mh030p_decode.sv rtlp/mh030p_uop.svh \
+                    rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
+                    tb/mh030p_core_tb.sv | $(SIM)
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
+	    rtlp/mh030p_decode.sv rtl/opcode_fields.sv rtl/eu_alu.sv \
+	    rtl/eu_shifter.sv tb/mh030p_core_tb.sv 2>&1 \
+	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
+	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
+
 # MH030-P: new-core decoder vs the reference decoder, all 65536 opcodes.
 # Needs -I rtlp for mh030p_uop.svh, so it cannot use the plain $(IVCOMP).
 $(SIM)/uop_equiv: rtlp/mh030p_decode.sv rtlp/mh030p_uop.svh \
@@ -285,7 +296,7 @@ ALL_TESTS := \
     $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/ext_count_overlap $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate \
-    $(SIM)/minrepro $(SIM)/uop_equiv
+    $(SIM)/minrepro $(SIM)/uop_equiv $(SIM)/mh030p_core
 
 # tb/minrepro_tb.sv: regression test for
 # project_skiptx_branch_target_regwrite_bug.md -- now FIXED (m68030_ifu.sv
