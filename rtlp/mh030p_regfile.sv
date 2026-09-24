@@ -13,8 +13,10 @@
 //
 // That costs a cycle of latency, which is exactly what the forwarding network
 // in mh030p_core.sv exists to hide. It also drops the port count from seven
-// reads to two: rd_c and rd_prev_a/b/c in the old file exist solely to serve
-// the zero-gap preview mechanism this core deliberately does not have.
+// reads to three: rd_prev_a/b/c in the old file exist solely to serve the
+// zero-gap preview mechanism this core deliberately does not have. The third
+// port here is a genuine need -- an indexed EA reads base, index and ALU
+// operand in the same cycle.
 //
 // The read port is WRITE-FIRST: a read issued in the same cycle as a write to
 // the same register returns the new value. That is not cosmetic. With four
@@ -41,8 +43,12 @@ module mh030p_regfile (
     input  wire        rd_en,
     input  wire [3:0]  rd_a_sel,
     input  wire [3:0]  rd_b_sel,
+    // Third port, for the index register of an indexed effective address:
+    // (d8,An,Xn) needs the base, the index AND the ALU operand at once.
+    input  wire [3:0]  rd_c_sel,
     output reg  [31:0] rd_a_data,
     output reg  [31:0] rd_b_data,
+    output reg  [31:0] rd_c_data,
 
     // Write (commit stage).
     input  wire        wr_en,
@@ -64,14 +70,17 @@ module mh030p_regfile (
     // Registered, write-first reads (see the header).
     wire hit_a = wr_en && (wr_sel == rd_a_sel);
     wire hit_b = wr_en && (wr_sel == rd_b_sel);
+    wire hit_c = wr_en && (wr_sel == rd_c_sel);
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             rd_a_data <= 32'h0;
             rd_b_data <= 32'h0;
+            rd_c_data <= 32'h0;
         end else if (rd_en) begin
             rd_a_data <= hit_a ? wr_data : regs[rd_a_sel];
             rd_b_data <= hit_b ? wr_data : regs[rd_b_sel];
+            rd_c_data <= hit_c ? wr_data : regs[rd_c_sel];
         end
     end
 

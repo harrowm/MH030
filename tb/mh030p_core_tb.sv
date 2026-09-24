@@ -282,6 +282,19 @@ module mh030p_core_tb;
         chk("RMW AND.L D1,(A3)", ram[32'h24 >> 2], 32'h0000_000F);
 
 
+        // ── Indexed EA: (d8,An,Xn) ─────────────────────────────────────────
+        // MOVE.L (d8,A3,D4.L),D5 = 0x2A33 + ext. The extension word is
+        // 0x4802: Xn=D4 (bits 15:12 = 0100), W/L=1 (long), scale=00, d8=0x02.
+        // A3 = 0x20, D4 = 0x10, d8 = 2  ->  EA = 0x32... use scale 0 and a
+        // longword-aligned result: A3=0x20, D4=0x10, d8=0x04 -> 0x34.
+        ram[32'h34 >> 2] = 32'hC0FF_EE00;
+        issue(MOVEQ(3, 8'h20));
+        issue(16'h2643);                  // A3 = 0x20
+        issue(MOVEQ(4, 8'h10));           // D4 = 0x10 (index)
+        issue(16'h2A33, 32'h0000_4804);   // MOVE.L (4,A3,D4.L),D5
+        bubble(14);
+        chk("indexed (4,A3,D4.L)", dut.u_rf.regs[5], 32'hC0FF_EE00);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

@@ -96,7 +96,8 @@ module mh030p_core (
     // Memory destinations and the indexed/indirect modes are later phases;
     // anything outside the set decodes but is never issued, so it cannot
     // silently produce a wrong architectural result.
-    wire dec_ea_ok = (dec_uop.ea_mode == UEA_AN_IND)
+    wire dec_ea_ok = (dec_uop.ea_mode == UEA_AN_IDX)
+                  || (dec_uop.ea_mode == UEA_AN_IND)
                   || (dec_uop.ea_mode == UEA_AN_POST)
                   || (dec_uop.ea_mode == UEA_AN_PRE)
                   || (dec_uop.ea_mode == UEA_AN_D16)
@@ -182,7 +183,9 @@ module mh030p_core (
                      && ex_valid && ex_uop.writes_reg
                      && ((ex_uop.dst_reg == ag_b_sel)
                       || ((ag_uop.writes_mem || ag_uop.reads_mem)
-                          && (ex_uop.dst_reg == ag_a_sel)));
+                          && (ex_uop.dst_reg == ag_a_sel))
+                      || ((ag_uop.ea_mode == UEA_AN_IDX)
+                          && (ex_uop.dst_reg == ag_uop.ea_idx_reg)));
 
     // TWO stalls, and they must not be conflated. ex_wait_mem freezes the
     // whole pipeline, because EX itself cannot complete. ag_base_busy must
@@ -198,18 +201,13 @@ module mh030p_core (
     // With a memory source the B port carries the EA BASE register instead of
     // the ALU destination; the destination is forwarded in EX.
     wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem;
-    wire [31:0] rf_a, rf_b;
+    wire [31:0] rf_a, rf_b, rf_c;
     mh030p_regfile u_rf (
         .clk_4x   (clk_4x),
         .rst_n    (rst_n),
         // Hold the read while anything downstream is stalled; see the
         // regfile header.
         .rd_en    (!stall_ex && !stall_ag),
-        // The A port carries the ALU destination only for a memory READ,
-        // where the source arrives from memory and the port is free. For a
-        // memory WRITE the source register IS the value to store, so it must
-        // stay on the A port -- routing it to dst_reg (unset for a memory
-        // destination) stored D0 instead.
         // dst_reg only for a PLAIN memory read, where the source arrives from
         // memory and the ALU destination is a register. For an RMW the
         // register operand is the SOURCE and the destination is memory, so
@@ -217,8 +215,11 @@ module mh030p_core (
         .rd_a_sel ((dec_uop.reads_mem && !dec_uop.writes_mem)
                    ? dec_uop.dst_reg : dec_uop.src_reg),
         .rd_b_sel (dec_mem ? dec_uop.ea_reg   : dec_uop.dst_reg),
+        // Index register for an indexed EA; harmlessly reads R0 otherwise.
+        .rd_c_sel (dec_uop.ea_idx_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
+        .rd_c_data(rf_c),
         .wr_en    (wb_wr_en),
         .wr_sel   (wb_wr_sel),
         .wr_data  (wb_wr_data)
@@ -291,6 +292,9 @@ module mh030p_core (
 
     wire [31:0] ag_a = fwd_h_wb ? wb_data : fwd_h_wbp ? wbp_data : rf_a;
     wire [31:0] ag_b = fwd_g_wb ? wb_data : fwd_g_wbp ? wbp_data : rf_b;
+    wire fwd_i_wb  = wb_valid  && wb_writes  && (wb_reg  == ag_uop.ea_idx_reg);
+    wire fwd_i_wbp = wbp_valid && wbp_writes && (wbp_reg == ag_uop.ea_idx_reg);
+    wire [31:0] ag_c = fwd_i_wb ? wb_data : fwd_i_wbp ? wbp_data : rf_c;
 
     // ── AG: effective address, on its own adder ─────────────────────────────
     wire [31:0] ea_step = (ag_uop.siz == UZ_BYTE) ? 32'd1
@@ -302,7 +306,15 @@ module mh030p_core (
     // does not.
     wire [31:0] ea_adj  = (ag_uop.ea_mode == UEA_AN_PRE) ? (32'h0 - ea_step)
                                                          : 32'h0;
-    wire [31:0] ag_ea   = ea_base + ag_uop.ea_disp + ea_adj;
+    // Index term: Xn as a word (sign-extended) or a longword, scaled by
+    // 1/2/4/8. Only the brief format is handled here; the full format with a
+    // base displacement and memory indirection is a later phase.
+    wire [31:0] ag_xn   = ag_uop.ea_idx_long ? ag_c
+                                             : {{16{ag_c[15]}}, ag_c[15:0]};
+    wire [31:0] ag_idx  = (ag_uop.ea_mode == UEA_AN_IDX)
+                        ? (ag_xn << ag_uop.ea_idx_scale) : 32'h0;
+
+    wire [31:0] ag_ea   = ea_base + ag_uop.ea_disp + ea_adj + ag_idx;
 
     // The An update is a SIDE EFFECT and must commit exactly once, when the
     // instruction actually leaves AG. Gating it on ag_valid alone makes it
