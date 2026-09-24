@@ -32,9 +32,11 @@ module uop_decode_equiv_tb;
     logic [31:0] ext;
     uop_t        uop;
 
+    logic [15:0] q3w;
     mh030p_decode u_new (
         .instr (instr),
         .ext   (ext),
+        .q3    (q3w),
         .uop   (uop)
     );
 
@@ -54,6 +56,11 @@ module uop_decode_equiv_tb;
     wire [3:0] old_alu_op  = `OLD.dec_alu_op;
     wire [2:0] old_md_op   = `OLD.dec_md_op;
     wire [1:0] old_bit_op  = `OLD.dec_bit_op;
+    // EA fields. Comparing these is what catches a wrong extension-word
+    // half being read -- a whole bug class the sweep was previously blind to.
+    wire        old_xn_wl    = `OLD.dec_xn_wl;
+    wire [1:0]  old_xn_scale = `OLD.dec_xn_scale;
+    wire [31:0] old_ea_off   = `OLD.dec_ea_offset;
     wire [1:0] old_siz     = `OLD.dec_siz;
     wire [3:0] old_src_reg = `OLD.dec_src_reg;
     // dec_dest_reg ("register to commit result into"), NOT dec_dst_reg
@@ -74,7 +81,7 @@ module uop_decode_equiv_tb;
         .clk_4x(clk_4x), .rst_n(rst_n),
         .instr_word(o_instr), .instr_valid(1'b1),
         .ext_data(o_ext), .ext_valid(1'b1),
-        .q3_word(16'h0), .ext34_data(32'h0), .q5_word(16'h0), .q6_word(16'h0),
+        .q3_word(q3w), .ext34_data(32'h0), .q5_word(16'h0), .q6_word(16'h0),
         .rd_a_sel(), .rd_a_siz(), .rd_a_data(32'h0),
         .rd_b_sel(), .rd_b_siz(), .rd_b_data(32'h0),
         .rd_c_sel(), .rd_c_siz(), .rd_c_data(32'h0),
@@ -122,6 +129,12 @@ module uop_decode_equiv_tb;
     integer i;
     reg [31:0] first_bad;
 
+    // Classes whose EA is a plain data operand, so dec_ea_offset really is
+    // the displacement rather than one of its other uses.
+    wire ea_operand_class = (uop.uclass == UC_ALU)   || (uop.uclass == UC_MOVE)
+                         || (uop.uclass == UC_ADDQ)  || (uop.uclass == UC_SHIFT)
+                         || (uop.uclass == UC_BITOP);
+
     task automatic report(input [15:0] op, input string what,
                           input [31:0] got, input [31:0] exp);
         if (mismatches < 20)
@@ -144,7 +157,10 @@ module uop_decode_equiv_tb;
         claimed = 0; agreed = 0; mismatches = 0; old_only = 0;
         for (g = 0; g < 16; g = g + 1) gap_by_group[g] = 0;
         first_bad = 32'hFFFF_FFFF;
-        ext = 32'h0000_1234;      // arbitrary but fixed immediate
+        // Deliberately asymmetric between halves so that reading the WRONG
+        // half of the extension word cannot accidentally compare equal.
+        ext = 32'hA5A5_3C7F;
+        q3w = 16'h5A91;
         rst_n = 1'b0;
         repeat (2) @(posedge clk_4x);
         rst_n = 1'b1;
@@ -273,6 +289,32 @@ module uop_decode_equiv_tb;
                     else if (uop.writes_reg && (uop.dst_reg !== old_dst_reg))
                         report(instr, "dst_reg", {28'h0, uop.dst_reg},
                                                  {28'h0, old_dst_reg});
+                    // EA displacement / index fields. dec_ea_offset is a
+                    // heavily REUSED field in the reference: it carries the
+                    // (An)+/-(An) delta for auto-increment modes and the
+                    // stack predecrement (-4) for PEA, among others. So this
+                    // is checked only for classes where the EA is genuinely a
+                    // data operand and the field genuinely holds a
+                    // displacement, and only when the decoder says the
+                    // position is unambiguous (ea_disp_valid).
+                    else if (ea_operand_class && uop.ea_disp_valid
+                             && (uop.ea_mode == UEA_AN_D16)
+                             && (uop.ea_disp !== old_ea_off))
+                        report(instr, "ea_disp16", uop.ea_disp, old_ea_off);
+                    else if (ea_operand_class && uop.ea_disp_valid
+                             && (uop.ea_mode == UEA_AN_IDX)
+                             && (uop.ea_disp !== old_ea_off))
+                        report(instr, "ea_disp8", uop.ea_disp, old_ea_off);
+                    else if (ea_operand_class && uop.ea_disp_valid
+                             && (uop.ea_mode == UEA_AN_IDX)
+                             && (uop.ea_idx_long !== old_xn_wl))
+                        report(instr, "xn_wl", {31'h0, uop.ea_idx_long},
+                                               {31'h0, old_xn_wl});
+                    else if (ea_operand_class && uop.ea_disp_valid
+                             && (uop.ea_mode == UEA_AN_IDX)
+                             && (uop.ea_idx_scale !== old_xn_scale))
+                        report(instr, "xn_scale", {30'h0, uop.ea_idx_scale},
+                                                  {30'h0, old_xn_scale});
                     else
                         agreed = agreed + 1;
                 end

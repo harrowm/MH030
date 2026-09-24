@@ -26,7 +26,8 @@
 
 module mh030p_decode (
     input  wire [15:0] instr,
-    input  wire [31:0] ext,      // extension words, as a 32-bit immediate
+    input  wire [31:0] ext,      // extension words, EU convention (see below)
+    input  wire [15:0] q3,       // third extension word
     output uop_t       uop
 );
 
@@ -146,6 +147,7 @@ module mh030p_decode (
 
     // ── Effective address ───────────────────────────────────────────────────
     // mode/reg straight from the opcode; mode 111 sub-selects on reg.
+    wire imm_is_long_pre = (f_ss == 2'b10);
     wire ea_m7 = (f_mode == 3'b111);
     wire [3:0] ea_mode_w =
         (f_mode == 3'b010) ? UEA_AN_IND  :
@@ -159,16 +161,43 @@ module mh030p_decode (
         (ea_m7 && (f_reg == 3'b011)) ? UEA_PC_IDX : UEA_NONE;
 
     wire ea_is_imm = ea_m7 && (f_reg == 3'b100);
+
+    // True when this instruction's own IMMEDIATE occupies eu_ext_data, so any
+    // EA displacement has been pushed out to q3. Only the group 0 immediate
+    // family is handled here; other families that can do this are not yet
+    // claimed with a displacement.
+    wire imm_takes_ext = (f_group == 4'h0) && !instr[8] && imm_is_long_pre;
+
     wire ea_is_mem = (ea_mode_w != UEA_NONE);
     wire ea_src_ok = ea_is_mem || ea_is_imm;
 
-    // Index fields live in the first extension word (bit 8 there selects full
-    // format, which is P3 -- the brief form is what is decoded here).
-    wire [3:0] ea_xn      = ext[31:28];
-    wire       ea_xn_long = ext[27];
-    wire [1:0] ea_xn_scl  = ext[26:25];
-    wire [31:0] ea_d16 = {{16{ext[31]}}, ext[31:16]};
-    wire [31:0] ea_d8  = {{24{ext[23]}}, ext[23:16]};
+    // Extension-word fields. CRITICAL CONVENTION, verified in
+    // rtl/m68030_seq.sv:1160-1164 rather than inferred:
+    //
+    //   ext_count == 1 -> eu_ext_data = {16'h0, word1}   (word1 in the LOW half)
+    //   ext_count >= 2 -> eu_ext_data = {word1, word2}   (word1 in the HIGH half)
+    //
+    // So a SINGLE-extension-word mode -- (d16,An), (d8,An,Xn), abs.W, and the
+    // register fields of MOVEC/BFEXTU -- reads from [15:0], NOT [31:16].
+    // eu_seq.sv's own header describes the IFU's raw {q[1],q[2]} layout, which
+    // is what the EU sees only for two-word forms; m68030_seq normalizes the
+    // one-word case into the low half. An earlier version of this file read
+    // every field from the high half and was silently wrong for every
+    // one-word EA mode -- the equivalence sweep could not see it because it
+    // did not compare these fields. It does now.
+    // When the instruction carries a LONG immediate, that immediate consumes
+    // eu_ext_data entirely and any EA displacement moves out to the third
+    // extension word -- the reference does exactly this at
+    // eu_seq_decode.svh:609. So the displacement source depends on what
+    // precedes it, not on the EA mode alone.
+    // (imm_is_long_pre is declared above, before first use)
+    wire [31:0] ea_d16 = imm_takes_ext ? {{16{q3[15]}}, q3}
+                                       : {{16{ext[15]}}, ext[15:0]};
+    wire [31:0] ea_d8  = imm_takes_ext ? {{24{q3[7]}},  q3[7:0]}
+                                       : {{24{ext[7]}},  ext[7:0]};
+    wire [3:0]  ea_xn      = imm_takes_ext ? q3[15:12] : ext[15:12];
+    wire        ea_xn_long = imm_takes_ext ? q3[11]    : ext[11];
+    wire [1:0]  ea_xn_scl  = imm_takes_ext ? q3[10:9]  : ext[10:9];
 
     // Destination EA (MOVE only): the mode/reg fields are swapped relative
     // to the source, which is a documented source of confusion in this
@@ -183,6 +212,23 @@ module mh030p_decode (
         (ea_dm7 && (f_dst_reg == 3'b000)) ? UEA_ABS_W :
         (ea_dm7 && (f_dst_reg == 3'b001)) ? UEA_ABS_L : UEA_NONE;
     wire ea_dst_is_mem = (ea_dst_mode_w != UEA_NONE);
+
+    // Extension-word accounting, enough to know whether a displacement's
+    // position is unambiguous. This is a deliberate subset of
+    // m68030_seq.sv's own ext_count chain, not a replacement for it.
+    function automatic logic [2:0] ea_words(input logic [3:0] m);
+        case (m)
+            UEA_AN_D16, UEA_PC_D16, UEA_AN_IDX, UEA_PC_IDX, UEA_ABS_W: ea_words = 3'd1;
+            UEA_ABS_L: ea_words = 3'd2;
+            default:   ea_words = 3'd0;
+        endcase
+    endfunction
+    wire [2:0] src_ea_words = ea_words(ea_mode_w);
+    wire [2:0] dst_ea_words = ((f_group == 4'h1) || (f_group == 4'h2)
+                            || (f_group == 4'h3)) ? ea_words(ea_dst_mode_w) : 3'd0;
+    wire [2:0] imm_words    = ea_is_imm ? ((f_move_siz == UZ_LONG) ? 3'd2 : 3'd1)
+                            : (imm_takes_ext ? 3'd2 : 3'd0);
+    wire [2:0] ea_words_total = src_ea_words + dst_ea_words + imm_words;
 
     // Control addressing modes (no Dn/An/(An)+/-(An)/#imm): what LEA, PEA,
     // JMP and JSR accept.
@@ -500,17 +546,11 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = 1'b1;
                 uop.traps       = 1'b1;
-            // MOVE CCR,<ea> (0x42xx) is restricted to the Dn form here
-            // because the REFERENCE decoder only implements that one and
-            // reports every memory destination as illegal. Memory
-            // destinations are legal on 68010+/68030, so this looks like a
-            // genuine gap in rtl/ -- recorded rather than silently papered
-            // over, and deliberately not claimed, since an opcode the
-            // reference rejects is one this sweep cannot validate.
-            end else if (g4_is_sr_move
-                         && ((g4_op == 4'h2) ? src_is_dn
-                                             : (ea_is_alt_mem || src_is_dn
-                                                || (!g4_sr_to_ea && ea_src_ok)))) begin
+            // MOVE CCR,<ea> to memory was missing from the reference decoder
+            // and has now been added there (rtl/eu_seq_decode.svh), so it is
+            // claimed here and the sweep validates it like any other form.
+            end else if (g4_is_sr_move && (ea_is_alt_mem || src_is_dn
+                                           || (!g4_sr_to_ea && ea_src_ok))) begin
                 uop.uclass      = UC_SYSCTL;
                 uop.unit        = UU_MOVE;
                 // MOVE #imm,CCR is byte-sized in the reference decoder (CCR
@@ -1052,6 +1092,36 @@ module mh030p_decode (
 
         default: ;   // stays UC_UNIMPL
         endcase
+
+        // ── Central EA field fill-in ────────────────────────────────────────
+        // Every branch above sets ea_mode; the displacement and index fields
+        // are derived from it exactly once, here. Doing it per-branch meant
+        // several families silently carried ea_disp = 0 -- caught the moment
+        // the sweep started comparing these fields. One place to be right
+        // beats twenty places to remember, which is the same reasoning
+        // rtl/opcode_fields.sv exists for.
+        if ((uop.ea_mode == UEA_AN_D16) || (uop.ea_mode == UEA_PC_D16)
+            || (uop.ea_mode == UEA_ABS_W))
+            uop.ea_disp = ea_d16;
+        else if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX))
+            uop.ea_disp = ea_d8;
+        else if (uop.ea_mode == UEA_ABS_L)
+            uop.ea_disp = ext;          // two extension words: the full address
+
+        // Is the displacement position unambiguous? Only when the whole
+        // instruction carries exactly ONE extension word. With two or more,
+        // m68030_seq packs them as {word1, word2} and which half holds which
+        // displacement depends on the full ext_count chain -- MOVE
+        // (d16,An),(d16,An) is the clear case, with a displacement at each
+        // end. Porting ext_count is its own task; until then the decoder says
+        // honestly that it does not know, rather than emitting a wrong value.
+        uop.ea_disp_valid = (ea_words_total == 3'd1);
+
+        if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX)) begin
+            uop.ea_idx_reg   = ea_xn;
+            uop.ea_idx_long  = ea_xn_long;
+            uop.ea_idx_scale = ea_xn_scl;
+        end
     end
 
 endmodule

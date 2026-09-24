@@ -527,6 +527,23 @@ module system_tb;
         repeat(4) @(posedge clk);
         chk("MOVE_SR-03:sr", {16'h0, sr_out}, 32'h0000_271F);
 
+        // MOVE CCR,<ea> with a MEMORY destination. This form was missing from
+        // the decoder entirely until the MH030-P equivalence sweep flagged it:
+        // only MOVE CCR,Dn was decoded, and every memory destination was
+        // reported illegal, though it is legal on 68010+/68030. The word
+        // written is the CCR zero-extended to 16 bits.
+        $display("--- MOVE_SR-03b: MOVE CCR,(A1) memory destination ---");
+        set_an(3'h1, 32'h0000_0400);
+        set_dn(2, 32'h0000_001F);
+        run_instr(16'h44C2, 1'b0, 32'h0);          // MOVE D2,CCR → CCR=0x1F
+        run_instr(16'h42D1, 1'b0, 32'h0);          // MOVE CCR,(A1)
+        repeat(8) @(posedge clk);
+        // CCR=0x1F written as the word 0x001F; the address is longword
+        // aligned so it lands in the high half (eu_lane's top-justified
+        // write convention). Before the decoder fix this instruction was
+        // ILLEGAL, so nothing was written and this read back as zero.
+        chk("MOVE_SR-03b:mem", ram[32'h400 >> 2], 32'h001F_0000);
+
         $display("--- MOVE_SR-04: MOVE D3,SR round-trip ---");
         run_instr(16'h40C3, 1'b0, 32'h0);          // MOVE SR,D3
         repeat(4) @(posedge clk);

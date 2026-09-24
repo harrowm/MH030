@@ -3164,13 +3164,27 @@
                                     f_mode == 3'b101 || f_mode == 3'b110 ||
                                     (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001 ||
                                                           f_reg == 3'b010 || f_reg == 3'b011)))) ||
-                                  (f_dn == 3'b000 &&
+                                  ((f_dn == 3'b000 || f_dn == 3'b001) &&
                                    (f_mode == 3'b010 || f_mode == 3'b011 || f_mode == 3'b100 ||
                                     f_mode == 3'b101 || f_mode == 3'b110 ||
                                     (f_mode == 3'b111 && (f_reg == 3'b000 || f_reg == 3'b001)))))) begin
-                        if (f_dn == 3'b000) begin
-                            // MOVE.W SR, EA — supervisor only
-                            if (!sr_live[13]) begin
+                        if (f_dn == 3'b000 || f_dn == 3'b001) begin
+                            // MOVE.W SR,EA (f_dn=000, supervisor only) and
+                            // MOVE.W CCR,EA (f_dn=001, user-accessible).
+                            //
+                            // MOVE CCR,EA used to be decoded ONLY for the Dn
+                            // destination (see the f_mode==000 block's own
+                            // "MOVE CCR,Dn" case); every memory destination
+                            // fell through and was reported ILLEGAL, although
+                            // MOVE CCR,<ea> is a legal 68010+/68030
+                            // instruction for all the alterable modes handled
+                            // here. Found by the MH030-P decoder equivalence
+                            // sweep, which claimed those 43 opcodes and got
+                            // "old-invalid" back. The two forms differ only in
+                            // the privilege check and in how much of SR is
+                            // written, so they share this block -- CCR reads
+                            // as a word with the upper byte zero.
+                            if ((f_dn == 3'b000) && !sr_live[13]) begin
                                 dec_valid   = 1'b1;
                                 dec_is_priv = 1'b1;
                             end else begin
@@ -3178,7 +3192,8 @@
                                 dec_unit        = UNIT_MOVE;
                                 dec_siz         = 2'b10;
                                 dec_use_imm     = 1'b1;
-                                dec_imm         = {16'h0, sr_live};
+                                dec_imm         = (f_dn == 3'b000) ? {16'h0, sr_live}
+                                                                   : {24'h0, sr_live[7:0]};
                                 dec_reads_ccr   = 1'b1;
                                 dec_x_unchanged = 1'b1;
                                 case (f_mode)

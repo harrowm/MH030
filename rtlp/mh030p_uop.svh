@@ -167,6 +167,11 @@ typedef struct packed {
     // Side effects.
     logic        writes_reg;
     logic        updates_ccr;
+    logic        ea_disp_valid;  // ea_disp/ea_idx_* are trustworthy. False when
+                                 // the instruction has several extension words
+                                 // and this decoder cannot yet say which one
+                                 // holds the displacement -- that needs the
+                                 // ext_count logic m68030_seq.sv carries.
     logic        sext_src;       // sign-extend a word source to 32 bits
                                  // (MOVEA.W / ADDA.W / CMPA.W: the OPERAND is
                                  // a word but the WRITE is a full longword)
@@ -207,6 +212,7 @@ function automatic uop_t uop_clear();
     u.ea_disp      = 32'h0;
     u.writes_reg   = 1'b0;
     u.updates_ccr  = 1'b0;
+    u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;
     u.x_unchanged  = 1'b0;
     u.reads_mem    = 1'b0;
