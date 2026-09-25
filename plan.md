@@ -3564,3 +3564,43 @@ directly. How much of the old core's area was that machinery rather than
 irreducible ISA cost is unmeasured, and it is the difference between
 "comparable" and "meaningfully faster". Measuring it needs the new core taken
 substantially closer to parity -- which is the same test, run again later.
+
+### Growth test, second data point: functional breadth is nearly free
+
+After adding bit operations, BCD, EXT/SWAP/ADDX and MOVEM:
+
+| Design | LUTs | Fmax | Period | Logic | Routing |
+|---|---|---|---|---|---|
+| New core, minimal | 4,618 | 38.02 MHz | 26.30 ns | 8.99 | 16.79 |
+| New core, all features | 7,038 | 33.96 MHz | 29.45 ns | 8.18 | 20.74 |
+| New CPU (+IFU+arbiter) | 7,736 | 32.21 MHz | 31.04 ns | 9.51 | 21.01 |
+| **New CPU + breadth + MOVEM** | **9,201** | **32.59 MHz** | **30.69 ns** | 9.25 | 20.91 |
+| Old EU | 29,043 | 19.55 MHz | 51.16 ns | 9.86 | 40.78 |
+
+**+19% LUTs cost nothing** -- Fmax went from 32.21 to 32.59 MHz, flat within
+placement noise. The previous step cost 11% for 52%; this one cost zero for
+19%.
+
+That difference is the useful finding, and it is not luck. The earlier growth
+was the AG stage and the memory path -- logic inserted INTO the dispatch
+chain. This growth is bit-operation and BCD units sitting in parallel with the
+ALU, plus a MOVEM sequencer that runs beside the pipeline rather than inside
+its critical path. **Adding functional breadth is close to free; adding
+dispatch depth is what costs.**
+
+That is also precisely the distinction the original diagnosis rested on. The
+old core's problem was never breadth -- it was `preview_ok`, a 17-way
+ack-dependent mux select sitting in the middle of the longest path, i.e.
+dispatch depth. This core does not have that and is not acquiring it as the
+ISA fills in.
+
+Refitting the scaling across all four new-core points gives period ∝ area^0.22,
+which extrapolated to the old core's 29,043 LUTs is ~40 ns, about **25 MHz**
+against its 19.55 MHz -- up from the ~23 MHz the previous fit suggested, and
+now on a shallower curve.
+
+The area question is also looking better than the LUT count alone implies: at
+9,201 LUTs this core already executes the integer ISA including memory
+operands, RMW, memory-to-memory, indexed EA, mul/div, branches, DBcc/Scc,
+BSR/RTS, TRAP, bit operations, BCD and MOVEM. It is not remotely 1/3 of the
+way through the old core's function at 1/3 of its area.
