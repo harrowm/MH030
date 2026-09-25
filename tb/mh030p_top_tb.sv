@@ -174,6 +174,32 @@ module mh030p_top_tb;
         chk("RTS returned",        dut.u_core.u_rf.regs[1], 32'd2);
         chk("stack restored",      dut.u_core.u_rf.regs[15], 32'h0000_0040);
 
+        // ── TRAP #0: frame pushed, vector fetched, handler entered ──────────
+        // TRAP #n takes vector 32+n, whose address is 4*(32+n) = 0x80 for #0.
+        //  0: MOVEQ #0x60,D7
+        //  2: MOVEA.L D7,A7      A7 = 0x60
+        //  4: TRAP #0            -> vector at 0x80 -> handler at byte 0x30
+        //  6: MOVEQ #0x7F,D0     must NOT run
+        // 0x30: MOVEQ #9,D3 ; BRA self
+        for (i = 0; i < 256; i++) begin prog[i] = 16'h4E71; ram[i] = 32'h0; end
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;                // MOVEA.L D7,A7
+        prog[2]  = 16'h4E40;                // TRAP #0
+        prog[3]  = MOVEQ(0, 8'h7F);         // skipped if the trap is taken
+        prog[24] = MOVEQ(3, 8'd9);          // handler at byte 0x30
+        prog[25] = 16'h60FE;                // park
+        ram[32'h80 >> 2] = 32'h0000_0030;   // vector 32 -> handler address
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("TRAP entered handler", dut.u_core.u_rf.regs[3], 32'd9);
+        chk("TRAP skipped inline",  dut.u_core.u_rf.regs[0], 32'd0);
+        chk("TRAP pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("frame holds PC",       ram[32'h5C >> 2], 32'h0000_0006);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

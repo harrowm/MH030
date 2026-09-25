@@ -129,13 +129,15 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_BRANCH)
                         || (dec_uop.uclass == UC_SCC)
                         || (dec_uop.uclass == UC_DBCC)
-                        || (dec_uop.uclass == UC_RETURN))
+                        || (dec_uop.uclass == UC_RETURN)
+                        || (dec_uop.uclass == UC_TRAP))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
                            || (dec_uop.uclass == UC_DBCC)
                            // RTS commits to no register, so it would fail the
                            // destination check below; it needs its EA instead.
                            || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
+                           || (dec_uop.uclass == UC_TRAP)
                            || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
                            :   dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
@@ -152,7 +154,8 @@ module mh030p_core (
     reg [31:0] mem_hold;
     reg [31:0] ag_pc, ex_pc;
     // Which register the B port carried; needed by the interlock below.
-    wire ag_mem    = ag_uop.reads_mem || ag_uop.writes_mem;
+    wire ag_is_trap = (ag_uop.uclass == UC_TRAP);
+    wire ag_mem     = ag_uop.reads_mem || ag_uop.writes_mem || ag_is_trap;
     wire ag_is_bsr = (ag_uop.uclass == UC_BRANCH) && (ag_uop.cond == 4'h1);
     wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
     // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
@@ -180,6 +183,25 @@ module mh030p_core (
     // single always_ff that drives the memory port; assigned once the operand
     // registers exist.
     wire [31:0] ex_m2m_addr;
+
+    // ── Exception sequence ──────────────────────────────────────────────────
+    // A trap is three bus cycles: push the return PC, push the SR, then read
+    // the vector and jump to it. That is the first thing in this core with a
+    // multi-cycle sequence of its OWN rather than a second phase bolted onto
+    // an instruction, so it gets a small state machine that owns the memory
+    // port while it runs.
+    localparam [1:0] XS_IDLE = 2'd0, XS_PC = 2'd1, XS_SR = 2'd2, XS_VEC = 2'd3;
+    // Declared here because the exception FSM below pushes it; assigned near
+    // the functional units.
+    reg  [7:0]  ccr_r;
+
+    reg  [1:0]  exc_state;
+    reg  [31:0] exc_sp;
+    reg  [31:0] exc_vec_addr;
+    reg         exc_taken;
+
+    wire ex_is_trap  = ex_valid && (ex_uop.uclass == UC_TRAP);
+    wire exc_running = (exc_state != XS_IDLE);
 
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
                     && (ex_rmw ? !rmw_done : !mem_got);
@@ -217,7 +239,8 @@ module mh030p_core (
     // NOT freeze EX: the producer it is waiting for IS in EX, so holding EX
     // as well deadlocks -- the interlock can never clear. It holds ID/AG and
     // lets EX drain, inserting a bubble.
-    wire stall_ex = ex_wait_mem || ex_wait_div;
+    wire stall_ex = ex_wait_mem || ex_wait_div
+                 || (ex_is_trap && !exc_taken);
     wire stall_ag = ag_base_busy;
 
     assign instr_ready = !stall_ex && !stall_ag;
@@ -225,7 +248,9 @@ module mh030p_core (
     // ── Register file: address in ID, data in AG ────────────────────────────
     // With a memory source the B port carries the EA BASE register instead of
     // the ALU destination; the destination is forwarded in EX.
-    wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem;
+    // A TRAP also needs A7 on the B port, to build its stack frame.
+    wire dec_is_trap = (dec_uop.uclass == UC_TRAP);
+    wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem || dec_is_trap;
     wire [31:0] rf_a, rf_b, rf_c;
     mh030p_regfile u_rf (
         .clk_4x   (clk_4x),
@@ -348,7 +373,7 @@ module mh030p_core (
     // instruction actually leaves AG. Gating it on ag_valid alone makes it
     // level-sensitive, so every cycle EX spends stalled on memory applies the
     // increment again -- (A3)+ advanced by 12 instead of 4.
-    wire ag_an_upd = ag_valid && ag_mem
+    wire ag_an_upd = ag_valid && ag_mem && !ag_is_trap
                   && !stall_ex && !stall_ag
                   && ((ag_uop.ea_mode == UEA_AN_POST)
                    || (ag_uop.ea_mode == UEA_AN_PRE));
@@ -381,7 +406,7 @@ module mh030p_core (
             // That is exactly what happened -- the first memory access went
             // out with addr=0 before A3 had been written.
             mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
-                                 && !stall_ag;
+                                 && !stall_ag && !ag_is_trap;
             mem_addr <= ag_ea;
             // Read if the instruction reads, regardless of whether it also
             // writes: an RMW's FIRST bus cycle is the read, and the write is
@@ -397,6 +422,31 @@ module mh030p_core (
             mem_wdata<= ag_is_bsr ? (ag_pc + 32'd2
                                      + {27'h0, ag_uop.ext_words, 1'b0})
                       : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
+        end else if (ex_is_trap && !exc_taken) begin
+            // Vector 32+n lives at VBR + 4*vector; VBR is 0 here, since a
+            // movable vector base needs the control registers this core does
+            // not have yet.
+            case (exc_state)
+                XS_IDLE: begin                       // push the return PC
+                    mem_req   <= 1'b1;
+                    mem_rw    <= 1'b0;
+                    mem_siz   <= UZ_LONG;
+                    mem_addr  <= ex_b - 32'd4;
+                    mem_wdata <= ex_pc + 32'd2;
+                end
+                XS_PC: if (mem_ack) begin            // push the SR
+                    mem_req   <= 1'b1;
+                    mem_rw    <= 1'b0;
+                    mem_addr  <= exc_sp - 32'd4;
+                    mem_wdata <= {16'h0, 8'h20, ccr_r};
+                end
+                XS_SR: if (mem_ack) begin            // fetch the vector
+                    mem_req   <= 1'b1;
+                    mem_rw    <= 1'b1;
+                    mem_addr  <= {ex_uop.imm[23:0], 2'b00};
+                end
+                default: if (mem_ack) mem_req <= 1'b0;
+            endcase
         end else if (ex_rmw && mem_got && !rmw_wr_issued) begin
             // Read captured: turn the same address around as a write of the
             // ALU result. The address is already in mem_addr, so only the
@@ -469,7 +519,6 @@ module mh030p_core (
     wire [31:0] alu_result, shf_result;
     wire alu_n, alu_z, alu_v, alu_c, alu_x;
     wire shf_n, shf_z, shf_v, shf_c, shf_x;
-    reg  [7:0]  ccr_r;
 
     eu_alu u_alu (
         .src   (ex_src),
@@ -595,10 +644,13 @@ module mh030p_core (
     // BSR (cond 0001) is unconditional despite the encoding meaning FALSE
     // everywhere else.
     wire branch_taken = ex_is_branch && ((ex_uop.cond == 4'h1) || cond_true);
-    assign redirect   = !stall_ex && (branch_taken || dbcc_branch || ex_is_rts);
+    assign redirect   = !stall_ex && (branch_taken || dbcc_branch || ex_is_rts
+                                      || (ex_is_trap && exc_taken));
     // RTS goes to the address it popped; everything else is relative to the
     // instruction plus 2. !stall_ex above guarantees the pop has landed.
-    assign redirect_pc = ex_is_rts ? mem_hold : (ex_pc + 32'd2 + ex_uop.imm);
+    assign redirect_pc = (ex_is_trap && exc_taken) ? exc_vec_addr
+                       : ex_is_rts                  ? mem_hold
+                                                    : (ex_pc + 32'd2 + ex_uop.imm);
 
     // Scc writes a byte: all ones or all zeroes, upper bytes untouched.
     wire [31:0] scc_result  = {ex_dst[31:8], {8{cond_true}}};
@@ -650,6 +702,32 @@ module mh030p_core (
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
+            exc_state    <= XS_IDLE;
+            exc_sp       <= 32'h0;
+            exc_vec_addr <= 32'h0;
+            exc_taken    <= 1'b0;
+        end else if (!ex_is_trap) begin
+            exc_state <= XS_IDLE;
+            exc_taken <= 1'b0;
+        end else begin
+            case (exc_state)
+                XS_IDLE: begin exc_state <= XS_PC; exc_sp <= ex_b - 32'd4; end
+                XS_PC:   if (mem_ack) begin
+                             exc_state <= XS_SR;
+                             exc_sp    <= exc_sp - 32'd4;
+                         end
+                XS_SR:   if (mem_ack) exc_state <= XS_VEC;
+                XS_VEC:  if (mem_ack) begin
+                             exc_vec_addr <= mem_rdata;
+                             exc_taken    <= 1'b1;
+                         end
+                default: ;
+            endcase
+        end
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
             rmw_wr_issued <= 1'b0;
             rmw_done      <= 1'b0;
         end else if (!stall_ex) begin
@@ -679,9 +757,13 @@ module mh030p_core (
     // (An)+ / -(An) commit their An update from AG, sharing the write port.
     // Nothing in this phase's subset both updates An and commits an ALU
     // result in the same cycle.
-    assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd;
-    assign wb_wr_sel  = ag_an_upd ? ag_uop.ea_reg : wb_reg;
-    assign wb_wr_data = ag_an_upd ? ag_an_val     : wb_data;
+    // A completed trap leaves A7 below the frame it pushed.
+    wire exc_commit_sp = ex_is_trap && exc_taken && !stall_ex;
+    assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd || exc_commit_sp;
+    assign wb_wr_sel  = exc_commit_sp ? 4'd15
+                      : ag_an_upd     ? ag_uop.ea_reg : wb_reg;
+    assign wb_wr_data = exc_commit_sp ? exc_sp
+                      : ag_an_upd     ? ag_an_val     : wb_data;
     assign ccr_out    = ccr_r;
 
 endmodule

@@ -769,7 +769,10 @@ module mh030p_decode (
                 uop.uclass      = UC_TRAP;
                 uop.unit        = UU_NONE;
                 uop.siz         = UZ_WORD;
-                uop.imm         = {28'h0, sys_lo};
+                // Vector NUMBER, not the opcode's vector field: TRAP #n takes
+                // vector 32+n (MC68030UM Table 8-1).
+                uop.imm         = {26'h0, 2'b00} | (32'd32 + {28'h0, sys_lo});
+                uop.ea_reg      = 4'd15;       // A7, for the stack frame
                 uop.traps       = 1'b1;
             end else if (sys_is_link || sys_is_unlk) begin
                 uop.uclass      = UC_LINK;
