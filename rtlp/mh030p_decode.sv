@@ -568,6 +568,11 @@ module mh030p_decode (
                     if (!ea_src_ok) begin
                         uop.ea_mode = ea_dst_mode_w;
                         uop.ea_reg  = rn_dst_an;
+                    end else begin
+                        // Memory to memory: the source EA stays in ea_*, the
+                        // destination goes in dst_ea_*.
+                        uop.dst_ea_mode = ea_dst_mode_w;
+                        uop.dst_ea_reg  = rn_dst_an;
                     end
                 end else begin
                     uop.dst_kind   = dst_is_dn ? US_DREG : US_AREG;

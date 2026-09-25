@@ -164,6 +164,17 @@ typedef struct packed {
     logic [1:0]  ea_idx_scale;   // 1/2/4/8 as 00/01/10/11
     logic [31:0] ea_disp;
 
+    // Destination effective address, for the one shape that genuinely needs
+    // TWO addresses in a single instruction: a memory-to-memory MOVE. Every
+    // other memory instruction uses ea_* alone -- for a plain store the
+    // destination EA goes in ea_* because the source is a register and the
+    // field is free. Adding a second EA rather than expanding into two uops
+    // is the smaller change; a general expander is still the eventual answer
+    // for the multi-cycle families.
+    logic [3:0]  dst_ea_mode;
+    logic [3:0]  dst_ea_reg;
+    logic [31:0] dst_ea_disp;
+
     // Side effects.
     logic        writes_reg;
     logic        updates_ccr;
@@ -214,6 +225,9 @@ function automatic uop_t uop_clear();
     u.ea_disp      = 32'h0;
     u.writes_reg   = 1'b0;
     u.updates_ccr  = 1'b0;
+    u.dst_ea_mode  = UEA_NONE;
+    u.dst_ea_reg   = 4'h0;
+    u.dst_ea_disp  = 32'h0;
     u.ext_words    = 3'd0;
     u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;

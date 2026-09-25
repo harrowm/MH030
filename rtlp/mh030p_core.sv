@@ -110,7 +110,16 @@ module mh030p_core (
     wire dec_pure_wr = dec_uop.writes_mem && !dec_uop.reads_mem;
     // Read-modify-write: one EA, read then write, two bus cycles. This is the
     // first instruction shape that needs more than one pass through EX.
-    wire dec_rmw     = dec_uop.writes_mem && dec_uop.reads_mem;
+    wire dec_rmw     = dec_uop.writes_mem && dec_uop.reads_mem
+                    && (dec_uop.dst_ea_mode == UEA_NONE);
+    // Memory to memory: read one address, write a DIFFERENT one. Two bus
+    // cycles like an RMW, but the second uses dst_ea_*.
+    wire dec_mem2mem = dec_uop.writes_mem && dec_uop.reads_mem
+                    && (dec_uop.dst_ea_mode != UEA_NONE);
+    wire dec_dst_ea_ok = (dec_uop.dst_ea_mode == UEA_AN_IND)
+                      || (dec_uop.dst_ea_mode == UEA_AN_POST)
+                      || (dec_uop.dst_ea_mode == UEA_AN_PRE)
+                      || (dec_uop.dst_ea_mode == UEA_AN_D16);
 
     wire dec_executable = dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
@@ -127,7 +136,8 @@ module mh030p_core (
                            // RTS commits to no register, so it would fail the
                            // destination check below; it needs its EA instead.
                            || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
-                           || (dec_rmw     ? dec_ea_ok
+                           || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
+                           :   dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
                                            : (dec_uop.dst_kind == US_DREG
                                               || dec_uop.dst_kind == US_AREG)))
@@ -147,8 +157,9 @@ module mh030p_core (
     wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
     // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
     // and the interlock track a different register than the one actually read.
-    wire [3:0] ag_a_sel = (ag_uop.reads_mem && !ag_uop.writes_mem)
-                        ? ag_uop.dst_reg : ag_uop.src_reg;
+    wire [3:0] ag_a_sel = (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
+                        : (ag_uop.reads_mem && !ag_uop.writes_mem)
+                          ? ag_uop.dst_reg : ag_uop.src_reg;
 
     // EX stalls while its own memory operand is still outstanding. The whole
     // pipeline behind it holds, which is what makes the request safe to leave
@@ -158,12 +169,17 @@ module mh030p_core (
     // computed value. mem_got marks the read captured, rmw_done the write
     // acknowledged; a plain access needs only the first.
     wire ex_rmw = ex_valid && ex_uop.reads_mem && ex_uop.writes_mem;
+    wire ex_m2m = ex_rmw && (ex_uop.dst_ea_mode != UEA_NONE);
     reg  rmw_wr_issued, rmw_done;
     // Declared here so the ONE always_ff that drives the memory port can use
     // it; assigned below once the ALU result exists. Splitting the port
     // across two blocks would give it two drivers -- the exact fault that had
     // to be fixed in rtl/ (see make lint-drivers).
     wire [31:0] ex_commit;
+    // Destination address for a memory-to-memory move. Declared here for the
+    // single always_ff that drives the memory port; assigned once the operand
+    // registers exist.
+    wire [31:0] ex_m2m_addr;
 
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
                     && (ex_rmw ? !rmw_done : !mem_got);
@@ -221,8 +237,11 @@ module mh030p_core (
         // memory and the ALU destination is a register. For an RMW the
         // register operand is the SOURCE and the destination is memory, so
         // dst_reg is unset -- using it read D0 by accident.
-        .rd_a_sel ((dec_uop.reads_mem && !dec_uop.writes_mem)
-                   ? dec_uop.dst_reg : dec_uop.src_reg),
+        // For a memory-to-memory move the source comes from memory and there
+        // is no register operand, so the A port carries the DESTINATION base.
+        .rd_a_sel ((dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
+                   : (dec_uop.reads_mem && !dec_uop.writes_mem)
+                     ? dec_uop.dst_reg : dec_uop.src_reg),
         .rd_b_sel (dec_mem ? dec_uop.ea_reg   : dec_uop.dst_reg),
         // Index register for an indexed EA; harmlessly reads R0 otherwise.
         .rd_c_sel (dec_uop.ea_idx_reg),
@@ -385,6 +404,10 @@ module mh030p_core (
             mem_req   <= 1'b1;
             mem_rw    <= 1'b0;
             mem_wdata <= ex_commit;
+            // A memory-to-memory move writes a DIFFERENT address than it
+            // read; an RMW writes the same one, so mem_addr is left alone
+            // there. Predecrement on the destination is applied here.
+            if (ex_m2m) mem_addr <= ex_m2m_addr;
         end else if (mem_ack) begin
             mem_req  <= 1'b0;   // acknowledged: drop it, never re-issue
         end
@@ -408,8 +431,9 @@ module mh030p_core (
     //   memory source : A = ALU destination, B = EA base
     //   otherwise     : A = ALU source,      B = ALU destination
     wire ex_rmw_op = ex_uop.reads_mem && ex_uop.writes_mem;
-    wire [3:0] ex_a_sel = (ex_uop.reads_mem && !ex_uop.writes_mem)
-                        ? ex_uop.dst_reg : ex_uop.src_reg;
+    wire [3:0] ex_a_sel = (ex_uop.dst_ea_mode != UEA_NONE) ? ex_uop.dst_ea_reg
+                        : (ex_uop.reads_mem && !ex_uop.writes_mem)
+                          ? ex_uop.dst_reg : ex_uop.src_reg;
 
     wire fwd_a_wb  = wb_valid  && wb_writes  && (wb_reg  == ex_a_sel);
     wire fwd_a_wbp = wbp_valid && wbp_writes && (wbp_reg == ex_a_sel);
@@ -424,11 +448,20 @@ module mh030p_core (
     //   read-modify-write (ADD.L Dn,(An)) : memory is the DESTINATION
     // eu_alu computes dst OP src, so getting this backwards computes the
     // right arithmetic on the wrong operands.
-    wire [31:0] ex_src = ex_rmw_op                   ? ex_a_f
+    // Three shapes, and they route memory to different places:
+    //   memory-to-memory       : memory is BOTH sides; the A port holds the
+    //                            destination ADDRESS, not an operand
+    //   read-modify-write      : memory is the destination
+    //   plain memory read      : memory is the source
+    // Checked in that order, because a mem-to-mem move also satisfies the RMW
+    // test -- it reads and writes memory too.
+    wire [31:0] ex_src = ex_m2m                      ? mem_hold
+                       : ex_rmw_op                   ? ex_a_f
                        : ex_uop.reads_mem            ? mem_hold
                        : (ex_uop.src_kind == US_IMM) ? ex_uop.imm
                                                      : ex_a_f;
-    wire [31:0] ex_dst = ex_rmw_op        ? mem_hold
+    wire [31:0] ex_dst = ex_m2m           ? mem_hold
+                       : ex_rmw_op        ? mem_hold
                        : ex_uop.reads_mem ? ex_a_f
                                           : ex_b_f;
 
@@ -476,6 +509,12 @@ module mh030p_core (
         .n_out(md_n), .z_out(md_z), .v_out(md_v), .c_out(md_c),
         .div_by_zero(md_dbz)
     );
+
+    wire [31:0] ex_m2m_step = (ex_uop.siz == UZ_BYTE) ? 32'd1
+                            : (ex_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
+    assign ex_m2m_addr = ex_a_f + ex_uop.dst_ea_disp
+                       + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
+                          ? (32'h0 - ex_m2m_step) : 32'h0);
 
     wire [31:0] mv_result = (ex_uop.siz == UZ_BYTE) ? {ex_dst[31:8],  ex_src[7:0]}
                           : (ex_uop.siz == UZ_WORD) ? {ex_dst[31:16], ex_src[15:0]}

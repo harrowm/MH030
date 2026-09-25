@@ -295,6 +295,19 @@ module mh030p_core_tb;
         bubble(14);
         chk("indexed (4,A3,D4.L)", dut.u_rf.regs[5], 32'hC0FF_EE00);
 
+        // ── Memory-to-memory MOVE: two different addresses ─────────────────
+        // MOVE.L (A3),(A4) = 0010 100 010 010 011 = 0x2893
+        ram[32'h30 >> 2] = 32'hBEEF_1234;
+        ram[32'h38 >> 2] = 32'h0;
+        issue(MOVEQ(3, 8'h30));
+        issue(16'h2643);                  // A3 = 0x30 (source)
+        issue(MOVEQ(4, 8'h38));
+        issue(16'h2844);                  // MOVEA.L D4,A4 -> A4 = 0x38 (dest)
+        issue(16'h2893);                  // MOVE.L (A3),(A4)
+        bubble(16);
+        chk("mem->mem MOVE.L",  ram[32'h38 >> 2], 32'hBEEF_1234);
+        chk("mem->mem src kept", ram[32'h30 >> 2], 32'hBEEF_1234);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");
