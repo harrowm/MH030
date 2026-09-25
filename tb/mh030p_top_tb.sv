@@ -140,6 +140,40 @@ module mh030p_top_tb;
         chk("DBF terminates",  dut.u_core.u_rf.regs[3], 32'h0000_FFFF);
         chk("ST sets byte",    dut.u_core.u_rf.regs[5][7:0] | 32'h0, 32'h0000_00FF);
 
+        // ── BSR / RTS: call and return through the stack ────────────────────
+        //  0: MOVEQ #0x40,D7        set up a stack pointer value
+        //  2: MOVEA.L D7,A7         A7 = 0x40
+        //  4: MOVEQ #1,D0
+        //  6: BSR.B  +6             call the routine at byte 12
+        //  8: MOVEQ #2,D1           runs AFTER the return
+        // 10: NOP
+        // 12: MOVEQ #7,D2           the routine
+        // 14: RTS                   back to byte 8
+        for (i = 0; i < 256; i++) begin prog[i] = 16'h4E71; ram[i] = 32'h0; end
+        prog[0] = MOVEQ(7, 8'h40);
+        prog[1] = 16'h2E47;                 // MOVEA.L D7,A7
+        prog[2] = MOVEQ(0, 8'd1);
+        prog[3] = 16'h6106;                 // BSR.B +6 -> 6+2+6 = 14? see below
+        prog[4] = MOVEQ(1, 8'd2);
+        // Park here after the return, otherwise execution falls through into
+        // the routine again and RTS pops repeatedly off a stack that is no
+        // longer its own -- which is what made A7 look wrong.
+        prog[5] = 16'h60FE;                 // BRA.B -2 (to itself, at byte 10)
+        prog[6] = MOVEQ(2, 8'd7);
+        prog[7] = 16'h4E75;                 // RTS
+        // BSR is at byte 6; base 6+2 = 8; the routine is at byte 12, so the
+        // displacement is 12 - 8 = 4.
+        prog[3] = 16'h6104;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("BSR reached routine", dut.u_core.u_rf.regs[2], 32'd7);
+        chk("RTS returned",        dut.u_core.u_rf.regs[1], 32'd2);
+        chk("stack restored",      dut.u_core.u_rf.regs[15], 32'h0000_0040);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

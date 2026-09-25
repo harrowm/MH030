@@ -792,7 +792,14 @@ module mh030p_decode (
                 uop.unit        = UU_NONE;
                 uop.siz         = UZ_LONG;
                 case (sys_lo)
-                    4'h3, 4'h5, 4'h7: uop.uclass = UC_RETURN;   // RTE/RTS/RTR
+                    4'h3, 4'h5, 4'h7: begin
+                        // RTS pops the return address; (A7)+ gets the stack
+                        // adjustment from the same machinery BSR uses.
+                        uop.uclass    = UC_RETURN;
+                        uop.ea_mode   = UEA_AN_POST;
+                        uop.ea_reg    = 4'd15;
+                        uop.reads_mem = 1'b1;
+                    end
                     4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1; end
                     4'h0, 4'h1, 4'h2: uop.uclass = UC_NOP;      // RESET/NOP/STOP
                     default: uop.uclass = UC_UNIMPL;            // RTD
@@ -940,6 +947,16 @@ module mh030p_decode (
                             ? {{16{ext[15]}}, ext[15:0]}
                             : {{24{instr[7]}}, instr[7:0]};
             uop.x_unchanged = 1'b1;
+            // BSR pushes a return address. Describing that as -(A7) lets the
+            // existing auto-decrement machinery do the stack adjustment, so
+            // no separate stack-pointer path is needed. writes_reg stays 0,
+            // matching the reference decoder.
+            if (f_cond == 4'h1) begin
+                uop.ea_mode    = UEA_AN_PRE;
+                uop.ea_reg     = 4'd15;          // A7
+                uop.siz        = UZ_LONG;
+                uop.writes_mem = 1'b1;
+            end
         end
 
         // ── MOVEQ ───────────────────────────────────────────────────────────

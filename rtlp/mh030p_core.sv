@@ -119,10 +119,14 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_MULDIV)
                         || (dec_uop.uclass == UC_BRANCH)
                         || (dec_uop.uclass == UC_SCC)
-                        || (dec_uop.uclass == UC_DBCC))
+                        || (dec_uop.uclass == UC_DBCC)
+                        || (dec_uop.uclass == UC_RETURN))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
                            || (dec_uop.uclass == UC_DBCC)
+                           // RTS commits to no register, so it would fail the
+                           // destination check below; it needs its EA instead.
+                           || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
                            || (dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
                                            : (dec_uop.dst_kind == US_DREG
@@ -138,7 +142,8 @@ module mh030p_core (
     reg [31:0] mem_hold;
     reg [31:0] ag_pc, ex_pc;
     // Which register the B port carried; needed by the interlock below.
-    wire ag_mem = ag_uop.reads_mem || ag_uop.writes_mem;
+    wire ag_mem    = ag_uop.reads_mem || ag_uop.writes_mem;
+    wire ag_is_bsr = (ag_uop.uclass == UC_BRANCH) && (ag_uop.cond == 4'h1);
     wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
     // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
     // and the interlock track a different register than the one actually read.
@@ -367,7 +372,12 @@ module mh030p_core (
             mem_siz  <= ag_uop.siz;
             // A pure write's data is the source operand, which AG already
             // has: the A port for a register source, or the immediate.
-            mem_wdata<= (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
+            // BSR stores the RETURN ADDRESS, not a register: the address of
+            // the instruction after the branch, which is the branch plus its
+            // own extension words.
+            mem_wdata<= ag_is_bsr ? (ag_pc + 32'd2
+                                     + {27'h0, ag_uop.ext_words, 1'b0})
+                      : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
         end else if (ex_rmw && mem_got && !rmw_wr_issued) begin
             // Read captured: turn the same address around as a write of the
             // ALU result. The address is already in mem_addr, so only the
@@ -522,7 +532,15 @@ module mh030p_core (
         endcase
     end
 
+    // BSR and RTS move the stack and the PC together. A7 is register 15.
+    // BSR pushes the return address then redirects; RTS pops it and
+    // redirects to what it read. Both are two-part operations that EX holds
+    // for, in the same way an RMW does.
+    localparam [3:0] REG_A7 = 4'd15;
+
     wire ex_is_branch = ex_valid && (ex_uop.uclass == UC_BRANCH);
+    wire ex_is_bsr    = ex_is_branch && (ex_uop.cond == 4'h1);
+    wire ex_is_rts    = ex_valid && (ex_uop.uclass == UC_RETURN);
     wire ex_is_scc    = ex_valid && (ex_uop.uclass == UC_SCC);
     wire ex_is_dbcc   = ex_valid && (ex_uop.uclass == UC_DBCC);
 
@@ -538,9 +556,10 @@ module mh030p_core (
     // BSR (cond 0001) is unconditional despite the encoding meaning FALSE
     // everywhere else.
     wire branch_taken = ex_is_branch && ((ex_uop.cond == 4'h1) || cond_true);
-    assign redirect   = !stall_ex && (branch_taken || dbcc_branch);
-    // The 68k branch base is the address of the instruction plus 2.
-    assign redirect_pc = ex_pc + 32'd2 + ex_uop.imm;
+    assign redirect   = !stall_ex && (branch_taken || dbcc_branch || ex_is_rts);
+    // RTS goes to the address it popped; everything else is relative to the
+    // instruction plus 2. !stall_ex above guarantees the pop has landed.
+    assign redirect_pc = ex_is_rts ? mem_hold : (ex_pc + 32'd2 + ex_uop.imm);
 
     // Scc writes a byte: all ones or all zeroes, upper bytes untouched.
     wire [31:0] scc_result  = {ex_dst[31:8], {8{cond_true}}};
@@ -566,7 +585,8 @@ module mh030p_core (
             // DBcc writes Dn only when it actually decrements.
             wb_writes  <= ex_valid && ex_uop.writes_reg && !ex_is_branch
                                    && !ex_uop.writes_mem
-                                   && (!ex_is_dbcc || dbcc_dec);
+                                   && (!ex_is_dbcc || dbcc_dec)
+                                   && !ex_is_rts;
             wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch;
             wb_ccr     <= {3'b000,
                            ex_uop.x_unchanged ? ccr_r[4] : ex_x,
