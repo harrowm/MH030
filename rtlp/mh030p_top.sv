@@ -8,29 +8,22 @@
 // testbench-fed instruction sequence, which is what makes a branch TARGET
 // verifiable end to end -- until now only the squash could be checked.
 //
-// The instruction and data ports are separate. Real 68030 silicon arbitrates
-// one bus between them (rtl/biu_arbiter.sv); see mh030p_ifu.sv's header for
-// why that is deliberately not modelled yet.
+// Instruction fetch and data share ONE external bus, arbitrated by
+// mh030p_arb.sv with data winning over fetch, as rtl/biu_arbiter.sv does.
 // =============================================================================
 
 module mh030p_top (
     input  wire        clk_4x,
     input  wire        rst_n,
 
-    // Instruction port.
-    output wire        if_req,
-    output wire [31:0] if_addr,
-    input  wire [31:0] if_rdata,
-    input  wire        if_ack,
-
-    // Data port.
-    output wire        mem_req,
-    output wire [31:0] mem_addr,
-    output wire        mem_rw,
-    output wire [1:0]  mem_siz,
-    output wire [31:0] mem_wdata,
-    input  wire [31:0] mem_rdata,
-    input  wire        mem_ack,
+    // The single external bus.
+    output wire        bus_req,
+    output wire [31:0] bus_addr,
+    output wire        bus_rw,
+    output wire [1:0]  bus_siz,
+    output wire [31:0] bus_wdata,
+    input  wire [31:0] bus_rdata,
+    input  wire        bus_ack,
 
     // Architectural state, exposed for the testbench.
     output wire        wb_wr_en,
@@ -38,6 +31,13 @@ module mh030p_top (
     output wire [31:0] wb_wr_data,
     output wire [7:0]  ccr_out
 );
+
+    // Internal request/ack pairs, joined by the arbiter below.
+    wire        if_req,  mem_req, mem_rw;
+    wire [31:0] if_addr, mem_addr, mem_wdata;
+    wire [1:0]  mem_siz;
+    wire [31:0] if_rdata, mem_rdata;
+    wire        if_ack,  mem_ack;
 
     wire [15:0] if_instr, if_q3;
     wire [31:0] if_ext, if_pc;
@@ -80,6 +80,18 @@ module mh030p_top (
         .mem_rdata(mem_rdata), .mem_ack(mem_ack),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
+    );
+
+    mh030p_arb u_arb (
+        .clk_4x(clk_4x), .rst_n(rst_n),
+        .if_req(if_req), .if_addr(if_addr),
+        .if_rdata(if_rdata), .if_ack(if_ack),
+        .d_req(mem_req), .d_addr(mem_addr), .d_rw(mem_rw),
+        .d_siz(mem_siz), .d_wdata(mem_wdata),
+        .d_rdata(mem_rdata), .d_ack(mem_ack),
+        .bus_req(bus_req), .bus_addr(bus_addr), .bus_rw(bus_rw),
+        .bus_siz(bus_siz), .bus_wdata(bus_wdata),
+        .bus_rdata(bus_rdata), .bus_ack(bus_ack)
     );
 
 endmodule

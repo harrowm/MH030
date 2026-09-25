@@ -88,11 +88,13 @@ $(SIM)/mh030p_core: rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
 # MH030-P: fetch unit + core running a program out of memory.
-$(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv \
+$(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+                   rtlp/mh030p_core.sv \
                    rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
                    rtlp/mh030p_uop.svh rtl/opcode_fields.sv rtl/eu_alu.sv \
                    rtl/eu_shifter.sv rtl/eu_mul_div.sv tb/mh030p_top_tb.sv | $(SIM)
-	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_ifu.sv \
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+	    rtlp/mh030p_ifu.sv \
 	    rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
 	    rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv \
 	    tb/mh030p_top_tb.sv 2>&1 \
