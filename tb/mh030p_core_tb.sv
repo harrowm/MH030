@@ -67,7 +67,6 @@ module mh030p_core_tb;
     );
 
     int fails = 0;
-
     // Capture the first redirect so its target arithmetic can be asserted.
     logic [31:0] branch_pc_seen   = 32'hFFFF_FFFF;
     logic [31:0] branch_pc_expect = 32'hFFFF_FFFF;
@@ -343,6 +342,26 @@ module mh030p_core_tb;
         issue(16'h4845);                  // SWAP D5 -> 0x00210000
         bubble(8);
         chk("SWAP D5",        dut.u_rf.regs[5], 32'h0021_0000);
+
+        // ── MOVEM: many registers, one bus cycle each ──────────────────────
+        // MOVEM.L D0-D2,(A3)  = 0x48D3 + mask 0x0007 (D0,D1,D2)
+        // MOVEM.L (A3),D4-D6  = 0x4CD3 + mask 0x0070 (D4,D5,D6)
+        issue(MOVEQ(3, 8'h50));
+        issue(16'h2643);                  // A3 = 0x50
+        issue(MOVEQ(0, 8'h11));
+        issue(MOVEQ(1, 8'h22));
+        issue(MOVEQ(2, 8'h33));
+        issue(16'h48D3, 32'h0000_0007);   // MOVEM.L D0-D2,(A3)
+        bubble(30);
+        chk("MOVEM store D0",  ram[32'h50 >> 2], 32'h0000_0011);
+        chk("MOVEM store D1",  ram[32'h54 >> 2], 32'h0000_0022);
+        chk("MOVEM store D2",  ram[32'h58 >> 2], 32'h0000_0033);
+
+        issue(16'h4CD3, 32'h0000_0070);   // MOVEM.L (A3),D4-D6
+        bubble(30);
+        chk("MOVEM load D4",   dut.u_rf.regs[4], 32'h0000_0011);
+        chk("MOVEM load D5",   dut.u_rf.regs[5], 32'h0000_0022);
+        chk("MOVEM load D6",   dut.u_rf.regs[6], 32'h0000_0033);
 
         $display("");
         if (fails == 0) begin

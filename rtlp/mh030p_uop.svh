@@ -178,6 +178,10 @@ typedef struct packed {
     // Side effects.
     logic        writes_reg;
     logic        updates_ccr;
+    logic        xfer_long;      // MOVEM transfer size. Separate from siz
+                                 // because the reference decoder reports
+                                 // siz=long for MOVEM whatever bit 6 says --
+                                 // siz is not the transfer size there.
     logic [2:0]  ext_words;      // extension words this instruction consumes,
                                  // so the fetch unit knows how far to drain
     logic        ea_disp_valid;  // ea_disp/ea_idx_* are trustworthy. False when
@@ -228,6 +232,7 @@ function automatic uop_t uop_clear();
     u.dst_ea_mode  = UEA_NONE;
     u.dst_ea_reg   = 4'h0;
     u.dst_ea_disp  = 32'h0;
+    u.xfer_long    = 1'b0;
     u.ext_words    = 3'd0;
     u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;

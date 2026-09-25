@@ -751,9 +751,18 @@ module mh030p_decode (
             end else if (g4_is_movem) begin
                 uop.uclass      = UC_MOVEM;
                 uop.unit        = UU_NONE;
-                uop.siz         = UZ_LONG;
+                uop.siz         = UZ_LONG;         // matches the reference
+                uop.xfer_long   = instr[6];        // the real transfer size
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
+                // The register mask is the FIRST extension word, so which
+                // half of ext holds it depends on whether the EA needs one
+                // too: mask alone lands in the low half, mask plus a
+                // displacement puts the mask high. Same rule as every other
+                // extension field (m68030_seq.sv:1160).
+                uop.imm         = (ea_words(ea_mode_w) == 3'd0)
+                                ? {16'h0, ext[15:0]}
+                                : {16'h0, ext[31:16]};
                 uop.reads_mem   = !g4_movem_to_mem;
                 uop.writes_mem  = g4_movem_to_mem;
                 uop.first       = 1'b1;
@@ -1317,6 +1326,9 @@ module mh030p_decode (
         uop.ext_words     = (uop.uclass == UC_BRANCH)
                           ? ((instr[7:0] == 8'h00) ? 3'd1 : 3'd0)
                           : (uop.uclass == UC_DBCC) ? 3'd1   // displacement word
+                          // MOVEM: the mask word plus whatever the EA needs.
+                          : (uop.uclass == UC_MOVEM)
+                            ? (3'd1 + ea_words(ea_mode_w))
                           : ea_words_total;
 
         if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX)) begin

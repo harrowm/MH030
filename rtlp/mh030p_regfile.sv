@@ -41,6 +41,11 @@ module mh030p_regfile (
     // operand is otherwise overwritten by the read the NEXT instruction
     // issues while it waits.
     input  wire        rd_en,
+    // Port C has its OWN enable. The A and B ports must freeze during a stall
+    // so a held instruction's operands are not overwritten, but a MOVEM walks
+    // a different register through C on every cycle OF that stall -- a shared
+    // enable would hand it the same register every time.
+    input  wire        rd_c_en,
     input  wire [3:0]  rd_a_sel,
     input  wire [3:0]  rd_b_sel,
     // Third port, for the index register of an indexed effective address:
@@ -77,10 +82,12 @@ module mh030p_regfile (
             rd_a_data <= 32'h0;
             rd_b_data <= 32'h0;
             rd_c_data <= 32'h0;
-        end else if (rd_en) begin
-            rd_a_data <= hit_a ? wr_data : regs[rd_a_sel];
-            rd_b_data <= hit_b ? wr_data : regs[rd_b_sel];
-            rd_c_data <= hit_c ? wr_data : regs[rd_c_sel];
+        end else begin
+            if (rd_en) begin
+                rd_a_data <= hit_a ? wr_data : regs[rd_a_sel];
+                rd_b_data <= hit_b ? wr_data : regs[rd_b_sel];
+            end
+            if (rd_c_en) rd_c_data <= hit_c ? wr_data : regs[rd_c_sel];
         end
     end
 

@@ -136,7 +136,8 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_EXT)
                         || (dec_uop.uclass == UC_SWAP)
                         || (dec_uop.uclass == UC_ADDX)
-                        || (dec_uop.uclass == UC_NOP))
+                        || (dec_uop.uclass == UC_NOP)
+                        || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
                            || (dec_uop.uclass == UC_DBCC)
@@ -145,6 +146,7 @@ module mh030p_core (
                            || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
                            || (dec_uop.uclass == UC_TRAP)
                            || (dec_uop.uclass == UC_NOP)
+                           || ((dec_uop.uclass == UC_MOVEM) && dec_ea_ok)
                            || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
                            :   dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
@@ -161,7 +163,8 @@ module mh030p_core (
     reg [31:0] mem_hold;
     reg [31:0] ag_pc, ex_pc;
     // Which register the B port carried; needed by the interlock below.
-    wire ag_is_trap = (ag_uop.uclass == UC_TRAP);
+    wire ag_is_trap  = (ag_uop.uclass == UC_TRAP);
+    wire ag_is_movem = (ag_uop.uclass == UC_MOVEM);
     wire ag_mem     = ag_uop.reads_mem || ag_uop.writes_mem || ag_is_trap;
     wire ag_is_bsr = (ag_uop.uclass == UC_BRANCH) && (ag_uop.cond == 4'h1);
     wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
@@ -190,6 +193,42 @@ module mh030p_core (
     // single always_ff that drives the memory port; assigned once the operand
     // registers exist.
     wire [31:0] ex_m2m_addr;
+
+    // Register-file read data; declared here because the MOVEM sequencer
+    // below repurposes the C port.
+    wire [31:0] rf_a, rf_b, rf_c;
+
+    // ── MOVEM ───────────────────────────────────────────────────────────────
+    // One register per bus cycle, walking the 16-bit mask in the extension
+    // word. This is the widest sequence in the core: up to 16 transfers for a
+    // single instruction, and the first one whose LENGTH depends on data
+    // rather than on the opcode.
+    //
+    // Mask order is architectural, not arbitrary: for -(An) the mask runs
+    // A7..D0, and for every other mode D0..A7. Getting that backwards stores
+    // the right registers at the wrong addresses.
+    reg  [3:0]  mvm_idx;       // which register is next
+    reg  [31:0] mvm_addr;      // running address
+    reg         mvm_run, mvm_done;
+    // The C port is a REGISTERED read, so the register data for mvm_reg only
+    // arrives a cycle after it is selected. Issuing immediately transferred
+    // the PREVIOUS register's value; this gates each transfer on the read
+    // having landed.
+    reg         mvm_ready;
+
+    wire        ex_is_movem = ex_valid && (ex_uop.uclass == UC_MOVEM);
+    wire        mvm_predec  = (ex_uop.ea_mode == UEA_AN_PRE);
+    wire [15:0] mvm_mask    = ex_uop.imm[15:0];
+    // Walk order: predecrement counts down from A7, everything else up from D0.
+    wire [3:0]  mvm_reg     = mvm_predec ? (4'd15 - mvm_idx) : mvm_idx;
+    wire        mvm_bit     = mvm_mask[mvm_idx];
+    wire        mvm_last    = (mvm_idx == 4'd15);
+    wire [31:0] mvm_step    = ex_uop.xfer_long ? 32'd4 : 32'd2;
+    // A register-to-memory transfer needs an arbitrary register out of the
+    // file every cycle, which no pipeline operand port can supply. The C port
+    // is repurposed: an indexed EA and a MOVEM cannot both be in AG at once,
+    // since MOVEM's own EA modes exclude indexing here.
+    wire [31:0] mvm_wdata   = rf_c;
 
     // ── Exception sequence ──────────────────────────────────────────────────
     // A trap is three bus cycles: push the return PC, push the SR, then read
@@ -247,7 +286,8 @@ module mh030p_core (
     // as well deadlocks -- the interlock can never clear. It holds ID/AG and
     // lets EX drain, inserting a bubble.
     wire stall_ex = ex_wait_mem || ex_wait_div
-                 || (ex_is_trap && !exc_taken);
+                 || (ex_is_trap && !exc_taken)
+                 || (ex_is_movem && !mvm_done);
     wire stall_ag = ag_base_busy;
 
     assign instr_ready = !stall_ex && !stall_ag;
@@ -258,13 +298,15 @@ module mh030p_core (
     // A TRAP also needs A7 on the B port, to build its stack frame.
     wire dec_is_trap = (dec_uop.uclass == UC_TRAP);
     wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem || dec_is_trap;
-    wire [31:0] rf_a, rf_b, rf_c;
     mh030p_regfile u_rf (
         .clk_4x   (clk_4x),
         .rst_n    (rst_n),
         // Hold the read while anything downstream is stalled; see the
         // regfile header.
         .rd_en    (!stall_ex && !stall_ag),
+        // Free-running during a MOVEM so the sequencer sees each register in
+        // turn; otherwise it follows the same rule as A and B.
+        .rd_c_en  (ex_is_movem || (!stall_ex && !stall_ag)),
         // dst_reg only for a PLAIN memory read, where the source arrives from
         // memory and the ALU destination is a register. For an RMW the
         // register operand is the SOURCE and the destination is memory, so
@@ -276,7 +318,9 @@ module mh030p_core (
                      ? dec_uop.dst_reg : dec_uop.src_reg),
         .rd_b_sel (dec_mem ? dec_uop.ea_reg   : dec_uop.dst_reg),
         // Index register for an indexed EA; harmlessly reads R0 otherwise.
-        .rd_c_sel (dec_uop.ea_idx_reg),
+        // Index register for an indexed EA, or the register MOVEM is about to
+        // transfer. Those two never overlap.
+        .rd_c_sel (ex_is_movem ? mvm_reg : dec_uop.ea_idx_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
         .rd_c_data(rf_c),
@@ -380,7 +424,7 @@ module mh030p_core (
     // instruction actually leaves AG. Gating it on ag_valid alone makes it
     // level-sensitive, so every cycle EX spends stalled on memory applies the
     // increment again -- (A3)+ advanced by 12 instead of 4.
-    wire ag_an_upd = ag_valid && ag_mem && !ag_is_trap
+    wire ag_an_upd = ag_valid && ag_mem && !ag_is_trap && !ag_is_movem
                   && !stall_ex && !stall_ag
                   && ((ag_uop.ea_mode == UEA_AN_POST)
                    || (ag_uop.ea_mode == UEA_AN_PRE));
@@ -413,7 +457,7 @@ module mh030p_core (
             // That is exactly what happened -- the first memory access went
             // out with addr=0 before A3 had been written.
             mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
-                                 && !stall_ag && !ag_is_trap;
+                                 && !stall_ag && !ag_is_trap && !ag_is_movem;
             mem_addr <= ag_ea;
             // Read if the instruction reads, regardless of whether it also
             // writes: an RMW's FIRST bus cycle is the read, and the write is
@@ -429,6 +473,21 @@ module mh030p_core (
             mem_wdata<= ag_is_bsr ? (ag_pc + 32'd2
                                      + {27'h0, ag_uop.ext_words, 1'b0})
                       : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
+        end else if (ex_is_movem && !mvm_done) begin
+            // Issue a transfer for each set mask bit; skip the clear ones
+            // without touching the bus. Predecrement writes BEFORE stepping,
+            // every other mode writes at the current address and steps after.
+            if (!mvm_run) begin
+                mem_req  <= 1'b0;        // first cycle: nothing issued yet
+            end else if (mvm_bit && mvm_ready && !mem_req) begin
+                mem_req   <= 1'b1;
+                mem_rw    <= ex_uop.reads_mem;
+                mem_siz   <= ex_uop.xfer_long ? UZ_LONG : UZ_WORD;
+                mem_addr  <= mvm_predec ? (mvm_addr - mvm_step) : mvm_addr;
+                mem_wdata <= mvm_wdata;
+            end else if (mem_ack) begin
+                mem_req   <= 1'b0;
+            end
         end else if (ex_is_trap && !exc_taken) begin
             // Vector 32+n lives at VBR + 4*vector; VBR is 0 here, since a
             // movable vector base needs the control registers this core does
@@ -759,6 +818,35 @@ module mh030p_core (
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
+            mvm_idx  <= 4'd0;
+            mvm_addr <= 32'h0;
+            mvm_run  <= 1'b0;
+            mvm_done <= 1'b0;
+        end else if (!ex_is_movem) begin
+            mvm_idx   <= 4'd0;
+            mvm_run   <= 1'b0;
+            mvm_done  <= 1'b0;
+            mvm_ready <= 1'b0;
+        end else if (!mvm_run) begin
+            mvm_run   <= 1'b1;           // latch the starting address
+            mvm_addr  <= ex_b;
+            mvm_ready <= 1'b0;
+        end else if (!mvm_ready) begin
+            mvm_ready <= 1'b1;           // C-port read has landed
+        end else if (!mvm_bit) begin
+            // Clear mask bit: nothing to transfer, just advance.
+            if (mvm_last) mvm_done <= 1'b1;
+            else begin mvm_idx <= mvm_idx + 4'd1; mvm_ready <= 1'b0; end
+        end else if (mem_ack) begin
+            mvm_addr <= mvm_predec ? (mvm_addr - mvm_step)
+                                   : (mvm_addr + mvm_step);
+            if (mvm_last) mvm_done <= 1'b1;
+            else begin mvm_idx <= mvm_idx + 4'd1; mvm_ready <= 1'b0; end
+        end
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
             exc_state    <= XS_IDLE;
             exc_sp       <= 32'h0;
             exc_vec_addr <= 32'h0;
@@ -816,10 +904,18 @@ module mh030p_core (
     // result in the same cycle.
     // A completed trap leaves A7 below the frame it pushed.
     wire exc_commit_sp = ex_is_trap && exc_taken && !stall_ex;
-    assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd || exc_commit_sp;
-    assign wb_wr_sel  = exc_commit_sp ? 4'd15
+    // MOVEM memory-to-register commits one register per acknowledged read,
+    // straight from the sequencer rather than through WB.
+    wire mvm_reg_wr = ex_is_movem && ex_uop.reads_mem && mvm_run
+                   && mvm_bit && mem_ack;
+    assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd || exc_commit_sp
+                      || mvm_reg_wr;
+    assign wb_wr_sel  = mvm_reg_wr    ? mvm_reg
+                      : exc_commit_sp ? 4'd15
                       : ag_an_upd     ? ag_uop.ea_reg : wb_reg;
-    assign wb_wr_data = exc_commit_sp ? exc_sp
+    assign wb_wr_data = mvm_reg_wr    ? (ex_uop.xfer_long ? mem_rdata
+                                         : {{16{mem_rdata[15]}}, mem_rdata[15:0]})
+                      : exc_commit_sp ? exc_sp
                       : ag_an_upd     ? ag_an_val     : wb_data;
     assign ccr_out    = ccr_r;
 
