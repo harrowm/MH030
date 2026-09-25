@@ -3520,3 +3520,47 @@ that would settle it is bringing the new core to rough feature parity and
 re-measuring -- if Fmax holds near 38 MHz as the LUT count grows toward the
 old core's, the premise is proven; if it decays toward 20 MHz, the gain was
 size all along.
+
+## MH030-P: the growth test — does Fmax hold as functionality lands?
+
+All four measurements use the same part, recipe and identical thin harness
+(`scripts/gen_fmax_wrapper.py`).
+
+| Design | LUTs | Fmax | Period | Logic | Routing |
+|---|---|---|---|---|---|
+| New core, minimal (pre-P3) | 4,618 | 38.02 MHz | 26.30 ns | 8.99 ns | 16.79 ns |
+| New core, all features | 7,038 | **33.96 MHz** | 29.45 ns | 8.18 ns | 20.74 ns |
+| New CPU (core+IFU+arbiter) | 7,736 | **32.21 MHz** | 31.04 ns | 9.51 ns | 21.01 ns |
+| Old EU (`m68030_eu`) | 29,043 | 19.55 MHz | 51.16 ns | 9.86 ns | 40.78 ns |
+
+**The growth test result: +52% LUTs cost only −11% Fmax.** That is better than
+area scaling alone would predict — routing delay in a 2D placement tends to
+grow with roughly the square root of area, which for 1.52x area would have
+cost ~19% period; the observed cost was 12%.
+
+**Logic delay is flat across all four**, 8.2-9.9 ns. The new core is not
+logically shallower than the old one and never was; what it has is far less
+area, and therefore far shorter routes.
+
+### The honest extrapolation, and why it matters
+
+Reaching the old EU's 29,043 LUTs means another 4.1x growth from here. Fitting
+the observed scaling (period ∝ area^0.27) gives ~43 ns, about **23 MHz**. A
+square-root model gives ~60 ns, about **17 MHz**. So at genuine feature parity
+this architecture plausibly lands somewhere around **17-23 MHz against the old
+core's 19.55 MHz** -- comparable, possibly modestly better, but NOT the 1.94x
+the first comparison suggested.
+
+That first 1.94x was measured at one sixth the size and a fraction of the
+function, and this test says most of it was size. The earlier caveat was the
+right one.
+
+### What this does not settle
+
+The new core will not need 29,043 LUTs for the same function: it has no
+zero-gap preview mechanism, no 17 bespoke multi-cycle FSMs, and a uniform
+uop-driven EX instead of ~6,200 lines of combinational decode feeding execute
+directly. How much of the old core's area was that machinery rather than
+irreducible ISA cost is unmeasured, and it is the difference between
+"comparable" and "meaningfully faster". Measuring it needs the new core taken
+substantially closer to parity -- which is the same test, run again later.
