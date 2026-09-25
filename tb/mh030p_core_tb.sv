@@ -308,6 +308,42 @@ module mh030p_core_tb;
         chk("mem->mem MOVE.L",  ram[32'h38 >> 2], 32'hBEEF_1234);
         chk("mem->mem src kept", ram[32'h30 >> 2], 32'hBEEF_1234);
 
+        // ── Bit ops, BCD, EXT, SWAP, ADDX ──────────────────────────────────
+        //   BSET #n,Dn   0000 1000 11 000 rrr + ext(bit number)
+        //   BCLR #n,Dn   0000 1000 10 000 rrr
+        //   ABCD Dy,Dx   1100 xxx1 0000 0yyy
+        //   EXT.W Dn     0100 1000 10 000 rrr
+        //   SWAP Dn      0100 1000 0100 0rrr
+        //   ADDX.L Dy,Dx 1101 xxx1 10 000 yyy
+        issue(MOVEQ(0, 8'h00));
+        issue(16'h08C0, 32'h0000_0003);   // BSET #3,D0  -> D0 = 8
+        bubble(8);
+        chk("BSET #3,D0",     dut.u_rf.regs[0], 32'h0000_0008);
+
+        issue(16'h0880, 32'h0000_0003);   // BCLR #3,D0  -> D0 = 0
+        bubble(8);
+        chk("BCLR #3,D0",     dut.u_rf.regs[0], 32'h0000_0000);
+
+        // ABCD D1,D2: packed-BCD 12 + 19 = 31. X feeds in, so clear it first
+        // with a 0+0 ADD -- there is no direct "clear X" here.
+        issue(MOVEQ(6, 8'h00));
+        issue(ADDL(6, 6));                // D6 = 0, C=0 -> X=0
+        issue(MOVEQ(1, 8'h19));           // D1 = 0x19 (BCD 19)
+        issue(MOVEQ(2, 8'h12));           // D2 = 0x12 (BCD 12)
+        issue(16'hC501);                  // ABCD D1,D2 -> D2 = 0x31
+        bubble(10);
+        chk("ABCD 12+19",     dut.u_rf.regs[2], 32'h0000_0031);
+
+        issue(MOVEQ(4, 8'h7F));
+        issue(16'h4884);                  // EXT.W D4 -> 0x0000007F stays
+        bubble(8);
+        chk("EXT.W D4",       dut.u_rf.regs[4], 32'h0000_007F);
+
+        issue(MOVEQ(5, 8'h21));
+        issue(16'h4845);                  // SWAP D5 -> 0x00210000
+        bubble(8);
+        chk("SWAP D5",        dut.u_rf.regs[5], 32'h0021_0000);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

@@ -130,7 +130,13 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_SCC)
                         || (dec_uop.uclass == UC_DBCC)
                         || (dec_uop.uclass == UC_RETURN)
-                        || (dec_uop.uclass == UC_TRAP))
+                        || (dec_uop.uclass == UC_TRAP)
+                        || (dec_uop.uclass == UC_BITOP)
+                        || (dec_uop.uclass == UC_BCD)
+                        || (dec_uop.uclass == UC_EXT)
+                        || (dec_uop.uclass == UC_SWAP)
+                        || (dec_uop.uclass == UC_ADDX)
+                        || (dec_uop.uclass == UC_NOP))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
                            || (dec_uop.uclass == UC_DBCC)
@@ -138,6 +144,7 @@ module mh030p_core (
                            // destination check below; it needs its EA instead.
                            || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
                            || (dec_uop.uclass == UC_TRAP)
+                           || (dec_uop.uclass == UC_NOP)
                            || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
                            :   dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
@@ -565,6 +572,32 @@ module mh030p_core (
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
                           ? (32'h0 - ex_m2m_step) : 32'h0);
 
+    // Bit operations: BTST/BCHG/BCLR/BSET. The bit number is the source
+    // operand mod 32 for a Dn destination.
+    wire [31:0] bit_result;
+    wire        bit_z;
+    eu_bitops u_bit (
+        .dst(ex_dst), .bit_num(ex_src[4:0]),
+        .op(ex_uop.alu_op[1:0]), .result(bit_result), .z_out(bit_z)
+    );
+
+    // BCD: byte-wide, and the X flag chains between operations.
+    wire [7:0] bcd_result;
+    wire bcd_c, bcd_x, bcd_z, bcd_n, bcd_v;
+    eu_bcd u_bcd (
+        .src(ex_src[7:0]), .dst(ex_dst[7:0]), .op(ex_uop.alu_op[1:0]),
+        .x_in(ccr_r[4]), .z_in(ccr_r[2]),
+        .result(bcd_result), .c_out(bcd_c), .x_out(bcd_x),
+        .z_out(bcd_z), .n_out(bcd_n), .v_out(bcd_v)
+    );
+
+    // EXT sign-extends in place; EXTB.L reaches from byte to longword.
+    wire [31:0] ext_result = (ex_uop.siz == UZ_WORD)
+                           ? {ex_dst[31:16], {8{ex_dst[7]}}, ex_dst[7:0]}
+                           : (ex_uop.ext_words == 3'd0 && ex_uop.siz == UZ_LONG)
+                             ? {{16{ex_dst[15]}}, ex_dst[15:0]} : ex_dst;
+    wire [31:0] swap_result = {ex_dst[15:0], ex_dst[31:16]};
+
     wire [31:0] mv_result = (ex_uop.siz == UZ_BYTE) ? {ex_dst[31:8],  ex_src[7:0]}
                           : (ex_uop.siz == UZ_WORD) ? {ex_dst[31:16], ex_src[15:0]}
                                                     : ex_src;
@@ -574,18 +607,42 @@ module mh030p_core (
               : (ex_uop.siz == UZ_WORD) ? (ex_src[15:0] == 16'h0)
                                         : (ex_src == 32'h0);
 
+    wire use_bit  = (ex_uop.unit == UU_BIT);
+    wire use_bcd  = (ex_uop.unit == UU_BCD);
+    wire use_ext  = (ex_uop.uclass == UC_EXT);
+    wire use_swap = (ex_uop.uclass == UC_SWAP);
     wire use_shf = (ex_uop.unit == UU_SHF);
     wire use_mv  = (ex_uop.unit == UU_MOVE);
     wire use_md  = (ex_uop.unit == UU_MUL) || (ex_uop.unit == UU_DIV);
 
-    wire [31:0] ex_result = use_md  ? md_lo
-                          : use_shf ? shf_result
-                          : use_mv  ? mv_result : alu_result;
-    wire ex_n = use_md ? md_n : use_shf ? shf_n : use_mv ? mv_n : alu_n;
-    wire ex_z = use_md ? md_z : use_shf ? shf_z : use_mv ? mv_z : alu_z;
-    wire ex_v = use_md ? md_v : use_shf ? shf_v : use_mv ? 1'b0 : alu_v;
-    wire ex_c = use_md ? md_c : use_shf ? shf_c : use_mv ? 1'b0 : alu_c;
-    wire ex_x = (use_md || use_mv) ? ccr_r[4] : use_shf ? shf_x : ccr_r[4];
+    // EXT and SWAP ride the MOVE unit in the reference decoder, so they are
+    // selected by class rather than by unit.
+    wire [31:0] ex_result = use_bit  ? bit_result
+                          : use_bcd  ? {ex_dst[31:8], bcd_result}
+                          : use_ext  ? ext_result
+                          : use_swap ? swap_result
+                          : use_md   ? md_lo
+                          : use_shf  ? shf_result
+                          : use_mv   ? mv_result : alu_result;
+
+    wire mv_like_n = use_ext  ? ext_result[31]
+                   : use_swap ? swap_result[31] : mv_n;
+    wire mv_like_z = use_ext  ? (ext_result == 32'h0)
+                   : use_swap ? (swap_result == 32'h0) : mv_z;
+
+    wire ex_n = use_bit ? 1'b0 : use_bcd ? bcd_n
+              : use_md  ? md_n : use_shf ? shf_n
+              : (use_mv || use_ext || use_swap) ? mv_like_n : alu_n;
+    wire ex_z = use_bit ? bit_z : use_bcd ? bcd_z
+              : use_md  ? md_z  : use_shf ? shf_z
+              : (use_mv || use_ext || use_swap) ? mv_like_z : alu_z;
+    wire ex_v = use_bit ? 1'b0 : use_bcd ? bcd_v
+              : use_md  ? md_v : use_shf ? shf_v
+              : (use_mv || use_ext || use_swap) ? 1'b0 : alu_v;
+    wire ex_c = use_bit ? 1'b0 : use_bcd ? bcd_c
+              : use_md  ? md_c : use_shf ? shf_c
+              : (use_mv || use_ext || use_swap) ? 1'b0 : alu_c;
+    wire ex_x = use_bcd ? bcd_x : use_shf ? shf_x : ccr_r[4];
 
     // MOVEA writes all 32 bits, sign-extending a word source.
     // ── Branch resolution, in EX where the CCR is settled ───────────────────

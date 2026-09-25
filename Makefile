@@ -80,10 +80,12 @@ $(SIM)/eu_mul_div: rtl/eu_mul_div.sv                 tb/eu_mul_div_tb.sv | $(SIM
 $(SIM)/mh030p_core: rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
                     rtlp/mh030p_decode.sv rtlp/mh030p_uop.svh \
                     rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
-                    rtl/eu_mul_div.sv tb/mh030p_core_tb.sv | $(SIM)
+                    rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
+                    tb/mh030p_core_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
 	    rtlp/mh030p_decode.sv rtl/opcode_fields.sv rtl/eu_alu.sv \
-	    rtl/eu_shifter.sv rtl/eu_mul_div.sv tb/mh030p_core_tb.sv 2>&1 \
+	    rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
+	    tb/mh030p_core_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
@@ -92,12 +94,13 @@ $(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                    rtlp/mh030p_core.sv \
                    rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
                    rtlp/mh030p_uop.svh rtl/opcode_fields.sv rtl/eu_alu.sv \
-                   rtl/eu_shifter.sv rtl/eu_mul_div.sv tb/mh030p_top_tb.sv | $(SIM)
+                   rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
+                   rtl/eu_bcd.sv tb/mh030p_top_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv \
 	    rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
 	    rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv \
-	    tb/mh030p_top_tb.sv 2>&1 \
+	    rtl/eu_bitops.sv rtl/eu_bcd.sv tb/mh030p_top_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
