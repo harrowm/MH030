@@ -816,6 +816,9 @@ module mh030p_decode (
                         uop.ea_mode   = UEA_AN_POST;
                         uop.ea_reg    = 4'd15;
                         uop.reads_mem = 1'b1;
+                        // Which return this is: 3 = RTE, 5 = RTS, 7 = RTR.
+                        // RTE and RTR pop a status word before the PC.
+                        uop.imm       = {28'h0, sys_lo};
                     end
                     4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1; end
                     4'h0, 4'h1, 4'h2: uop.uclass = UC_NOP;      // RESET/NOP/STOP

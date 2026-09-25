@@ -39,15 +39,35 @@ module mh030p_top_tb;
         rd32 = {prog[a[10:1]], prog[a[10:1] + 1]};
     endfunction
 
+    // Lane-aware, and right-justified for byte and word: that is the
+    // convention the core reads with (mem_rdata[15:0] for a word) and writes
+    // with (the low bits of the register). A model that always moved a full
+    // longword worked only because nothing had yet issued a narrow access --
+    // RTE's status-word pop is the first.
+    logic [31:0] rdw;
     always_ff @(posedge clk_4x) begin
         bus_ack <= 1'b0;
         if (bus_req && !bus_ack) begin
             bus_ack <= 1'b1;
-            if (bus_rw) bus_rdata <= {prog[bus_addr[10:1]],
-                                      prog[bus_addr[10:1] + 1]};
-            else begin
-                prog[bus_addr[10:1]]     <= bus_wdata[31:16];
-                prog[bus_addr[10:1] + 1] <= bus_wdata[15:0];
+            rdw = {prog[bus_addr[10:1]], prog[bus_addr[10:1] + 1]};
+            if (bus_rw) begin
+                case (bus_siz)
+                    2'b01: bus_rdata <= bus_addr[0] ? {24'h0, rdw[23:16]}
+                                                    : {24'h0, rdw[31:24]};
+                    2'b10: bus_rdata <= {16'h0, rdw[31:16]};
+                    default: bus_rdata <= rdw;
+                endcase
+            end else begin
+                case (bus_siz)
+                    2'b01: prog[bus_addr[10:1]] <=
+                               bus_addr[0] ? {rdw[31:24], bus_wdata[7:0]}
+                                           : {bus_wdata[7:0], rdw[23:16]};
+                    2'b10: prog[bus_addr[10:1]] <= bus_wdata[15:0];
+                    default: begin
+                        prog[bus_addr[10:1]]     <= bus_wdata[31:16];
+                        prog[bus_addr[10:1] + 1] <= bus_wdata[15:0];
+                    end
+                endcase
             end
         end
     end
@@ -197,7 +217,147 @@ module mh030p_top_tb;
         chk("TRAP entered handler", dut.u_core.u_rf.regs[3], 32'd9);
         chk("TRAP skipped inline",  dut.u_core.u_rf.regs[0], 32'd0);
         chk("TRAP pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
-        chk("frame holds PC",       rd32(32'h5C), 32'h0000_0006);
+        // Format $0: the SR alone at SP+0, the PC at SP+2.
+        chk("frame holds PC",       rd32(32'h5A), 32'h0000_0006);
+        chk("frame holds SR",       {16'h0, prog[32'h58 >> 1]}, 32'h0000_2700);
+
+        // ── LEA / PEA: the effective address AS the result ──────────────────
+        // The second LEA reads the address register the first one just wrote,
+        // which is the case that needs the AG interlock: an EA-class
+        // instruction wants its base a whole stage before a producer still in
+        // EX has anything to forward.
+        //  0: MOVEQ #0x50,D7
+        //  2: MOVEA.L D7,A7        A7 = 0x50
+        //  4: LEA (0x24).W,A1      A1 = 0x24
+        //  8: LEA (6,A1),A2        A2 = 0x2A
+        // 12: PEA (0x30).W         push 0x30, A7 = 0x4C
+        // 16: BRA self
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(7, 8'h50);
+        prog[1] = 16'h2E47;                 // MOVEA.L D7,A7
+        prog[2] = 16'h43F8; prog[3] = 16'h0024;   // LEA (0x24).W,A1
+        prog[4] = 16'h45E9; prog[5] = 16'h0006;   // LEA (6,A1),A2
+        prog[6] = 16'h4878; prog[7] = 16'h0030;   // PEA (0x30).W
+        prog[8] = 16'h60FE;                 // park
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (200) @(negedge clk_4x);
+
+        chk("LEA absolute",     dut.u_core.u_rf.regs[9],  32'h0000_0024);
+        chk("LEA (d16,An)",     dut.u_core.u_rf.regs[10], 32'h0000_002A);
+        chk("PEA moved SP",     dut.u_core.u_rf.regs[15], 32'h0000_004C);
+        chk("PEA pushed EA",    rd32(32'h4C),             32'h0000_0030);
+
+        // ── JMP / JSR: a redirect to a computed address ──────────────────────
+        //  0: MOVEQ #0x50,D7
+        //  2: MOVEA.L D7,A7
+        //  4: JSR (0x20).W       push 8, A7 = 0x4C, go to 0x20
+        //  8: MOVEQ #5,D3        runs after the RTS
+        // 10: JMP (0x14).W       go to 0x14
+        // 14: MOVEQ #0x7F,D0     must NOT run
+        // 0x14: MOVEQ #6,D5 ; park
+        // 0x20: MOVEQ #7,D4 ; RTS
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h50);
+        prog[1]  = 16'h2E47;
+        prog[2]  = 16'h4EB8; prog[3] = 16'h0020;  // JSR (0x20).W
+        prog[4]  = MOVEQ(3, 8'd5);
+        prog[5]  = 16'h4EF8; prog[6] = 16'h0014;  // JMP (0x14).W
+        prog[7]  = MOVEQ(0, 8'h7F);               // skipped by the JMP
+        prog[10] = MOVEQ(5, 8'd6);                // 0x14
+        prog[11] = 16'h60FE;
+        prog[16] = MOVEQ(4, 8'd7);                // 0x20
+        prog[17] = 16'h4E75;                      // RTS
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("JSR reached target", dut.u_core.u_rf.regs[4],  32'd7);
+        chk("JSR RTS returned",   dut.u_core.u_rf.regs[3],  32'd5);
+        chk("JMP reached target", dut.u_core.u_rf.regs[5],  32'd6);
+        chk("JMP skipped inline", dut.u_core.u_rf.regs[0],  32'd0);
+        chk("JSR SP restored",    dut.u_core.u_rf.regs[15], 32'h0000_0050);
+
+        // ── TRAP then RTE: a full round trip through a stack frame ──────────
+        // The CCR is deliberately non-zero when the trap is taken and is
+        // changed by the handler, so a restored CCR is distinguishable from a
+        // reset one -- otherwise "RTE restored the status" passes for free.
+        //  0: MOVEQ #0x60,D7
+        //  2: MOVEA.L D7,A7        A7 = 0x60
+        //  4: MOVEQ #-1,D0         CCR = 0x08 (N set)
+        //  6: TRAP #0              -> handler at 0x30
+        //  8: MOVEA.L D0,A1        runs only if the RTE returns here. MOVEA
+        //                          is deliberate: a MOVEQ marker would set
+        //                          the CCR itself and overwrite the very
+        //                          thing the RTE just restored.
+        // 10: park
+        // 0x30: MOVEQ #9,D3 ; MOVEQ #0,D4 (CCR = Z) ; RTE
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'hFF);         // MOVEQ #-1,D0 -> N set
+        prog[3]  = 16'h4E40;                // TRAP #0
+        prog[4]  = 16'h2240;                // MOVEA.L D0,A1
+        prog[5]  = 16'h60FE;
+        prog[24] = MOVEQ(3, 8'd9);          // 0x30 handler
+        prog[25] = MOVEQ(4, 8'd0);          // clears N, sets Z
+        prog[26] = 16'h4E73;                // RTE
+        prog[32'h80 >> 1]       = 16'h0000; // vector 32 -> 0x30
+        prog[(32'h80 >> 1) + 1] = 16'h0030;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("RTE handler ran",   dut.u_core.u_rf.regs[3],  32'd9);
+        chk("RTE returned",      dut.u_core.u_rf.regs[9],  32'hFFFF_FFFF);
+        chk("RTE popped frame",  dut.u_core.u_rf.regs[15], 32'h0000_0060);
+        // N was set before the trap and cleared by the handler; the pop must
+        // put it back.
+        chk("RTE restored CCR",  {24'h0, ccr_out},         32'h0000_0008);
+
+        // ── CCR forwarding: a flag consumer directly behind its producer ─────
+        // ccr_r is written in WB, so an instruction in EX is a whole stage
+        // ahead of its predecessor's flag update. Without forwarding, a Bcc
+        // immediately after a CMP branches on the PREVIOUS instruction's
+        // flags and an ADDX adds the previous X. Both are tested here with no
+        // filler between producer and consumer, which is the only arrangement
+        // that can tell the difference.
+        //  0: MOVEQ #5,D0 ; 2: MOVEQ #5,D1
+        //  4: CMP.L D1,D0        Z set
+        //  6: BEQ.B -> 12        must be taken on THIS CMP's Z
+        //  8: MOVEQ #0x7F,D2     must NOT run
+        // 12: MOVEQ #-1,D0 ; MOVEQ #1,D1 ; MOVEQ #0,D4 ; MOVEQ #0,D5
+        // 20: ADD.L D1,D0        D0 = 0, X = 1
+        // 22: ADDX.L D5,D4       D4 = 0 + 0 + X = 1
+        // 24: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(0, 8'd5);
+        prog[1]  = MOVEQ(1, 8'd5);
+        prog[2]  = 16'hB081;                // CMP.L D1,D0 -> Z
+        prog[3]  = 16'h6704;                // BEQ.B +4 -> byte 12
+        prog[4]  = MOVEQ(2, 8'h7F);         // skipped
+        prog[6]  = MOVEQ(0, 8'hFF);         // byte 12: D0 = -1
+        prog[7]  = MOVEQ(1, 8'd1);
+        prog[8]  = MOVEQ(4, 8'd0);
+        prog[9]  = MOVEQ(5, 8'd0);
+        prog[10] = 16'hD081;                // ADD.L D1,D0 -> D0 = 0, X = 1
+        prog[11] = 16'hD985;                // ADDX.L D5,D4 -> D4 = 1
+        prog[12] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (200) @(negedge clk_4x);
+
+        chk("BEQ saw its own CMP",  dut.u_core.u_rf.regs[2], 32'd0);
+        chk("ADD wrapped to zero",  dut.u_core.u_rf.regs[0], 32'd0);
+        chk("ADDX saw forwarded X", dut.u_core.u_rf.regs[4], 32'd1);
 
         $display("");
         if (fails == 0) begin
