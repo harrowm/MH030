@@ -453,6 +453,97 @@ module mh030p_top_tb;
         chk("MOVE An,USP",  dut.u_core.usp_r,                  32'h0000_0020);
         chk("MOVE USP,An",  dut.u_core.u_rf.regs[10],          32'h0000_0020);
 
+        // ── PC-relative effective addresses ─────────────────────────────────
+        // The base is the address of the instruction's own EXTENSION WORD --
+        // its PC plus two -- not the next instruction and not the opcode.
+        //  0: MOVEQ #0x10,D2
+        //  2: MOVE.L (0x1C,PC),D1      base 4 -> 0x20
+        //  6: MOVE.L (0x10,PC,D2.L),D3 base 8 -> 8 + 0x10 + 0x10 = 0x28
+        // 10: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(2, 8'h10);
+        prog[1]  = 16'h223A; prog[2] = 16'h001C;   // MOVE.L (d16,PC),D1
+        prog[3]  = 16'h263B; prog[4] = 16'h2810;   // MOVE.L (d8,PC,D2.L),D3
+        prog[5]  = 16'h60FE;
+        prog[16] = 16'hDEAD; prog[17] = 16'hBEEF;  // 0x20
+        prog[20] = 16'hCAFE; prog[21] = 16'hBABE;  // 0x28
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("(d16,PC)",      dut.u_core.u_rf.regs[1], 32'hDEAD_BEEF);
+        chk("(d8,PC,Xn.L)",  dut.u_core.u_rf.regs[3], 32'hCAFE_BABE);
+
+        // ── TRAPV: taken and not taken ───────────────────────────────────────
+        // The same opcode twice, with V clear then set, so "the trap fired"
+        // and "the trap was conditional" are both actually checked. Vector 7
+        // lives at 0x1C.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: MOVEQ #1,D0      V clear
+        //  6: TRAPV            NOT taken
+        //  8: MOVEQ #5,D1      must run
+        // 10: MOVEQ #2,D2 ; 12: MOVE D2,CCR   V set
+        // 14: TRAPV           taken -> 0x40
+        // 16: MOVEQ #0x7F,D3  must NOT run
+        // 18: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'd1);
+        prog[3]  = 16'h4E76;                // TRAPV, V clear
+        prog[4]  = MOVEQ(1, 8'd5);
+        prog[5]  = MOVEQ(2, 8'd2);
+        prog[6]  = 16'h44C2;                // MOVE D2,CCR -> V
+        prog[7]  = 16'h4E76;                // TRAPV, V set
+        prog[8]  = MOVEQ(3, 8'h7F);         // must not run
+        prog[9]  = 16'h60FE;
+        prog[14] = 16'h0000; prog[15] = 16'h0040;  // vector 7 at 0x1C
+        prog[32] = MOVEQ(4, 8'd6);          // handler at 0x40
+        prog[33] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("TRAPV not taken on V=0", dut.u_core.u_rf.regs[1],  32'd5);
+        chk("TRAPV taken on V=1",     dut.u_core.u_rf.regs[4],  32'd6);
+        chk("TRAPV skipped inline",   dut.u_core.u_rf.regs[3],  32'd0);
+        chk("TRAPV pushed frame",     dut.u_core.u_rf.regs[15], 32'h0000_0058);
+
+        // ── Divide by zero: vector 5, from an instruction that is not a trap ─
+        // The divider reports its zero divisor when it FINISHES, so this also
+        // checks the exception waits for the handshake the result does.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: MOVEQ #10,D0 ; 6: MOVEQ #0,D1
+        //  8: DIVU.W D1,D0     -> vector 5 at 0x14 -> 0x40
+        // 10: MOVEQ #0x7F,D2   must NOT run
+        // 12: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'd10);
+        prog[3]  = MOVEQ(1, 8'd0);
+        prog[4]  = 16'h80C1;                // DIVU.W D1,D0
+        prog[5]  = MOVEQ(2, 8'h7F);         // must not run
+        prog[6]  = 16'h60FE;
+        prog[10] = 16'h0000; prog[11] = 16'h0040;  // vector 5 at 0x14
+        prog[32] = MOVEQ(3, 8'd4);          // handler at 0x40
+        prog[33] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (400) @(negedge clk_4x);
+
+        chk("DIV0 entered handler", dut.u_core.u_rf.regs[3],  32'd4);
+        chk("DIV0 skipped inline",  dut.u_core.u_rf.regs[2],  32'd0);
+        chk("DIV0 left D0 alone",   dut.u_core.u_rf.regs[0],  32'd10);
+        chk("DIV0 pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("DIV0 frame vector",    {16'h0, prog[32'h5E >> 1]}, 32'h0000_0014);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

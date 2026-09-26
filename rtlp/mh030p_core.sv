@@ -102,7 +102,12 @@ module mh030p_core (
                   || (dec_uop.ea_mode == UEA_AN_PRE)
                   || (dec_uop.ea_mode == UEA_AN_D16)
                   || (dec_uop.ea_mode == UEA_ABS_W)
-                  || (dec_uop.ea_mode == UEA_ABS_L);
+                  || (dec_uop.ea_mode == UEA_ABS_L)
+                  // PC-relative: the base is the instruction's own address
+                  // plus two, which AG takes from the pipeline rather than
+                  // from a register.
+                  || (dec_uop.ea_mode == UEA_PC_D16)
+                  || (dec_uop.ea_mode == UEA_PC_IDX);
 
     // A pure memory WRITE (register or immediate source, memory destination)
     // is in scope. A read-modify-write, and a memory-to-memory move, need two
@@ -189,6 +194,32 @@ module mh030p_core (
                        // which is on the destination field, so it has no EA
                        // mode for the check above to approve.
                        && (!dec_uop.reads_mem || dec_ea_ok || dec_is_link);
+
+    // ── Commit-stage registers, hoisted ─────────────────────────────────────
+    // These sit ahead of everything that reads them: the stall logic, the
+    // exception request and the A7 shadow all need a commit that has not yet
+    // landed, so the whole writeback register set and its forwarded views are
+    // declared before any of it.
+    reg  [7:0]  ccr_r;
+    reg         wb_valid;
+    reg  [3:0]  wb_reg;
+    reg  [31:0] wb_data;
+    reg         wb_writes;
+    reg  [7:0]  wb_ccr;
+    reg         wb_upd_ccr;
+    // The CCR as EX must see it, not as it has been committed. ccr_r is
+    // written in WB, so an instruction in EX is a full stage ahead of its
+    // predecessor's flag update -- a Bcc straight after a CMP, an ADDX after
+    // an ADD, or a trap capturing the SR for its stack frame all read the
+    // PREVIOUS instruction's flags without this. Exactly the same forwarding
+    // the register file gets, for the same reason, and one level is enough:
+    // ccr_r has already absorbed everything older than WB.
+    wire [7:0] ccr_live = wb_upd_ccr ? wb_ccr : ccr_r;
+    // The second commit port, registered in WB exactly as the first is, and
+    // mirrored one cycle later into wbp2_* for the second forwarding level.
+    reg         wb2_en,  wbp2_en;
+    reg  [3:0]  wb2_sel, wbp2_sel;
+    reg  [31:0] wb2_data, wbp2_data;
 
     // ── Stage registers ─────────────────────────────────────────────────────
     uop_t ag_uop, ex_uop;
@@ -320,10 +351,16 @@ module mh030p_core (
     localparam [1:0] XS_IDLE = 2'd0, XS_PC = 2'd1, XS_SR = 2'd2, XS_VEC = 2'd3;
     // Declared here because the exception FSM below pushes it; assigned near
     // the functional units.
-    reg  [7:0]  ccr_r;
 
     reg  [1:0]  exc_state;
     reg  [31:0] exc_sp;
+    // A7 as the exception sequence needs it. Taking it from an operand port
+    // only worked while TRAP #n was the single source: the decoder puts A7 on
+    // the EA field for a trap, but a divide has its own operands there. A
+    // shadow of A7, forwarded the same way the CCR is, is available to every
+    // source without spending a port on any of them.
+    reg  [31:0] sp_shadow;
+    reg  [31:0] exc_base_r;
     // The PC the handler returns to, latched rather than recomputed: it is
     // needed by two different states, and ex_pc is only stable while the
     // instruction is held in EX.
@@ -331,8 +368,6 @@ module mh030p_core (
     reg  [31:0] exc_vec_addr;
     reg         exc_taken;
 
-    wire ex_is_trap  = ex_valid && (ex_uop.uclass == UC_TRAP);
-    wire exc_running = (exc_state != XS_IDLE);
 
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
                     && (ex_rmw ? !rmw_done : !mem_got);
@@ -348,7 +383,33 @@ module mh030p_core (
     reg  div_started;
     wire md_div_start = ex_is_div && !div_started;
     wire md_div_busy;
+    // Driven by the mul/div unit below; declared here because the exception
+    // request above needs it.
+    wire md_dbz;
     wire ex_wait_div  = ex_is_div && (!div_started || md_div_busy);
+
+    // ── Which exception, and whether one is being taken at all ──────────────
+    // Until now the only source was TRAP #n, so "is this a TRAP uop" and "take
+    // an exception" were the same signal. They are not: a divide by zero and a
+    // TRAPV with V set both take one from instructions that are not traps by
+    // class, and TRAPV with V CLEAR is a trap by class that takes nothing.
+    wire ex_trap_n = ex_valid && (ex_uop.uclass == UC_TRAP)
+                              && (ex_uop.subop == 4'd0);
+    wire ex_trapv  = ex_valid && (ex_uop.uclass == UC_TRAP)
+                              && (ex_uop.subop == 4'd1);
+    // The divider reports its zero divisor when it finishes, not when it
+    // starts, so this has to wait for the handshake to complete exactly as the
+    // result does.
+    wire div_zero  = ex_is_div && div_started && !md_div_busy && md_dbz;
+    wire exc_req   = ex_trap_n || (ex_trapv && ccr_live[1]) || div_zero;
+    // Vectors 5 and 7 are architectural (MC68030UM Table 8-1); TRAP #n carries
+    // its own, already resolved to 32+n at decode.
+    wire [9:0] exc_vec_num = div_zero ? 10'd5
+                           : ex_trapv ? 10'd7
+                                      : ex_uop.imm[9:0];
+
+    wire ex_is_trap  = exc_req;
+    wire exc_running = (exc_state != XS_IDLE);
 
     // Address-base interlock. AG needs the base register a full stage before
     // EX does, so a producer still in EX has nothing to forward yet. Rather
@@ -362,7 +423,8 @@ module mh030p_core (
                      && ((ex_uop.dst_reg == ag_b_sel)
                       || ((ag_uop.writes_mem || ag_uop.reads_mem)
                           && (ex_uop.dst_reg == ag_a_sel))
-                      || (((ag_uop.ea_mode == UEA_AN_IDX) || ag_is_push
+                      || (((ag_uop.ea_mode == UEA_AN_IDX)
+                           || (ag_uop.ea_mode == UEA_PC_IDX) || ag_is_push
                            || ag_is_link)
                           && (ex_uop.dst_reg == ag_c_sel)))
                      // The second write port's target has to be interlocked
@@ -388,6 +450,23 @@ module mh030p_core (
 
     assign instr_ready = !stall_ex && !stall_ag;
 
+    // A7 as of right now, including a commit landing this very cycle. Same
+    // shape as the register file's own write-first bypass, and needed for the
+    // same reason: the exception sequence reads A7 in the cycle its
+    // predecessor's write to A7 is still in flight.
+    wire [31:0] sp_live = (wb_wr_en && (wb_wr_sel == 4'd15)) ? wb_wr_data
+                        : (wb2_en   && (wb2_sel   == 4'd15)) ? wb2_data
+                                                             : sp_shadow;
+    // The frame base, held for the whole sequence: an older commit to A7 can
+    // land during the stall, and the frame must not move under it.
+    wire [31:0] exc_base = (exc_state == XS_IDLE) ? sp_live : exc_base_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                                   sp_shadow <= 32'h0;
+        else if (wb_wr_en && (wb_wr_sel == 4'd15))    sp_shadow <= wb_wr_data;
+        else if (wb2_en   && (wb2_sel   == 4'd15))    sp_shadow <= wb2_data;
+    end
+
     // ── Register file: address in ID, data in AG ────────────────────────────
     // With a memory source the B port carries the EA BASE register instead of
     // the ALU destination; the destination is forwarded in EX.
@@ -398,11 +477,6 @@ module mh030p_core (
     // LINK reads the old frame pointer on B and needs A7 as well, so it takes
     // the C port exactly as a push does.
     wire dec_needs_sp = dec_is_push || (dec_is_link && (dec_uop.subop == 4'd0));
-    // The second commit port, registered in WB exactly as the first is, and
-    // mirrored one cycle later into wbp2_* for the second forwarding level.
-    reg         wb2_en,  wbp2_en;
-    reg  [3:0]  wb2_sel, wbp2_sel;
-    reg  [31:0] wb2_data, wbp2_data;
 
     mh030p_regfile u_rf (
         .clk_4x   (clk_4x),
@@ -455,21 +529,7 @@ module mh030p_core (
     end
 
     // ── EX/WB boundary ──────────────────────────────────────────────────────
-    reg         wb_valid;
-    reg  [3:0]  wb_reg;
-    reg  [31:0] wb_data;
-    reg         wb_writes;
-    reg  [7:0]  wb_ccr;
-    reg         wb_upd_ccr;
 
-    // The CCR as EX must see it, not as it has been committed. ccr_r is
-    // written in WB, so an instruction in EX is a full stage ahead of its
-    // predecessor's flag update -- a Bcc straight after a CMP, an ADDX after
-    // an ADD, or a trap capturing the SR for its stack frame all read the
-    // PREVIOUS instruction's flags without this. Exactly the same forwarding
-    // the register file gets, for the same reason, and one level is enough:
-    // ccr_r has already absorbed everything older than WB.
-    wire [7:0] ccr_live = wb_upd_ccr ? wb_ccr : ccr_r;
 
     // ── Forwarding ──────────────────────────────────────────────────────────
     // TWO levels are needed, which follows from the read being registered:
@@ -535,8 +595,15 @@ module mh030p_core (
     wire [31:0] ea_step = (ag_uop.siz == UZ_BYTE) ? 32'd1
                         : (ag_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
     // Absolute modes have no base register; the address is the displacement.
+    // PC-relative modes take the address of their own EXTENSION WORD as the
+    // base, which is the instruction address plus two -- not the address of
+    // the next instruction, and not the instruction address itself.
+    wire ag_pc_rel = (ag_uop.ea_mode == UEA_PC_D16)
+                  || (ag_uop.ea_mode == UEA_PC_IDX);
     wire [31:0] ea_base = ((ag_uop.ea_mode == UEA_ABS_W)
-                        || (ag_uop.ea_mode == UEA_ABS_L)) ? 32'h0 : ag_b;
+                        || (ag_uop.ea_mode == UEA_ABS_L)) ? 32'h0
+                        : ag_pc_rel                       ? (ag_pc + 32'd2)
+                                                          : ag_b;
     // Predecrement applies to the address used THIS cycle; postincrement
     // does not.
     wire [31:0] ea_adj  = (ag_uop.ea_mode == UEA_AN_PRE) ? (32'h0 - ea_step)
@@ -546,7 +613,8 @@ module mh030p_core (
     // base displacement and memory indirection is a later phase.
     wire [31:0] ag_xn   = ag_uop.ea_idx_long ? ag_c
                                              : {{16{ag_c[15]}}, ag_c[15:0]};
-    wire [31:0] ag_idx  = (ag_uop.ea_mode == UEA_AN_IDX)
+    wire [31:0] ag_idx  = ((ag_uop.ea_mode == UEA_AN_IDX)
+                        || (ag_uop.ea_mode == UEA_PC_IDX))
                         ? (ag_xn << ag_uop.ea_idx_scale) : 32'h0;
 
     wire [31:0] ag_ea   = ea_base + ag_uop.ea_disp + ea_adj + ag_idx;
@@ -663,21 +731,21 @@ module mh030p_core (
                     mem_req   <= 1'b1;
                     mem_rw    <= 1'b0;
                     mem_siz   <= UZ_LONG;
-                    mem_addr  <= ex_b - 32'd8;
+                    mem_addr  <= exc_base - 32'd8;
                     mem_wdata <= {sr_sys_r, ccr_live, exc_ret_pc[31:16]};
                 end
                 XS_PC: if (mem_ack) begin
                     mem_req   <= 1'b1;
                     mem_rw    <= 1'b0;
-                    mem_addr  <= ex_b - 32'd4;
+                    mem_addr  <= exc_base - 32'd4;
                     // Format 0, vector OFFSET (4 x the vector number).
                     mem_wdata <= {exc_ret_pc[15:0],
-                                  4'h0, ex_uop.imm[9:0], 2'b00};
+                                  4'h0, exc_vec_num, 2'b00};
                 end
                 XS_SR: if (mem_ack) begin            // fetch the vector
                     mem_req   <= 1'b1;
                     mem_rw    <= 1'b1;
-                    mem_addr  <= {ex_uop.imm[23:0], 2'b00};
+                    mem_addr  <= {20'h0, exc_vec_num, 2'b00};
                 end
                 default: if (mem_ack) mem_req <= 1'b0;
             endcase
@@ -793,7 +861,7 @@ module mh030p_core (
 
     // MOVE/MOVEQ pass the source through, sized.
     wire [31:0] md_lo, md_hi;
-    wire md_n, md_z, md_v, md_c, md_dbz;
+    wire md_n, md_z, md_v, md_c;
     eu_mul_div u_md (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .div_start(md_div_start), .div_busy(md_div_busy),
@@ -1019,6 +1087,7 @@ module mh030p_core (
             wb_data    <= ex_commit;
             // DBcc writes Dn only when it actually decrements.
             wb_writes  <= (ex_valid && ex_uop.writes_reg && !ex_is_branch
+                                    && !exc_req
                                     && !ex_uop.writes_mem
                                     && (!ex_is_dbcc || dbcc_dec)
                                     && !ex_is_rts)
@@ -1031,6 +1100,7 @@ module mh030p_core (
             // would land a cycle later and overwrite the transferred value
             // with whatever the datapath happened to compute.
             wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch
+                       && !exc_req
                        && !(ex_is_sys && (ex_uop.subop >= 4'd2)
                                       && (ex_uop.subop <= 4'd3));
             wb_ccr     <= {3'b000,
@@ -1110,6 +1180,7 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             exc_state    <= XS_IDLE;
+            exc_base_r   <= 32'h0;
             exc_sp       <= 32'h0;
             exc_vec_addr <= 32'h0;
             exc_taken    <= 1'b0;
@@ -1118,7 +1189,11 @@ module mh030p_core (
             exc_taken <= 1'b0;
         end else begin
             case (exc_state)
-                XS_IDLE: begin exc_state <= XS_PC; exc_sp <= ex_b - 32'd8; end
+                XS_IDLE: begin
+                             exc_state  <= XS_PC;
+                             exc_base_r <= sp_live;
+                             exc_sp     <= sp_live - 32'd8;
+                         end
                 XS_PC:   if (mem_ack) exc_state <= XS_SR;
                 XS_SR:   if (mem_ack) exc_state <= XS_VEC;
                 XS_VEC:  if (mem_ack) begin

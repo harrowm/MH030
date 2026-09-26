@@ -837,7 +837,11 @@ module mh030p_decode (
                         uop.imm       = {28'h0, sys_lo};
                         uop.subop     = sys_lo;
                     end
-                    4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1; end
+                    // TRAPV: vector 7, and conditional on V (sub-op 1,
+                    // against TRAP #n's unconditional sub-op 0).
+                    4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1;
+                                uop.imm    = 32'd7;   uop.subop = 4'd1;
+                                uop.ea_reg = 4'd15; end
                     4'h0, 4'h1, 4'h2: uop.uclass = UC_NOP;      // RESET/NOP/STOP
                     default: uop.uclass = UC_UNIMPL;            // RTD
                 endcase

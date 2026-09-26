@@ -3594,6 +3594,45 @@ ack-dependent mux select sitting in the middle of the longest path, i.e.
 dispatch depth. This core does not have that and is not acquiring it as the
 ISA fills in.
 
+### Growth test, third data point: 12,106 LUTs at 28.21 MHz, and a new binder
+
+After LEA/PEA/JMP/JSR, RTE with a real Format $0 frame and status register,
+EXG, LINK/UNLK and the system-control moves (commit `048f6b3`):
+
+| Design | LUTs | Fmax | Period | Logic | Routing |
+|---|---|---|---|---|---|
+| New core, minimal | 4,618 | 38.02 MHz | 26.30 ns | 8.99 | 16.79 |
+| New core, all features | 7,038 | 33.96 MHz | 29.45 ns | 8.18 | 20.74 |
+| New CPU (+IFU+arbiter) | 7,736 | 32.21 MHz | 31.04 ns | 9.51 | 21.01 |
+| New CPU + breadth + MOVEM | 9,201 | 32.59 MHz | 30.69 ns | 9.25 | 20.91 |
+| **+ control flow, RTE, EXG/LINK, sysctl** | **12,106** | **28.21 MHz** | **35.44 ns** | 8.80 | 26.11 |
+| Old EU | 29,043 | 19.55 MHz | 51.16 ns | 9.86 | 40.78 |
+
++32% LUTs for -13% Fmax, which sits between the first step's -11%-for-+52% and
+the second's zero-for-+19%. Logic delay is still flat (8.80 ns), for the fifth
+measurement running.
+
+**But the interesting part is not the number, it is where the path now is.**
+The worst path has moved almost entirely into one module:
+
+| Module | Delay | Share | Hops |
+|---|---|---|---|
+| `u_core.u_md` | 29.68 ns | **83.7%** | 61 |
+| `u_core` | 4.88 ns | 13.8% | 8 |
+| `<top>` | 0.89 ns | 2.5% | 4 |
+
+73 hops total, 73.7% of it routing. `u_md` is `rtl/eu_mul_div.sv`, reused
+verbatim: the divider was made sequential at P0 (the 2.46 -> 14.24 MHz fix) but
+the MULTIPLY is still combinational, a 32x32 composed from five MULT18X18D
+blocks plus LUT adders, and that composition network is the depth. It did not
+bind at 9,201 LUTs and does bind at 12,106 -- not because it grew, but because
+the design around it did, so its own nets got longer.
+
+This is the same shape as the P0 finding, and the same kind of fix: bounded,
+local, well understood, in a module the new core inherited rather than wrote.
+It is the obvious next lever, ahead of any further parity work, because a
+83.7%-of-path single module means nothing else can be measured until it moves.
+
 Refitting the scaling across all four new-core points gives period ∝ area^0.22,
 which extrapolated to the old core's 29,043 LUTs is ~40 ns, about **25 MHz**
 against its 19.55 MHz -- up from the ~23 MHz the previous fit suggested, and
