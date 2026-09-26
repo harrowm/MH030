@@ -3633,6 +3633,62 @@ local, well understood, in a module the new core inherited rather than wrote.
 It is the obvious next lever, ahead of any further parity work, because a
 83.7%-of-path single module means nothing else can be measured until it moves.
 
+### The multiplier fix: it moved the path and barely moved the clock
+
+The finding above said `u_md` was 83.7% of the worst path, so the new core got
+its own two-stage multiplier (`rtlp/mh030p_mul.sv`, five 17x17 partial products
+with the composition adders behind a register; verified against the frozen
+reference over 2,000 operand pairs, bit-identical including N and Z).
+
+| | LUTs | Fmax | Period | `u_md` share of path |
+|---|---|---|---|---|
+| before | 12,106 | 28.21 MHz | 35.44 ns | **83.7%** |
+| after  | 12,913 | 29.11 MHz | 34.35 ns | **0%** |
+
+**The fix worked structurally and gained 3%.** `u_md` is now completely off the
+critical path -- 97.4% of it is in `u_core` -- and Fmax moved 28.21 -> 29.11 MHz.
+The multiply was genuinely 84% of that path and was genuinely eliminated; the
+NEXT path was 34.35 ns.
+
+This is the third time this project has measured the same lesson, and it is
+worth stating plainly because it keeps being tempting to forget: **an
+attribution share is not a headroom estimate.** Phase 284 fixed two real
+combinational loops for 1.78 vs 1.73 MHz. Phase 285's `wdata_hold_r` was fully
+verified and had zero effect. Here a module holding 84% of the path yielded 3%.
+In a routing-dominated design with many near-equal paths, removing the worst one
+reveals the second, which is nearly as long by construction.
+
+What binds now, read from the report rather than guessed: both endpoints in
+`u_core`, 75 hops, 73.5% routing, and the delay concentrated in two `CCU2C`
+carry chains with wide LUT muxes ahead of them -- a 32-bit adder fed by a deep
+mux. (The synthesized cell names all carry an `mvm_ready` prefix, which is NOT
+attribution: ABC9 names new cells after the nearest traceable ancestor
+register, a trap already documented in `project_eu_pipeline_cutpoints.md`.)
+
+Logic delay: 8.56 ns, the sixth flat measurement in a row (8.18-9.51 ns across
+every design measured, old core included). The new core has never been
+logically shallower than the old one. Its advantage is entirely area and
+therefore routing.
+
+### Refit over all six new-core points
+
+period = 2.563 x area^0.276
+
+| Target | Predicted |
+|---|---|
+| 15,000 LUTs | 27.5 MHz |
+| 20,000 LUTs | 25.4 MHz |
+| 29,043 LUTs (old core's size) | 22.9 MHz |
+
+Against the old EU's 19.55 MHz. The exponent has drifted back up from the
+0.22 the four-point fit gave to 0.276, because the two newest points landed
+below the optimistic curve -- so the honest reading is the middle of the
+earlier range, ~23 MHz at parity, not the ~25 the previous refit suggested.
+The target band this effort was scoped to is 25-50 MHz; the core is inside it
+NOW at 29.11 MHz, and the extrapolation says it leaves the bottom of that band
+somewhere before parity unless something changes the curve rather than the
+constant.
+
 Refitting the scaling across all four new-core points gives period ∝ area^0.22,
 which extrapolated to the old core's 29,043 LUTs is ~40 ns, about **25 MHz**
 against its 19.55 MHz -- up from the ~23 MHz the previous fit suggested, and

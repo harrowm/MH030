@@ -25,6 +25,9 @@ module mh030p_top (
     input  wire [31:0] bus_rdata,
     input  wire        bus_ack,
 
+    // Interrupt priority level, encoded 0-7 (see the core).
+    input  wire [2:0]  ipl,
+
     // Architectural state, exposed for the testbench.
     output wire        wb_wr_en,
     output wire [3:0]  wb_wr_sel,
@@ -73,6 +76,7 @@ module mh030p_top (
     mh030p_core u_core (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .instr(if_instr), .ext(if_ext), .q3(if_q3),
+        .ipl(ipl),
         .instr_valid(have_all), .instr_ready(core_ready),
         .pc_in(if_pc), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),

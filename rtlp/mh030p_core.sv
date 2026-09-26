@@ -70,6 +70,11 @@ module mh030p_core (
     output reg         mem_rw,        // 1 = read, 0 = write
     output reg  [1:0]  mem_siz,
     output reg  [31:0] mem_wdata,
+    // Interrupt priority level, already encoded 0-7. Real silicon presents it
+    // on three ACTIVE-LOW pins; inverting them is the pin driver's job, not
+    // the core's, and the SoC that wires this up owns that.
+    input  wire [2:0]  ipl,
+
     input  wire [31:0] mem_rdata,
     input  wire        mem_ack,
 
@@ -361,10 +366,6 @@ module mh030p_core (
     // source without spending a port on any of them.
     reg  [31:0] sp_shadow;
     reg  [31:0] exc_base_r;
-    // The PC the handler returns to, latched rather than recomputed: it is
-    // needed by two different states, and ex_pc is only stable while the
-    // instruction is held in EX.
-    wire [31:0] exc_ret_pc = ex_pc + 32'd2;
     reg  [31:0] exc_vec_addr;
     reg         exc_taken;
 
@@ -399,28 +400,6 @@ module mh030p_core (
     wire mul_busy;
     wire ex_wait_mul = ex_is_mul && (!mul_started || mul_busy);
 
-    // ── Which exception, and whether one is being taken at all ──────────────
-    // Until now the only source was TRAP #n, so "is this a TRAP uop" and "take
-    // an exception" were the same signal. They are not: a divide by zero and a
-    // TRAPV with V set both take one from instructions that are not traps by
-    // class, and TRAPV with V CLEAR is a trap by class that takes nothing.
-    wire ex_trap_n = ex_valid && (ex_uop.uclass == UC_TRAP)
-                              && (ex_uop.subop == 4'd0);
-    wire ex_trapv  = ex_valid && (ex_uop.uclass == UC_TRAP)
-                              && (ex_uop.subop == 4'd1);
-    // The divider reports its zero divisor when it finishes, not when it
-    // starts, so this has to wait for the handshake to complete exactly as the
-    // result does.
-    wire div_zero  = ex_is_div && div_started && !md_div_busy && md_dbz;
-    wire exc_req   = ex_trap_n || (ex_trapv && ccr_live[1]) || div_zero;
-    // Vectors 5 and 7 are architectural (MC68030UM Table 8-1); TRAP #n carries
-    // its own, already resolved to 32+n at decode.
-    wire [9:0] exc_vec_num = div_zero ? 10'd5
-                           : ex_trapv ? 10'd7
-                                      : ex_uop.imm[9:0];
-
-    wire ex_is_trap  = exc_req;
-    wire exc_running = (exc_state != XS_IDLE);
 
     // Address-base interlock. AG needs the base register a full stage before
     // EX does, so a producer still in EX has nothing to forward yet. Rather
@@ -454,12 +433,94 @@ module mh030p_core (
     // lets EX drain, inserting a bubble.
     wire ex_wait_rte = ex_is_rte && !rte_done;
 
+    // ── Which exception, and whether one is being taken at all ──────────────
+    // Until now the only source was TRAP #n, so "is this a TRAP uop" and "take
+    // an exception" were the same signal. They are not: a divide by zero and a
+    // TRAPV with V set both take one from instructions that are not traps by
+    // class, and TRAPV with V CLEAR is a trap by class that takes nothing.
+    wire ex_trap_n = ex_valid && (ex_uop.uclass == UC_TRAP)
+                              && (ex_uop.subop == 4'd0);
+    wire ex_trapv  = ex_valid && (ex_uop.uclass == UC_TRAP)
+                              && (ex_uop.subop == 4'd1);
+    // The divider reports its zero divisor when it finishes, not when it
+    // starts, so this has to wait for the handshake to complete exactly as the
+    // result does.
+    wire div_zero  = ex_is_div && div_started && !md_div_busy && md_dbz;
+    // ── Interrupts ──────────────────────────────────────────────────────────
+    // Asynchronous, so two flip-flops before anything looks at it -- the
+    // project's own standing rule for every external input.
+    //
+    // Level 7 is NON-MASKABLE, and a plain `level > mask` comparison can never
+    // recognise it: the mask is already 7 out of reset, and 7 > 7 is false
+    // forever. So level 7 gets a sticky edge latch instead, set on any
+    // TRANSITION into 7 and cleared when the interrupt actually dispatches.
+    // rtl/ needed exactly this and did not have it until Phase 278
+    // (project_int_pending_level7_mask_gap.md); building it in from the start
+    // here is cheaper than finding it again.
+    reg [2:0] ipl_s1, ipl_s2, ipl_s3;
+    reg       nmi_pend;
+    wire      nmi_edge = (ipl_s2 == 3'b111) && (ipl_s3 != 3'b111);
+
+    wire int_pending = (ipl_s2 > sr_sys_r[2:0]) || nmi_pend;
+    wire [2:0] int_level = nmi_pend ? 3'd7 : ipl_s2;
+
+    // An interrupt is taken BETWEEN instructions, so the one in EX is
+    // abandoned and re-executed after the RTE -- which means it must not have
+    // done anything yet. A bus cycle cannot be taken back, and a multi-cycle
+    // sequence is already part-way through its own side effects, so those wait.
+    // Deliberately NOT written in terms of stall_ex: stall_ex depends on the
+    // exception request, which would depend on this, which is a loop.
+    wire ex_busy_own = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
+                    || (ex_is_movem && !mvm_done);
+    wire ex_interruptible = ex_valid && !ex_busy_own
+                         && !ex_uop.reads_mem && !ex_uop.writes_mem
+                         && (ex_uop.uclass != UC_TRAP)
+                         && (ex_uop.uclass != UC_MOVEM)
+                         && (ex_uop.uclass != UC_LINK)
+                         && (ex_uop.uclass != UC_RETURN)
+                         && (ex_uop.uclass != UC_LEA)
+                         && (ex_uop.uclass != UC_JMP)
+                         && (ex_uop.uclass != UC_BRANCH)
+                         && (ex_uop.uclass != UC_DBCC);
+    wire int_take = int_pending && ex_interruptible;
+
+    wire exc_req   = int_take || ex_trap_n || (ex_trapv && ccr_live[1])
+                  || div_zero;
+    // Vectors 5 and 7 are architectural (MC68030UM Table 8-1); TRAP #n carries
+    // its own, already resolved to 32+n at decode.
+    // Autovectored: level n takes vector 24+n. A real IACK bus cycle fetching a
+    // vector FROM the peripheral is the other half of this and is not here yet.
+    wire [9:0] exc_vec_num = int_take  ? (10'd24 + {7'h0, int_level})
+                           : div_zero  ? 10'd5
+                           : ex_trapv  ? 10'd7
+                                       : ex_uop.imm[9:0];
+
+    wire ex_is_trap  = exc_req;
+    wire exc_running = (exc_state != XS_IDLE);
+
+    // The PC the handler returns to, latched rather than recomputed: it is
+    // needed by two different states, and ex_pc is only stable while the
+    // instruction is held in EX.
+    // A FAULT or a trap returns to the instruction AFTER the one that took it,
+    // extension words included -- which the old `ex_pc + 2` got wrong for
+    // anything longer than one word, latent until a divide-by-zero on a
+    // memory operand could reach it. An INTERRUPT returns to the interrupted
+    // instruction itself, because it was abandoned before doing anything.
+    wire [31:0] exc_ret_pc = int_take ? ex_pc
+                           : (ex_pc + 32'd2
+                              + {27'h0, ex_uop.ext_words, 1'b0});
+
+
     wire stall_ex = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
                  || (ex_is_trap && !exc_taken)
                  || (ex_is_movem && !mvm_done);
     wire stall_ag = ag_base_busy;
 
     assign instr_ready = !stall_ex && !stall_ag;
+
+    // The cycle an interrupt actually lands: used to clear the level-7 latch
+    // and to raise the mask. Needs stall_ex, so it sits after it.
+    wire int_dispatched = int_take && exc_taken && !stall_ex;
 
     // A7 as of right now, including a commit landing this very cycle. Same
     // shape as the register file's own write-first bypass, and needed for the
@@ -1174,6 +1235,12 @@ module mh030p_core (
                                               sr_sys_r <= rte_sr[15:8];
         else if (ex_is_sys && (ex_uop.subop == 4'd3) && !stall_ex)
                                               sr_sys_r <= sys_wr_val[15:8];
+        // An interrupt also raises the mask to its own level, so it cannot
+        // immediately re-interrupt its own handler. M survives; T does not.
+        else if (int_dispatched)
+                                              sr_sys_r <= {2'b00, 1'b1,
+                                                           sr_sys_r[4], 1'b0,
+                                                           int_level};
         else if (ex_is_trap && exc_taken && !stall_ex)
                                               sr_sys_r <= (sr_sys_r | 8'h20)
                                                           & 8'h3F;
@@ -1309,6 +1376,24 @@ module mh030p_core (
             wbp2_sel  <= wb2_sel;
             wbp2_data <= wb2_data;
         end
+    end
+
+    // ── Interrupt input synchroniser and the level-7 latch ──────────────────
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            ipl_s1 <= 3'b000; ipl_s2 <= 3'b000; ipl_s3 <= 3'b000;
+        end else begin
+            ipl_s1 <= ipl;
+            ipl_s2 <= ipl_s1;
+            ipl_s3 <= ipl_s2;     // one more stage, purely for the 7-edge test
+        end
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)              nmi_pend <= 1'b0;
+        else if (nmi_edge)       nmi_pend <= 1'b1;
+        else if (int_dispatched) nmi_pend <= 1'b0;
     end
 
     // ── USP ─────────────────────────────────────────────────────────────────

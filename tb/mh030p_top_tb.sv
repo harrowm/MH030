@@ -26,6 +26,8 @@ module mh030p_top_tb;
     wire [31:0] wb_wr_data;
     wire [7:0]  ccr_out;
 
+    // No interrupt source in these programs; a dedicated test drives it.
+    logic [2:0]  ipl       = 3'b000;
     logic [31:0] bus_rdata = 32'h0;
     logic        bus_ack   = 1'b0;
 
@@ -76,7 +78,7 @@ module mh030p_top_tb;
         .clk_4x(clk_4x), .rst_n(rst_n),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_rw(bus_rw),
         .bus_siz(bus_siz), .bus_wdata(bus_wdata),
-        .bus_rdata(bus_rdata), .bus_ack(bus_ack),
+        .bus_rdata(bus_rdata), .bus_ack(bus_ack), .ipl(ipl),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
@@ -543,6 +545,108 @@ module mh030p_top_tb;
         chk("DIV0 left D0 alone",   dut.u_core.u_rf.regs[0],  32'd10);
         chk("DIV0 pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
         chk("DIV0 frame vector",    {16'h0, prog[32'h5E >> 1]}, 32'h0000_0014);
+
+        // ── Interrupts ───────────────────────────────────────────────────────
+        // Autovectored: level n takes vector 24+n, so level 5 is vector 29 at
+        // 0x74. The mask starts at 7 out of reset, so the program lowers it
+        // first -- and that is also what makes the level-7 case below a real
+        // test rather than a repeat of this one.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: MOVEQ #0,D6 ; 6: MOVE D6,SR      mask = 0, S = 0
+        //  8: NOP                              the interruptible instruction
+        // 10: BRA -4 (back to the NOP)         a branch is NOT interruptible,
+        //                                      so the interrupt can only land
+        //                                      on byte 8 -- which is what makes
+        //                                      the return-PC check exact
+        // 0x50: handler: MOVEQ #9,D3 ; park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(7, 8'h60);
+        prog[1] = 16'h2E47;
+        prog[2] = MOVEQ(6, 8'd0);
+        prog[3] = 16'h46C6;                 // MOVE D6,SR -> mask 0
+        prog[4] = 16'h4E71;                 // NOP at byte 8
+        prog[5] = 16'h60FC;                 // BRA -4 -> back to byte 8
+        prog[40] = MOVEQ(3, 8'd9);          // handler at 0x50
+        prog[41] = 16'h60FE;
+        prog[32'h74 >> 1]       = 16'h0000; // vector 29 (level 5) at 0x74
+        prog[(32'h74 >> 1) + 1] = 16'h0050;
+
+        ipl   = 3'b000;
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        // Let the program lower the mask and reach its spin loop first,
+        // otherwise the interrupt races the MOVE to SR that permits it.
+        repeat (60) @(negedge clk_4x);
+        ipl = 3'b101;                        // level 5
+        repeat (40) @(negedge clk_4x);
+        ipl = 3'b000;                        // the handler has taken it
+        repeat (200) @(negedge clk_4x);
+
+        chk("INT entered handler", dut.u_core.u_rf.regs[3],  32'd9);
+        chk("INT pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        // The frame's return PC is the INTERRUPTED instruction, not the one
+        // after it: nothing of it ran, so an RTE has to re-execute it.
+        chk("INT frame return PC", rd32(32'h5A), 32'h0000_0008);
+        chk("INT raised the mask", {29'h0, dut.u_core.sr_sys_r[2:0]}, 32'd5);
+
+        // ── Level 7 with the mask already at 7 ───────────────────────────────
+        // A plain level>mask comparison can NEVER fire here, since 7 > 7 is
+        // false and 7 is the reset mask. rtl/ shipped that bug for 278 phases.
+        // This program deliberately does NOT lower the mask.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: NOP ; 6: BRA -4
+        // 0x50: handler: MOVEQ #8,D4 ; park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(7, 8'h60);
+        prog[1] = 16'h2E47;
+        prog[2] = 16'h4E71;                 // NOP at byte 4
+        prog[3] = 16'h60FC;                 // BRA -4 -> back to byte 4
+        prog[40] = MOVEQ(4, 8'd8);          // handler at 0x50
+        prog[41] = 16'h60FE;
+        prog[32'h7C >> 1]       = 16'h0000; // vector 31 (level 7) at 0x7C
+        prog[(32'h7C >> 1) + 1] = 16'h0050;
+
+        ipl   = 3'b000;
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (60) @(negedge clk_4x);
+        ipl = 3'b111;                        // level 7, mask still 7
+        repeat (40) @(negedge clk_4x);
+        ipl = 3'b000;
+        repeat (200) @(negedge clk_4x);
+
+        chk("NMI at mask 7",       dut.u_core.u_rf.regs[4],  32'd8);
+        chk("NMI pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+
+        // ── Interrupt with no request: nothing happens ───────────────────────
+        // The mask is lowered to 0 and IPL held at 0 for the whole run, so a
+        // recognition condition that is merely "not equal" rather than
+        // "greater than" would fire here and be caught.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(7, 8'h60);
+        prog[1] = 16'h2E47;
+        prog[2] = MOVEQ(6, 8'd0);
+        prog[3] = 16'h46C6;                 // MOVE D6,SR -> mask 0
+        prog[4] = MOVEQ(5, 8'd6);
+        prog[5] = 16'h60FE;
+        prog[40] = MOVEQ(4, 8'h7F);         // any handler: must NOT run
+        prog[41] = 16'h60FE;
+        for (i = 24; i < 32; i++) begin
+            prog[(i * 4) >> 1]       = 16'h0000;
+            prog[((i * 4) >> 1) + 1] = 16'h0050;
+        end
+
+        ipl   = 3'b000;
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("no spurious INT",  dut.u_core.u_rf.regs[4],  32'd0);
+        chk("program ran",      dut.u_core.u_rf.regs[5],  32'd6);
+        chk("SP untouched",     dut.u_core.u_rf.regs[15], 32'h0000_0060);
 
         $display("");
         if (fails == 0) begin
