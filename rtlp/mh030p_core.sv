@@ -118,6 +118,16 @@ module mh030p_core (
     wire dec_is_push     = dec_is_ea_class && dec_uop.writes_mem;  // PEA / JSR
     // (An)+ and -(An) are illegal for all four, and a push needs the C port
     // for A7 so it cannot also index with it.
+    // LINK/UNLK build and tear down a stack frame; the address register they
+    // name is on the DESTINATION field, not the EA field, so they are excluded
+    // from the EA-base selection even though both touch memory.
+    wire dec_is_link = (dec_uop.uclass == UC_LINK);
+    // Only the register and immediate forms of the system-control moves are in
+    // scope here; memory destinations, and the AND/OR/EOR-to-SR forms at
+    // sub-op 6, are not.
+    wire dec_sysctl_ok = (dec_uop.uclass == UC_SYSCTL)
+                      && (dec_uop.subop <= 4'd5)
+                      && !dec_uop.reads_mem && !dec_uop.writes_mem;
     wire dec_ea_class_ok = dec_is_ea_class && dec_ea_ok
                         && (dec_uop.ea_mode != UEA_AN_POST)
                         && (dec_uop.ea_mode != UEA_AN_PRE)
@@ -153,6 +163,9 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_NOP)
                         || (dec_uop.uclass == UC_LEA)
                         || (dec_uop.uclass == UC_JMP)
+                        || (dec_uop.uclass == UC_EXG)
+                        || (dec_uop.uclass == UC_LINK)
+                        || (dec_uop.uclass == UC_SYSCTL)
                         || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
@@ -164,12 +177,18 @@ module mh030p_core (
                            || (dec_uop.uclass == UC_NOP)
                            || ((dec_uop.uclass == UC_MOVEM) && dec_ea_ok)
                            || dec_ea_class_ok
+                           || (dec_uop.uclass == UC_EXG)
+                           || dec_is_link
+                           || dec_sysctl_ok
                            || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
                            :   dec_rmw     ? dec_ea_ok
                            :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
                                            : (dec_uop.dst_kind == US_DREG
                                               || dec_uop.dst_kind == US_AREG)))
-                       && (!dec_uop.reads_mem || dec_ea_ok);
+                       // UNLK reads memory at the address register it names,
+                       // which is on the destination field, so it has no EA
+                       // mode for the check above to approve.
+                       && (!dec_uop.reads_mem || dec_ea_ok || dec_is_link);
 
     // ── Stage registers ─────────────────────────────────────────────────────
     uop_t ag_uop, ex_uop;
@@ -187,17 +206,28 @@ module mh030p_core (
     wire ag_ea_class = (ag_uop.uclass == UC_LEA) || (ag_uop.uclass == UC_JMP);
     wire ag_mem     = ag_uop.reads_mem || ag_uop.writes_mem || ag_is_trap
                    || ag_ea_class;
+    // Which registers a dual-commit instruction touches on the SECOND port.
+    // Selector only -- no data -- so it can be declared this early and used by
+    // the interlock below.
+    wire ex_dual = ex_valid && ((ex_uop.uclass == UC_EXG)
+                             || (ex_uop.uclass == UC_LINK));
+    wire [3:0] ex_wr2_sel_e = (ex_uop.uclass == UC_EXG) ? ex_uop.src_reg
+                                                        : 4'd15;
     wire ag_is_bsr = (ag_uop.uclass == UC_BRANCH) && (ag_uop.cond == 4'h1);
     // PEA / JSR: the bus cycle goes to -(A7), not to the computed EA.
     wire ag_is_push = ag_ea_class && ag_uop.writes_mem;
     wire ag_is_jsr  = (ag_uop.uclass == UC_JMP) && ag_uop.writes_mem;
     // RTE and RTR pop a 16-bit status word BEFORE the PC; RTS (imm 5) does
     // not. See the two-phase return sequence in EX.
-    wire ag_is_rte  = (ag_uop.uclass == UC_RETURN) && (ag_uop.imm[3:0] != 4'd5);
-    wire [3:0] ag_b_sel = ag_mem ? ag_uop.ea_reg : ag_uop.dst_reg;
+    wire ag_is_rte  = (ag_uop.uclass == UC_RETURN) && (ag_uop.subop != 4'd5);
+    wire ag_is_link = (ag_uop.uclass == UC_LINK) && (ag_uop.subop == 4'd0);
+    wire ag_is_unlk = (ag_uop.uclass == UC_LINK) && (ag_uop.subop == 4'd1);
+    wire [3:0] ag_b_sel = (ag_mem && (ag_uop.uclass != UC_LINK))
+                          ? ag_uop.ea_reg : ag_uop.dst_reg;
     // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
     // and the interlock track a different register than the one actually read.
-    wire [3:0] ag_c_sel = ag_is_push ? 4'd15 : ag_uop.ea_idx_reg;
+    wire [3:0] ag_c_sel = (ag_is_push || ag_is_link) ? 4'd15
+                                                      : ag_uop.ea_idx_reg;
     wire [3:0] ag_a_sel = (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
                         : (ag_uop.reads_mem && !ag_uop.writes_mem)
                           ? ag_uop.dst_reg : ag_uop.src_reg;
@@ -219,7 +249,7 @@ module mh030p_core (
     // is a supervisor resource and RTR is a user instruction. The pop itself
     // is identical, so both share this sequence and differ only at commit.
     wire ex_is_ret = ex_valid && (ex_uop.uclass == UC_RETURN);
-    wire ex_is_rte = ex_is_ret && (ex_uop.imm[3:0] != 4'd5);
+    wire ex_is_rte = ex_is_ret && (ex_uop.subop != 4'd5);
     reg        rte_p2_issued, rte_done;
     reg [15:0] rte_sr;
 
@@ -229,6 +259,8 @@ module mh030p_core (
     // but not to RESTORE one -- an RTE has to put back what was there.
     // Reset leaves S=1 and the interrupt mask at 7 (MC68030UM section 8.1.1).
     reg [7:0] sr_sys_r;
+    // The user stack pointer, shadowed while in supervisor state.
+    reg [31:0] usp_r;
 
     wire ex_rmw = ex_valid && ex_uop.reads_mem && ex_uop.writes_mem;
     wire ex_m2m = ex_rmw && (ex_uop.dst_ea_mode != UEA_NONE);
@@ -330,8 +362,17 @@ module mh030p_core (
                      && ((ex_uop.dst_reg == ag_b_sel)
                       || ((ag_uop.writes_mem || ag_uop.reads_mem)
                           && (ex_uop.dst_reg == ag_a_sel))
-                      || (((ag_uop.ea_mode == UEA_AN_IDX) || ag_is_push)
-                          && (ex_uop.dst_reg == ag_c_sel)));
+                      || (((ag_uop.ea_mode == UEA_AN_IDX) || ag_is_push
+                           || ag_is_link)
+                          && (ex_uop.dst_reg == ag_c_sel)))
+                     // The second write port's target has to be interlocked
+                     // too, or an EXG/LINK/UNLK in EX is invisible to the AG
+                     // stage for half of what it commits.
+                     || (ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
+                         && ex_dual
+                         && ((ex_wr2_sel_e == ag_b_sel)
+                          || (ex_wr2_sel_e == ag_a_sel)
+                          || (ex_wr2_sel_e == ag_c_sel)));
 
     // TWO stalls, and they must not be conflated. ex_wait_mem freezes the
     // whole pipeline, because EX itself cannot complete. ag_base_busy must
@@ -354,6 +395,15 @@ module mh030p_core (
     wire dec_is_trap = (dec_uop.uclass == UC_TRAP);
     wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem || dec_is_trap
                 || dec_is_ea_class;
+    // LINK reads the old frame pointer on B and needs A7 as well, so it takes
+    // the C port exactly as a push does.
+    wire dec_needs_sp = dec_is_push || (dec_is_link && (dec_uop.subop == 4'd0));
+    // The second commit port, registered in WB exactly as the first is, and
+    // mirrored one cycle later into wbp2_* for the second forwarding level.
+    reg         wb2_en,  wbp2_en;
+    reg  [3:0]  wb2_sel, wbp2_sel;
+    reg  [31:0] wb2_data, wbp2_data;
+
     mh030p_regfile u_rf (
         .clk_4x   (clk_4x),
         .rst_n    (rst_n),
@@ -372,18 +422,22 @@ module mh030p_core (
         .rd_a_sel ((dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
                      ? dec_uop.dst_reg : dec_uop.src_reg),
-        .rd_b_sel (dec_mem ? dec_uop.ea_reg   : dec_uop.dst_reg),
+        .rd_b_sel ((dec_mem && !dec_is_link) ? dec_uop.ea_reg
+                                             : dec_uop.dst_reg),
         // Index register for an indexed EA; harmlessly reads R0 otherwise.
         // Index register for an indexed EA, or the register MOVEM is about to
         // transfer. Those two never overlap.
         .rd_c_sel (ex_is_movem ? mvm_reg
-                   : dec_is_push ? 4'd15 : dec_uop.ea_idx_reg),
+                   : dec_needs_sp ? 4'd15 : dec_uop.ea_idx_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
         .rd_c_data(rf_c),
         .wr_en    (wb_wr_en),
         .wr_sel   (wb_wr_sel),
-        .wr_data  (wb_wr_data)
+        .wr_data  (wb_wr_data),
+        .wr2_en   (wb2_en),
+        .wr2_sel  (wb2_sel),
+        .wr2_data (wb2_data)
     );
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -460,11 +514,22 @@ module mh030p_core (
     wire fwd_h_wb  = wb_valid  && wb_writes  && (wb_reg  == ag_a_sel);
     wire fwd_h_wbp = wbp_valid && wbp_writes && (wbp_reg == ag_a_sel);
 
-    wire [31:0] ag_a = fwd_h_wb ? wb_data : fwd_h_wbp ? wbp_data : rf_a;
-    wire [31:0] ag_b = fwd_g_wb ? wb_data : fwd_g_wbp ? wbp_data : rf_b;
+    // Port 2 sits BELOW port 1 at each level, matching the register file's own
+    // conflict rule.
+    wire fwd_h_wb2  = wb2_en  && (wb2_sel  == ag_a_sel);
+    wire fwd_h_wbp2 = wbp2_en && (wbp2_sel == ag_a_sel);
+    wire fwd_g_wb2  = wb2_en  && (wb2_sel  == ag_b_sel);
+    wire fwd_g_wbp2 = wbp2_en && (wbp2_sel == ag_b_sel);
+    wire [31:0] ag_a = fwd_h_wb  ? wb_data  : fwd_h_wb2  ? wb2_data
+                     : fwd_h_wbp ? wbp_data : fwd_h_wbp2 ? wbp2_data : rf_a;
+    wire [31:0] ag_b = fwd_g_wb  ? wb_data  : fwd_g_wb2  ? wb2_data
+                     : fwd_g_wbp ? wbp_data : fwd_g_wbp2 ? wbp2_data : rf_b;
     wire fwd_i_wb  = wb_valid  && wb_writes  && (wb_reg  == ag_c_sel);
     wire fwd_i_wbp = wbp_valid && wbp_writes && (wbp_reg == ag_c_sel);
-    wire [31:0] ag_c = fwd_i_wb ? wb_data : fwd_i_wbp ? wbp_data : rf_c;
+    wire fwd_i_wb2  = wb2_en  && (wb2_sel  == ag_c_sel);
+    wire fwd_i_wbp2 = wbp2_en && (wbp2_sel == ag_c_sel);
+    wire [31:0] ag_c = fwd_i_wb  ? wb_data  : fwd_i_wb2  ? wb2_data
+                     : fwd_i_wbp ? wbp_data : fwd_i_wbp2 ? wbp2_data : rf_c;
 
     // ── AG: effective address, on its own adder ─────────────────────────────
     wire [31:0] ea_step = (ag_uop.siz == UZ_BYTE) ? 32'd1
@@ -539,7 +604,11 @@ module mh030p_core (
             mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
                                  && !stall_ag && !ag_is_trap && !ag_is_movem;
             // A push goes to -(A7); everything else to the computed EA.
-            mem_addr <= ag_is_push ? (ag_c - 32'd4) : ag_ea;
+            // LINK pushes the old frame pointer below A7; UNLK pops from
+            // wherever An points. Neither address comes from the EA adder.
+            mem_addr <= (ag_is_push || ag_is_link) ? (ag_c - 32'd4)
+                      : ag_is_unlk                 ? ag_b
+                                                   : ag_ea;
             // Read if the instruction reads, regardless of whether it also
             // writes: an RMW's FIRST bus cycle is the read, and the write is
             // turned around later from EX. Deriving this from writes_mem made
@@ -558,6 +627,7 @@ module mh030p_core (
             mem_wdata<= (ag_is_bsr || ag_is_jsr)
                         ? (ag_pc + 32'd2 + {27'h0, ag_uop.ext_words, 1'b0})
                       : ag_is_push ? ag_ea
+                      : ag_is_link ? ag_b
                       : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
         end else if (ex_is_movem && !mvm_done) begin
             // Issue a transfer for each set mask bit; skip the clear ones
@@ -660,8 +730,14 @@ module mh030p_core (
     wire fwd_b_wb  = wb_valid  && wb_writes  && (wb_reg  == ex_uop.dst_reg);
     wire fwd_b_wbp = wbp_valid && wbp_writes && (wbp_reg == ex_uop.dst_reg);
 
-    wire [31:0] ex_a_f = fwd_a_wb ? wb_data : fwd_a_wbp ? wbp_data : ex_a;
-    wire [31:0] ex_b_f = fwd_b_wb ? wb_data : fwd_b_wbp ? wbp_data : ex_b;
+    wire fwd_a_wb2  = wb2_en  && (wb2_sel  == ex_a_sel);
+    wire fwd_a_wbp2 = wbp2_en && (wbp2_sel == ex_a_sel);
+    wire fwd_b_wb2  = wb2_en  && (wb2_sel  == ex_uop.dst_reg);
+    wire fwd_b_wbp2 = wbp2_en && (wbp2_sel == ex_uop.dst_reg);
+    wire [31:0] ex_a_f = fwd_a_wb  ? wb_data  : fwd_a_wb2  ? wb2_data
+                       : fwd_a_wbp ? wbp_data : fwd_a_wbp2 ? wbp2_data : ex_a;
+    wire [31:0] ex_b_f = fwd_b_wb  ? wb_data  : fwd_b_wb2  ? wb2_data
+                       : fwd_b_wbp ? wbp_data : fwd_b_wbp2 ? wbp2_data : ex_b;
 
     // Which side the memory value lands on differs between the two shapes:
     //   plain memory read (ADD.L (An),Dn) : memory is the SOURCE
@@ -863,6 +939,21 @@ module mh030p_core (
     wire ex_is_jmp    = ex_valid && (ex_uop.uclass == UC_JMP);
     wire ex_is_lea    = ex_valid && (ex_uop.uclass == UC_LEA)
                                  && ex_uop.writes_reg;
+    wire ex_is_exg    = ex_valid && (ex_uop.uclass == UC_EXG);
+    wire ex_is_link   = ex_valid && (ex_uop.uclass == UC_LINK)
+                                 && (ex_uop.subop == 4'd0);
+    wire ex_is_unlk   = ex_valid && (ex_uop.uclass == UC_LINK)
+                                 && (ex_uop.subop == 4'd1);
+    wire ex_is_sys    = ex_valid && (ex_uop.uclass == UC_SYSCTL);
+    // MOVE SR,Dn and MOVE CCR,Dn are WORD transfers: the upper half of Dn
+    // survives, and for the CCR form so does a zero high byte.
+    wire [31:0] sys_rd_val = (ex_uop.subop == 4'd0)
+                             ? {ex_b_f[31:16], sr_sys_r, ccr_live}
+                             : {ex_b_f[31:16], 8'h00,    ccr_live};
+    // The value going INTO the status register, from a data register or an
+    // immediate.
+    wire [15:0] sys_wr_val = (ex_uop.src_kind == US_IMM) ? ex_uop.imm[15:0]
+                                                         : ex_a_f[15:0];
     wire ex_is_scc    = ex_valid && (ex_uop.uclass == UC_SCC);
     wire ex_is_dbcc   = ex_valid && (ex_uop.uclass == UC_DBCC);
 
@@ -897,9 +988,14 @@ module mh030p_core (
     // RTE pops a Format $0 frame -- status word, PC, format/vector word, eight
     // bytes. RTR pops only a CCR word and the PC, six. Wider frame formats
     // need the format field decoded, which is a later phase.
-    assign ex_commit = ex_is_push               ? (ex_sp - 32'd4)
+    assign ex_commit = ex_is_exg                ? ex_a_f
+                     : ex_is_link               ? (ex_sp - 32'd4)
+                     : ex_is_unlk               ? mem_hold
+                     : (ex_is_sys && (ex_uop.subop == 4'd5)) ? usp_r
+                     : (ex_is_sys && (ex_uop.subop <= 4'd1)) ? sys_rd_val
+                     : ex_is_push               ? (ex_sp - 32'd4)
                      : ex_is_rte                ? (ex_ea
-                                                   + ((ex_uop.imm[3:0] == 4'd3)
+                                                   + ((ex_uop.subop == 4'd3)
                                                       ? 32'd8 : 32'd6))
                      : ex_is_lea                ? ex_ea
                      : ex_is_scc                ? scc_result
@@ -926,8 +1022,17 @@ module mh030p_core (
                                     && !ex_uop.writes_mem
                                     && (!ex_is_dbcc || dbcc_dec)
                                     && !ex_is_rts)
-                       || ex_is_push || ex_is_rte;
-            wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch;
+                       || ex_is_push || ex_is_rte
+                       // LINK commits An although it also writes memory,
+                       // which the clause above excludes.
+                       || (ex_is_link && ex_uop.writes_reg);
+            // MOVE <ea>,CCR and MOVE <ea>,SR write the status register
+            // DIRECTLY, in EX. Letting the ordinary WB flag update run as well
+            // would land a cycle later and overwrite the transferred value
+            // with whatever the datapath happened to compute.
+            wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch
+                       && !(ex_is_sys && (ex_uop.subop >= 4'd2)
+                                      && (ex_uop.subop <= 4'd3));
             wb_ccr     <= {3'b000,
                            ex_uop.x_unchanged ? ccr_live[4] : ex_x,
                            ex_n, ex_z, ex_v, ex_c};
@@ -947,6 +1052,9 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)            ccr_r <= 8'h0;
         else if (rte_commit)   ccr_r <= rte_sr[7:0];
+        else if (ex_is_sys && (ex_uop.subop >= 4'd2) && (ex_uop.subop <= 4'd3)
+                 && !stall_ex)
+                               ccr_r <= sys_wr_val[7:0];
         else if (wb_upd_ccr)   ccr_r <= wb_ccr;
     end
 
@@ -955,8 +1063,10 @@ module mh030p_core (
     // which is what makes the frame it just pushed the only way back.
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)                           sr_sys_r <= 8'h27;
-        else if (rte_commit && (ex_uop.imm[3:0] == 4'd3))
+        else if (rte_commit && (ex_uop.subop == 4'd3))
                                               sr_sys_r <= rte_sr[15:8];
+        else if (ex_is_sys && (ex_uop.subop == 4'd3) && !stall_ex)
+                                              sr_sys_r <= sys_wr_val[15:8];
         else if (ex_is_trap && exc_taken && !stall_ex)
                                               sr_sys_r <= (sr_sys_r | 8'h20)
                                                           & 8'h3F;
@@ -1047,6 +1157,50 @@ module mh030p_core (
             if (mem_got && !rmw_wr_issued) rmw_wr_issued <= 1'b1;
             else if (rmw_wr_issued && mem_ack) rmw_done  <= 1'b1;
         end
+    end
+
+    // EXG swaps, LINK sets An and A7, UNLK restores An and A7. The register
+    // the SECOND port writes, and what it writes there.
+    wire        ex_dual_commit = ex_is_exg || ex_is_link || ex_is_unlk;
+    wire [3:0]  ex_wr2_sel  = ex_is_exg ? ex_uop.src_reg : REG_A7;
+    wire [31:0] ex_wr2_data = ex_is_exg  ? ex_b_f
+                            : ex_is_link ? (ex_sp - 32'd4 + ex_uop.imm)
+                                         : (ex_b_f + 32'd4);   // UNLK
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            wb2_en   <= 1'b0;
+            wb2_sel  <= 4'h0;
+            wb2_data <= 32'h0;
+        end else if (!stall_ex) begin
+            wb2_en   <= ex_dual_commit;
+            wb2_sel  <= ex_wr2_sel;
+            wb2_data <= ex_wr2_data;
+        end else begin
+            wb2_en   <= 1'b0;
+        end
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            wbp2_en   <= 1'b0;
+            wbp2_sel  <= 4'h0;
+            wbp2_data <= 32'h0;
+        end else begin
+            wbp2_en   <= wb2_en;
+            wbp2_sel  <= wb2_sel;
+            wbp2_data <= wb2_data;
+        end
+    end
+
+    // ── USP ─────────────────────────────────────────────────────────────────
+    // A supervisor-only register with no other purpose than to be swapped in
+    // and out of A7 by MOVE USP. No privilege check yet -- that needs the
+    // privilege-violation vector, which is a later phase.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) usp_r <= 32'h0;
+        else if (ex_is_sys && (ex_uop.subop == 4'd4) && !stall_ex)
+            usp_r <= ex_b_f;
     end
 
     // One-cycle history of the commit, for the second forwarding level.

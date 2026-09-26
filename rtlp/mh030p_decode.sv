@@ -89,6 +89,10 @@ module mh030p_decode (
 
     // Group 4 single-operand selector (bits[11:8]).
     wire [3:0] g4_op = instr[11:8];
+    // Hoisted out of the decode process: a constant bit-select inside an
+    // always_* block is not fully supported by Icarus, which is why every
+    // other field in this file is a wire assign too.
+    wire [1:0] g4_op_hi = g4_op[2:1];
     wire g4_is_neg  = (g4_op == 4'h4);
     wire g4_is_not  = (g4_op == 4'h6);
     wire g4_is_clr  = (g4_op == 4'h2);
@@ -400,6 +404,10 @@ module mh030p_decode (
                 uop.src_kind    = US_IMM;
                 uop.imm         = ext;
                 uop.dst_kind    = US_SR;
+                // 6, not one of the MOVE sub-ops: these AND/OR/EOR into the
+                // status register rather than replacing it, and would
+                // otherwise alias onto "MOVE SR,<ea>" at sub-op 0.
+                uop.subop       = 4'd6;
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = 1'b1;
                 uop.x_unchanged = 1'b1;
@@ -685,6 +693,9 @@ module mh030p_decode (
                 uop.siz         = (ea_is_imm && (g4_op == 4'h4)) ? UZ_BYTE : UZ_WORD;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
+                // 0 = MOVE SR,<ea>   1 = MOVE CCR,<ea>
+                // 2 = MOVE <ea>,CCR   3 = MOVE <ea>,SR
+                uop.subop       = {2'b00, g4_op_hi};
                 if (g4_sr_to_ea) begin
                     uop.src_kind    = US_SR;
                     uop.dst_kind    = src_is_dn ? US_DREG : US_MEM;
@@ -795,10 +806,15 @@ module mh030p_decode (
                 uop.writes_reg  = !(sys_is_link && (f_reg == 3'b111));
                 uop.reads_mem   = sys_is_unlk;
                 uop.writes_mem  = sys_is_link;
+                // LINK's frame size is its extension word. LINK.L (0x4808)
+                // takes a longword one; this decodes the word form.
+                uop.imm         = {{16{ext[15]}}, ext[15:0]};
+                uop.subop       = sys_is_link ? 4'd0 : 4'd1;
             end else if (sys_is_usp || sys_is_uspr) begin
                 uop.uclass      = UC_SYSCTL;
                 uop.unit        = UU_MOVE;   // reference decoder: unit=MOVE
                 uop.siz         = UZ_LONG;
+                uop.subop       = sys_is_uspr ? 4'd5 : 4'd4;  // USP -> An / An -> USP
                 uop.src_kind    = sys_is_uspr ? US_USP : US_AREG;
                 uop.dst_kind    = sys_is_uspr ? US_AREG : US_USP;
                 uop.dst_reg     = rn_src_an;
@@ -819,6 +835,7 @@ module mh030p_decode (
                         // Which return this is: 3 = RTE, 5 = RTS, 7 = RTR.
                         // RTE and RTR pop a status word before the PC.
                         uop.imm       = {28'h0, sys_lo};
+                        uop.subop     = sys_lo;
                     end
                     4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1; end
                     4'h0, 4'h1, 4'h2: uop.uclass = UC_NOP;      // RESET/NOP/STOP
@@ -1329,9 +1346,27 @@ module mh030p_decode (
         uop.ext_words     = (uop.uclass == UC_BRANCH)
                           ? ((instr[7:0] == 8'h00) ? 3'd1 : 3'd0)
                           : (uop.uclass == UC_DBCC) ? 3'd1   // displacement word
+                          // LINK carries its frame size in an extension word;
+                          // UNLK carries nothing.
+                          : ((uop.uclass == UC_LINK) && (uop.subop == 4'd0))
+                            ? 3'd1
                           // MOVEM: the mask word plus whatever the EA needs.
                           : (uop.uclass == UC_MOVEM)
                             ? (3'd1 + ea_words(ea_mode_w))
+                          // An instruction that declares NO effective address
+                          // cannot be consuming extension words for one, but
+                          // ea_words_total is computed from the raw opcode's EA
+                          // field regardless of whether the decoded uop uses
+                          // it -- so MOVE USP,A2 (0x4E6A, low bits 101010,
+                          // which read as (d16,An)) claimed a displacement word
+                          // and swallowed the instruction after it. Harmless
+                          // for RTS/RTE, whose own redirect flushes the queue
+                          // before the miscount can matter, which is why it
+                          // survived this long. Immediates are still counted:
+                          // those are real, and independent of the EA field.
+                          : ((uop.ea_mode == UEA_NONE)
+                             && (uop.dst_ea_mode == UEA_NONE))
+                            ? (imm_words + dst_ea_words)
                           : ea_words_total;
 
         if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX)) begin

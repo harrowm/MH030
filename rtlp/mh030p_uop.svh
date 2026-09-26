@@ -203,6 +203,14 @@ typedef struct packed {
 
     // Condition code selector for Bcc/DBcc/Scc/TRAPcc.
     logic [3:0]  cond;
+
+    // Sub-operation within a class, where the class alone is not enough to
+    // say what to do. The system-control class needs it most: MOVE SR,<ea>,
+    // MOVE CCR,<ea>, MOVE <ea>,CCR, MOVE <ea>,SR and both MOVE USP forms all
+    // decode to the same class with the same size and the same unit, and are
+    // told apart only by which register the transfer touches and in which
+    // direction. Returns use it too, for RTE vs RTS vs RTR.
+    logic [3:0]  subop;
 } uop_t;
 
 // Field-by-field clear. A function rather than a constant because Icarus 13
@@ -234,6 +242,7 @@ function automatic uop_t uop_clear();
     u.dst_ea_disp  = 32'h0;
     u.xfer_long    = 1'b0;
     u.ext_words    = 3'd0;
+    u.subop        = 4'd0;
     u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;
     u.x_unchanged  = 1'b0;

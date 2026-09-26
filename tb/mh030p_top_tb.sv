@@ -359,6 +359,100 @@ module mh030p_top_tb;
         chk("ADD wrapped to zero",  dut.u_core.u_rf.regs[0], 32'd0);
         chk("ADDX saw forwarded X", dut.u_core.u_rf.regs[4], 32'd1);
 
+        // ── EXG: two commits from one instruction ───────────────────────────
+        // The first genuine need for a second register-file write port. The
+        // mixed form is included deliberately: which side is the address
+        // register differs per flavour, and the swap has to survive that.
+        //  0: MOVEQ #5,D0 ; 2: MOVEQ #9,D1
+        //  4: EXG D0,D1           D0 = 9, D1 = 5
+        //  6: MOVEQ #3,D2 ; 8: MOVEA.L D2,A3      A3 = 3
+        // 10: EXG D0,A3           D0 = 3, A3 = 9
+        // 12: MOVEA.L A3,A5       A5 = 9 -- reads the SECOND port's target
+        //                         with no filler, so only forwarding can
+        //                         supply it
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(0, 8'd5);
+        prog[1] = MOVEQ(1, 8'd9);
+        prog[2] = 16'hC141;                 // EXG D0,D1
+        prog[3] = MOVEQ(2, 8'd3);
+        prog[4] = 16'h2642;                 // MOVEA.L D2,A3
+        prog[5] = 16'hC18B;                 // EXG D0,A3
+        prog[6] = 16'h2A4B;                 // MOVEA.L A3,A5
+        prog[7] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (200) @(negedge clk_4x);
+
+        chk("EXG Dx,Dy port 1",  dut.u_core.u_rf.regs[0],  32'd3);
+        chk("EXG Dx,Dy port 2",  dut.u_core.u_rf.regs[1],  32'd5);
+        chk("EXG Dx,Ay port 2",  dut.u_core.u_rf.regs[11], 32'd9);
+        chk("EXG port 2 fwd",    dut.u_core.u_rf.regs[13], 32'd9);
+
+        // ── LINK / UNLK: a stack frame built and torn down ───────────────────
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7     A7 = 0x60
+        //  4: MOVEQ #0x11,D0 ; 6: MOVEA.L D0,A2     A2 = 0x11
+        //  8: LINK A2,#-8       push A2 at 0x5C, A2 = 0x5C, A7 = 0x54
+        // 12: MOVEQ #7,D1
+        // 14: UNLK A2          A7 = A2 + 4 = 0x60, A2 = pop = 0x11
+        // 16: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(7, 8'h60);
+        prog[1] = 16'h2E47;                 // MOVEA.L D7,A7
+        prog[2] = MOVEQ(0, 8'h11);
+        prog[3] = 16'h2440;                 // MOVEA.L D0,A2
+        prog[4] = 16'h4E52; prog[5] = 16'hFFF8;   // LINK A2,#-8
+        prog[6] = MOVEQ(1, 8'd7);
+        prog[7] = 16'h4E5A;                 // UNLK A2
+        prog[8] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("LINK pushed old An",  rd32(32'h5C),             32'h0000_0011);
+        chk("UNLK restored An",    dut.u_core.u_rf.regs[10], 32'h0000_0011);
+        chk("UNLK restored SP",    dut.u_core.u_rf.regs[15], 32'h0000_0060);
+        chk("LINK ran the body",   dut.u_core.u_rf.regs[1],  32'd7);
+
+        // ── MOVE to/from SR, CCR and USP ────────────────────────────────────
+        //  0: MOVEQ #-1,D0     CCR = 0x08 (N)
+        //  2: MOVE SR,D1       D1 low word = 0x2708
+        //  4: MOVE CCR,D2      D2 low word = 0x0008
+        //  6: MOVEQ #0x20,D4 ; 8: MOVEA.L D4,A1    A1 = 0x20
+        // 10: MOVE A1,USP     USP = 0x20
+        // 12: MOVE USP,A2     A2 = 0x20
+        // 14: MOVEQ #8,D3     D3 = 8, CCR = 0
+        // 16: MOVE D3,CCR     CCR = 0x08 again, from the transfer this time.
+        //                     LAST deliberately: any MOVEQ after it would set
+        //                     the CCR itself and erase what was transferred.
+        // 18: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(0, 8'hFF);
+        prog[1] = 16'h40C1;                 // MOVE SR,D1
+        prog[2] = 16'h42C2;                 // MOVE CCR,D2
+        prog[3] = MOVEQ(4, 8'h20);
+        prog[4] = 16'h2244;                 // MOVEA.L D4,A1
+        prog[5] = 16'h4E61;                 // MOVE A1,USP
+        prog[6] = 16'h4E6A;                 // MOVE USP,A2
+        prog[7] = MOVEQ(3, 8'd8);
+        prog[8] = 16'h44C3;                 // MOVE D3,CCR
+        prog[9] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (400) @(negedge clk_4x);
+
+        // Reset leaves S set and the mask at 7, and the MOVEQ above set N.
+        chk("MOVE SR,Dn",   dut.u_core.u_rf.regs[1] & 32'h0000_FFFF, 32'h2708);
+        chk("MOVE CCR,Dn",  dut.u_core.u_rf.regs[2] & 32'h0000_FFFF, 32'h0008);
+        chk("MOVE Dn,CCR",  {24'h0, ccr_out},                  32'h0000_0008);
+        chk("MOVE An,USP",  dut.u_core.usp_r,                  32'h0000_0020);
+        chk("MOVE USP,An",  dut.u_core.u_rf.regs[10],          32'h0000_0020);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

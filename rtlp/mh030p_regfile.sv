@@ -58,7 +58,20 @@ module mh030p_regfile (
     // Write (commit stage).
     input  wire        wr_en,
     input  wire [3:0]  wr_sel,
-    input  wire [31:0] wr_data
+    input  wire [31:0] wr_data,
+    // SECOND write port. Three instructions genuinely commit two registers at
+    // once and cannot be expressed with one: EXG swaps a pair, LINK sets both
+    // the frame pointer and the stack pointer, UNLK restores both. Sequencing
+    // them over two cycles instead was the alternative, and it would have cost
+    // a stall on every one of them to save a port the device has 74,000 spare
+    // flip-flops' worth of room for.
+    //
+    // Port 1 WINS a same-register conflict, which is not arbitrary: UNLK A7
+    // sets A7 from An and then pops into An, and since they are the same
+    // register the popped value -- port 1 -- is the architectural result.
+    input  wire        wr2_en,
+    input  wire [3:0]  wr2_sel,
+    input  wire [31:0] wr2_data
 );
 
     reg [31:0] regs [0:15];
@@ -67,15 +80,19 @@ module mh030p_regfile (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < 16; i = i + 1) regs[i] <= 32'h0;
-        end else if (wr_en) begin
-            regs[wr_sel] <= wr_data;
+        end else begin
+            if (wr2_en) regs[wr2_sel] <= wr2_data;
+            if (wr_en)  regs[wr_sel]  <= wr_data;   // port 1 wins; see above
         end
     end
 
     // Registered, write-first reads (see the header).
-    wire hit_a = wr_en && (wr_sel == rd_a_sel);
-    wire hit_b = wr_en && (wr_sel == rd_b_sel);
-    wire hit_c = wr_en && (wr_sel == rd_c_sel);
+    wire hit_a  = wr_en && (wr_sel == rd_a_sel);
+    wire hit_b  = wr_en && (wr_sel == rd_b_sel);
+    wire hit_c  = wr_en && (wr_sel == rd_c_sel);
+    wire hit2_a = wr2_en && (wr2_sel == rd_a_sel);
+    wire hit2_b = wr2_en && (wr2_sel == rd_b_sel);
+    wire hit2_c = wr2_en && (wr2_sel == rd_c_sel);
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -84,10 +101,13 @@ module mh030p_regfile (
             rd_c_data <= 32'h0;
         end else begin
             if (rd_en) begin
-                rd_a_data <= hit_a ? wr_data : regs[rd_a_sel];
-                rd_b_data <= hit_b ? wr_data : regs[rd_b_sel];
+                rd_a_data <= hit_a ? wr_data
+                           : hit2_a ? wr2_data : regs[rd_a_sel];
+                rd_b_data <= hit_b ? wr_data
+                           : hit2_b ? wr2_data : regs[rd_b_sel];
             end
-            if (rd_c_en) rd_c_data <= hit_c ? wr_data : regs[rd_c_sel];
+            if (rd_c_en) rd_c_data <= hit_c ? wr_data
+                                    : hit2_c ? wr2_data : regs[rd_c_sel];
         end
     end
 
