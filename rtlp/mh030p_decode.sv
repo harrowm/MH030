@@ -424,6 +424,7 @@ module mh030p_decode (
                 uop.x_unchanged = 1'b1;
             end else if (g0_is_cmp2) begin
                 uop.uclass      = UC_TRAP;      // CHK2 can trap
+                uop.subop       = 4'd3;         // CHK2/CMP2
                 uop.unit        = UU_MOVE;
                 uop.siz         = (f_dn == 3'b000) ? UZ_BYTE :
                                   (f_dn == 3'b001) ? UZ_WORD : UZ_LONG;
@@ -435,6 +436,7 @@ module mh030p_decode (
                 uop.x_unchanged = 1'b1;
             end else if (g0_is_cas) begin
                 uop.uclass      = UC_ATOMIC;
+                uop.subop       = 4'd1;         // CAS / CAS2, not yet executable
                 uop.unit        = UU_ALU;
                 uop.alu_op      = UA_CMP;
                 // CAS size comes from f_dn: 101=B, 110=W, 111=L.
@@ -666,6 +668,7 @@ module mh030p_decode (
             // unjustified convention into the new core for 2 opcodes.
             end else if (g4_is_chk) begin
                 uop.uclass      = UC_TRAP;
+                uop.subop       = 4'd2;         // CHK: vector 6 on a bounds fail
                 uop.unit        = UU_NONE;
                 uop.siz         = (g4_b76 == 2'b10) ? UZ_WORD : UZ_LONG;
                 uop.src_kind    = src_is_dn ? US_DREG :
@@ -736,6 +739,7 @@ module mh030p_decode (
                 end
             end else if (g4_is_tas) begin
                 uop.uclass      = UC_ATOMIC;
+                uop.subop       = 4'd0;         // TAS
                 uop.unit        = UU_MOVE;
                 uop.siz         = UZ_BYTE;
                 uop.dst_kind    = US_MEM;
@@ -885,6 +889,7 @@ module mh030p_decode (
         4'h5: begin
             if (g5_is_trapcc) begin
                 uop.uclass      = UC_TRAP;
+                uop.subop       = 4'd4;         // TRAPcc: vector 7 on cc true
                 uop.unit        = UU_NONE;
                 uop.siz         = UZ_LONG;
                 uop.cond        = f_cond;
@@ -968,6 +973,7 @@ module mh030p_decode (
         // ── A-line: the whole group is the unimplemented-instruction trap ───
         4'hA: begin
             uop.uclass      = UC_TRAP;
+            uop.subop       = 4'd5;         // Line-A emulator: vector 10
             uop.unit        = UU_NONE;
             uop.siz         = UZ_LONG;
             uop.traps       = 1'b1;
@@ -1350,6 +1356,21 @@ module mh030p_decode (
         uop.ext_words     = (uop.uclass == UC_BRANCH)
                           ? ((instr[7:0] == 8'h00) ? 3'd1 : 3'd0)
                           : (uop.uclass == UC_DBCC) ? 3'd1   // displacement word
+                          // TRAP #n, TRAPV and the whole A-line group have no
+                          // operand at all; TRAPcc names its own operand size
+                          // in the low three bits (010 word, 011 long, 100
+                          // none), which is NOT an EA field even though it sits
+                          // where one would be. TRAPF is 0x51FC -- mode 111
+                          // reg 100, which reads as an immediate -- so without
+                          // this it claimed an extension word and swallowed the
+                          // instruction after it.
+                          : ((uop.uclass == UC_TRAP)
+                             && ((uop.subop == 4'd0) || (uop.subop == 4'd1)
+                              || (uop.subop == 4'd5)))
+                            ? 3'd0
+                          : ((uop.uclass == UC_TRAP) && (uop.subop == 4'd4))
+                            ? ((f_reg == 3'b010) ? 3'd1 :
+                               (f_reg == 3'b011) ? 3'd2 : 3'd0)
                           // LINK carries its frame size in an extension word;
                           // UNLK carries nothing.
                           : ((uop.uclass == UC_LINK) && (uop.subop == 4'd0))

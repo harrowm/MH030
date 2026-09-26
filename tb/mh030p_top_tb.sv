@@ -83,6 +83,7 @@ module mh030p_top_tb;
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
 
+
     int fails = 0;
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
@@ -647,6 +648,200 @@ module mh030p_top_tb;
         chk("no spurious INT",  dut.u_core.u_rf.regs[4],  32'd0);
         chk("program ran",      dut.u_core.u_rf.regs[5],  32'd6);
         chk("SP untouched",     dut.u_core.u_rf.regs[15], 32'h0000_0060);
+
+        // ── CHK: not taken, taken above, taken below ─────────────────────────
+        // All three outcomes, because CHK traps on TWO independent conditions
+        // and leaves defined flags in every case. Vector 6 lives at 0x18.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: MOVEQ #5,D0 ; 6: MOVEQ #10,D1
+        //  8: CHK.L D1,D0      5 <= 10, no trap
+        // 10: MOVEQ #3,D2      must run
+        // 12: MOVEQ #20,D3
+        // 14: CHK.L D1,D3      20 > 10 -> trap
+        // 16: MOVEQ #0x7F,D4   must NOT run
+        // 18: park
+        // 0x40: handler: MOVEQ #7,D5 ; park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'd5);
+        prog[3]  = MOVEQ(1, 8'd10);
+        prog[4]  = 16'h4181;                // CHK.L D1,D0
+        prog[5]  = MOVEQ(2, 8'd3);
+        prog[6]  = MOVEQ(3, 8'd20);
+        prog[7]  = 16'h4781;                // CHK.L D1,D3
+        prog[8]  = MOVEQ(4, 8'h7F);         // must not run
+        prog[9]  = 16'h60FE;
+        prog[12] = 16'h0000; prog[13] = 16'h0040;  // vector 6 at 0x18
+        prog[32] = MOVEQ(5, 8'd7);          // handler at 0x40
+        prog[33] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("CHK in bounds passed", dut.u_core.u_rf.regs[2], 32'd3);
+        chk("CHK above bound trap", dut.u_core.u_rf.regs[5], 32'd7);
+        chk("CHK skipped inline",   dut.u_core.u_rf.regs[4], 32'd0);
+        chk("CHK frame vector",     {16'h0, prog[32'h5E >> 1]}, 32'h0000_0018);
+
+        // Below-bound is the other trap condition and a DIFFERENT comparison:
+        // a negative value fails however small the bound is.
+        //  4: MOVEQ #-1,D0 ; 6: MOVEQ #10,D1 ; 8: CHK.W D1,D0 -> trap
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'hFF);         // D0 = -1
+        prog[3]  = MOVEQ(1, 8'd10);
+        prog[4]  = 16'h4181;                // CHK.W D1,D0
+        prog[5]  = MOVEQ(4, 8'h7F);         // must not run
+        prog[6]  = 16'h60FE;
+        prog[12] = 16'h0000; prog[13] = 16'h0040;
+        // MOVEA, not MOVEQ: the marker must not set the CCR itself, or it
+        // erases the N the trap just recorded.
+        prog[32] = 16'h2C40;                // MOVEA.L D0,A6 -> A6 = -1
+        prog[33] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("CHK below zero trap", dut.u_core.u_rf.regs[14], 32'hFFFF_FFFF);
+        chk("CHK below skipped",   dut.u_core.u_rf.regs[4], 32'd0);
+        // N is the below-bound result when CHK traps.
+        chk("CHK set N on below",  {28'h0, ccr_out[3]}, 32'h0000_0001);
+
+        // ── TRAPcc and Line-A ────────────────────────────────────────────────
+        // TRAPcc shares vector 7 with TRAPV (Table 8-1); Line-A is the
+        // Line-1010 emulator at vector 10 (0x28), and it stacks the address of
+        // the UNIMPLEMENTED instruction so a handler could decode it.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: TRAPF            condition false -> NOT taken (0x51FC)
+        //  6: MOVEQ #2,D1      must run
+        //  8: 0xA123           Line-A -> vector 10 -> 0x40
+        // 10: MOVEQ #0x7F,D2   must NOT run
+        // 12: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = 16'h51FC;                // TRAPF -- never taken
+        prog[3]  = MOVEQ(1, 8'd2);
+        prog[4]  = 16'hA123;                // Line-A
+        prog[5]  = MOVEQ(2, 8'h7F);         // must not run
+        prog[6]  = 16'h60FE;
+        prog[20] = 16'h0000; prog[21] = 16'h0040;  // vector 10 at 0x28
+        prog[32] = MOVEQ(3, 8'd5);          // handler at 0x40
+        prog[33] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("TRAPF not taken",   dut.u_core.u_rf.regs[1], 32'd2);
+        chk("Line-A trapped",    dut.u_core.u_rf.regs[3], 32'd5);
+        chk("Line-A skipped",    dut.u_core.u_rf.regs[2], 32'd0);
+        // The stacked PC is the A-line opcode's own address, byte 8.
+        chk("Line-A stacked PC", rd32(32'h5A), 32'h0000_0008);
+
+        // TRAPcc with a TRUE condition must actually fire.
+        //  4: MOVEQ #2,D6 ; 6: MOVE D6,CCR   V set
+        //  8: TRAPVS         V set -> taken (0x59FC, cc = VS)
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(6, 8'd2);
+        prog[3]  = 16'h44C6;                // MOVE D6,CCR -> V
+        prog[4]  = 16'h59FC;                // TRAPVS
+        prog[5]  = MOVEQ(2, 8'h7F);         // must not run
+        prog[6]  = 16'h60FE;
+        prog[14] = 16'h0000; prog[15] = 16'h0040;  // vector 7 at 0x1C
+        prog[32] = MOVEQ(4, 8'd6);
+        prog[33] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("TRAPcc taken on VS", dut.u_core.u_rf.regs[4], 32'd6);
+        chk("TRAPcc skipped",     dut.u_core.u_rf.regs[2], 32'd0);
+
+        // ── TAS: read-modify-write on a byte, flags from the ORIGINAL ────────
+        // Two runs: one where the byte starts clear (Z set, bit 7 set by us)
+        // and one where it starts with bit 7 already set (N set).
+        //  0: MOVEQ #0x30,D7 ; 2: MOVEA.L D7,A7 -- A7 unused, just a base
+        //  4: MOVEQ #0x40,D0 ; 6: MOVEA.L D0,A1   A1 = 0x40
+        //  8: TAS (A1)        0x4AD1
+        // 10: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h30);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'h40);
+        prog[3]  = 16'h2240;                // MOVEA.L D0,A1
+        prog[4]  = 16'h4AD1;                // TAS (A1)
+        prog[5]  = 16'h60FE;
+        prog[32] = 16'h0000;                // the byte at 0x40 starts at 0
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("TAS set bit 7",   {24'h0, prog[32][15:8]}, 32'h0000_0080);
+        chk("TAS Z on zero",   {28'h0, ccr_out[2]},     32'h0000_0001);
+        chk("TAS N clear",     {28'h0, ccr_out[3]},     32'h0000_0000);
+
+        // Same again with bit 7 already set: N set, Z clear, byte unchanged.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h30);
+        prog[1]  = 16'h2E47;
+        prog[2]  = MOVEQ(0, 8'h40);
+        prog[3]  = 16'h2240;
+        prog[4]  = 16'h4AD1;                // TAS (A1)
+        prog[5]  = 16'h60FE;
+        prog[32] = 16'h8500;                // byte at 0x40 = 0x85
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("TAS keeps its bits", {24'h0, prog[32][15:8]}, 32'h0000_0085);
+        chk("TAS N on negative",  {28'h0, ccr_out[3]},     32'h0000_0001);
+        chk("TAS Z clear",        {28'h0, ccr_out[2]},     32'h0000_0000);
+
+        // ── RMW flags on a shared bus ────────────────────────────────────────
+        // The flags of a read-modify-write come from the value it READ, and are
+        // latched when it leaves EX -- after its write has acked. On a bus
+        // shared with instruction fetch, an unrelated fetch lands between those
+        // two acks, so this only fails when the arbiter is in the picture: the
+        // core-level testbench has no second requester and cannot see it.
+        //  0: MOVEQ #0x40,D0 ; 2: MOVEA.L D0,A1   A1 = 0x40
+        //  4: MOVEQ #0,D1
+        //  6: ADD.L D1,(A1)     0x7FFFFFFF + 1 -> 0x80000000, N set. The
+        //                       operand must CHANGE, or a clobbered read and a
+        //                       correct one store the same thing.
+        //  8: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(0, 8'h40);
+        prog[1]  = 16'h2240;                // MOVEA.L D0,A1
+        prog[2]  = MOVEQ(1, 8'd1);
+        prog[3]  = 16'hD391;                // ADD.L D1,(A1)
+        prog[4]  = 16'h60FE;
+        prog[32] = 16'h7FFF; prog[33] = 16'hFFFF;   // 0x40 = 0x7FFFFFFF
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("RMW stored result", rd32(32'h40),        32'h8000_0000);
+        // N from the result, V from the signed overflow: 0x7FFFFFFF + 1.
+        chk("RMW flags N",  {28'h0, ccr_out[3]}, 32'h0000_0001);
+        chk("RMW flags V",  {28'h0, ccr_out[1]}, 32'h0000_0001);
 
         $display("");
         if (fails == 0) begin

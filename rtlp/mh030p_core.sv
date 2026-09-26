@@ -176,6 +176,7 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_EXG)
                         || (dec_uop.uclass == UC_LINK)
                         || (dec_uop.uclass == UC_SYSCTL)
+                        || (dec_uop.uclass == UC_ATOMIC)
                         || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
@@ -183,7 +184,14 @@ module mh030p_core (
                            // RTS commits to no register, so it would fail the
                            // destination check below; it needs its EA instead.
                            || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
-                           || (dec_uop.uclass == UC_TRAP)
+                           // Sub-op 3 is CHK2/CMP2, which needs a PAIR of
+                           // bounds read from memory -- a two-access sequence
+                           // that is not built yet.
+                           || ((dec_uop.uclass == UC_TRAP)
+                               && (dec_uop.subop != 4'd3))
+                           // TAS only; CAS and CAS2 need a bus lock.
+                           || ((dec_uop.uclass == UC_ATOMIC)
+                               && (dec_uop.subop == 4'd0) && dec_ea_ok)
                            || (dec_uop.uclass == UC_NOP)
                            || ((dec_uop.uclass == UC_MOVEM) && dec_ea_ok)
                            || dec_ea_class_ok
@@ -240,8 +248,7 @@ module mh030p_core (
     // LEA/PEA/JMP/JSR need the EA base on the B port exactly as a memory
     // operand does, even though LEA and JMP issue no bus cycle at all.
     wire ag_ea_class = (ag_uop.uclass == UC_LEA) || (ag_uop.uclass == UC_JMP);
-    wire ag_mem     = ag_uop.reads_mem || ag_uop.writes_mem || ag_is_trap
-                   || ag_ea_class;
+    wire ag_mem     = ag_uop.reads_mem || ag_uop.writes_mem || ag_ea_class;
     // Which registers a dual-commit instruction touches on the SECOND port.
     // Selector only -- no data -- so it can be declared this early and used by
     // the interlock below.
@@ -438,10 +445,28 @@ module mh030p_core (
     // an exception" were the same signal. They are not: a divide by zero and a
     // TRAPV with V set both take one from instructions that are not traps by
     // class, and TRAPV with V CLEAR is a trap by class that takes nothing.
-    wire ex_trap_n = ex_valid && (ex_uop.uclass == UC_TRAP)
+    // Both of these are resolved far below, where the operands and the
+    // condition-code mux live -- but the exception request has to be visible to
+    // stall_ex, which comes first. Declared here, assigned there.
+    reg  cond_true;
+    wire chk_traps;
+
+    // UC_TRAP has SIX producers, and until the sub-op field existed they all
+    // looked like TRAP #n: CHK, CHK2/CMP2, TRAPcc and every one of the 4,096
+    // A-line opcodes shared sub-op 0 and so took a vector built from an `imm`
+    // none of them set -- a bogus jump through address 0. Found by auditing
+    // rather than by a test, because nothing in the suite executed one.
+    wire ex_trap_cls = ex_valid && (ex_uop.uclass == UC_TRAP);
+    wire ex_trap_n   = ex_trap_cls && (ex_uop.subop == 4'd0);   // TRAP #n
+    wire ex_trapv    = ex_trap_cls && (ex_uop.subop == 4'd1);   // TRAPV
+    wire ex_is_chk   = ex_trap_cls && (ex_uop.subop == 4'd2);   // CHK
+    wire ex_trapcc   = ex_trap_cls && (ex_uop.subop == 4'd4);   // TRAPcc
+    wire ex_linea    = ex_trap_cls && (ex_uop.subop == 4'd5);   // A-line
+
+    // TAS: read a byte, set its bit 7, write it back. The RMW machinery
+    // already does the two bus cycles; only the value and the flags differ.
+    wire ex_is_tas = ex_valid && (ex_uop.uclass == UC_ATOMIC)
                               && (ex_uop.subop == 4'd0);
-    wire ex_trapv  = ex_valid && (ex_uop.uclass == UC_TRAP)
-                              && (ex_uop.subop == 4'd1);
     // The divider reports its zero divisor when it finishes, not when it
     // starts, so this has to wait for the handshake to complete exactly as the
     // result does.
@@ -484,15 +509,26 @@ module mh030p_core (
                          && (ex_uop.uclass != UC_DBCC);
     wire int_take = int_pending && ex_interruptible;
 
+    // CHK needs its operands, so its own condition lives further down; this
+    // takes the resolved signal.
     wire exc_req   = int_take || ex_trap_n || (ex_trapv && ccr_live[1])
-                  || div_zero;
+                  || (ex_trapcc && cond_true) || ex_linea
+                  || (ex_is_chk && chk_traps) || div_zero;
+    // An exception that ABANDONS its instruction must suppress that
+    // instruction's register and flag writes. CHK and TRAPV are not in that
+    // set: both leave defined flags behind even when they trap.
+    wire exc_discards = int_take || div_zero;
     // Vectors 5 and 7 are architectural (MC68030UM Table 8-1); TRAP #n carries
     // its own, already resolved to 32+n at decode.
     // Autovectored: level n takes vector 24+n. A real IACK bus cycle fetching a
     // vector FROM the peripheral is the other half of this and is not here yet.
+    // Vectors from MC68030UM Table 8-1. TRAPcc shares vector 7 with TRAPV,
+    // and CHK takes 6; A-line is the Line-1010 emulator at 10.
     wire [9:0] exc_vec_num = int_take  ? (10'd24 + {7'h0, int_level})
                            : div_zero  ? 10'd5
-                           : ex_trapv  ? 10'd7
+                           : ex_is_chk ? 10'd6
+                           : ex_linea  ? 10'd10
+                           : (ex_trapv || ex_trapcc) ? 10'd7
                                        : ex_uop.imm[9:0];
 
     wire ex_is_trap  = exc_req;
@@ -506,7 +542,10 @@ module mh030p_core (
     // anything longer than one word, latent until a divide-by-zero on a
     // memory operand could reach it. An INTERRUPT returns to the interrupted
     // instruction itself, because it was abandoned before doing anything.
-    wire [31:0] exc_ret_pc = int_take ? ex_pc
+    // A-line stacks the address of the unimplemented instruction itself, so
+    // the emulator handler can decode it -- the same rule as an interrupt, for
+    // a different reason.
+    wire [31:0] exc_ret_pc = (int_take || ex_linea) ? ex_pc
                            : (ex_pc + 32'd2
                               + {27'h0, ex_uop.ext_words, 1'b0});
 
@@ -542,9 +581,12 @@ module mh030p_core (
     // ── Register file: address in ID, data in AG ────────────────────────────
     // With a memory source the B port carries the EA BASE register instead of
     // the ALU destination; the destination is forwarded in EX.
-    // A TRAP also needs A7 on the B port, to build its stack frame.
-    wire dec_is_trap = (dec_uop.uclass == UC_TRAP);
-    wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem || dec_is_trap
+    // The TRAP class used to be forced onto the EA field here so a trap could
+    // read A7 for its stack frame. It no longer needs to -- the frame takes A7
+    // from sp_live -- and leaving it in actively broke CHK, whose Dn belongs on
+    // this port and was being displaced by an address register the encoding
+    // never named.
+    wire dec_mem = dec_uop.reads_mem || dec_uop.writes_mem
                 || dec_is_ea_class;
     // LINK reads the old frame pointer on B and needs A7 as well, so it takes
     // the C port exactly as a push does.
@@ -849,8 +891,16 @@ module mh030p_core (
             mem_got  <= 1'b0;
             mem_hold <= 32'h0;
         end else if (mem_ack) begin
+            // mem_got marks "the access completed", for a write as much as a
+            // read -- but the DATA must only be captured from a read. A
+            // read-modify-write acks twice, and taking mem_rdata on the write's
+            // ack replaced the value just read with whatever the bus happened
+            // to be carrying: on a shared bus, an interleaved instruction
+            // fetch. TAS made this visible because its flags come from the
+            // value read, and flags are latched when the instruction leaves EX
+            // -- after the write. Every RMW's flags had the same exposure.
             mem_got  <= 1'b1;
-            mem_hold <= mem_rdata;
+            if (mem_rw) mem_hold <= mem_rdata;
         end else if (!stall_ex) begin
             mem_got  <= 1'b0;
         end
@@ -879,6 +929,42 @@ module mh030p_core (
     wire [31:0] ex_b_f = fwd_b_wb  ? wb_data  : fwd_b_wb2  ? wb2_data
                        : fwd_b_wbp ? wbp_data : fwd_b_wbp2 ? wbp2_data : ex_b;
 
+    // ── Holding a forwarded operand across a stall ──────────────────────────
+    // ex_a/ex_b are the values READ in ID, which can be stale; correctness has
+    // been relying on the forwarding above covering the gap. That works only
+    // while an instruction passes through EX in one cycle. An instruction that
+    // STALLS there -- a memory access, a divide, an exception sequence, CHK
+    // deciding whether to trap -- outlives both forwarding levels, and on the
+    // cycle they expire its operand silently reverts to the stale register.
+    //
+    // CHK found this: it correctly saw 20 > 10 in its first EX cycle, started
+    // its exception, then lost the 20 on the next cycle and abandoned the trap
+    // half-built. Nothing before it had both stalled in EX and depended on a
+    // freshly-forwarded operand, so the bug had no way to show.
+    //
+    // Fixed by capturing the forwarded values once, on the first stalled cycle,
+    // and using the captured copy thereafter. An operand cannot legitimately
+    // change while its own instruction waits, so a snapshot is exactly right.
+    reg [31:0] ex_a_h, ex_b_h;
+    reg        ex_held;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            ex_held <= 1'b0;
+            ex_a_h  <= 32'h0;
+            ex_b_h  <= 32'h0;
+        end else if (!stall_ex) begin
+            ex_held <= 1'b0;          // instruction leaving EX
+        end else if (!ex_held) begin
+            ex_held <= 1'b1;
+            ex_a_h  <= ex_a_f;        // forwarding is still live this cycle
+            ex_b_h  <= ex_b_f;
+        end
+    end
+
+    wire [31:0] ex_a_u = ex_held ? ex_a_h : ex_a_f;
+    wire [31:0] ex_b_u = ex_held ? ex_b_h : ex_b_f;
+
     // Which side the memory value lands on differs between the two shapes:
     //   plain memory read (ADD.L (An),Dn) : memory is the SOURCE
     //   read-modify-write (ADD.L Dn,(An)) : memory is the DESTINATION
@@ -892,14 +978,48 @@ module mh030p_core (
     // Checked in that order, because a mem-to-mem move also satisfies the RMW
     // test -- it reads and writes memory too.
     wire [31:0] ex_src = ex_m2m                      ? mem_hold
-                       : ex_rmw_op                   ? ex_a_f
+                       : ex_rmw_op                   ? ex_a_u
                        : ex_uop.reads_mem            ? mem_hold
                        : (ex_uop.src_kind == US_IMM) ? ex_uop.imm
-                                                     : ex_a_f;
+                                                     : ex_a_u;
     wire [31:0] ex_dst = ex_m2m           ? mem_hold
                        : ex_rmw_op        ? mem_hold
-                       : ex_uop.reads_mem ? ex_a_f
-                                          : ex_b_f;
+                       : ex_uop.reads_mem ? ex_a_u
+                                          : ex_b_u;
+
+    // ── CHK ─────────────────────────────────────────────────────────────────
+    // Traps if Dn is negative OR greater than the upper bound, both compared
+    // SIGNED at the instruction's size, and leaves defined flags either way:
+    // N is the below-bound result when it traps and unchanged when it does not,
+    // Z reflects Dn, V and C clear. Taken from rtl/eu_seq_execute.svh's own
+    // chk_below_w/chk_above_w rather than re-derived.
+    //
+    // Which port holds which operand follows the shape already in place: with a
+    // memory bound this is an ordinary memory read, so the A port carries Dn
+    // and the bound arrives in mem_hold; otherwise the A port carries the bound
+    // and the B port Dn.
+    wire        chk_word    = (ex_uop.siz == UZ_WORD);
+    wire [31:0] chk_val_raw = ex_uop.reads_mem ? ex_a_u : ex_b_u;
+    wire [31:0] chk_bnd_raw = ex_uop.reads_mem            ? mem_hold
+                            : (ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a_u;
+    wire [31:0] chk_val = chk_word ? {{16{chk_val_raw[15]}}, chk_val_raw[15:0]}
+                                   : chk_val_raw;
+    wire [31:0] chk_bnd = chk_word ? {{16{chk_bnd_raw[15]}}, chk_bnd_raw[15:0]}
+                                   : chk_bnd_raw;
+    wire chk_below = chk_word ? chk_val_raw[15] : chk_val_raw[31];
+    wire chk_above = $signed(chk_val) > $signed(chk_bnd);
+    wire chk_z     = chk_word ? (chk_val_raw[15:0] == 16'h0)
+                              : (chk_val_raw == 32'h0);
+    // Gated on the bound having ARRIVED. Without that, a CHK with a memory
+    // bound would raise its exception from an uninitialised mem_hold and start
+    // pushing a frame while its own read was still outstanding.
+    assign chk_traps = ex_is_chk && (!ex_uop.reads_mem || mem_got)
+                                 && (chk_below || chk_above);
+
+    // ── TAS ─────────────────────────────────────────────────────────────────
+    // mem_hold is right-justified for reads, so the byte is in [7:0].
+    wire [7:0]  tas_orig = mem_hold[7:0];
+    wire [31:0] tas_res  = {24'h0, tas_orig | 8'h80};
 
     // ── Functional units ────────────────────────────────────────────────────
     wire [31:0] alu_result, shf_result;
@@ -973,7 +1093,7 @@ module mh030p_core (
 
     wire [31:0] ex_m2m_step = (ex_uop.siz == UZ_BYTE) ? 32'd1
                             : (ex_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
-    assign ex_m2m_addr = ex_a_f + ex_uop.dst_ea_disp
+    assign ex_m2m_addr = ex_a_u + ex_uop.dst_ea_disp
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
                           ? (32'h0 - ex_m2m_step) : 32'h0);
 
@@ -1035,16 +1155,20 @@ module mh030p_core (
     wire mv_like_z = use_ext  ? (ext_result == 32'h0)
                    : use_swap ? (swap_result == 32'h0) : mv_z;
 
-    wire ex_n = use_bit ? 1'b0 : use_bcd ? bcd_n
+    wire ex_n = ex_is_chk ? (chk_traps ? chk_below : ccr_live[3]) : ex_is_tas ? tas_orig[7] :
+                use_bit ? ccr_live[3] : use_bcd ? bcd_n
               : use_md  ? md_n : use_shf ? shf_n
               : (use_mv || use_ext || use_swap) ? mv_like_n : alu_n;
-    wire ex_z = use_bit ? bit_z : use_bcd ? bcd_z
+    wire ex_z = ex_is_chk ? chk_z : ex_is_tas ? (tas_orig == 8'h0) :
+                use_bit ? bit_z : use_bcd ? bcd_z
               : use_md  ? md_z  : use_shf ? shf_z
               : (use_mv || use_ext || use_swap) ? mv_like_z : alu_z;
-    wire ex_v = use_bit ? 1'b0 : use_bcd ? bcd_v
+    wire ex_v = (ex_is_chk || ex_is_tas) ? 1'b0 :
+                use_bit ? ccr_live[1] : use_bcd ? bcd_v
               : use_md  ? md_v : use_shf ? shf_v
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_v;
-    wire ex_c = use_bit ? 1'b0 : use_bcd ? bcd_c
+    wire ex_c = (ex_is_chk || ex_is_tas) ? 1'b0 :
+                use_bit ? ccr_live[0] : use_bcd ? bcd_c
               : use_md  ? md_c : use_shf ? shf_c
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_c;
     // alu_x was missing from this mux: every unit's X came from somewhere
@@ -1053,7 +1177,8 @@ module mh030p_core (
     // the instructions that genuinely must not touch X (MOVE, CMP, AND, OR,
     // EOR, TST), which is the majority -- so the wrong answer and the right
     // one agree everywhere except on exactly the arithmetic that chains.
-    wire ex_x = use_bit ? ccr_live[4] : use_bcd ? bcd_x
+    wire ex_x = (ex_is_chk || ex_is_tas) ? ccr_live[4]
+              : use_bit ? ccr_live[4] : use_bcd ? bcd_x
               : use_md  ? ccr_live[4] : use_shf ? shf_x
               : (use_mv || use_ext || use_swap) ? ccr_live[4] : alu_x;
 
@@ -1065,7 +1190,6 @@ module mh030p_core (
     // eventually earns its place.
     wire cc_n = ccr_live[3], cc_z = ccr_live[2],
          cc_v = ccr_live[1], cc_c = ccr_live[0];
-    reg  cond_true;
     always_comb begin
         case (ex_uop.cond)
             // 0000 = T, 0001 = F. For a BRANCH the 0001 encoding is BSR,
@@ -1114,12 +1238,12 @@ module mh030p_core (
     // MOVE SR,Dn and MOVE CCR,Dn are WORD transfers: the upper half of Dn
     // survives, and for the CCR form so does a zero high byte.
     wire [31:0] sys_rd_val = (ex_uop.subop == 4'd0)
-                             ? {ex_b_f[31:16], sr_sys_r, ccr_live}
-                             : {ex_b_f[31:16], 8'h00,    ccr_live};
+                             ? {ex_b_u[31:16], sr_sys_r, ccr_live}
+                             : {ex_b_u[31:16], 8'h00,    ccr_live};
     // The value going INTO the status register, from a data register or an
     // immediate.
     wire [15:0] sys_wr_val = (ex_uop.src_kind == US_IMM) ? ex_uop.imm[15:0]
-                                                         : ex_a_f[15:0];
+                                                         : ex_a_u[15:0];
     wire ex_is_scc    = ex_valid && (ex_uop.uclass == UC_SCC);
     wire ex_is_dbcc   = ex_valid && (ex_uop.uclass == UC_DBCC);
 
@@ -1154,7 +1278,8 @@ module mh030p_core (
     // RTE pops a Format $0 frame -- status word, PC, format/vector word, eight
     // bytes. RTR pops only a CCR word and the PC, six. Wider frame formats
     // need the format field decoded, which is a later phase.
-    assign ex_commit = ex_is_exg                ? ex_a_f
+    assign ex_commit = ex_is_tas                ? tas_res
+                     : ex_is_exg                ? ex_a_u
                      : ex_is_link               ? (ex_sp - 32'd4)
                      : ex_is_unlk               ? mem_hold
                      : (ex_is_sys && (ex_uop.subop == 4'd5)) ? usp_r
@@ -1185,7 +1310,7 @@ module mh030p_core (
             wb_data    <= ex_commit;
             // DBcc writes Dn only when it actually decrements.
             wb_writes  <= (ex_valid && ex_uop.writes_reg && !ex_is_branch
-                                    && !exc_req
+                                    && !exc_discards
                                     && !ex_uop.writes_mem
                                     && (!ex_is_dbcc || dbcc_dec)
                                     && !ex_is_rts)
@@ -1197,8 +1322,16 @@ module mh030p_core (
             // DIRECTLY, in EX. Letting the ordinary WB flag update run as well
             // would land a cycle later and overwrite the transferred value
             // with whatever the datapath happened to compute.
-            wb_upd_ccr <= ex_valid && ex_uop.updates_ccr && !ex_is_branch
-                       && !exc_req
+            // The decoder reports updates_ccr=0 for every memory-destination
+            // read-modify-write and for TAS, because the reference computes
+            // their flags inside its own RMW state machine rather than from the
+            // decode flag. This core has no such machine, so the flags are
+            // claimed here instead -- without this, NO RMW has ever updated the
+            // CCR at all, which nothing noticed because no test read an RMW's
+            // flags until TAS needed them.
+            wb_upd_ccr <= ex_valid && (ex_uop.updates_ccr || ex_is_tas || ex_rmw)
+                                   && !ex_is_branch
+                       && !exc_discards
                        && !(ex_is_sys && (ex_uop.subop >= 4'd2)
                                       && (ex_uop.subop <= 4'd3));
             wb_ccr     <= {3'b000,
@@ -1348,9 +1481,9 @@ module mh030p_core (
     // the SECOND port writes, and what it writes there.
     wire        ex_dual_commit = ex_is_exg || ex_is_link || ex_is_unlk;
     wire [3:0]  ex_wr2_sel  = ex_is_exg ? ex_uop.src_reg : REG_A7;
-    wire [31:0] ex_wr2_data = ex_is_exg  ? ex_b_f
+    wire [31:0] ex_wr2_data = ex_is_exg  ? ex_b_u
                             : ex_is_link ? (ex_sp - 32'd4 + ex_uop.imm)
-                                         : (ex_b_f + 32'd4);   // UNLK
+                                         : (ex_b_u + 32'd4);   // UNLK
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -1403,7 +1536,7 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) usp_r <= 32'h0;
         else if (ex_is_sys && (ex_uop.subop == 4'd4) && !stall_ex)
-            usp_r <= ex_b_f;
+            usp_r <= ex_b_u;
     end
 
     // One-cycle history of the commit, for the second forwarding level.
