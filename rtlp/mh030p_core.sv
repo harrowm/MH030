@@ -388,6 +388,17 @@ module mh030p_core (
     wire md_dbz;
     wire ex_wait_div  = ex_is_div && (!div_started || md_div_busy);
 
+    // Multiply is now two cycles as well, for the same reason the divide became
+    // sequential: a combinational one puts its whole composition network in a
+    // single tick. Same handshake shape -- a one-tick start so a stalled cycle
+    // cannot retrigger it, which is the bug the (An)+ side effect and the
+    // divider both had to be fixed for.
+    wire ex_is_mul = ex_valid && (ex_uop.unit == UU_MUL);
+    reg  mul_started;
+    wire mul_start = ex_is_mul && !mul_started;
+    wire mul_busy;
+    wire ex_wait_mul = ex_is_mul && (!mul_started || mul_busy);
+
     // ── Which exception, and whether one is being taken at all ──────────────
     // Until now the only source was TRAP #n, so "is this a TRAP uop" and "take
     // an exception" were the same signal. They are not: a divide by zero and a
@@ -443,7 +454,7 @@ module mh030p_core (
     // lets EX drain, inserting a bubble.
     wire ex_wait_rte = ex_is_rte && !rte_done;
 
-    wire stall_ex = ex_wait_mem || ex_wait_div || ex_wait_rte
+    wire stall_ex = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
                  || (ex_is_trap && !exc_taken)
                  || (ex_is_movem && !mvm_done);
     wire stall_ag = ag_base_busy;
@@ -860,18 +871,44 @@ module mh030p_core (
     );
 
     // MOVE/MOVEQ pass the source through, sized.
-    wire [31:0] md_lo, md_hi;
-    wire md_n, md_z, md_v, md_c;
+    wire [31:0] md_lo, md_hi;      // selected below from the two units
+    wire md_n, md_z, md_v, md_c;   // selected below from the two units
+    // The divider only. Its op is driven with bit 2 forced HIGH -- the divide
+    // half of the encoding -- so the four multiply arms of its output mux are
+    // unreachable by construction and synthesis prunes the multipliers behind
+    // them. Without that the old combinational multipliers would still be built
+    // and still bind the clock even though nothing reads them.
+    wire [31:0] dv_lo, dv_hi;
+    wire dv_n, dv_z, dv_v, dv_c;
     eu_mul_div u_md (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .div_start(md_div_start), .div_busy(md_div_busy),
         .src(ex_src), .dst(ex_dst),
         // md_op is 3 bits; the uop keeps it in the shared 4-bit alu_op field.
-        .op(ex_uop.alu_op[2:0]),
-        .result_lo(md_lo), .result_hi(md_hi),
-        .n_out(md_n), .z_out(md_z), .v_out(md_v), .c_out(md_c),
+        .op({1'b1, ex_uop.alu_op[1:0]}),
+        .result_lo(dv_lo), .result_hi(dv_hi),
+        .n_out(dv_n), .z_out(dv_z), .v_out(dv_v), .c_out(dv_c),
         .div_by_zero(md_dbz)
     );
+
+    wire [31:0] ml_lo, ml_hi;
+    wire ml_n, ml_z;
+    mh030p_mul u_mul (
+        .clk_4x(clk_4x), .rst_n(rst_n),
+        .start(mul_start), .busy(mul_busy),
+        .src(ex_src), .dst(ex_dst),
+        .op(ex_uop.alu_op[1:0]),
+        .result_lo(ml_lo), .result_hi(ml_hi),
+        .n_out(ml_n), .z_out(ml_z)
+    );
+
+    wire is_mul_op = (ex_uop.unit == UU_MUL);
+    assign md_lo = is_mul_op ? ml_lo : dv_lo;
+    assign md_hi = is_mul_op ? ml_hi : dv_hi;
+    assign md_n  = is_mul_op ? ml_n  : dv_n;
+    assign md_z  = is_mul_op ? ml_z  : dv_z;
+    assign md_v  = is_mul_op ? 1'b0  : dv_v;
+    assign md_c  = is_mul_op ? 1'b0  : dv_c;
 
     wire [31:0] ex_m2m_step = (ex_uop.siz == UZ_BYTE) ? 32'd1
                             : (ex_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
@@ -1146,6 +1183,12 @@ module mh030p_core (
         if (!rst_n)          div_started <= 1'b0;
         else if (!stall_ex)  div_started <= 1'b0;   // instruction leaving EX
         else if (ex_is_div)  div_started <= 1'b1;
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)          mul_started <= 1'b0;
+        else if (!stall_ex)  mul_started <= 1'b0;
+        else if (ex_is_mul)  mul_started <= 1'b1;
     end
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
