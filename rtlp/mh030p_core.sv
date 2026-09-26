@@ -132,6 +132,18 @@ module mh030p_core (
     // name is on the DESTINATION field, not the EA field, so they are excluded
     // from the EA-base selection even though both touch memory.
     wire dec_is_link = (dec_uop.uclass == UC_LINK);
+    // ── Bit fields ──────────────────────────────────────────────────────────
+    // The operand registers do not sit where any other class puts them: the
+    // FIELD lives in the register the EA field names, and BFINS's source in the
+    // specification word's own [15:12]. The destination is whichever of those
+    // two the operation writes, which the decoder has already resolved.
+    //
+    // Dn-direct only, and only with an immediate offset and width. A Dn offset
+    // or width would need two more read ports than exist, and the memory forms
+    // need the byte/word/longword sub-access sizing rtl/ only got at Phase 276.
+    wire dec_is_bf = (dec_uop.uclass == UC_BITFIELD);
+    wire dec_bf_ok = dec_is_bf && !dec_uop.reads_mem && !dec_uop.writes_mem
+                  && !dec_uop.imm[11] && !dec_uop.imm[5];
     // Only the register and immediate forms of the system-control moves are in
     // scope here; memory destinations, and the AND/OR/EOR-to-SR forms at
     // sub-op 6, are not.
@@ -177,6 +189,7 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_LINK)
                         || (dec_uop.uclass == UC_SYSCTL)
                         || (dec_uop.uclass == UC_ATOMIC)
+                        || (dec_uop.uclass == UC_BITFIELD)
                         || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
@@ -192,6 +205,7 @@ module mh030p_core (
                            // TAS only; CAS and CAS2 need a bus lock.
                            || ((dec_uop.uclass == UC_ATOMIC)
                                && (dec_uop.subop == 4'd0) && dec_ea_ok)
+                           || dec_bf_ok
                            || (dec_uop.uclass == UC_NOP)
                            || ((dec_uop.uclass == UC_MOVEM) && dec_ea_ok)
                            || dec_ea_class_ok
@@ -265,13 +279,16 @@ module mh030p_core (
     wire ag_is_rte  = (ag_uop.uclass == UC_RETURN) && (ag_uop.subop != 4'd5);
     wire ag_is_link = (ag_uop.uclass == UC_LINK) && (ag_uop.subop == 4'd0);
     wire ag_is_unlk = (ag_uop.uclass == UC_LINK) && (ag_uop.subop == 4'd1);
-    wire [3:0] ag_b_sel = (ag_mem && (ag_uop.uclass != UC_LINK))
+    wire ag_is_bf = (ag_uop.uclass == UC_BITFIELD);
+    wire [3:0] ag_b_sel = ag_is_bf ? {1'b0, ag_uop.ea_reg[2:0]}
+                        : (ag_mem && (ag_uop.uclass != UC_LINK))
                           ? ag_uop.ea_reg : ag_uop.dst_reg;
     // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
     // and the interlock track a different register than the one actually read.
     wire [3:0] ag_c_sel = (ag_is_push || ag_is_link) ? 4'd15
                                                       : ag_uop.ea_idx_reg;
-    wire [3:0] ag_a_sel = (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
+    wire [3:0] ag_a_sel = ag_is_bf ? ag_uop.imm[15:12]
+                        : (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
                         : (ag_uop.reads_mem && !ag_uop.writes_mem)
                           ? ag_uop.dst_reg : ag_uop.src_reg;
 
@@ -607,11 +624,13 @@ module mh030p_core (
         // dst_reg is unset -- using it read D0 by accident.
         // For a memory-to-memory move the source comes from memory and there
         // is no register operand, so the A port carries the DESTINATION base.
-        .rd_a_sel ((dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
+        .rd_a_sel (dec_is_bf ? dec_uop.imm[15:12]
+                   : (dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
                      ? dec_uop.dst_reg : dec_uop.src_reg),
-        .rd_b_sel ((dec_mem && !dec_is_link) ? dec_uop.ea_reg
-                                             : dec_uop.dst_reg),
+        .rd_b_sel (dec_is_bf ? {1'b0, dec_uop.ea_reg[2:0]}
+                   : (dec_mem && !dec_is_link) ? dec_uop.ea_reg
+                                              : dec_uop.dst_reg),
         // Index register for an indexed EA; harmlessly reads R0 otherwise.
         // Index register for an indexed EA, or the register MOVEM is about to
         // transfer. Those two never overlap.
@@ -911,19 +930,30 @@ module mh030p_core (
     //   memory source : A = ALU destination, B = EA base
     //   otherwise     : A = ALU source,      B = ALU destination
     wire ex_rmw_op = ex_uop.reads_mem && ex_uop.writes_mem;
-    wire [3:0] ex_a_sel = (ex_uop.dst_ea_mode != UEA_NONE) ? ex_uop.dst_ea_reg
+    wire ex_is_bf = ex_valid && (ex_uop.uclass == UC_BITFIELD);
+    wire [3:0] ex_a_sel = ex_is_bf ? ex_uop.imm[15:12]
+                        : (ex_uop.dst_ea_mode != UEA_NONE) ? ex_uop.dst_ea_reg
                         : (ex_uop.reads_mem && !ex_uop.writes_mem)
                           ? ex_uop.dst_reg : ex_uop.src_reg;
+    // The B port's forwarding compared ex_uop.dst_reg, which is only the right
+    // register when the read selector also used dst_reg. It mirrors the read
+    // exactly now -- for a memory instruction the B port carries the EA BASE,
+    // and comparing a destination against it was checking the wrong register.
+    wire ex_b_mem_cls = ex_uop.reads_mem || ex_uop.writes_mem
+                     || (ex_uop.uclass == UC_LEA) || (ex_uop.uclass == UC_JMP);
+    wire [3:0] ex_b_sel = ex_is_bf ? {1'b0, ex_uop.ea_reg[2:0]}
+                        : (ex_b_mem_cls && (ex_uop.uclass != UC_LINK))
+                          ? ex_uop.ea_reg : ex_uop.dst_reg;
 
     wire fwd_a_wb  = wb_valid  && wb_writes  && (wb_reg  == ex_a_sel);
     wire fwd_a_wbp = wbp_valid && wbp_writes && (wbp_reg == ex_a_sel);
-    wire fwd_b_wb  = wb_valid  && wb_writes  && (wb_reg  == ex_uop.dst_reg);
-    wire fwd_b_wbp = wbp_valid && wbp_writes && (wbp_reg == ex_uop.dst_reg);
+    wire fwd_b_wb  = wb_valid  && wb_writes  && (wb_reg  == ex_b_sel);
+    wire fwd_b_wbp = wbp_valid && wbp_writes && (wbp_reg == ex_b_sel);
 
     wire fwd_a_wb2  = wb2_en  && (wb2_sel  == ex_a_sel);
     wire fwd_a_wbp2 = wbp2_en && (wbp2_sel == ex_a_sel);
-    wire fwd_b_wb2  = wb2_en  && (wb2_sel  == ex_uop.dst_reg);
-    wire fwd_b_wbp2 = wbp2_en && (wbp2_sel == ex_uop.dst_reg);
+    wire fwd_b_wb2  = wb2_en  && (wb2_sel  == ex_b_sel);
+    wire fwd_b_wbp2 = wbp2_en && (wbp2_sel == ex_b_sel);
     wire [31:0] ex_a_f = fwd_a_wb  ? wb_data  : fwd_a_wb2  ? wb2_data
                        : fwd_a_wbp ? wbp_data : fwd_a_wbp2 ? wbp2_data : ex_a;
     wire [31:0] ex_b_f = fwd_b_wb  ? wb_data  : fwd_b_wb2  ? wb2_data
@@ -1020,6 +1050,21 @@ module mh030p_core (
     // mem_hold is right-justified for reads, so the byte is in [7:0].
     wire [7:0]  tas_orig = mem_hold[7:0];
     wire [31:0] tas_res  = {24'h0, tas_orig | 8'h80};
+
+    // ── Bit-field unit ──────────────────────────────────────────────────────
+    // rtl/eu_bitfield.sv verbatim: a pure combinational leaf, and a Tier-1
+    // reuse. The field comes from the B port, BFINS's inserted value from A.
+    wire [31:0] bf_result;
+    wire        bf_n, bf_z, bf_v, bf_c;
+    eu_bitfield u_bf (
+        .bf_data     (ex_b_u),
+        .bf_offset   (ex_uop.imm[10:6]),
+        .bf_raw_width(ex_uop.imm[4:0]),
+        .bf_src      (ex_a_u),
+        .bf_op       (ex_uop.subop[2:0]),
+        .bf_result   (bf_result),
+        .bf_n(bf_n), .bf_z(bf_z), .bf_v(bf_v), .bf_c(bf_c)
+    );
 
     // ── Functional units ────────────────────────────────────────────────────
     wire [31:0] alu_result, shf_result;
@@ -1155,19 +1200,23 @@ module mh030p_core (
     wire mv_like_z = use_ext  ? (ext_result == 32'h0)
                    : use_swap ? (swap_result == 32'h0) : mv_z;
 
-    wire ex_n = ex_is_chk ? (chk_traps ? chk_below : ccr_live[3]) : ex_is_tas ? tas_orig[7] :
+    wire ex_n = ex_is_bf ? bf_n :
+                ex_is_chk ? (chk_traps ? chk_below : ccr_live[3]) : ex_is_tas ? tas_orig[7] :
                 use_bit ? ccr_live[3] : use_bcd ? bcd_n
               : use_md  ? md_n : use_shf ? shf_n
               : (use_mv || use_ext || use_swap) ? mv_like_n : alu_n;
-    wire ex_z = ex_is_chk ? chk_z : ex_is_tas ? (tas_orig == 8'h0) :
+    wire ex_z = ex_is_bf ? bf_z :
+                ex_is_chk ? chk_z : ex_is_tas ? (tas_orig == 8'h0) :
                 use_bit ? bit_z : use_bcd ? bcd_z
               : use_md  ? md_z  : use_shf ? shf_z
               : (use_mv || use_ext || use_swap) ? mv_like_z : alu_z;
-    wire ex_v = (ex_is_chk || ex_is_tas) ? 1'b0 :
+    wire ex_v = ex_is_bf ? bf_v :
+                (ex_is_chk || ex_is_tas) ? 1'b0 :
                 use_bit ? ccr_live[1] : use_bcd ? bcd_v
               : use_md  ? md_v : use_shf ? shf_v
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_v;
-    wire ex_c = (ex_is_chk || ex_is_tas) ? 1'b0 :
+    wire ex_c = ex_is_bf ? bf_c :
+                (ex_is_chk || ex_is_tas) ? 1'b0 :
                 use_bit ? ccr_live[0] : use_bcd ? bcd_c
               : use_md  ? md_c : use_shf ? shf_c
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_c;
@@ -1177,7 +1226,7 @@ module mh030p_core (
     // the instructions that genuinely must not touch X (MOVE, CMP, AND, OR,
     // EOR, TST), which is the majority -- so the wrong answer and the right
     // one agree everywhere except on exactly the arithmetic that chains.
-    wire ex_x = (ex_is_chk || ex_is_tas) ? ccr_live[4]
+    wire ex_x = (ex_is_bf || ex_is_chk || ex_is_tas) ? ccr_live[4]
               : use_bit ? ccr_live[4] : use_bcd ? bcd_x
               : use_md  ? ccr_live[4] : use_shf ? shf_x
               : (use_mv || use_ext || use_swap) ? ccr_live[4] : alu_x;
@@ -1278,7 +1327,8 @@ module mh030p_core (
     // RTE pops a Format $0 frame -- status word, PC, format/vector word, eight
     // bytes. RTR pops only a CCR word and the PC, six. Wider frame formats
     // need the format field decoded, which is a later phase.
-    assign ex_commit = ex_is_tas                ? tas_res
+    assign ex_commit = ex_is_bf                 ? bf_result
+                     : ex_is_tas                ? tas_res
                      : ex_is_exg                ? ex_a_u
                      : ex_is_link               ? (ex_sp - 32'd4)
                      : ex_is_unlk               ? mem_hold

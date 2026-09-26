@@ -1284,6 +1284,16 @@ module mh030p_decode (
                 // RMW split as every other memory read-modify-write family.
                 uop.updates_ccr = src_is_dn;
                 uop.x_unchanged = 1'b1;
+                // Which of the eight operations, and the whole specification
+                // word: offset in [10:6], width in [4:0], the register field
+                // BFINS inserts from in [15:12], and the two "this is in a Dn"
+                // flags at [11] and [5]. The spec word is the FIRST extension
+                // word, so which half of ext holds it depends on whether the EA
+                // needed one too -- the same rule as MOVEM's mask.
+                uop.subop       = {1'b0, bf_op};
+                uop.imm         = (ea_words(ea_mode_w) == 3'd0)
+                                ? {16'h0, ext[15:0]}
+                                : {16'h0, ext[31:16]};
             end else if (ea_is_alt_mem && (f_ss == 2'b11) && e_mem_legal) begin
                 // Memory shift/rotate: always one bit, always a word.
                 uop.uclass      = UC_SHIFT;
@@ -1377,6 +1387,13 @@ module mh030p_decode (
                             ? 3'd1
                           // MOVEM: the mask word plus whatever the EA needs.
                           : (uop.uclass == UC_MOVEM)
+                            ? (3'd1 + ea_words(ea_mode_w))
+                          // A bit field's specification word is not an EA word
+                          // and is not optional -- same shape as MOVEM's mask.
+                          // Without this a Dn-direct bit field reported ZERO
+                          // extension words and its own specification was
+                          // decoded as the following instruction.
+                          : (uop.uclass == UC_BITFIELD)
                             ? (3'd1 + ea_words(ea_mode_w))
                           // An instruction that declares NO effective address
                           // cannot be consuming extension words for one, but

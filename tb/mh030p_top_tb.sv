@@ -843,6 +843,59 @@ module mh030p_top_tb;
         chk("RMW flags N",  {28'h0, ccr_out[3]}, 32'h0000_0001);
         chk("RMW flags V",  {28'h0, ccr_out[1]}, 32'h0000_0001);
 
+        // ── Bit fields, register-direct ──────────────────────────────────────
+        // Offsets are counted from the MSB, which is the part that is easy to
+        // get backwards, so every check below names the bits it expects.
+        // D0 = 0xF0F0F0F0, so bits 8..15 from the MSB are 0xF0 -- a field whose
+        // own top bit is set, which is what separates EXTU from EXTS.
+        //  0: MOVE.L #0xF0F0F0F0,D0
+        //  6: BFEXTU D0{8:8},D1      -> 0x000000F0
+        // 10: BFEXTS D0{8:8},D2      -> 0xFFFFFFF0
+        // 14: BFFFO  D0{0:32},D5     -> 0 (bit 0 from the MSB is already set)
+        // 18: MOVEQ #0x0F,D3 ; 20: MOVEQ #0,D4
+        // 22: BFINS  D3,D4{8:8}      -> 0x000F0000
+        // 26: BFCLR  D0{0:4}         -> 0x00F0F0F0, and N set from the field
+        // 30: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = 16'h203C; prog[1] = 16'hF0F0; prog[2] = 16'hF0F0;
+        prog[3]  = 16'hE9C0; prog[4] = 16'h1208;   // BFEXTU D0{8:8},D1
+        prog[5]  = 16'hEBC0; prog[6] = 16'h2208;   // BFEXTS D0{8:8},D2
+        prog[7]  = 16'hEDC0; prog[8] = 16'h5000;   // BFFFO  D0{0:32},D5
+        prog[9]  = MOVEQ(3, 8'h0F);
+        prog[10] = MOVEQ(4, 8'd0);
+        prog[11] = 16'hEFC4; prog[12] = 16'h3208;  // BFINS D3,D4{8:8}
+        prog[13] = 16'hECC0; prog[14] = 16'h0004;  // BFCLR D0{0:4}
+        prog[15] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("BFEXTU zero-extends", dut.u_core.u_rf.regs[1], 32'h0000_00F0);
+        chk("BFEXTS sign-extends", dut.u_core.u_rf.regs[2], 32'hFFFF_FFF0);
+        chk("BFFFO finds bit 0",   dut.u_core.u_rf.regs[5], 32'd0);
+        chk("BFINS places field",  dut.u_core.u_rf.regs[4], 32'h000F_0000);
+        chk("BFCLR clears field",  dut.u_core.u_rf.regs[0], 32'h00F0_F0F0);
+        // BFCLR ran last; its field was 0xF (width 4), whose top bit is set.
+        chk("BF flags N from field", {28'h0, ccr_out[3]}, 32'h0000_0001);
+        chk("BF flags Z clear",      {28'h0, ccr_out[2]}, 32'h0000_0000);
+
+        // BFTST writes no register at all, only flags -- and a zero field must
+        // set Z. Bits 8..12 of 0x00F0F0F0 are 0, so this is the zero case.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h203C; prog[1] = 16'h00F0; prog[2] = 16'hF0F0;
+        prog[3] = 16'hE8C0; prog[4] = 16'h0104;    // BFTST D0{4:4}
+        prog[5] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (250) @(negedge clk_4x);
+
+        chk("BFTST left D0",   dut.u_core.u_rf.regs[0], 32'h00F0_F0F0);
+        chk("BFTST Z on zero", {28'h0, ccr_out[2]},     32'h0000_0001);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");
