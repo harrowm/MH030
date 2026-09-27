@@ -1046,9 +1046,13 @@ module mh030p_core (
             // turned around later from EX. Deriving this from writes_mem made
             // every RMW start with a write.
             mem_rw   <= ag_uop.reads_mem;
-            // A return that pops a status word reads it as a WORD; the PC
-            // that follows is a separate longword, issued from EX.
-            mem_siz  <= ag_is_rte ? UZ_WORD : ag_uop.siz;
+            // The bus access follows the OPERAND size, not the write size. They
+            // differ for MOVEA.W, ADDA.W, SUBA.W, CMPA.W and the word MUL/DIV,
+            // all of which write 32 bits from a 16-bit operand. A return that
+            // pops a status word reads a WORD too; the PC that follows is a
+            // separate longword, issued from EX.
+            mem_siz  <= ag_is_rte      ? UZ_WORD
+                      : ag_uop.opnd_word ? UZ_WORD : ag_uop.siz;
             // A pure write's data is the source operand, which AG already
             // has: the A port for a register source, or the immediate.
             // BSR stores the RETURN ADDRESS, not a register: the address of
@@ -1286,7 +1290,7 @@ module mh030p_core (
     // destination was adding a leftover register value instead of its own
     // constant. Found by the Harte corpus in its first forty vectors; no
     // hand-written test had ever used an immediate against memory.
-    wire [31:0] ex_src = ex_m2m                      ? mem_hold
+    wire [31:0] ex_src_raw = ex_m2m                  ? mem_hold
                        : ex_rmw_op
                          ? ((ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a_u)
                        // TST/BTST-on-memory: the register or immediate is the
@@ -1296,6 +1300,16 @@ module mh030p_core (
                        : ex_uop.reads_mem            ? mem_hold
                        : (ex_uop.src_kind == US_IMM) ? ex_uop.imm
                                                      : ex_a_u;
+    // A word source going to an ADDRESS register is sign-extended to 32 bits
+    // before the arithmetic -- ADDA.w, SUBA.w, CMPA.w. The uop already said so
+    // with sext_src, but the only consumer treated it as "the result IS the
+    // sign-extended source", which is true for MOVEA.w and wrong for these:
+    // ADDA.w has to ADD the extended value to the whole register. Every ADDA.w
+    // vector in the corpus failed.
+    wire [31:0] ex_src = ex_uop.sext_src
+                         ? {{16{ex_src_raw[15]}}, ex_src_raw[15:0]}
+                         : ex_src_raw;
+
     wire [31:0] ex_dst = ex_m2m           ? mem_hold
                        : ex_rmw_op        ? mem_hold
                        : ex_mem_operand   ? mem_hold
@@ -1778,7 +1792,11 @@ module mh030p_core (
                      : ex_is_lea                ? ex_ea
                      : ex_is_scc                ? scc_result
                      : ex_is_dbcc               ? dbcc_result
-                     : (ex_uop.sext_src) ? {{16{ex_src[15]}}, ex_src[15:0]}
+                     // MOVEA only: its result genuinely IS the sign-extended
+                     // source. For ADDA/SUBA/CMPA the extension has already been
+                     // applied to the operand above, and the result is the
+                     // arithmetic.
+                     : (ex_uop.sext_src && use_mv) ? ex_src
                                               : ex_result;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -2085,9 +2103,26 @@ module mh030p_core (
 
     // EXG swaps, LINK sets An and A7, UNLK restores An and A7. The register
     // the SECOND port writes, and what it writes there.
-    wire        ex_dual_commit = ex_is_exg || ex_is_link || ex_is_unlk;
-    wire [3:0]  ex_wr2_sel  = ex_is_exg ? ex_uop.src_reg : REG_A7;
+    // A memory-to-memory move has TWO address registers to maintain, and only
+    // the source's was being updated: ag_an_upd handles ag_uop.ea_reg, and
+    // nothing handled dst_ea_reg. So MOVE.b (A7)+,(A4)+ advanced A7 and left A4
+    // where it was. The second write port already exists for EXG and LINK, and
+    // this is the same shape -- one instruction, two register commits.
+    wire [31:0] m2m_step = (ex_uop.siz == UZ_BYTE)
+                           ? ((ex_uop.dst_ea_reg == 4'd15) ? 32'd2 : 32'd1)
+                         : (ex_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
+    wire ex_m2m_an = ex_m2m
+                  && ((ex_uop.dst_ea_mode == UEA_AN_POST)
+                   || (ex_uop.dst_ea_mode == UEA_AN_PRE));
+
+    wire        ex_dual_commit = ex_is_exg || ex_is_link || ex_is_unlk
+                              || ex_m2m_an;
+    wire [3:0]  ex_wr2_sel  = ex_is_exg  ? ex_uop.src_reg
+                            : ex_m2m_an  ? ex_uop.dst_ea_reg : REG_A7;
     wire [31:0] ex_wr2_data = ex_is_exg  ? ex_b_u
+                            : ex_m2m_an
+                              ? ((ex_uop.dst_ea_mode == UEA_AN_POST)
+                                 ? (ex_a_u + m2m_step) : (ex_a_u - m2m_step))
                             : ex_is_link ? (ex_sp - 32'd4 + ex_uop.imm)
                                          : (ex_b_u + 32'd4);   // UNLK
 

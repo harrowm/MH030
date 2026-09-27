@@ -63,6 +63,12 @@ module mh030p_decode (
     // Register-direct predicates. mode 000 = Dn, 001 = An.
     wire src_is_dn = (f_mode == 3'b000);
     wire src_is_an = (f_mode == 3'b001);
+    // An address register is a legal ALU SOURCE only for ADD (group D), SUB
+    // (group 9) and CMP (group B), and never at byte size. OR (8) and AND (C)
+    // do not accept one -- the reference decoder rejects those, and the sweep
+    // said so in 256 opcodes when this was first written as "any group".
+    wire alu_an_src_ok = src_is_an && (f_siz != UZ_BYTE)
+                      && (f_group != 4'h8) && (f_group != 4'hC);
     wire dst_is_dn = (f_dst_mode == 3'b000);
     wire dst_is_an = (f_dst_mode == 3'b001);
 
@@ -598,6 +604,7 @@ module mh030p_decode (
                 uop.unit        = UU_MOVE;
                 uop.siz         = dst_is_an ? UZ_LONG : f_move_siz;
                 uop.sext_src    = dst_is_an && (f_move_siz == UZ_WORD);
+                uop.opnd_word   = dst_is_an && (f_move_siz == UZ_WORD);
 
                 // Source
                 if (ea_src_ok) begin
@@ -663,6 +670,7 @@ module mh030p_decode (
                     // dec_siz=long for 0x3040 (MOVEA.W D0,A0).
                     uop.siz         = dst_is_an ? UZ_LONG : f_move_siz;
                     uop.sext_src    = dst_is_an && (f_move_siz == UZ_WORD);
+                    uop.opnd_word   = dst_is_an && (f_move_siz == UZ_WORD);
                     uop.src_kind    = src_is_dn ? US_DREG : US_AREG;
                     uop.src_reg     = src_is_dn ? rn_src_dn : rn_src_an;
                     uop.dst_kind    = dst_is_dn ? US_DREG : US_AREG;
@@ -1023,6 +1031,26 @@ module mh030p_decode (
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = 1'b0;
+            end else if (src_is_an && (f_siz != UZ_BYTE)) begin
+                // ADDQ/SUBQ #n,An. The whole address register is written
+                // whatever the encoded size says, and the flags are NOT
+                // affected -- the one ALU operation in the set that writes a
+                // register and leaves the CCR alone. Not decoded before, so
+                // SUBQ #3,A6 did nothing at all.
+                uop.uclass      = UC_ADDQ;
+                uop.unit        = UU_ALU;
+                uop.alu_op      = f_dir ? UA_SUB : UA_ADD;
+                // LONG whatever the encoded size says, which is what the
+                // reference reports too: the arithmetic is on the whole
+                // register, so the operation size is not the encoded size.
+                uop.siz         = UZ_LONG;
+                uop.src_kind    = US_IMM;
+                uop.imm         = f_q_imm;
+                uop.dst_kind    = US_AREG;
+                uop.dst_reg     = rn_src_an;
+                uop.writes_reg  = 1'b1;
+                uop.updates_ccr = 1'b0;
+                uop.x_unchanged = 1'b1;
             end else if (src_is_dn && f_ss_valid) begin
                 uop.uclass      = UC_ADDQ;
                 uop.unit        = UU_ALU;
@@ -1172,6 +1200,10 @@ module mh030p_decode (
                 // operand-size-vs-write-size distinction as MOVEA.W.
                 uop.siz         = UZ_LONG;
                 uop.sext_src    = 1'b0;
+                // Group 8/C MUL and DIV are the WORD forms -- the .L forms
+                // live in group 4. siz is long because the RESULT is, but the
+                // operand fetched from memory is a word.
+                uop.opnd_word   = 1'b1;
                 uop.src_kind    = src_is_dn ? US_DREG :
                                   ea_is_imm ? US_IMM  : US_MEM;
                 uop.src_reg     = rn_src_dn;
@@ -1200,6 +1232,7 @@ module mh030p_decode (
                                   (f_group == 4'h9) ? UA_SUB : UA_CMP;
                 uop.siz         = UZ_LONG;
                 uop.sext_src    = g_xxxa_word;
+                uop.opnd_word   = g_xxxa_word;
                 if (ea_src_ok) begin
                     uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
                     uop.imm         = ext;
@@ -1254,10 +1287,17 @@ module mh030p_decode (
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = 1'b0;
-            end else if (ea_src_ok && !f_dir && f_ss_valid) begin
-                // <ea>,Dn with a MEMORY or IMMEDIATE source. The destination
-                // is always Dn, so dest_reg stays well defined. The Dn,<ea>
-                // direction (memory destination) is P3.
+            end else if ((ea_src_ok || alu_an_src_ok)
+                         && !f_dir && f_ss_valid) begin
+                // <ea>,Dn with a MEMORY, IMMEDIATE or ADDRESS-REGISTER source.
+                // The destination is always Dn, so dest_reg stays well defined.
+                //
+                // An-direct was missing entirely: SUB.l A4,D1 and its siblings
+                // decoded to UNIMPL and silently did nothing. Restricted to word
+                // and long, because a BYTE operation on an address register is
+                // genuinely illegal -- the reference decoder accepts it, and
+                // copying that over-acceptance is exactly what plan.md's own P1
+                // finding says not to do.
                 uop.uclass      = UC_ALU;
                 uop.unit        = UU_ALU;
                 uop.siz         = f_siz;
@@ -1265,15 +1305,17 @@ module mh030p_decode (
                                   (f_group == 4'h9) ? UA_SUB :
                                   (f_group == 4'hB) ? UA_CMP :
                                   (f_group == 4'hC) ? UA_AND : UA_ADD;
-                uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
+                uop.src_kind    = alu_an_src_ok ? US_AREG :
+                                  ea_is_imm     ? US_IMM  : US_MEM;
+                uop.src_reg     = rn_src_an;
                 uop.imm         = ext;
-                uop.ea_mode     = ea_mode_w;
+                uop.ea_mode     = alu_an_src_ok ? UEA_NONE : ea_mode_w;
                 uop.ea_reg      = rn_src_an;
                 uop.ea_idx_reg  = ea_xn;
                 uop.ea_idx_long = ea_xn_long;
                 uop.ea_idx_scale= ea_xn_scl;
                 uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
-                uop.reads_mem   = !ea_is_imm;
+                uop.reads_mem   = !ea_is_imm && !alu_an_src_ok;
                 uop.dst_kind    = US_DREG;
                 uop.dst_reg     = rn_dn;
                 uop.writes_reg  = (f_group != 4'hB);
@@ -1471,6 +1513,18 @@ module mh030p_decode (
                                ? 3'd0
                                : (ea_words(ea_mode_w)
                                   + (ea_is_imm ? 3'd1 : 3'd0)))
+                          // The group-0 immediate ALU family: ADDI, SUBI, ANDI,
+                          // ORI, EORI, CMPI. Their immediate is ONE word for
+                          // byte and word sizes and two for long, on top of
+                          // whatever the destination EA needs. Only the long
+                          // case was counted (imm_takes_ext), so CMPI.b and
+                          // ADDI.b reported zero extension words and their own
+                          // immediate was executed as the next instruction --
+                          // which ran the program off its end past the STOP.
+                          : ((uop.uclass == UC_ALU) && (uop.src_kind == US_IMM)
+                             && (f_group == 4'h0))
+                            ? (((uop.siz == UZ_LONG) ? 3'd2 : 3'd1)
+                               + ea_words(ea_mode_w))
                           // A STATIC bit operation carries its bit number in an
                           // immediate word, on top of whatever the EA needs;
                           // the dynamic forms take it from a register. Neither

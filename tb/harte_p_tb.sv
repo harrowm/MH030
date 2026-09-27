@@ -161,12 +161,12 @@ module harte_p_tb;
         // Sampled in EX, not WB: wb_upd_ccr belongs to the PREVIOUS instruction,
         // so printing it beside ex_uop mixes two stages.
         if (ccrtrace && rst_n && dut.u_core.ex_valid && !dut.u_core.stall_ex)
-            $display("EX cls=%0d aluop=%0d siz=%0d upd=%b xunch=%b alux=%b touch=%b exx=%b n=%b z=%b ccr_r=%02h",
+            $display("EX cls=%0d aluop=%0d siz=%0d src=%08h dst=%08h res=%08h commit=%08h wr=%b r=%0d ccr_r=%02h",
                      dut.u_core.ex_uop.uclass, dut.u_core.ex_uop.alu_op,
-                     dut.u_core.ex_uop.siz, dut.u_core.ex_uop.updates_ccr,
-                     dut.u_core.ex_uop.x_unchanged, dut.u_core.alu_x,
-                     dut.u_core.alu_touches_x, dut.u_core.ex_x,
-                     dut.u_core.ex_n, dut.u_core.ex_z, dut.u_core.ccr_r);
+                     dut.u_core.ex_uop.siz, dut.u_core.ex_src, dut.u_core.ex_dst,
+                     dut.u_core.ex_result, dut.u_core.ex_commit,
+                     dut.u_core.ex_uop.writes_reg, dut.u_core.ex_uop.dst_reg,
+                     dut.u_core.ccr_r);
     end
 
     logic [7:0] ccr_shadow = 8'hFF;

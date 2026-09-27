@@ -211,6 +211,13 @@ typedef struct packed {
     // told apart only by which register the transfer touches and in which
     // direction. Returns use it too, for RTE vs RTS vs RTR.
     logic [3:0]  subop;
+
+    // The OPERAND is 16 bits even though siz says longword. siz is the WRITE
+    // size -- MOVEA.W, ADDA.W, SUBA.W, CMPA.W and the word MUL/DIV all write a
+    // full 32 bits from a 16-bit operand -- and the bus access has to follow the
+    // operand, not the write. Without this, ADDA.W fetched a longword and took
+    // its source from the wrong half.
+    logic        opnd_word;
 } uop_t;
 
 // Field-by-field clear. A function rather than a constant because Icarus 13
@@ -243,6 +250,7 @@ function automatic uop_t uop_clear();
     u.xfer_long    = 1'b0;
     u.ext_words    = 3'd0;
     u.subop        = 4'd0;
+    u.opnd_word    = 1'b0;
     u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;
     u.x_unchanged  = 1'b0;
