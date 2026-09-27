@@ -70,6 +70,10 @@ module mh030p_core (
     output reg         mem_rw,        // 1 = read, 0 = write
     output reg  [1:0]  mem_siz,
     output reg  [31:0] mem_wdata,
+    // Asserted for as long as an indivisible operation needs the bus: from the
+    // moment its read is dispatched until its write has been acknowledged. The
+    // arbiter refuses instruction fetch in between.
+    output wire        mem_lock,
     // Interrupt priority level, already encoded 0-7. Real silicon presents it
     // on three ACTIVE-LOW pins; inverting them is the pin driver's job, not
     // the core's, and the SoC that wires this up owns that.
@@ -142,6 +146,8 @@ module mh030p_core (
     // or width would need two more read ports than exist, and the memory forms
     // need the byte/word/longword sub-access sizing rtl/ only got at Phase 276.
     wire dec_is_movep = (dec_uop.uclass == UC_MOVEP);
+    wire dec_is_cas    = (dec_uop.uclass == UC_ATOMIC)
+                      && (dec_uop.subop == 4'd1);
     wire dec_is_bf = (dec_uop.uclass == UC_BITFIELD);
     wire dec_bf_ok = dec_is_bf && !dec_uop.reads_mem && !dec_uop.writes_mem
                   && !dec_uop.imm[11] && !dec_uop.imm[5];
@@ -207,7 +213,7 @@ module mh030p_core (
                                && (dec_uop.subop != 4'd3))
                            // TAS only; CAS and CAS2 need a bus lock.
                            || ((dec_uop.uclass == UC_ATOMIC)
-                               && (dec_uop.subop == 4'd0) && dec_ea_ok)
+                               && (dec_uop.subop <= 4'd1) && dec_ea_ok)
                            || dec_bf_ok
                            || (dec_is_movep && dec_ea_ok)
                            // MOVEC only; MOVES (sub-op 0) needs the alternate
@@ -294,9 +300,12 @@ module mh030p_core (
                           ? ag_uop.ea_reg : ag_uop.dst_reg;
     // Must mirror rd_a_sel exactly. When these two disagree the AG forwarding
     // and the interlock track a different register than the one actually read.
+    wire ag_is_cas = (ag_uop.uclass == UC_ATOMIC) && (ag_uop.subop == 4'd1);
     wire [3:0] ag_c_sel = (ag_is_push || ag_is_link) ? 4'd15
-                                                      : ag_uop.ea_idx_reg;
-    wire [3:0] ag_a_sel = ag_is_movep ? ag_uop.imm[3:0]
+                        : ag_is_cas                  ? ag_uop.imm[3:0]
+                                                     : ag_uop.ea_idx_reg;
+    wire [3:0] ag_a_sel = ag_is_cas ? ag_uop.dst_reg
+                        : ag_is_movep ? ag_uop.imm[3:0]
                         : ag_is_bf ? ag_uop.imm[15:12]
                         : (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
                         : (ag_uop.reads_mem && !ag_uop.writes_mem)
@@ -354,6 +363,9 @@ module mh030p_core (
     // single always_ff that drives the memory port; assigned once the operand
     // registers exist.
     wire [31:0] ex_m2m_addr;
+    // Declared here for the single always_ff that drives the memory port; the
+    // comparison it depends on only exists once the ALU has run.
+    wire cas_skip_wr;
 
     // Register-file read data; declared here because the MOVEM sequencer
     // below repurposes the C port.
@@ -480,7 +492,7 @@ module mh030p_core (
                           && (ex_uop.dst_reg == ag_a_sel))
                       || (((ag_uop.ea_mode == UEA_AN_IDX)
                            || (ag_uop.ea_mode == UEA_PC_IDX) || ag_is_push
-                           || ag_is_link)
+                           || ag_is_link || ag_is_cas)
                           && (ex_uop.dst_reg == ag_c_sel)))
                      // The second write port's target has to be interlocked
                      // too, or an EXG/LINK/UNLK in EX is invisible to the AG
@@ -520,6 +532,18 @@ module mh030p_core (
     wire ex_is_chk   = ex_trap_cls && (ex_uop.subop == 4'd2);   // CHK
     wire ex_trapcc   = ex_trap_cls && (ex_uop.subop == 4'd4);   // TRAPcc
     wire ex_linea    = ex_trap_cls && (ex_uop.subop == 4'd5);   // A-line
+
+    // ── CAS ─────────────────────────────────────────────────────────────────
+    // Read the operand, compare it with Dc, and then EITHER write Du to memory
+    // (on a match) OR write the operand into Dc (on a mismatch) -- never both,
+    // and the mismatch path issues no second bus cycle at all.
+    //
+    // The compare rides the ordinary read-modify-write path: alu_op is already
+    // CMP and an RMW routes memory to the ALU's destination and the register to
+    // its source, so Z falls out of the machinery that is already there. Dc
+    // arrives on the A port and Du on the C port, which an RMW leaves free.
+    wire ex_is_cas = ex_valid && (ex_uop.uclass == UC_ATOMIC)
+                              && (ex_uop.subop == 4'd1);
 
     // TAS: read a byte, set its bit 7, write it back. The RMW machinery
     // already does the two bus cycles; only the value and the flags differ.
@@ -667,7 +691,8 @@ module mh030p_core (
         // dst_reg is unset -- using it read D0 by accident.
         // For a memory-to-memory move the source comes from memory and there
         // is no register operand, so the A port carries the DESTINATION base.
-        .rd_a_sel (dec_is_movep ? dec_uop.imm[3:0]
+        .rd_a_sel (dec_is_cas ? dec_uop.dst_reg
+                   : dec_is_movep ? dec_uop.imm[3:0]
                    : dec_is_bf ? dec_uop.imm[15:12]
                    : (dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
@@ -679,6 +704,7 @@ module mh030p_core (
         // Index register for an indexed EA, or the register MOVEM is about to
         // transfer. Those two never overlap.
         .rd_c_sel (ex_is_movem ? mvm_reg
+                   : dec_is_cas   ? dec_uop.imm[3:0]
                    : dec_needs_sp ? 4'd15 : dec_uop.ea_idx_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
@@ -940,7 +966,7 @@ module mh030p_core (
                 end
                 default: if (mem_ack) mem_req <= 1'b0;
             endcase
-        end else if (ex_rmw && mem_got && !rmw_wr_issued) begin
+        end else if (ex_rmw && mem_got && !rmw_wr_issued && !cas_skip_wr) begin
             // Read captured: turn the same address around as a write of the
             // ALU result. The address is already in mem_addr, so only the
             // direction and data change.
@@ -989,7 +1015,8 @@ module mh030p_core (
     //   otherwise     : A = ALU source,      B = ALU destination
     wire ex_rmw_op = ex_uop.reads_mem && ex_uop.writes_mem;
     wire ex_is_bf = ex_valid && (ex_uop.uclass == UC_BITFIELD);
-    wire [3:0] ex_a_sel = ex_is_movep ? ex_uop.imm[3:0]
+    wire [3:0] ex_a_sel = ex_is_cas ? ex_uop.dst_reg
+                        : ex_is_movep ? ex_uop.imm[3:0]
                         : ex_is_bf ? ex_uop.imm[15:12]
                         : (ex_uop.dst_ea_mode != UEA_NONE) ? ex_uop.dst_ea_reg
                         : (ex_uop.reads_mem && !ex_uop.writes_mem)
@@ -1173,6 +1200,7 @@ module mh030p_core (
     );
 
     // ── Functional units ────────────────────────────────────────────────────
+    // (CAS's own values are assembled below the ALU, which produces the compare.)
     wire [31:0] alu_result, shf_result;
     wire alu_n, alu_z, alu_v, alu_c, alu_x;
     wire shf_n, shf_z, shf_v, shf_c, shf_x;
@@ -1433,7 +1461,16 @@ module mh030p_core (
     // RTE pops a Format $0 frame -- status word, PC, format/vector word, eight
     // bytes. RTR pops only a CCR word and the PC, six. Wider frame formats
     // need the format field decoded, which is a later phase.
-    assign ex_commit = ex_movep_rd              ? mvp_result
+    // Sized so a byte or word CAS leaves the rest of Dc alone.
+    wire [31:0] cas_rd_sized =
+          (ex_uop.siz == UZ_BYTE) ? {ex_a_u[31:8],  mem_hold[7:0]}
+        : (ex_uop.siz == UZ_WORD) ? {ex_a_u[31:16], mem_hold[15:0]}
+                                  : mem_hold;
+    wire cas_eq = alu_z;
+    assign cas_skip_wr = ex_is_cas && mem_got && !cas_eq;
+
+    assign ex_commit = ex_is_cas ? (cas_eq ? ex_sp : cas_rd_sized)
+                     : ex_movep_rd              ? mvp_result
                      : ex_movec_rd              ? movec_rd_val
                      : ex_is_bf                 ? bf_result
                      : ex_is_tas                ? tas_res
@@ -1478,7 +1515,10 @@ module mh030p_core (
                        // LINK commits An although it also writes memory,
                        // which the clause above excludes.
                        || (ex_is_link && ex_uop.writes_reg)
-                       || ex_movep_rd;
+                       || ex_movep_rd
+                       // A CAS that did not match commits the operand into Dc
+                       // and writes no memory at all.
+                       || (ex_is_cas && mem_got && !cas_eq);
             // MOVE <ea>,CCR and MOVE <ea>,SR write the status register
             // DIRECTLY, in EX. Letting the ordinary WB flag update run as well
             // would land a cycle later and overwrite the transferred value
@@ -1659,8 +1699,12 @@ module mh030p_core (
             rmw_wr_issued <= 1'b0;          // instruction leaving EX
             rmw_done      <= 1'b0;
         end else if (ex_rmw) begin
-            if (mem_got && !rmw_wr_issued) rmw_wr_issued <= 1'b1;
-            else if (rmw_wr_issued && mem_ack) rmw_done  <= 1'b1;
+            if (mem_got && !rmw_wr_issued) begin
+                rmw_wr_issued <= 1'b1;
+                // A CAS mismatch never issues the write, so it must retire the
+                // sequence here or the stall would never clear.
+                if (cas_skip_wr) rmw_done <= 1'b1;
+            end else if (rmw_wr_issued && mem_ack) rmw_done  <= 1'b1;
         end
     end
 
@@ -1761,6 +1805,9 @@ module mh030p_core (
                                          : {{16{mem_rdata[15]}}, mem_rdata[15:0]})
                       : exc_commit_sp ? exc_sp
                       : ag_an_upd     ? ag_an_val     : wb_data;
+    // Held from the read's dispatch until the write is acknowledged. A CAS
+    // mismatch retires early, and rmw_done going high drops this with it.
+    assign mem_lock   = ex_rmw && !rmw_done;
     assign ccr_out    = ccr_r;
 
 endmodule

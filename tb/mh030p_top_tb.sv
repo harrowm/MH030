@@ -84,6 +84,24 @@ module mh030p_top_tb;
     );
 
 
+    // The lock's whole purpose is that no instruction fetch is acknowledged
+    // between the halves of an indivisible operation, so that is checked
+    // directly rather than inferred from the result.
+    // Precisely: a fetch completing strictly BETWEEN an indivisible
+    // operation's read and its write. A fetch already on the bus when the lock
+    // is taken is allowed to finish -- the lock prevents a new one starting,
+    // which is what RMC# does on real silicon.
+    logic lock_violation = 1'b0;
+    logic in_rmw_gap     = 1'b0;
+    always @(posedge clk_4x) begin
+        // The gap exists only while the lock is held: a CAS mismatch issues no
+        // write at all, so "until the write acks" would never end.
+        if (!dut.mem_lock)                             in_rmw_gap <= 1'b0;
+        else if (dut.mem_ack && dut.mem_rw)            in_rmw_gap <= 1'b1;
+        else if (dut.mem_ack && !dut.mem_rw)           in_rmw_gap <= 1'b0;
+        if (in_rmw_gap && dut.if_ack)                  lock_violation <= 1'b1;
+    end
+
     int fails = 0;
     task automatic chk(input string name, input logic [31:0] got,
                                           input logic [31:0] exp);
@@ -999,6 +1017,56 @@ module mh030p_top_tb;
         repeat (300) @(negedge clk_4x);
 
         chk("MOVEP.W into Dn", dut.u_core.u_rf.regs[2], 32'hAAAA_7788);
+
+        // ── CAS: match, mismatch, and the lock ───────────────────────────────
+        // Match: memory takes Du, Dc is left alone, Z set.
+        //  0: MOVE.L #0x11223344,D1     Dc, equal to what is in memory
+        //  6: MOVE.L #0xAABBCCDD,D2     Du
+        // 12: MOVEQ #0x40,D0 ; 14: MOVEA.L D0,A1
+        // 16: CAS.L D1,D2,(A1)          0x0ED1 0x0081
+        // 20: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h1122; prog[2] = 16'h3344;
+        prog[3] = 16'h243C; prog[4] = 16'hAABB; prog[5] = 16'hCCDD;
+        prog[6] = MOVEQ(0, 8'h40);
+        prog[7] = 16'h2240;                 // MOVEA.L D0,A1
+        prog[8] = 16'h0ED1; prog[9] = 16'h0081;   // CAS.L D1,D2,(A1)
+        prog[10] = 16'h60FE;
+        prog[32] = 16'h1122; prog[33] = 16'h3344; // 0x40 = 0x11223344
+
+        lock_violation = 1'b0;
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("CAS match wrote Du",  rd32(32'h40),             32'hAABB_CCDD);
+        chk("CAS match kept Dc",   dut.u_core.u_rf.regs[1],  32'h1122_3344);
+        chk("CAS match set Z",     {28'h0, ccr_out[2]},      32'h0000_0001);
+        chk("CAS held the bus",    {31'h0, lock_violation},  32'h0000_0000);
+
+        // Mismatch: memory untouched, Dc takes the operand, Z clear -- and no
+        // second bus cycle is issued at all.
+        //  0: MOVEQ #0,D1               Dc, deliberately wrong
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = MOVEQ(1, 8'd0);
+        prog[1] = 16'h243C; prog[2] = 16'hAABB; prog[3] = 16'hCCDD;
+        prog[4] = MOVEQ(0, 8'h40);
+        prog[5] = 16'h2240;
+        prog[6] = 16'h0ED1; prog[7] = 16'h0081;
+        prog[8] = 16'h60FE;
+        prog[32] = 16'h1122; prog[33] = 16'h3344;
+
+        lock_violation = 1'b0;
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("CAS miss kept memory", rd32(32'h40),            32'h1122_3344);
+        chk("CAS miss loaded Dc",   dut.u_core.u_rf.regs[1], 32'h1122_3344);
+        chk("CAS miss cleared Z",   {28'h0, ccr_out[2]},     32'h0000_0000);
+        chk("CAS miss held bus",    {31'h0, lock_violation}, 32'h0000_0000);
 
         $display("");
         if (fails == 0) begin

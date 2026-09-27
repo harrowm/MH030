@@ -36,7 +36,7 @@ module mh030p_top (
 );
 
     // Internal request/ack pairs, joined by the arbiter below.
-    wire        if_req,  mem_req, mem_rw;
+    wire        if_req,  mem_req, mem_rw, mem_lock;
     wire [31:0] if_addr, mem_addr, mem_wdata;
     wire [1:0]  mem_siz;
     wire [31:0] if_rdata, mem_rdata;
@@ -81,7 +81,7 @@ module mh030p_top (
         .pc_in(if_pc), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),
-        .mem_rdata(mem_rdata), .mem_ack(mem_ack),
+        .mem_rdata(mem_rdata), .mem_ack(mem_ack), .mem_lock(mem_lock),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
@@ -91,7 +91,7 @@ module mh030p_top (
         .if_req(if_req), .if_addr(if_addr),
         .if_rdata(if_rdata), .if_ack(if_ack),
         .d_req(mem_req), .d_addr(mem_addr), .d_rw(mem_rw),
-        .d_siz(mem_siz), .d_wdata(mem_wdata),
+        .d_siz(mem_siz), .d_wdata(mem_wdata), .d_lock(mem_lock),
         .d_rdata(mem_rdata), .d_ack(mem_ack),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_rw(bus_rw),
         .bus_siz(bus_siz), .bus_wdata(bus_wdata),

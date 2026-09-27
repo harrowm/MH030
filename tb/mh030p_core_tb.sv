@@ -61,7 +61,7 @@ module mh030p_core_tb;
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .pc_in(pc_in), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),
-        .mem_rdata(mem_rdata), .mem_ack(mem_ack), .ipl(3'b000),
+        .mem_rdata(mem_rdata), .mem_ack(mem_ack), .mem_lock(), .ipl(3'b000),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );

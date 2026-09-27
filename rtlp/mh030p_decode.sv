@@ -450,7 +450,10 @@ module mh030p_decode (
                 uop.x_unchanged = 1'b1;
             end else if (g0_is_cas) begin
                 uop.uclass      = UC_ATOMIC;
-                uop.subop       = 4'd1;         // CAS / CAS2, not yet executable
+                // CAS2 is the immediate-mode encoding (0x0CFC / 0x0EFC) and
+                // carries TWO extension words, which moves every field; kept
+                // apart so only real CAS is executed.
+                uop.subop       = ea_is_imm ? 4'd2 : 4'd1;
                 uop.unit        = UU_ALU;
                 uop.alu_op      = UA_CMP;
                 // CAS size comes from f_dn: 101=B, 110=W, 111=L.
@@ -463,6 +466,12 @@ module mh030p_decode (
                 uop.reads_mem   = 1'b1;
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
+                // Dc (compare) and Du (update), both named by the extension
+                // word. dst_reg is safe to use despite writes_reg being 0: the
+                // sweep only compares it when writes_reg is set, and Dc IS
+                // where a mismatch commits.
+                uop.dst_reg     = {1'b0, ext[2:0]};
+                uop.imm         = {28'h0, 1'b0, ext[8:6]};
                 uop.first       = 1'b1;
                 uop.last        = 1'b0;
             end else if (g0_is_moves) begin
@@ -1435,6 +1444,13 @@ module mh030p_decode (
                           : (uop.uclass == UC_MOVEC)
                             ? ((uop.subop == 4'd0)
                                ? (3'd1 + ea_words(ea_mode_w)) : 3'd1)
+                          // CAS names its two registers in an extension word;
+                          // CAS2 uses two. TAS (sub-op 0) has none, and its own
+                          // EA words are already counted.
+                          : ((uop.uclass == UC_ATOMIC) && (uop.subop == 4'd1))
+                            ? (3'd1 + ea_words(ea_mode_w))
+                          : ((uop.uclass == UC_ATOMIC) && (uop.subop == 4'd2))
+                            ? 3'd2
                           // An instruction that declares NO effective address
                           // cannot be consuming extension words for one, but
                           // ea_words_total is computed from the raw opcode's EA

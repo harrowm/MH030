@@ -38,6 +38,11 @@ module mh030p_arb (
     input  wire        d_rw,
     input  wire [1:0]  d_siz,
     input  wire [31:0] d_wdata,
+    // Hold the bus across a multi-transaction indivisible operation. Real
+    // silicon asserts RMC# for exactly this, and without it an instruction
+    // fetch lands between a read-modify-write's two halves -- which makes TAS
+    // and CAS not atomic at all, however single-threaded the system is.
+    input  wire        d_lock,
     output wire [31:0] d_rdata,
     output wire        d_ack,
 
@@ -52,10 +57,14 @@ module mh030p_arb (
 );
 
     // Who owns the bus: 0 = nobody, 1 = data, 2 = instruction fetch.
-    localparam [1:0] OWN_NONE = 2'd0, OWN_DATA = 2'd1, OWN_IFU = 2'd2;
+    localparam [1:0] OWN_NONE = 2'd0, OWN_DATA = 2'd1, OWN_IFU  = 2'd2,
+    // Between the transactions of a locked sequence: the data side still owns
+    // the bus but has nothing on it yet, so a fetch must still be refused.
+                     OWN_LOCK = 2'd3;
     reg [1:0] owner;
 
-    wire idle = (owner == OWN_NONE);
+    wire idle   = (owner == OWN_NONE);
+    wire locked = (owner == OWN_LOCK);
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -65,7 +74,7 @@ module mh030p_arb (
             bus_rw    <= 1'b1;
             bus_siz   <= 2'b00;
             bus_wdata <= 32'h0;
-        end else if (idle) begin
+        end else if (idle || locked) begin
             // Data first; see the header.
             if (d_req) begin
                 owner     <= OWN_DATA;
@@ -74,7 +83,10 @@ module mh030p_arb (
                 bus_rw    <= d_rw;
                 bus_siz   <= d_siz;
                 bus_wdata <= d_wdata;
-            end else if (if_req) begin
+            end else if (locked && !d_lock) begin
+                // The lock has been released with nothing more to dispatch.
+                owner     <= OWN_NONE;
+            end else if (if_req && idle) begin
                 owner     <= OWN_IFU;
                 bus_req   <= 1'b1;
                 bus_addr  <= if_addr;
@@ -83,9 +95,12 @@ module mh030p_arb (
                 bus_wdata <= 32'h0;
             end
         end else if (bus_ack) begin
-            // Transaction complete; release. The address above is never
-            // re-driven while owner != NONE, so it cannot move mid-cycle.
-            owner   <= OWN_NONE;
+            // Transaction complete; release -- unless this was a locked data
+            // transaction, in which case ownership is held for the next one.
+            // d_lock is still asserted on the final transaction's own ack
+            // cycle, which is why OWN_LOCK has to be able to fall back to
+            // OWN_NONE above rather than relying on it having dropped.
+            owner   <= (d_lock && (owner == OWN_DATA)) ? OWN_LOCK : OWN_NONE;
             bus_req <= 1'b0;
         end
     end
