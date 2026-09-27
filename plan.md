@@ -3633,6 +3633,65 @@ local, well understood, in a module the new core inherited rather than wrote.
 It is the obvious next lever, ahead of any further parity work, because a
 83.7%-of-path single module means nothing else can be measured until it moves.
 
+### Growth point 4: breadth stopped being free, and logic depth moved
+
+After TAS, CAS with a real bus lock, bit fields, MOVEC/VBR, MOVEP, CHK,
+TRAPcc, Line-A, interrupts and the rest of the exception generalisation
+(measured at commit `31ed707`):
+
+| Design | LUTs | Fmax | Period | Logic | Routing |
+|---|---|---|---|---|---|
+| New CPU + breadth + MOVEM | 9,201 | 32.59 MHz | 30.69 ns | 9.25 | 20.91 |
+| + control flow, RTE, EXG/LINK, sysctl | 12,106 | 28.21 MHz | 35.44 ns | 8.80 | 26.11 |
+| + own two-stage multiplier | 12,913 | 29.11 MHz | 34.35 ns | 8.56 | 25.26 |
+| **+ atomics, bit fields, MOVEC/VBR, MOVEP, interrupts** | **14,138** | **21.46 MHz** | **46.60 ns** | **11.89** | 34.19 |
+
+**+9.5% LUTs for -26% Fmax**, which is far worse than any previous step and
+breaks the pattern the earlier points established. The first-six-point curve
+predicted 27.9 MHz at this area; the measurement is 21.5.
+
+**The signal is logic delay, which moved for the first time in seven
+measurements.** It had sat at 8.18-9.51 ns across every design measured, the
+old core included, and is now 11.89 ns. Routing grew too, but routing growing
+with area is expected; logic depth growing is not, and it says this increment
+added combinational DEPTH rather than just area.
+
+Reading the path confirms it: **74 of its 105 hops are CCU2C carry-chain
+cells**, with 22 muxes and only 9 plain LUTs. That is arithmetic in SERIES --
+roughly two 32-bit adders plus a comparator -- not a wide fan-in. (The
+synthesized names all carry an `mvm_ready` prefix, which is not attribution;
+ABC9 names new cells after the nearest traceable ancestor register.)
+
+The likely cause, and it is a design error rather than a cost of the
+instructions themselves: **the exception conditions were put into `stall_ex`.**
+`exc_req` now includes CHK's signed 32-bit bound comparison, CMP2/CHK2's two
+signed comparisons, and TRAPcc's condition-code mux -- and `stall_ex` gates the
+AG-to-EX register, the writeback latch, `instr_ready` and the memory port. Every
+one of those comparators is therefore in front of everything. Separately,
+`mem_addr`'s mux acquired several new arithmetic arms (`ex_ea + cmp2_step`,
+`mvp_addr + 2`, `exc_base - 8`, `vbr_r + vector`), each its own adder.
+
+This is the same distinction the earlier points drew, landing the other way
+round. "Functional breadth is close to free; dispatch depth is what costs" still
+holds -- but exception DETECTION is not breadth. Putting a comparator in the
+stall path is dispatch depth, and it cost what dispatch depth costs.
+
+**The fix is structural and not yet attempted**: the trap decision is already
+latched (`exc_pend`, added for a correctness reason -- see the CMP2/CHK2 commit),
+so the comparators could feed only that register while `stall_ex` depends on a
+cheap decode-time "this instruction might trap" flag plus a "decision made"
+register. That costs one cycle on possibly-trapping instructions, which is
+architecturally free -- real CHK is eight-plus clocks. It has NOT been measured,
+and given this project's own record on predicted-versus-measured timing wins,
+the estimate is worth nothing until it has been.
+
+Refit over all seven points: period = 0.872 x area^0.398, which extrapolates to
+**19.1 MHz** at the old core's 29,043 LUTs -- against its 19.55. The exponent
+nearly doubled because of this one point. Dropping it gives back 0.276 and
+22.9 MHz. Which of those is the real curve depends entirely on whether the
+depth added here is structural or a mistake, and the paragraph above says it is
+a mistake -- but saying so is not measuring it.
+
 ### The multiplier fix: it moved the path and barely moved the clock
 
 The finding above said `u_md` was 83.7% of the worst path, so the new core got
