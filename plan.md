@@ -3888,3 +3888,40 @@ cannot clear that bar is not worth a 3-hour measurement at all -- which is itsel
 the useful conclusion, because it means single-path surgery on this design is
 unmeasurable and therefore not the lever. The one effect that IS far above noise
 is area: 12.9k -> 14.1k LUTs cost 7.65 MHz. That is where the signal is.
+
+
+## The 50 MHz target, measured properly: it is a population problem
+
+`make depth` (17 s, `scripts/logic_depth.py`) reads the synthesised netlist and
+reports every register's logic-cone depth. Calibrated against four real nextpnr
+runs at 0.794 ns per level, so 20 ns -- 50 MHz -- is a budget of **25 levels**.
+
+At 14.1k LUTs the current core reports:
+
+| depth | endpoints | |
+|---|---|---|
+| >= 57 levels | 3 of 2545 | the worst path, and the only thing nextpnr ever showed |
+| >= 45 levels | 101 | |
+| >= 34 levels | 263 | |
+| **>= 25 levels** | **1073 of 2545 (42%)** | **over the 50 MHz budget** |
+
+**That is the answer to why three consecutive critical-path fixes achieved
+nothing.** Only 3 endpoints sit at the worst depth; 1,073 are over budget.
+Repairing the deepest of 1,073 offenders cannot move the clock, and no amount of
+reading nextpnr's report -- which names exactly one path per clock -- could have
+revealed that. It was the question I most wanted answered after the multiplier
+fix and could not answer from the data I had.
+
+So 50 MHz is not "find the bottleneck". It is **halve the logic depth of 42% of
+the design**, which is a microarchitecture job: more pipeline stages, shallower
+cones between them. Consistent with the LUT:FF ratio of 5.7:1 against the ~1.5:1
+a well-pipelined core shows, and with routing being 73% of the delay.
+
+### Honest limits of the proxy
+
+The ordering is reliable -- 43 levels measured fastest, 64 slowest, and the two
+variants that tied at 57 levels measured within noise of each other. The absolute
+figure runs ~15% pessimistic. But it is necessary, not sufficient: nt6 -> nt7 cut
+depth 64 -> 57 and moved Fmax not at all, which says the design is congestion-
+limited as well as depth-limited at this size. Use it to reject ideas cheaply and
+to aim; still confirm with a multi-seed measurement before claiming anything.

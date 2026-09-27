@@ -955,3 +955,25 @@ help:
 	@echo "  make sim/seq43     — recompile one test binary"
 	@echo "  make clean         — remove sim/ binaries and top-level .vvp/.vcd"
 	@echo "  make -j compile    — parallel compile (faster on multicore)"
+
+# ── MH030-P: fast logic-depth proxy (seconds, not the 3-hour nextpnr run) ────
+# A real Fmax measurement cannot resolve a change worth less than ~2 MHz (its
+# seed-to-seed spread is ~0.5 MHz), so this reads the synthesised netlist
+# instead. See scripts/logic_depth.py's header for the calibration.
+DEPTH_SRC := rtl/opcode_fields.sv rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+             rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
+             rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtl/eu_alu.sv \
+             rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
+             rtl/eu_bcd.sv rtl/eu_bitfield.sv
+YOSYS_OSS ?= $(HOME)/oss-cad-suite/bin/yosys
+
+.PHONY: depth
+depth:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(DEPTH_SRC) > $(SIM)/depth.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/depth.v mh030p_top \
+	    wrap_depth $(SIM)/depth_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/depth.v $(SIM)/depth_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_depth; \
+	    write_json $(SIM)/depth.json' -l $(SIM)/depth_yosys.log > /dev/null
+	@python3 scripts/logic_depth.py $(SIM)/depth.json
