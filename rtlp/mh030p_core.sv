@@ -266,6 +266,13 @@ module mh030p_core (
     reg        mem_got;
     reg [31:0] mem_hold;
     reg [31:0] ag_pc, ex_pc;
+    // The instruction's own address plus two, REGISTERED rather than added in
+    // AG. A PC-relative EA and a BSR/JSR return address both need it, and
+    // computing it in AG put a fourth 32-bit adder at the head of the effective-
+    // address chain -- which the measurement found as the binding path, rooted
+    // literally at this register. pc_in is available a stage early, so this
+    // costs one adder's worth of logic and no cycles at all.
+    reg [31:0] ag_pc2;
     // Which register the B port carried; needed by the interlock below.
     wire ag_is_trap  = (ag_uop.uclass == UC_TRAP);
     // Which TRAP-class instructions have no operand of their own. TRAP #n,
@@ -810,6 +817,7 @@ module mh030p_core (
             ag_valid <= instr_valid && dec_executable && !redirect;
             ag_uop   <= dec_uop;
             ag_pc    <= pc_in;
+            ag_pc2   <= pc_in + 32'd2;
         end else if (redirect) begin
             ag_valid <= 1'b0;
         end
@@ -889,12 +897,16 @@ module mh030p_core (
                   || (ag_uop.ea_mode == UEA_PC_IDX);
     wire [31:0] ea_base = ((ag_uop.ea_mode == UEA_ABS_W)
                         || (ag_uop.ea_mode == UEA_ABS_L)) ? 32'h0
-                        : ag_pc_rel                       ? (ag_pc + 32'd2)
+                        : ag_pc_rel                       ? ag_pc2
                                                           : ag_b;
     // Predecrement applies to the address used THIS cycle; postincrement
     // does not.
     wire [31:0] ea_adj  = (ag_uop.ea_mode == UEA_AN_PRE) ? (32'h0 - ea_step)
                                                          : 32'h0;
+    // Predecrement and indexing are mutually exclusive -- they are different EA
+    // modes -- so the two terms collapse into ONE addend instead of two. That
+    // takes a whole 32-bit add out of the chain for free, with no behaviour
+    // change: whichever of them is non-zero, the other was zero anyway.
     // Index term: Xn as a word (sign-extended) or a longword, scaled by
     // 1/2/4/8. Only the brief format is handled here; the full format with a
     // base displacement and memory indirection is a later phase.
@@ -904,7 +916,11 @@ module mh030p_core (
                         || (ag_uop.ea_mode == UEA_PC_IDX))
                         ? (ag_xn << ag_uop.ea_idx_scale) : 32'h0;
 
-    wire [31:0] ag_ea   = ea_base + ag_uop.ea_disp + ea_adj + ag_idx;
+    wire [31:0] ea_adj_idx = (ag_uop.ea_mode == UEA_AN_PRE) ? ea_adj : ag_idx;
+
+    // Two adds in series from registers, where this was four: (ag_pc + 2), then
+    // + ea_disp, + ea_adj, + ag_idx.
+    wire [31:0] ag_ea   = ea_base + ag_uop.ea_disp + ea_adj_idx;
 
     // The An update is a SIDE EFFECT and must commit exactly once, when the
     // instruction actually leaves AG. Gating it on ag_valid alone makes it
@@ -982,7 +998,7 @@ module mh030p_core (
             // JSR pushes the same return address BSR does. PEA pushes the
             // effective address itself, which is the whole point of it.
             mem_wdata<= (ag_is_bsr || ag_is_jsr)
-                        ? (ag_pc + 32'd2 + {27'h0, ag_uop.ext_words, 1'b0})
+                        ? (ag_pc2 + {27'h0, ag_uop.ext_words, 1'b0})
                       : ag_is_push ? ag_ea
                       : ag_is_link ? ag_b
                       : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
