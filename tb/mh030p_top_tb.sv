@@ -78,7 +78,7 @@ module mh030p_top_tb;
         .clk_4x(clk_4x), .rst_n(rst_n),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_rw(bus_rw),
         .bus_siz(bus_siz), .bus_wdata(bus_wdata),
-        .bus_rdata(bus_rdata), .bus_ack(bus_ack), .ipl(ipl),
+        .bus_rdata(bus_rdata), .bus_ack(bus_ack), .ipl(ipl), .stopped(),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
@@ -121,8 +121,20 @@ module mh030p_top_tb;
 
     integer i;
     initial begin
+        // EVERY program below is loaded at byte 8, with a real 68k reset vector
+        // at 0 (SSP) and 4 (PC -> 8), because the core performs a genuine
+        // reset-vector fetch. The byte offsets in each program's own comment
+        // block are relative to that base, so an instruction commented "0:"
+        // actually executes at byte 8. Absolute operands and vector-table
+        // entries are written as real addresses and do account for it.
         $display("=== mh030p_top: program execution from memory ===");
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
 
         // Program at address 0. Word index = byte address / 2.
         //  0: MOVEQ #1,D0
@@ -132,13 +144,13 @@ module mh030p_top_tb;
         //  8: MOVEQ #0x7E,D1    <- must NOT execute
         // 10: MOVEQ #4,D2
         // 12: ADD.L D1,D0       -> D0 = 1 + 2 = 3 if the skip worked
-        prog[0] = MOVEQ(0, 8'h01);
-        prog[1] = MOVEQ(1, 8'h02);
-        prog[2] = 16'h6004;                 // BRA.B +4
-        prog[3] = MOVEQ(0, 8'h7F);
-        prog[4] = MOVEQ(1, 8'h7E);
-        prog[5] = MOVEQ(2, 8'h04);
-        prog[6] = ADDL(0, 1);
+        prog[4] = MOVEQ(0, 8'h01);
+        prog[5] = MOVEQ(1, 8'h02);
+        prog[6] = 16'h6004;                 // BRA.B +4
+        prog[7] = MOVEQ(0, 8'h7F);
+        prog[8] = MOVEQ(1, 8'h7E);
+        prog[9] = MOVEQ(2, 8'h04);
+        prog[10] = ADDL(0, 1);
 
         repeat (3) @(negedge clk_4x);
         rst_n = 1'b1;
@@ -158,16 +170,22 @@ module mh030p_top_tb;
         //   DBF D3,L           loop while D3.W != -1  (0x51CB + disp)
         //   ST  D5             Scc always-true -> D5 low byte = 0xFF
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(3, 8'd3);
-        prog[1] = MOVEQ(4, 8'd0);
-        prog[2] = 16'h5284;                 // ADDQ.L #1,D4   <- loop body at 4
-        prog[3] = 16'h51CB;                 // DBF D3,<disp>
-        prog[4] = 16'hFFFE;                 // disp = -2 -> target = 6 + 2 - 2 = 6? see below
-        prog[5] = 16'h50C5;                 // ST D5
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(3, 8'd3);
+        prog[5] = MOVEQ(4, 8'd0);
+        prog[6] = 16'h5284;                 // ADDQ.L #1,D4   <- loop body at 4
+        prog[7] = 16'h51CB;                 // DBF D3,<disp>
+        prog[8] = 16'hFFFE;                 // disp = -2 -> target = 6 + 2 - 2 = 6? see below
+        prog[9] = 16'h50C5;                 // ST D5
 
         // DBF is at byte 6; its base is 6+2 = 8, so a target of byte 4 (the
         // loop body) needs disp = 4 - 8 = -4.
-        prog[4] = 16'hFFFC;
+        prog[8] = 16'hFFFC;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -189,20 +207,26 @@ module mh030p_top_tb;
         // 12: MOVEQ #7,D2           the routine
         // 14: RTS                   back to byte 8
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(7, 8'h40);
-        prog[1] = 16'h2E47;                 // MOVEA.L D7,A7
-        prog[2] = MOVEQ(0, 8'd1);
-        prog[3] = 16'h6106;                 // BSR.B +6 -> 6+2+6 = 14? see below
-        prog[4] = MOVEQ(1, 8'd2);
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(7, 8'h40);
+        prog[5] = 16'h2E47;                 // MOVEA.L D7,A7
+        prog[6] = MOVEQ(0, 8'd1);
+        prog[7] = 16'h6106;                 // BSR.B +6 -> 6+2+6 = 14? see below
+        prog[8] = MOVEQ(1, 8'd2);
         // Park here after the return, otherwise execution falls through into
         // the routine again and RTS pops repeatedly off a stack that is no
         // longer its own -- which is what made A7 look wrong.
-        prog[5] = 16'h60FE;                 // BRA.B -2 (to itself, at byte 10)
-        prog[6] = MOVEQ(2, 8'd7);
-        prog[7] = 16'h4E75;                 // RTS
+        prog[9] = 16'h60FE;                 // BRA.B -2 (to itself, at byte 10)
+        prog[10] = MOVEQ(2, 8'd7);
+        prog[11] = 16'h4E75;                 // RTS
         // BSR is at byte 6; base 6+2 = 8; the routine is at byte 12, so the
         // displacement is 12 - 8 = 4.
-        prog[3] = 16'h6104;
+        prog[7] = 16'h6104;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -221,10 +245,16 @@ module mh030p_top_tb;
         //  6: MOVEQ #0x7F,D0     must NOT run
         // 0x30: MOVEQ #9,D3 ; BRA self
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;                // MOVEA.L D7,A7
-        prog[2]  = 16'h4E40;                // TRAP #0
-        prog[3]  = MOVEQ(0, 8'h7F);         // skipped if the trap is taken
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;                // MOVEA.L D7,A7
+        prog[6]  = 16'h4E40;                // TRAP #0
+        prog[7]  = MOVEQ(0, 8'h7F);         // skipped if the trap is taken
         prog[24] = MOVEQ(3, 8'd9);          // handler at byte 0x30
         prog[25] = 16'h60FE;                // park
         prog[32'h80 >> 1]     = 16'h0000;   // vector 32 -> handler at 0x30
@@ -239,7 +269,7 @@ module mh030p_top_tb;
         chk("TRAP skipped inline",  dut.u_core.u_rf.regs[0], 32'd0);
         chk("TRAP pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
         // Format $0: the SR alone at SP+0, the PC at SP+2.
-        chk("frame holds PC",       rd32(32'h5A), 32'h0000_0006);
+        chk("frame holds PC",       rd32(32'h5A), 32'h0000_000E);
         chk("frame holds SR",       {16'h0, prog[32'h58 >> 1]}, 32'h0000_2700);
 
         // ── LEA / PEA: the effective address AS the result ──────────────────
@@ -254,12 +284,18 @@ module mh030p_top_tb;
         // 12: PEA (0x30).W         push 0x30, A7 = 0x4C
         // 16: BRA self
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(7, 8'h50);
-        prog[1] = 16'h2E47;                 // MOVEA.L D7,A7
-        prog[2] = 16'h43F8; prog[3] = 16'h0024;   // LEA (0x24).W,A1
-        prog[4] = 16'h45E9; prog[5] = 16'h0006;   // LEA (6,A1),A2
-        prog[6] = 16'h4878; prog[7] = 16'h0030;   // PEA (0x30).W
-        prog[8] = 16'h60FE;                 // park
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(7, 8'h50);
+        prog[5] = 16'h2E47;                 // MOVEA.L D7,A7
+        prog[6] = 16'h43F8; prog[7] = 16'h0024;   // LEA (0x24).W,A1
+        prog[8] = 16'h45E9; prog[9] = 16'h0006;   // LEA (6,A1),A2
+        prog[10] = 16'h4878; prog[11] = 16'h0030;   // PEA (0x30).W
+        prog[12] = 16'h60FE;                 // park
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -281,16 +317,22 @@ module mh030p_top_tb;
         // 0x14: MOVEQ #6,D5 ; park
         // 0x20: MOVEQ #7,D4 ; RTS
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h50);
-        prog[1]  = 16'h2E47;
-        prog[2]  = 16'h4EB8; prog[3] = 16'h0020;  // JSR (0x20).W
-        prog[4]  = MOVEQ(3, 8'd5);
-        prog[5]  = 16'h4EF8; prog[6] = 16'h0014;  // JMP (0x14).W
-        prog[7]  = MOVEQ(0, 8'h7F);               // skipped by the JMP
-        prog[10] = MOVEQ(5, 8'd6);                // 0x14
-        prog[11] = 16'h60FE;
-        prog[16] = MOVEQ(4, 8'd7);                // 0x20
-        prog[17] = 16'h4E75;                      // RTS
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h50);
+        prog[5]  = 16'h2E47;
+        prog[6]  = 16'h4EB8; prog[7] = 16'h0028;  // JSR (0x28).W
+        prog[8]  = MOVEQ(3, 8'd5);
+        prog[9]  = 16'h4EF8; prog[10] = 16'h001C;  // JMP (0x1C).W
+        prog[11]  = MOVEQ(0, 8'h7F);               // skipped by the JMP
+        prog[14] = MOVEQ(5, 8'd6);                // 0x1C
+        prog[15] = 16'h60FE;
+        prog[20] = MOVEQ(4, 8'd7);                // 0x28
+        prog[21] = 16'h4E75;                      // RTS
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -318,12 +360,18 @@ module mh030p_top_tb;
         // 10: park
         // 0x30: MOVEQ #9,D3 ; MOVEQ #0,D4 (CCR = Z) ; RTE
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'hFF);         // MOVEQ #-1,D0 -> N set
-        prog[3]  = 16'h4E40;                // TRAP #0
-        prog[4]  = 16'h2240;                // MOVEA.L D0,A1
-        prog[5]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'hFF);         // MOVEQ #-1,D0 -> N set
+        prog[7]  = 16'h4E40;                // TRAP #0
+        prog[8]  = 16'h2240;                // MOVEA.L D0,A1
+        prog[9]  = 16'h60FE;
         prog[24] = MOVEQ(3, 8'd9);          // 0x30 handler
         prog[25] = MOVEQ(4, 8'd0);          // clears N, sets Z
         prog[26] = 16'h4E73;                // RTE
@@ -358,18 +406,24 @@ module mh030p_top_tb;
         // 22: ADDX.L D5,D4       D4 = 0 + 0 + X = 1
         // 24: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(0, 8'd5);
-        prog[1]  = MOVEQ(1, 8'd5);
-        prog[2]  = 16'hB081;                // CMP.L D1,D0 -> Z
-        prog[3]  = 16'h6704;                // BEQ.B +4 -> byte 12
-        prog[4]  = MOVEQ(2, 8'h7F);         // skipped
-        prog[6]  = MOVEQ(0, 8'hFF);         // byte 12: D0 = -1
-        prog[7]  = MOVEQ(1, 8'd1);
-        prog[8]  = MOVEQ(4, 8'd0);
-        prog[9]  = MOVEQ(5, 8'd0);
-        prog[10] = 16'hD081;                // ADD.L D1,D0 -> D0 = 0, X = 1
-        prog[11] = 16'hD985;                // ADDX.L D5,D4 -> D4 = 1
-        prog[12] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(0, 8'd5);
+        prog[5]  = MOVEQ(1, 8'd5);
+        prog[6]  = 16'hB081;                // CMP.L D1,D0 -> Z
+        prog[7]  = 16'h6704;                // BEQ.B +4 -> byte 12
+        prog[8]  = MOVEQ(2, 8'h7F);         // skipped
+        prog[10]  = MOVEQ(0, 8'hFF);         // byte 12: D0 = -1
+        prog[11]  = MOVEQ(1, 8'd1);
+        prog[12]  = MOVEQ(4, 8'd0);
+        prog[13]  = MOVEQ(5, 8'd0);
+        prog[14] = 16'hD081;                // ADD.L D1,D0 -> D0 = 0, X = 1
+        prog[15] = 16'hD985;                // ADDX.L D5,D4 -> D4 = 1
+        prog[16] = 16'h60FE;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -392,14 +446,20 @@ module mh030p_top_tb;
         //                         with no filler, so only forwarding can
         //                         supply it
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(0, 8'd5);
-        prog[1] = MOVEQ(1, 8'd9);
-        prog[2] = 16'hC141;                 // EXG D0,D1
-        prog[3] = MOVEQ(2, 8'd3);
-        prog[4] = 16'h2642;                 // MOVEA.L D2,A3
-        prog[5] = 16'hC18B;                 // EXG D0,A3
-        prog[6] = 16'h2A4B;                 // MOVEA.L A3,A5
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(0, 8'd5);
+        prog[5] = MOVEQ(1, 8'd9);
+        prog[6] = 16'hC141;                 // EXG D0,D1
+        prog[7] = MOVEQ(2, 8'd3);
+        prog[8] = 16'h2642;                 // MOVEA.L D2,A3
+        prog[9] = 16'hC18B;                 // EXG D0,A3
+        prog[10] = 16'h2A4B;                 // MOVEA.L A3,A5
+        prog[11] = 16'h60FE;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -419,14 +479,20 @@ module mh030p_top_tb;
         // 14: UNLK A2          A7 = A2 + 4 = 0x60, A2 = pop = 0x11
         // 16: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(7, 8'h60);
-        prog[1] = 16'h2E47;                 // MOVEA.L D7,A7
-        prog[2] = MOVEQ(0, 8'h11);
-        prog[3] = 16'h2440;                 // MOVEA.L D0,A2
-        prog[4] = 16'h4E52; prog[5] = 16'hFFF8;   // LINK A2,#-8
-        prog[6] = MOVEQ(1, 8'd7);
-        prog[7] = 16'h4E5A;                 // UNLK A2
-        prog[8] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(7, 8'h60);
+        prog[5] = 16'h2E47;                 // MOVEA.L D7,A7
+        prog[6] = MOVEQ(0, 8'h11);
+        prog[7] = 16'h2440;                 // MOVEA.L D0,A2
+        prog[8] = 16'h4E52; prog[9] = 16'hFFF8;   // LINK A2,#-8
+        prog[10] = MOVEQ(1, 8'd7);
+        prog[11] = 16'h4E5A;                 // UNLK A2
+        prog[12] = 16'h60FE;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -451,16 +517,22 @@ module mh030p_top_tb;
         //                     the CCR itself and erase what was transferred.
         // 18: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(0, 8'hFF);
-        prog[1] = 16'h40C1;                 // MOVE SR,D1
-        prog[2] = 16'h42C2;                 // MOVE CCR,D2
-        prog[3] = MOVEQ(4, 8'h20);
-        prog[4] = 16'h2244;                 // MOVEA.L D4,A1
-        prog[5] = 16'h4E61;                 // MOVE A1,USP
-        prog[6] = 16'h4E6A;                 // MOVE USP,A2
-        prog[7] = MOVEQ(3, 8'd8);
-        prog[8] = 16'h44C3;                 // MOVE D3,CCR
-        prog[9] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(0, 8'hFF);
+        prog[5] = 16'h40C1;                 // MOVE SR,D1
+        prog[6] = 16'h42C2;                 // MOVE CCR,D2
+        prog[7] = MOVEQ(4, 8'h20);
+        prog[8] = 16'h2244;                 // MOVEA.L D4,A1
+        prog[9] = 16'h4E61;                 // MOVE A1,USP
+        prog[10] = 16'h4E6A;                 // MOVE USP,A2
+        prog[11] = MOVEQ(3, 8'd8);
+        prog[12] = 16'h44C3;                 // MOVE D3,CCR
+        prog[13] = 16'h60FE;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -482,12 +554,18 @@ module mh030p_top_tb;
         //  6: MOVE.L (0x10,PC,D2.L),D3 base 8 -> 8 + 0x10 + 0x10 = 0x28
         // 10: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(2, 8'h10);
-        prog[1]  = 16'h223A; prog[2] = 16'h001C;   // MOVE.L (d16,PC),D1
-        prog[3]  = 16'h263B; prog[4] = 16'h2810;   // MOVE.L (d8,PC,D2.L),D3
-        prog[5]  = 16'h60FE;
-        prog[16] = 16'hDEAD; prog[17] = 16'hBEEF;  // 0x20
-        prog[20] = 16'hCAFE; prog[21] = 16'hBABE;  // 0x28
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(2, 8'h10);
+        prog[5]  = 16'h223A; prog[6] = 16'h001C;   // MOVE.L (d16,PC),D1
+        prog[7]  = 16'h263B; prog[8] = 16'h2810;   // MOVE.L (d8,PC,D2.L),D3
+        prog[9]  = 16'h60FE;
+        prog[20] = 16'hDEAD; prog[21] = 16'hBEEF;  // 0x20
+        prog[24] = 16'hCAFE; prog[25] = 16'hBABE;  // 0x28
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -510,16 +588,22 @@ module mh030p_top_tb;
         // 16: MOVEQ #0x7F,D3  must NOT run
         // 18: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'd1);
-        prog[3]  = 16'h4E76;                // TRAPV, V clear
-        prog[4]  = MOVEQ(1, 8'd5);
-        prog[5]  = MOVEQ(2, 8'd2);
-        prog[6]  = 16'h44C2;                // MOVE D2,CCR -> V
-        prog[7]  = 16'h4E76;                // TRAPV, V set
-        prog[8]  = MOVEQ(3, 8'h7F);         // must not run
-        prog[9]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'd1);
+        prog[7]  = 16'h4E76;                // TRAPV, V clear
+        prog[8]  = MOVEQ(1, 8'd5);
+        prog[9]  = MOVEQ(2, 8'd2);
+        prog[10]  = 16'h44C2;                // MOVE D2,CCR -> V
+        prog[11]  = 16'h4E76;                // TRAPV, V set
+        prog[12]  = MOVEQ(3, 8'h7F);         // must not run
+        prog[13]  = 16'h60FE;
         prog[14] = 16'h0000; prog[15] = 16'h0040;  // vector 7 at 0x1C
         prog[32] = MOVEQ(4, 8'd6);          // handler at 0x40
         prog[33] = 16'h60FE;
@@ -543,13 +627,19 @@ module mh030p_top_tb;
         // 10: MOVEQ #0x7F,D2   must NOT run
         // 12: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'd10);
-        prog[3]  = MOVEQ(1, 8'd0);
-        prog[4]  = 16'h80C1;                // DIVU.W D1,D0
-        prog[5]  = MOVEQ(2, 8'h7F);         // must not run
-        prog[6]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'd10);
+        prog[7]  = MOVEQ(1, 8'd0);
+        prog[8]  = 16'h80C1;                // DIVU.W D1,D0
+        prog[9]  = MOVEQ(2, 8'h7F);         // must not run
+        prog[10]  = 16'h60FE;
         prog[10] = 16'h0000; prog[11] = 16'h0040;  // vector 5 at 0x14
         prog[32] = MOVEQ(3, 8'd4);          // handler at 0x40
         prog[33] = 16'h60FE;
@@ -579,12 +669,18 @@ module mh030p_top_tb;
         //                                      the return-PC check exact
         // 0x50: handler: MOVEQ #9,D3 ; park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(7, 8'h60);
-        prog[1] = 16'h2E47;
-        prog[2] = MOVEQ(6, 8'd0);
-        prog[3] = 16'h46C6;                 // MOVE D6,SR -> mask 0
-        prog[4] = 16'h4E71;                 // NOP at byte 8
-        prog[5] = 16'h60FC;                 // BRA -4 -> back to byte 8
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(7, 8'h60);
+        prog[5] = 16'h2E47;
+        prog[6] = MOVEQ(6, 8'd0);
+        prog[7] = 16'h46C6;                 // MOVE D6,SR -> mask 0
+        prog[8] = 16'h4E71;                 // NOP at byte 8
+        prog[9] = 16'h60FC;                 // BRA -4 -> back to byte 8
         prog[40] = MOVEQ(3, 8'd9);          // handler at 0x50
         prog[41] = 16'h60FE;
         prog[32'h74 >> 1]       = 16'h0000; // vector 29 (level 5) at 0x74
@@ -606,7 +702,7 @@ module mh030p_top_tb;
         chk("INT pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
         // The frame's return PC is the INTERRUPTED instruction, not the one
         // after it: nothing of it ran, so an RTE has to re-execute it.
-        chk("INT frame return PC", rd32(32'h5A), 32'h0000_0008);
+        chk("INT frame return PC", rd32(32'h5A), 32'h0000_0010);
         chk("INT raised the mask", {29'h0, dut.u_core.sr_sys_r[2:0]}, 32'd5);
 
         // ── Level 7 with the mask already at 7 ───────────────────────────────
@@ -617,10 +713,16 @@ module mh030p_top_tb;
         //  4: NOP ; 6: BRA -4
         // 0x50: handler: MOVEQ #8,D4 ; park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(7, 8'h60);
-        prog[1] = 16'h2E47;
-        prog[2] = 16'h4E71;                 // NOP at byte 4
-        prog[3] = 16'h60FC;                 // BRA -4 -> back to byte 4
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(7, 8'h60);
+        prog[5] = 16'h2E47;
+        prog[6] = 16'h4E71;                 // NOP at byte 4
+        prog[7] = 16'h60FC;                 // BRA -4 -> back to byte 4
         prog[40] = MOVEQ(4, 8'd8);          // handler at 0x50
         prog[41] = 16'h60FE;
         prog[32'h7C >> 1]       = 16'h0000; // vector 31 (level 7) at 0x7C
@@ -644,12 +746,18 @@ module mh030p_top_tb;
         // recognition condition that is merely "not equal" rather than
         // "greater than" would fire here and be caught.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(7, 8'h60);
-        prog[1] = 16'h2E47;
-        prog[2] = MOVEQ(6, 8'd0);
-        prog[3] = 16'h46C6;                 // MOVE D6,SR -> mask 0
-        prog[4] = MOVEQ(5, 8'd6);
-        prog[5] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(7, 8'h60);
+        prog[5] = 16'h2E47;
+        prog[6] = MOVEQ(6, 8'd0);
+        prog[7] = 16'h46C6;                 // MOVE D6,SR -> mask 0
+        prog[8] = MOVEQ(5, 8'd6);
+        prog[9] = 16'h60FE;
         prog[40] = MOVEQ(4, 8'h7F);         // any handler: must NOT run
         prog[41] = 16'h60FE;
         for (i = 24; i < 32; i++) begin
@@ -680,16 +788,22 @@ module mh030p_top_tb;
         // 18: park
         // 0x40: handler: MOVEQ #7,D5 ; park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'd5);
-        prog[3]  = MOVEQ(1, 8'd10);
-        prog[4]  = 16'h4181;                // CHK.L D1,D0
-        prog[5]  = MOVEQ(2, 8'd3);
-        prog[6]  = MOVEQ(3, 8'd20);
-        prog[7]  = 16'h4781;                // CHK.L D1,D3
-        prog[8]  = MOVEQ(4, 8'h7F);         // must not run
-        prog[9]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'd5);
+        prog[7]  = MOVEQ(1, 8'd10);
+        prog[8]  = 16'h4181;                // CHK.L D1,D0
+        prog[9]  = MOVEQ(2, 8'd3);
+        prog[10]  = MOVEQ(3, 8'd20);
+        prog[11]  = 16'h4781;                // CHK.L D1,D3
+        prog[12]  = MOVEQ(4, 8'h7F);         // must not run
+        prog[13]  = 16'h60FE;
         prog[12] = 16'h0000; prog[13] = 16'h0040;  // vector 6 at 0x18
         prog[32] = MOVEQ(5, 8'd7);          // handler at 0x40
         prog[33] = 16'h60FE;
@@ -708,14 +822,20 @@ module mh030p_top_tb;
         // a negative value fails however small the bound is.
         //  4: MOVEQ #-1,D0 ; 6: MOVEQ #10,D1 ; 8: CHK.W D1,D0 -> trap
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'hFF);         // D0 = -1
-        prog[3]  = MOVEQ(1, 8'd10);
-        prog[4]  = 16'h4181;                // CHK.W D1,D0
-        prog[5]  = MOVEQ(4, 8'h7F);         // must not run
-        prog[6]  = 16'h60FE;
-        prog[12] = 16'h0000; prog[13] = 16'h0040;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'hFF);         // D0 = -1
+        prog[7]  = MOVEQ(1, 8'd10);
+        prog[8]  = 16'h4181;                // CHK.W D1,D0
+        prog[9]  = MOVEQ(4, 8'h7F);         // must not run
+        prog[10]  = 16'h60FE;
+        prog[12] = 16'h0000; prog[13] = 16'h0040;  // vector 6 at 0x18
         // MOVEA, not MOVEQ: the marker must not set the CCR itself, or it
         // erases the N the trap just recorded.
         prog[32] = 16'h2C40;                // MOVEA.L D0,A6 -> A6 = -1
@@ -742,13 +862,19 @@ module mh030p_top_tb;
         // 10: MOVEQ #0x7F,D2   must NOT run
         // 12: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = 16'h51FC;                // TRAPF -- never taken
-        prog[3]  = MOVEQ(1, 8'd2);
-        prog[4]  = 16'hA123;                // Line-A
-        prog[5]  = MOVEQ(2, 8'h7F);         // must not run
-        prog[6]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = 16'h51FC;                // TRAPF -- never taken
+        prog[7]  = MOVEQ(1, 8'd2);
+        prog[8]  = 16'hA123;                // Line-A
+        prog[9]  = MOVEQ(2, 8'h7F);         // must not run
+        prog[10]  = 16'h60FE;
         prog[20] = 16'h0000; prog[21] = 16'h0040;  // vector 10 at 0x28
         prog[32] = MOVEQ(3, 8'd5);          // handler at 0x40
         prog[33] = 16'h60FE;
@@ -762,19 +888,25 @@ module mh030p_top_tb;
         chk("Line-A trapped",    dut.u_core.u_rf.regs[3], 32'd5);
         chk("Line-A skipped",    dut.u_core.u_rf.regs[2], 32'd0);
         // The stacked PC is the A-line opcode's own address, byte 8.
-        chk("Line-A stacked PC", rd32(32'h5A), 32'h0000_0008);
+        chk("Line-A stacked PC", rd32(32'h5A), 32'h0000_0010);
 
         // TRAPcc with a TRUE condition must actually fire.
         //  4: MOVEQ #2,D6 ; 6: MOVE D6,CCR   V set
         //  8: TRAPVS         V set -> taken (0x59FC, cc = VS)
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(6, 8'd2);
-        prog[3]  = 16'h44C6;                // MOVE D6,CCR -> V
-        prog[4]  = 16'h59FC;                // TRAPVS
-        prog[5]  = MOVEQ(2, 8'h7F);         // must not run
-        prog[6]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(6, 8'd2);
+        prog[7]  = 16'h44C6;                // MOVE D6,CCR -> V
+        prog[8]  = 16'h59FC;                // TRAPVS
+        prog[9]  = MOVEQ(2, 8'h7F);         // must not run
+        prog[10]  = 16'h60FE;
         prog[14] = 16'h0000; prog[15] = 16'h0040;  // vector 7 at 0x1C
         prog[32] = MOVEQ(4, 8'd6);
         prog[33] = 16'h60FE;
@@ -795,12 +927,18 @@ module mh030p_top_tb;
         //  8: TAS (A1)        0x4AD1
         // 10: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h30);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'h40);
-        prog[3]  = 16'h2240;                // MOVEA.L D0,A1
-        prog[4]  = 16'h4AD1;                // TAS (A1)
-        prog[5]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h30);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'h40);
+        prog[7]  = 16'h2240;                // MOVEA.L D0,A1
+        prog[8]  = 16'h4AD1;                // TAS (A1)
+        prog[9]  = 16'h60FE;
         prog[32] = 16'h0000;                // the byte at 0x40 starts at 0
 
         rst_n = 1'b0;
@@ -814,12 +952,18 @@ module mh030p_top_tb;
 
         // Same again with bit 7 already set: N set, Z clear, byte unchanged.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h30);
-        prog[1]  = 16'h2E47;
-        prog[2]  = MOVEQ(0, 8'h40);
-        prog[3]  = 16'h2240;
-        prog[4]  = 16'h4AD1;                // TAS (A1)
-        prog[5]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h30);
+        prog[5]  = 16'h2E47;
+        prog[6]  = MOVEQ(0, 8'h40);
+        prog[7]  = 16'h2240;
+        prog[8]  = 16'h4AD1;                // TAS (A1)
+        prog[9]  = 16'h60FE;
         prog[32] = 16'h8500;                // byte at 0x40 = 0x85
 
         rst_n = 1'b0;
@@ -844,11 +988,17 @@ module mh030p_top_tb;
         //                       correct one store the same thing.
         //  8: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(0, 8'h40);
-        prog[1]  = 16'h2240;                // MOVEA.L D0,A1
-        prog[2]  = MOVEQ(1, 8'd1);
-        prog[3]  = 16'hD391;                // ADD.L D1,(A1)
-        prog[4]  = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(0, 8'h40);
+        prog[5]  = 16'h2240;                // MOVEA.L D0,A1
+        prog[6]  = MOVEQ(1, 8'd1);
+        prog[7]  = 16'hD391;                // ADD.L D1,(A1)
+        prog[8]  = 16'h60FE;
         prog[32] = 16'h7FFF; prog[33] = 16'hFFFF;   // 0x40 = 0x7FFFFFFF
 
         rst_n = 1'b0;
@@ -875,15 +1025,21 @@ module mh030p_top_tb;
         // 26: BFCLR  D0{0:4}         -> 0x00F0F0F0, and N set from the field
         // 30: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = 16'h203C; prog[1] = 16'hF0F0; prog[2] = 16'hF0F0;
-        prog[3]  = 16'hE9C0; prog[4] = 16'h1208;   // BFEXTU D0{8:8},D1
-        prog[5]  = 16'hEBC0; prog[6] = 16'h2208;   // BFEXTS D0{8:8},D2
-        prog[7]  = 16'hEDC0; prog[8] = 16'h5000;   // BFFFO  D0{0:32},D5
-        prog[9]  = MOVEQ(3, 8'h0F);
-        prog[10] = MOVEQ(4, 8'd0);
-        prog[11] = 16'hEFC4; prog[12] = 16'h3208;  // BFINS D3,D4{8:8}
-        prog[13] = 16'hECC0; prog[14] = 16'h0004;  // BFCLR D0{0:4}
-        prog[15] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = 16'h203C; prog[5] = 16'hF0F0; prog[6] = 16'hF0F0;
+        prog[7]  = 16'hE9C0; prog[8] = 16'h1208;   // BFEXTU D0{8:8},D1
+        prog[9]  = 16'hEBC0; prog[10] = 16'h2208;   // BFEXTS D0{8:8},D2
+        prog[11]  = 16'hEDC0; prog[12] = 16'h5000;   // BFFFO  D0{0:32},D5
+        prog[13]  = MOVEQ(3, 8'h0F);
+        prog[14] = MOVEQ(4, 8'd0);
+        prog[15] = 16'hEFC4; prog[16] = 16'h3208;  // BFINS D3,D4{8:8}
+        prog[17] = 16'hECC0; prog[18] = 16'h0004;  // BFCLR D0{0:4}
+        prog[19] = 16'h60FE;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -902,9 +1058,15 @@ module mh030p_top_tb;
         // BFTST writes no register at all, only flags -- and a zero field must
         // set Z. Bits 8..12 of 0x00F0F0F0 are 0, so this is the zero case.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h203C; prog[1] = 16'h00F0; prog[2] = 16'hF0F0;
-        prog[3] = 16'hE8C0; prog[4] = 16'h0104;    // BFTST D0{4:4}
-        prog[5] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h203C; prog[5] = 16'h00F0; prog[6] = 16'hF0F0;
+        prog[7] = 16'hE8C0; prog[8] = 16'h0104;    // BFTST D0{4:4}
+        prog[9] = 16'h60FE;
 
         rst_n = 1'b0;
         repeat (3) @(negedge clk_4x);
@@ -931,17 +1093,23 @@ module mh030p_top_tb;
         // 32: park
         // 0x60 is the stack, so the handler goes at 0x90.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0]  = MOVEQ(7, 8'h60);
-        prog[1]  = 16'h2E47;
-        prog[2]  = 16'h203C; prog[3] = 16'h0000; prog[4] = 16'h0100;
-        prog[5]  = 16'h4E7B; prog[6]  = 16'h0801;   // MOVEC D0,VBR
-        prog[7]  = 16'h4E7A; prog[8]  = 16'h1801;   // MOVEC VBR,D1
-        prog[9]  = MOVEQ(2, 8'h2A);
-        prog[10] = 16'h4E7B; prog[11] = 16'h2002;   // MOVEC D2,CACR
-        prog[12] = 16'h4E7A; prog[13] = 16'h3002;   // MOVEC CACR,D3
-        prog[14] = 16'h4E40;                        // TRAP #0
-        prog[15] = MOVEQ(4, 8'h7F);                 // must not run
-        prog[16] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4]  = MOVEQ(7, 8'h60);
+        prog[5]  = 16'h2E47;
+        prog[6]  = 16'h203C; prog[7] = 16'h0000; prog[8] = 16'h0100;
+        prog[9]  = 16'h4E7B; prog[10]  = 16'h0801;   // MOVEC D0,VBR
+        prog[11]  = 16'h4E7A; prog[12]  = 16'h1801;   // MOVEC VBR,D1
+        prog[13]  = MOVEQ(2, 8'h2A);
+        prog[14] = 16'h4E7B; prog[15] = 16'h2002;   // MOVEC D2,CACR
+        prog[16] = 16'h4E7A; prog[17] = 16'h3002;   // MOVEC CACR,D3
+        prog[18] = 16'h4E40;                        // TRAP #0
+        prog[19] = MOVEQ(4, 8'h7F);                 // must not run
+        prog[20] = 16'h60FE;
         prog[72] = MOVEQ(5, 8'd9);                  // handler at 0x90
         prog[73] = 16'h60FE;
         // Vector 32 through the MOVED base, at 0x180.
@@ -978,11 +1146,17 @@ module mh030p_top_tb;
         // 10: MOVEP.L D1,(0,A2)    0x0B8A 0x0000
         // 14: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h1122; prog[2] = 16'h3344;
-        prog[3] = MOVEQ(0, 8'h40);
-        prog[4] = 16'h2440;                 // MOVEA.L D0,A2
-        prog[5] = 16'h03CA; prog[6] = 16'h0000;   // MOVEP.L D1,(0,A2)
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h1122; prog[6] = 16'h3344;
+        prog[7] = MOVEQ(0, 8'h40);
+        prog[8] = 16'h2440;                 // MOVEA.L D0,A2
+        prog[9] = 16'h03CA; prog[10] = 16'h0000;   // MOVEP.L D1,(0,A2)
+        prog[11] = 16'h60FE;
         for (i = 32; i < 36; i++) prog[i] = 16'h00BB;   // markers at 0x40..0x47
 
         rst_n = 1'b0;
@@ -1003,11 +1177,17 @@ module mh030p_top_tb;
         // 10: MOVEP.W (0,A3),D2   0x0513 0x0000
         // 14: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h243C; prog[1] = 16'hAAAA; prog[2] = 16'h5555;
-        prog[3] = MOVEQ(0, 8'h50);
-        prog[4] = 16'h2640;                 // MOVEA.L D0,A3
-        prog[5] = 16'h050B; prog[6] = 16'h0000;   // MOVEP.W (0,A3),D2
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h243C; prog[5] = 16'hAAAA; prog[6] = 16'h5555;
+        prog[7] = MOVEQ(0, 8'h50);
+        prog[8] = 16'h2640;                 // MOVEA.L D0,A3
+        prog[9] = 16'h050B; prog[10] = 16'h0000;   // MOVEP.W (0,A3),D2
+        prog[11] = 16'h60FE;
         prog[40] = 16'h7700;                // 0x50: byte 0x77, then filler
         prog[41] = 16'h8800;                // 0x52: byte 0x88
 
@@ -1026,12 +1206,18 @@ module mh030p_top_tb;
         // 16: CAS.L D1,D2,(A1)          0x0ED1 0x0081
         // 20: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h1122; prog[2] = 16'h3344;
-        prog[3] = 16'h243C; prog[4] = 16'hAABB; prog[5] = 16'hCCDD;
-        prog[6] = MOVEQ(0, 8'h40);
-        prog[7] = 16'h2240;                 // MOVEA.L D0,A1
-        prog[8] = 16'h0ED1; prog[9] = 16'h0081;   // CAS.L D1,D2,(A1)
-        prog[10] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h1122; prog[6] = 16'h3344;
+        prog[7] = 16'h243C; prog[8] = 16'hAABB; prog[9] = 16'hCCDD;
+        prog[10] = MOVEQ(0, 8'h40);
+        prog[11] = 16'h2240;                 // MOVEA.L D0,A1
+        prog[12] = 16'h0ED1; prog[13] = 16'h0081;   // CAS.L D1,D2,(A1)
+        prog[14] = 16'h60FE;
         prog[32] = 16'h1122; prog[33] = 16'h3344; // 0x40 = 0x11223344
 
         lock_violation = 1'b0;
@@ -1049,12 +1235,18 @@ module mh030p_top_tb;
         // second bus cycle is issued at all.
         //  0: MOVEQ #0,D1               Dc, deliberately wrong
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = MOVEQ(1, 8'd0);
-        prog[1] = 16'h243C; prog[2] = 16'hAABB; prog[3] = 16'hCCDD;
-        prog[4] = MOVEQ(0, 8'h40);
-        prog[5] = 16'h2240;
-        prog[6] = 16'h0ED1; prog[7] = 16'h0081;
-        prog[8] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = MOVEQ(1, 8'd0);
+        prog[5] = 16'h243C; prog[6] = 16'hAABB; prog[7] = 16'hCCDD;
+        prog[8] = MOVEQ(0, 8'h40);
+        prog[9] = 16'h2240;
+        prog[10] = 16'h0ED1; prog[11] = 16'h0081;
+        prog[12] = 16'h60FE;
         prog[32] = 16'h1122; prog[33] = 16'h3344;
 
         lock_violation = 1'b0;
@@ -1077,11 +1269,17 @@ module mh030p_top_tb;
         // 14: MOVEQ #3,D2       marker, and it must not disturb the check
         // 16: park
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h000A;  // D1 = 10
-        prog[3] = MOVEQ(0, 8'h40);
-        prog[4] = 16'h2240;                       // MOVEA.L D0,A1
-        prog[5] = 16'h04D1; prog[6] = 16'h1000;   // CMP2.L (A1),D1
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h0000; prog[6] = 16'h000A;  // D1 = 10
+        prog[7] = MOVEQ(0, 8'h40);
+        prog[8] = 16'h2240;                       // MOVEA.L D0,A1
+        prog[9] = 16'h04D1; prog[10] = 16'h1000;   // CMP2.L (A1),D1
+        prog[11] = 16'h60FE;
         prog[32] = 16'h0000; prog[33] = 16'h0005; // lower bound 5 at 0x40
         prog[34] = 16'h0000; prog[35] = 16'h0014; // upper bound 20 at 0x44
 
@@ -1096,11 +1294,17 @@ module mh030p_top_tb;
         // Out of range above, and equal to a bound, in one run: 25 > 20 sets C,
         // then 20 == the upper bound sets Z and clears C.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0019;  // D1 = 25
-        prog[3] = MOVEQ(0, 8'h40);
-        prog[4] = 16'h2240;
-        prog[5] = 16'h04D1; prog[6] = 16'h1000;   // CMP2.L (A1),D1 -> C
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h0000; prog[6] = 16'h0019;  // D1 = 25
+        prog[7] = MOVEQ(0, 8'h40);
+        prog[8] = 16'h2240;
+        prog[9] = 16'h04D1; prog[10] = 16'h1000;   // CMP2.L (A1),D1 -> C
+        prog[11] = 16'h60FE;
         prog[32] = 16'h0000; prog[33] = 16'h0005;
         prog[34] = 16'h0000; prog[35] = 16'h0014;
 
@@ -1112,11 +1316,17 @@ module mh030p_top_tb;
         chk("CMP2 above: C=1", {28'h0, ccr_out[0]}, 32'h0000_0001);
 
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0014;  // D1 = 20
-        prog[3] = MOVEQ(0, 8'h40);
-        prog[4] = 16'h2240;
-        prog[5] = 16'h04D1; prog[6] = 16'h1000;
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h0000; prog[6] = 16'h0014;  // D1 = 20
+        prog[7] = MOVEQ(0, 8'h40);
+        prog[8] = 16'h2240;
+        prog[9] = 16'h04D1; prog[10] = 16'h1000;
+        prog[11] = 16'h60FE;
         prog[32] = 16'h0000; prog[33] = 16'h0005;
         prog[34] = 16'h0000; prog[35] = 16'h0014;
 
@@ -1133,11 +1343,17 @@ module mh030p_top_tb;
         // unwrapped one until Phase 250. Bounds [10,5] with R=3: wrapped-valid,
         // so C must be 0. The unwrapped formula would give 1.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0003;  // D1 = 3
-        prog[3] = MOVEQ(0, 8'h40);
-        prog[4] = 16'h2240;
-        prog[5] = 16'h04D1; prog[6] = 16'h1000;
-        prog[7] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h0000; prog[6] = 16'h0003;  // D1 = 3
+        prog[7] = MOVEQ(0, 8'h40);
+        prog[8] = 16'h2240;
+        prog[9] = 16'h04D1; prog[10] = 16'h1000;
+        prog[11] = 16'h60FE;
         prog[32] = 16'h0000; prog[33] = 16'h000A; // lower 10
         prog[34] = 16'h0000; prog[35] = 16'h0005; // upper 5  -- wrapped
 
@@ -1151,12 +1367,18 @@ module mh030p_top_tb;
         // CHK2 is the same comparison, and traps on it. Extension bit 11 set,
         // so 0x1000 becomes 0x1800. Vector 6 lives at 0x18.
         for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
-        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0019;  // D1 = 25
-        prog[3] = MOVEQ(0, 8'h40);
-        prog[4] = 16'h2240;
-        prog[5] = 16'h04D1; prog[6] = 16'h1800;   // CHK2.L (A1),D1 -> trap
-        prog[7] = MOVEQ(3, 8'h7F);                // must NOT run
-        prog[8] = 16'h60FE;
+        // Real 68k reset reads the SSP from 0 and the PC from 4, so every
+        // program starts at byte 8 and the vector points there. The core does
+        // this fetch now; leaving the programs at 0 would have them execute
+        // their own vector words.
+        prog[0] = 16'h0000; prog[1] = 16'h0400;   // SSP
+        prog[2] = 16'h0000; prog[3] = 16'h0008;   // PC -> byte 8
+        prog[4] = 16'h223C; prog[5] = 16'h0000; prog[6] = 16'h0019;  // D1 = 25
+        prog[7] = MOVEQ(0, 8'h40);
+        prog[8] = 16'h2240;
+        prog[9] = 16'h04D1; prog[10] = 16'h1800;   // CHK2.L (A1),D1 -> trap
+        prog[11] = MOVEQ(3, 8'h7F);                // must NOT run
+        prog[12] = 16'h60FE;
         // The handler goes at 0x48, NOT 0x40 -- 0x40 is where the bounds live,
         // and pointing the vector there would execute the bounds data.
         prog[12] = 16'h0000; prog[13] = 16'h0048; // vector 6 at 0x18

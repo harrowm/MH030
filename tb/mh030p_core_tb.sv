@@ -61,7 +61,7 @@ module mh030p_core_tb;
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .pc_in(pc_in), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),
-        .mem_rdata(mem_rdata), .mem_ack(mem_ack), .mem_lock(), .ipl(3'b000),
+        .mem_rdata(mem_rdata), .mem_ack(mem_ack), .mem_lock(), .stopped(), .ipl(3'b000),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
     );
@@ -71,7 +71,11 @@ module mh030p_core_tb;
     logic [31:0] branch_pc_seen   = 32'hFFFF_FFFF;
     logic [31:0] branch_pc_expect = 32'hFFFF_FFFF;
     always @(posedge clk_4x)
-        if (rst_n && redirect && branch_pc_seen === 32'hFFFF_FFFF) begin
+        // Not the reset-vector redirect: the core now performs a real 68k
+        // vector fetch, and its own redirect is the FIRST one after reset. This
+        // check is about the branch base, so skip while that sequence runs.
+        if (rst_n && redirect && !dut.in_reset_seq
+                 && branch_pc_seen === 32'hFFFF_FFFF) begin
             branch_pc_seen   <= redirect_pc;
             branch_pc_expect <= dut.ex_pc + 32'd2 + 32'd2;   // BRA.B +2
         end

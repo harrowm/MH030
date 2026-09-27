@@ -32,6 +32,7 @@ module mh030p_top (
     output wire        wb_wr_en,
     output wire [3:0]  wb_wr_sel,
     output wire [31:0] wb_wr_data,
+    output wire        stopped,
     output wire [7:0]  ccr_out
 );
 
@@ -83,7 +84,7 @@ module mh030p_top (
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),
         .mem_rdata(mem_rdata), .mem_ack(mem_ack), .mem_lock(mem_lock),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
-        .wb_wr_data(wb_wr_data), .ccr_out(ccr_out)
+        .wb_wr_data(wb_wr_data), .ccr_out(ccr_out), .stopped(stopped)
     );
 
     mh030p_arb u_arb (

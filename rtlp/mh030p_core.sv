@@ -74,6 +74,10 @@ module mh030p_core (
     // moment its read is dispatched until its write has been acknowledged. The
     // arbiter refuses instruction fetch in between.
     output wire        mem_lock,
+    // High once STOP has executed, until an interrupt arrives. The pin exists
+    // for the same reason rtl/ has one: a testbench needs to know the program
+    // has finished, and STOP is how a 68k program says so.
+    output wire        stopped,
     // Interrupt priority level, already encoded 0-7. Real silicon presents it
     // on three ACTIVE-LOW pins; inverting them is the pin driver's job, not
     // the core's, and the SoC that wires this up owns that.
@@ -556,7 +560,25 @@ module mh030p_core (
     // class of bug rather than one instance: the vector, the return-PC rule,
     // the interrupt level and both flag contributions were all being re-read
     // from operands the exception sequence itself overwrites.
+    // ── Reset vector fetch ──────────────────────────────────────────────────
+    // Real 68k reset reads the supervisor stack pointer from address 0 and the
+    // initial PC from address 4 before executing anything. The core started at
+    // PC=0 instead, which worked only because every testbench so far put its
+    // program there. The Harte corpus does not -- its images carry a genuine
+    // vector pair -- so this is a real missing behaviour, not a harness detail.
+    localparam [1:0] RS_SSP = 2'd0, RS_PC = 2'd1, RS_DONE = 2'd2;
+    reg  [1:0]  rst_state;
+    reg         rst_issued;
+    reg  [31:0] rst_pc;
+    wire in_reset_seq = (rst_state != RS_DONE);
+    // One tick of redirect, on the cycle the sequence completes, to send the
+    // fetch unit at the vector it just read.
+    wire rst_redirect = (rst_state == RS_PC) && rst_issued && mem_ack;
+
     reg        exc_pend, trap_decided;
+    // Declared up here because the instruction-issue gate reads it, and that
+    // sits far above STOP's own logic.
+    reg        stopped_r;
     reg  [9:0] exc_vec_r;
     reg        exc_retself_r, exc_disc_r, exc_isint_r;
     reg  [2:0] exc_ilevel_r;
@@ -725,7 +747,8 @@ module mh030p_core (
     // a divide reporting a zero divisor all get a settled answer.
     wire ex_decide = ex_may_trap && !trap_decided && !ex_other_stall;
 
-    wire stall_ex = ex_other_stall
+    wire stall_ex = in_reset_seq
+                 || ex_other_stall
                  || (ex_may_trap && !trap_decided)
                  || (exc_pend && !exc_taken);
     wire stall_ag = ag_base_busy;
@@ -814,7 +837,8 @@ module mh030p_core (
             ag_uop   <= uop_clear();
         end else if (!stall_ex && !stall_ag) begin
             // A taken branch squashes whatever is behind it.
-            ag_valid <= instr_valid && dec_executable && !redirect;
+            ag_valid <= instr_valid && dec_executable && !redirect
+                                    && !stopped_r && !in_reset_seq;
             ag_uop   <= dec_uop;
             ag_pc    <= pc_in;
             ag_pc2   <= pc_in + 32'd2;
@@ -1016,6 +1040,15 @@ module mh030p_core (
                 mem_wdata <= mvm_wdata;
             end else if (mem_ack) begin
                 mem_req   <= 1'b0;
+            end
+        end else if (in_reset_seq) begin
+            if (!rst_issued) begin
+                mem_req  <= 1'b1;
+                mem_rw   <= 1'b1;
+                mem_siz  <= UZ_LONG;
+                mem_addr <= (rst_state == RS_SSP) ? 32'h0 : 32'h4;
+            end else if (mem_ack) begin
+                mem_req  <= 1'b0;
             end
         end else if (ex_is_movep && !mvp_done) begin
             if (!mvp_run) begin
@@ -1279,6 +1312,22 @@ module mh030p_core (
     // mem_hold is right-justified for reads, so the byte is in [7:0].
     wire [7:0]  tas_orig = mem_hold[7:0];
     wire [31:0] tas_res  = {24'h0, tas_orig | 8'h80};
+
+    // ── STOP ────────────────────────────────────────────────────────────────
+    // Loads the SR from its operand and then halts until an interrupt. The
+    // halt is what makes it the natural end of a test program.
+    wire ex_is_stop = ex_valid && (ex_uop.uclass == UC_NOP)
+                               && (ex_uop.subop == 4'd2);
+    assign stopped = stopped_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)                          stopped_r <= 1'b0;
+        // A real STOP resumes on an interrupt its own new mask permits, which
+        // int_pending already expresses -- the mask it is waiting behind is the
+        // one STOP itself just loaded.
+        else if (int_pending)                stopped_r <= 1'b0;
+        else if (ex_is_stop && !stall_ex)    stopped_r <= 1'b1;
+    end
 
     // ── MOVEC ───────────────────────────────────────────────────────────────
     // Control-register numbers from MC68030UM Table 6-1 / section 2.
@@ -1582,12 +1631,14 @@ module mh030p_core (
     // BSR (cond 0001) is unconditional despite the encoding meaning FALSE
     // everywhere else.
     wire branch_taken = ex_is_branch && ((ex_uop.cond == 4'h1) || cond_true);
-    assign redirect   = !stall_ex && (branch_taken || dbcc_branch || ex_is_rts
+    assign redirect   = rst_redirect
+                     || !stall_ex && (branch_taken || dbcc_branch || ex_is_rts
                                       || ex_is_jmp
                                       || (ex_is_trap && exc_taken));
     // RTS goes to the address it popped; everything else is relative to the
     // instruction plus 2. !stall_ex above guarantees the pop has landed.
-    assign redirect_pc = (ex_is_trap && exc_taken) ? exc_vec_addr
+    assign redirect_pc = rst_redirect ? mem_rdata
+                       : (ex_is_trap && exc_taken) ? exc_vec_addr
                        : ex_is_rts                  ? mem_hold
                        : ex_is_jmp                  ? ex_ea
                                                     : (ex_pc + 32'd2 + ex_uop.imm);
@@ -1698,6 +1749,8 @@ module mh030p_core (
         else if (ex_is_sys && (ex_uop.subop >= 4'd2) && (ex_uop.subop <= 4'd3)
                  && !stall_ex)
                                ccr_r <= sys_wr_val[7:0];
+        else if (ex_is_stop && !stall_ex)
+                               ccr_r <= ex_uop.imm[7:0];
         else if (wb_upd_ccr)   ccr_r <= wb_ccr;
     end
 
@@ -1710,6 +1763,7 @@ module mh030p_core (
                                               sr_sys_r <= rte_sr[15:8];
         else if (ex_is_sys && (ex_uop.subop == 4'd3) && !stall_ex)
                                               sr_sys_r <= sys_wr_val[15:8];
+        else if (ex_is_stop && !stall_ex)     sr_sys_r <= ex_uop.imm[15:8];
         // An interrupt also raises the mask to its own level, so it cannot
         // immediately re-interrupt its own handler. M survives; T does not.
         else if (int_dispatched)
@@ -1815,6 +1869,25 @@ module mh030p_core (
             endcase
         end
     end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            rst_state  <= RS_SSP;
+            rst_issued <= 1'b0;
+            rst_pc     <= 32'h0;
+        end else if (in_reset_seq) begin
+            if (!rst_issued) rst_issued <= 1'b1;
+            else if (mem_ack) begin
+                rst_issued <= 1'b0;
+                if (rst_state == RS_SSP) rst_state <= RS_PC;
+                else begin
+                    rst_state <= RS_DONE;
+                    rst_pc    <= mem_rdata;
+                end
+            end
+        end
+    end
+
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -1993,16 +2066,20 @@ module mh030p_core (
     // result in the same cycle.
     // A completed trap leaves A7 below the frame it pushed.
     wire exc_commit_sp = ex_is_trap && exc_taken && !stall_ex;
+    // The supervisor stack pointer, straight from address 0.
+    wire rst_commit_sp = (rst_state == RS_SSP) && rst_issued && mem_ack;
     // MOVEM memory-to-register commits one register per acknowledged read,
     // straight from the sequencer rather than through WB.
     wire mvm_reg_wr = ex_is_movem && ex_uop.reads_mem && mvm_run
                    && mvm_bit && mem_ack;
     assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd || exc_commit_sp
-                      || mvm_reg_wr;
-    assign wb_wr_sel  = mvm_reg_wr    ? mvm_reg
+                      || mvm_reg_wr || rst_commit_sp;
+    assign wb_wr_sel  = rst_commit_sp ? 4'd15
+                      : mvm_reg_wr    ? mvm_reg
                       : exc_commit_sp ? 4'd15
                       : ag_an_upd     ? ag_uop.ea_reg : wb_reg;
-    assign wb_wr_data = mvm_reg_wr    ? (ex_uop.xfer_long ? mem_rdata
+    assign wb_wr_data = rst_commit_sp ? mem_rdata
+                      : mvm_reg_wr    ? (ex_uop.xfer_long ? mem_rdata
                                          : {{16{mem_rdata[15]}}, mem_rdata[15:0]})
                       : exc_commit_sp ? exc_sp
                       : ag_an_upd     ? ag_an_val     : wb_data;

@@ -894,7 +894,13 @@ module mh030p_decode (
                     4'h6: begin uop.uclass = UC_TRAP; uop.traps = 1'b1;
                                 uop.imm    = 32'd7;   uop.subop = 4'd1;
                                 uop.ea_reg = 4'd15; end
-                    4'h0, 4'h1, 4'h2: uop.uclass = UC_NOP;      // RESET/NOP/STOP
+                    // 0 RESET, 1 NOP, 2 STOP. Only STOP does anything, and it
+                    // carries the SR value to load in an extension word.
+                    4'h0, 4'h1, 4'h2: begin
+                        uop.uclass = UC_NOP;
+                        uop.subop  = sys_lo;
+                        uop.imm    = {16'h0, ext[15:0]};
+                    end
                     default: uop.uclass = UC_UNIMPL;            // RTD
                 endcase
             end else if (g4_is_swap) begin
@@ -1426,6 +1432,9 @@ module mh030p_decode (
                              && ((uop.subop == 4'd0) || (uop.subop == 4'd1)
                               || (uop.subop == 4'd5)))
                             ? 3'd0
+                          // STOP's operand is the SR value to load.
+                          : ((uop.uclass == UC_NOP) && (uop.subop == 4'd2))
+                            ? 3'd1
                           : ((uop.uclass == UC_TRAP) && (uop.subop == 4'd4))
                             ? ((f_reg == 3'b010) ? 3'd1 :
                                (f_reg == 3'b011) ? 3'd2 : 3'd0)
