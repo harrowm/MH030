@@ -3834,3 +3834,57 @@ core whose only net is its own hand-written tests.
 **The single highest-value next step remains pointing Harte at `mh030p_top`.**
 It compares architectural state only, so it transfers essentially unchanged,
 and it would turn 121 checks into ~700k vectors.
+
+
+## The measurement's own noise floor — and a correction
+
+Three targeted fixes were made to the reported worst path and all three
+"measured nothing". Checking why exposed a hole in the method rather than
+anything about the RTL: **every measurement in this effort used
+`--randomize-seed`, so no comparison ever separated placement noise from RTL
+effect.**
+
+Re-running the IDENTICAL netlist with a fixed seed settles it:
+
+| Run | RTL | Fmax |
+|---|---|---|
+| nt6 | before the stall-path restructure | 21.46 MHz |
+| nt7 | exception decision moved behind a register | 21.08 MHz |
+| nt8 | + effective-address adder chain collapsed | 21.49 MHz |
+| nt8b | **byte-identical to nt8**, seed 12345 | 21.01 MHz |
+
+Seed-only spread: **0.48 MHz**. Spread across three genuinely different RTL
+variants: **0.41 MHz**. They are the same magnitude, so all four numbers are one
+population, ≈21.2 ± 0.25 MHz, and the three variants are indistinguishable.
+
+### What this does and does not invalidate
+
+**Still solid** — differences much larger than 0.5 MHz:
+- the sequential divider, 2.46 -> 14.24 MHz
+- cache BRAM inference, 1.79 -> 2.46 MHz
+- this session's breadth cost, 29.11 -> 21.46 MHz (7.65 MHz)
+- every growth-curve point, whose steps are 1-8 MHz apart
+
+**Now only "below resolution", not "measured to do nothing"**:
+- the stall-path restructure and the EA adder collapse. Both remain correct
+  engineering -- the first removed real arithmetic from a signal that gates the
+  whole core and fixed a real bug class, the second provably removed two 32-bit
+  adds from a register-to-register path -- but any effect is under 0.5 MHz and
+  this method cannot see it.
+
+**A correction to a claim already recorded above**: the two-stage multiplier was
+reported as "+3%, 28.21 -> 29.11 MHz". That is 0.9 MHz on a single run each, only
+about twice the seed spread, from a comparison that also changed the seed. The
+structural finding stands and is independently visible -- `u_md` went from 83.7%
+of the worst path to 0% -- but the frequency figure is weak evidence and should
+not be quoted as a measured 3% gain. The honest version is: the multiply left
+the critical path, and the clock did not move enough to distinguish from noise.
+
+### Protocol from here
+
+No single-run comparison. Any change expected to move Fmax by less than ~2 MHz
+needs at least three fixed seeds per variant, reported as a range. A change that
+cannot clear that bar is not worth a 3-hour measurement at all -- which is itself
+the useful conclusion, because it means single-path surgery on this design is
+unmeasurable and therefore not the lever. The one effect that IS far above noise
+is area: 12.9k -> 14.1k LUTs cost 7.65 MHz. That is where the signal is.
