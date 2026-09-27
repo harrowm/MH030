@@ -1068,6 +1068,111 @@ module mh030p_top_tb;
         chk("CAS miss cleared Z",   {28'h0, ccr_out[2]},     32'h0000_0000);
         chk("CAS miss held bus",    {31'h0, lock_violation}, 32'h0000_0000);
 
+        // ── CMP2 / CHK2 ──────────────────────────────────────────────────────
+        // The bounds are a PAIR in memory: lower at the effective address,
+        // upper one operand size above. C is set when the register is OUTSIDE
+        // the range, Z when it equals either end, and N/V/X survive untouched.
+        //  0: MOVE.L #10,D1 ; 6: MOVEQ #0x40,D0 ; 8: MOVEA.L D0,A1
+        // 10: CMP2.L (A1),D1    0x02D1 0x1000    bounds [5,20] -> in range
+        // 14: MOVEQ #3,D2       marker, and it must not disturb the check
+        // 16: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h000A;  // D1 = 10
+        prog[3] = MOVEQ(0, 8'h40);
+        prog[4] = 16'h2240;                       // MOVEA.L D0,A1
+        prog[5] = 16'h04D1; prog[6] = 16'h1000;   // CMP2.L (A1),D1
+        prog[7] = 16'h60FE;
+        prog[32] = 16'h0000; prog[33] = 16'h0005; // lower bound 5 at 0x40
+        prog[34] = 16'h0000; prog[35] = 16'h0014; // upper bound 20 at 0x44
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("CMP2 in range: C=0", {28'h0, ccr_out[0]}, 32'h0000_0000);
+        chk("CMP2 in range: Z=0", {28'h0, ccr_out[2]}, 32'h0000_0000);
+
+        // Out of range above, and equal to a bound, in one run: 25 > 20 sets C,
+        // then 20 == the upper bound sets Z and clears C.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0019;  // D1 = 25
+        prog[3] = MOVEQ(0, 8'h40);
+        prog[4] = 16'h2240;
+        prog[5] = 16'h04D1; prog[6] = 16'h1000;   // CMP2.L (A1),D1 -> C
+        prog[7] = 16'h60FE;
+        prog[32] = 16'h0000; prog[33] = 16'h0005;
+        prog[34] = 16'h0000; prog[35] = 16'h0014;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("CMP2 above: C=1", {28'h0, ccr_out[0]}, 32'h0000_0001);
+
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0014;  // D1 = 20
+        prog[3] = MOVEQ(0, 8'h40);
+        prog[4] = 16'h2240;
+        prog[5] = 16'h04D1; prog[6] = 16'h1000;
+        prog[7] = 16'h60FE;
+        prog[32] = 16'h0000; prog[33] = 16'h0005;
+        prog[34] = 16'h0000; prog[35] = 16'h0014;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("CMP2 on bound: Z=1", {28'h0, ccr_out[2]}, 32'h0000_0001);
+        chk("CMP2 on bound: C=0", {28'h0, ccr_out[0]}, 32'h0000_0000);
+
+        // A WRAPPED range -- upper below lower -- is a documented 68020+ idiom
+        // with its own branch of the formula, and rtl/ implemented only the
+        // unwrapped one until Phase 250. Bounds [10,5] with R=3: wrapped-valid,
+        // so C must be 0. The unwrapped formula would give 1.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0003;  // D1 = 3
+        prog[3] = MOVEQ(0, 8'h40);
+        prog[4] = 16'h2240;
+        prog[5] = 16'h04D1; prog[6] = 16'h1000;
+        prog[7] = 16'h60FE;
+        prog[32] = 16'h0000; prog[33] = 16'h000A; // lower 10
+        prog[34] = 16'h0000; prog[35] = 16'h0005; // upper 5  -- wrapped
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("CMP2 wrapped: C=0", {28'h0, ccr_out[0]}, 32'h0000_0000);
+
+        // CHK2 is the same comparison, and traps on it. Extension bit 11 set,
+        // so 0x1000 becomes 0x1800. Vector 6 lives at 0x18.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h0000; prog[2] = 16'h0019;  // D1 = 25
+        prog[3] = MOVEQ(0, 8'h40);
+        prog[4] = 16'h2240;
+        prog[5] = 16'h04D1; prog[6] = 16'h1800;   // CHK2.L (A1),D1 -> trap
+        prog[7] = MOVEQ(3, 8'h7F);                // must NOT run
+        prog[8] = 16'h60FE;
+        // The handler goes at 0x48, NOT 0x40 -- 0x40 is where the bounds live,
+        // and pointing the vector there would execute the bounds data.
+        prog[12] = 16'h0000; prog[13] = 16'h0048; // vector 6 at 0x18
+        prog[32] = 16'h0000; prog[33] = 16'h0005;
+        prog[34] = 16'h0000; prog[35] = 16'h0014;
+        prog[36] = 16'h2C40;                      // handler at 0x48: MOVEA.L D0,A6
+        prog[37] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (350) @(negedge clk_4x);
+
+        chk("CHK2 trapped",        dut.u_core.u_rf.regs[14], 32'h0000_0040);
+        chk("CHK2 skipped inline", dut.u_core.u_rf.regs[3],  32'd0);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

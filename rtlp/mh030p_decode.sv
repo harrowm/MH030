@@ -448,6 +448,12 @@ module mh030p_decode (
                 uop.reads_mem   = 1'b1;
                 uop.writes_reg  = 1'b0;
                 uop.x_unchanged = 1'b1;
+                // The register being range-checked, and which of the pair this
+                // is: extension bit 11 selects CHK2 over CMP2, bit 15 selects An
+                // over Dn. The whole word travels in imm, as for every other
+                // family whose operands the reference resolves in its own FSM.
+                uop.imm         = {16'h0, ext[15:0]};
+                uop.dst_reg     = {ext[15], ext[14:12]};
             end else if (g0_is_cas) begin
                 uop.uclass      = UC_ATOMIC;
                 // CAS2 is the immediate-mode encoding (0x0CFC / 0x0EFC) and
@@ -1451,6 +1457,10 @@ module mh030p_decode (
                             ? (3'd1 + ea_words(ea_mode_w))
                           : ((uop.uclass == UC_ATOMIC) && (uop.subop == 4'd2))
                             ? 3'd2
+                          // CMP2/CHK2 name their register in an extension word
+                          // on top of whatever the EA needs.
+                          : ((uop.uclass == UC_TRAP) && (uop.subop == 4'd3))
+                            ? (3'd1 + ea_words(ea_mode_w))
                           // An instruction that declares NO effective address
                           // cannot be consuming extension words for one, but
                           // ea_words_total is computed from the raw opcode's EA
