@@ -26,6 +26,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO     = Path(__file__).parent.parent
+# Which core to test. The default is rtl/, the golden reference; --sim points
+# at any binary honouring the same +hexfile / REGSTATE / MEMWRITE contract, which
+# is how the pipelined core in rtlp/ gets measured against the same corpus.
 SIM_BIN  = REPO / 'sim' / 'harte_dat'
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -228,8 +231,13 @@ def main():
     ap.add_argument('--stop-on-fail',   type=int, default=None)
     ap.add_argument('--jobs', '-j',     type=int, default=6,
                     help='parallel vvp workers (default 6)')
+    ap.add_argument('--sim', default=None,
+                    help='simulator binary to test (default sim/harte_dat)')
     args = ap.parse_args()
 
+    global SIM_BIN
+    if args.sim:
+        SIM_BIN = Path(args.sim)
     if not SIM_BIN.exists():
         print(f"ERROR: {SIM_BIN} not found — run: make sim/harte_dat", file=sys.stderr)
         sys.exit(1)

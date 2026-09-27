@@ -215,6 +215,12 @@ module mh030p_core (
                            || ((dec_uop.uclass == UC_ATOMIC)
                                && (dec_uop.subop <= 4'd1) && dec_ea_ok)
                            || dec_bf_ok
+                           // Reads memory and commits nothing: TST, and CMP
+                           // against a memory source. The destination check
+                           // below demands a register, which these do not have.
+                           || ((dec_uop.uclass == UC_ALU) && dec_uop.reads_mem
+                               && !dec_uop.writes_mem && !dec_uop.writes_reg
+                               && dec_ea_ok)
                            || (dec_is_movep && dec_ea_ok)
                            // MOVEC only; MOVES (sub-op 0) needs the alternate
                            // function codes to mean something first.
@@ -228,7 +234,14 @@ module mh030p_core (
                            || dec_sysctl_ok
                            || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
                            :   dec_rmw     ? dec_ea_ok
-                           :   dec_pure_wr ? (dec_ea_ok && (dec_uop.uclass == UC_MOVE))
+                           // A pure memory write used to require UC_MOVE, which
+                           // silently excluded CLR -- write-only on 68010+ and
+                           // the only other instruction of that shape. It was
+                           // not failing, it was never executing: no bus cycle,
+                           // no An update, no flags.
+                           :   dec_pure_wr ? (dec_ea_ok
+                                              && ((dec_uop.uclass == UC_MOVE)
+                                               || (dec_uop.alu_op == UA_CLR)))
                                            : (dec_uop.dst_kind == US_DREG
                                               || dec_uop.dst_kind == US_AREG)))
                        // UNLK reads memory at the address register it names,
@@ -374,6 +387,10 @@ module mh030p_core (
     reg [2:0]  sfc_r, dfc_r;
 
     wire ex_rmw = ex_valid && ex_uop.reads_mem && ex_uop.writes_mem;
+    // A write-only ALU operation on memory -- CLR. Its flags are not claimed at
+    // decode, for the same reason no memory RMW's are.
+    wire ex_is_alu_mem_wr = ex_valid && (ex_uop.uclass == UC_ALU)
+                         && ex_uop.writes_mem && !ex_uop.reads_mem;
     wire ex_m2m = ex_rmw && (ex_uop.dst_ea_mode != UEA_NONE);
     reg  rmw_wr_issued, rmw_done;
     // Declared here so the ONE always_ff that drives the memory port can use
@@ -911,7 +928,11 @@ module mh030p_core (
                      : fwd_i_wbp ? wbp_data : fwd_i_wbp2 ? wbp2_data : rf_c;
 
     // ── AG: effective address, on its own adder ─────────────────────────────
-    wire [31:0] ea_step = (ag_uop.siz == UZ_BYTE) ? 32'd1
+    // A BYTE access through A7 adjusts the pointer by TWO, not one, because the
+    // stack pointer has to stay even -- the one place where the operand size and
+    // the pointer step genuinely disagree on a 68k.
+    wire [31:0] ea_step = (ag_uop.siz == UZ_BYTE)
+                          ? ((ag_uop.ea_reg == 4'd15) ? 32'd2 : 32'd1)
                         : (ag_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
     // Absolute modes have no base register; the address is the displacement.
     // PC-relative modes take the address of their own EXTENSION WORD as the
@@ -1025,6 +1046,10 @@ module mh030p_core (
                         ? (ag_pc2 + {27'h0, ag_uop.ext_words, 1'b0})
                       : ag_is_push ? ag_ea
                       : ag_is_link ? ag_b
+                      // CLR writes zero. A pure write takes its data from AG,
+                      // which would otherwise send whatever the A port held.
+                      : ((ag_uop.uclass == UC_ALU) && (ag_uop.alu_op == UA_CLR))
+                        ? 32'h0
                       : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
         end else if (ex_is_movem && !mvm_done) begin
             // Issue a transfer for each set mask bit; skip the clear ones
@@ -1238,8 +1263,15 @@ module mh030p_core (
     //   plain memory read      : memory is the source
     // Checked in that order, because a mem-to-mem move also satisfies the RMW
     // test -- it reads and writes memory too.
+    // A read-modify-write took its non-memory operand from the A port
+    // unconditionally, which is wrong whenever that operand is an IMMEDIATE:
+    // every ADDQ, SUBQ, ADDI, SUBI, ANDI, ORI, EORI and CMPI with a memory
+    // destination was adding a leftover register value instead of its own
+    // constant. Found by the Harte corpus in its first forty vectors; no
+    // hand-written test had ever used an immediate against memory.
     wire [31:0] ex_src = ex_m2m                      ? mem_hold
-                       : ex_rmw_op                   ? ex_a_u
+                       : ex_rmw_op
+                         ? ((ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a_u)
                        : ex_uop.reads_mem            ? mem_hold
                        : (ex_uop.src_kind == US_IMM) ? ex_uop.imm
                                                      : ex_a_u;
@@ -1501,18 +1533,50 @@ module mh030p_core (
     wire use_ext  = (ex_uop.uclass == UC_EXT);
     wire use_swap = (ex_uop.uclass == UC_SWAP);
     wire use_shf = (ex_uop.unit == UU_SHF);
-    wire use_mv  = (ex_uop.unit == UU_MOVE);
+    // CLR's unit is UU_MOVE in the reference decoder, but its result and flags
+    // are the ALU's: zero, with Z set. Routing it through the MOVE path derived
+    // both from the SOURCE operand instead, so Z came out of whatever happened
+    // to be on the A port. The register form passed anyway, because that operand
+    // was usually zero -- the memory forms are what exposed it.
+    wire use_clr = (ex_uop.uclass == UC_ALU) && (ex_uop.alu_op == UA_CLR);
+    wire use_mv  = (ex_uop.unit == UU_MOVE) && !use_clr;
     wire use_md  = (ex_uop.unit == UU_MUL) || (ex_uop.unit == UU_DIV);
 
     // EXT and SWAP ride the MOVE unit in the reference decoder, so they are
     // selected by class rather than by unit.
+    // ── Sizing the result into a data register ──────────────────────────────
+    // eu_alu and eu_shifter both MASK their result to the operation size
+    // (eu_alu.sv: `arith_result = add_sum[31:0] & result_mask`), so a byte or
+    // word operation returns its answer zero-extended. A 68k byte operation on
+    // a data register must leave the upper 24 bits ALONE, so the merge has to
+    // happen here. mv_result and the BCD path already did it; the ALU and
+    // shifter paths did not, which zeroed the top of every destination register
+    // for every byte and word ALU operation in the instruction set.
+    //
+    // Only for a DATA register: an address-register destination is always
+    // written in full, and a memory destination takes its bytes from the low
+    // end regardless.
+    wire ex_merge = (ex_uop.dst_kind == US_DREG);
+    function automatic logic [31:0] merge_sz(input logic [31:0] res,
+                                             input logic [31:0] old,
+                                             input logic [1:0]  sz,
+                                             input logic        en);
+        merge_sz = (!en)             ? res
+                 : (sz == UZ_BYTE)   ? {old[31:8],  res[7:0]}
+                 : (sz == UZ_WORD)   ? {old[31:16], res[15:0]}
+                                     : res;
+    endfunction
+
+    wire [31:0] alu_sized = merge_sz(alu_result, ex_dst, ex_uop.siz, ex_merge);
+    wire [31:0] shf_sized = merge_sz(shf_result, ex_dst, ex_uop.siz, ex_merge);
+
     wire [31:0] ex_result = use_bit  ? bit_result
                           : use_bcd  ? {ex_dst[31:8], bcd_result}
                           : use_ext  ? ext_result
                           : use_swap ? swap_result
                           : use_md   ? md_lo
-                          : use_shf  ? shf_result
-                          : use_mv   ? mv_result : alu_result;
+                          : use_shf  ? shf_sized
+                          : use_mv   ? mv_result : alu_sized;
 
     wire mv_like_n = use_ext  ? ext_result[31]
                    : use_swap ? swap_result[31] : mv_n;
@@ -1549,10 +1613,20 @@ module mh030p_core (
     // the instructions that genuinely must not touch X (MOVE, CMP, AND, OR,
     // EOR, TST), which is the majority -- so the wrong answer and the right
     // one agree everywhere except on exactly the arithmetic that chains.
+    // Only the ADD/SUB family touches X. AND, OR, EOR, NOT, CMP, TST and CLR
+    // leave it alone, and taking alu_x for those set X on every logical
+    // operation -- a regression introduced by this session's own fix for alu_x
+    // being absent from this mux altogether, and caught immediately by the Harte
+    // corpus. The two bugs are opposite halves of the same missing distinction.
+    wire alu_touches_x = (ex_uop.alu_op == UA_ADD)  || (ex_uop.alu_op == UA_ADDX)
+                      || (ex_uop.alu_op == UA_SUB)  || (ex_uop.alu_op == UA_SUBX)
+                      || (ex_uop.alu_op == UA_NEG)  || (ex_uop.alu_op == UA_NEGX);
+
     wire ex_x = (ex_is_bf || ex_is_chk || ex_is_tas || ex_is_cmp2) ? ccr_live[4]
               : use_bit ? ccr_live[4] : use_bcd ? bcd_x
               : use_md  ? ccr_live[4] : use_shf ? shf_x
-              : (use_mv || use_ext || use_swap) ? ccr_live[4] : alu_x;
+              : (use_mv || use_ext || use_swap) ? ccr_live[4]
+              : alu_touches_x ? alu_x : ccr_live[4];
 
     // MOVEA writes all 32 bits, sign-extending a word source.
     // ── Branch resolution, in EX where the CCR is settled ───────────────────
@@ -1722,7 +1796,7 @@ module mh030p_core (
             // CCR at all, which nothing noticed because no test read an RMW's
             // flags until TAS needed them.
             wb_upd_ccr <= ex_valid && (ex_uop.updates_ccr || ex_is_tas || ex_rmw
-                                       || ex_is_cmp2)
+                                       || ex_is_cmp2 || ex_is_alu_mem_wr)
                                    && !ex_is_branch
                        && !exc_discards
                        && !(ex_is_sys && (ex_uop.subop >= 4'd2)

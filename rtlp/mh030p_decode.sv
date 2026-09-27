@@ -1432,6 +1432,22 @@ module mh030p_decode (
                              && ((uop.subop == 4'd0) || (uop.subop == 4'd1)
                               || (uop.subop == 4'd5)))
                             ? 3'd0
+                          // The system-control moves. MOVE #imm,SR is word-sized
+                          // and takes exactly ONE extension word, but the
+                          // generic immediate accounting sized it from a MOVE
+                          // opcode's own size field and claimed two -- which
+                          // swallowed the following instruction and left the SR
+                          // holding half of it. The USP forms take none.
+                          //
+                          // Sixth instance of this shape. The lesson is that
+                          // extension-word count belongs with each instruction's
+                          // own decode, not derived from fields that only mean
+                          // something for other instructions.
+                          : (uop.uclass == UC_SYSCTL)
+                            ? (((uop.subop == 4'd4) || (uop.subop == 4'd5))
+                               ? 3'd0
+                               : (ea_words(ea_mode_w)
+                                  + (ea_is_imm ? 3'd1 : 3'd0)))
                           // STOP's operand is the SR value to load.
                           : ((uop.uclass == UC_NOP) && (uop.subop == 4'd2))
                             ? 3'd1
