@@ -490,6 +490,27 @@ module mh030p_decode (
                 uop.dst_reg     = ext[15:12];
                 uop.writes_reg  = 1'b1;
                 uop.x_unchanged = 1'b1;
+            end else if (g0_is_dynbit && ea_is_alt_mem) begin
+                // Dynamic bit ops on memory: the bit number comes from a data
+                // register rather than an immediate word, and the operand is a
+                // byte. This form was not decoded AT ALL -- BTST Dn,<mem> and
+                // its mutating siblings all fell through to UNIMPL, which the
+                // Harte corpus found immediately.
+                uop.uclass      = UC_BITOP;
+                uop.unit        = UU_BIT;
+                uop.alu_op      = {2'b00, b_op};
+                uop.siz         = UZ_BYTE;
+                uop.subop       = 4'd0;          // dynamic: no immediate word
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_dn;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.writes_mem  = (b_op != 2'b00);
+                uop.writes_reg  = 1'b0;
+                uop.updates_ccr = (b_op == 2'b00);
+                uop.x_unchanged = 1'b1;
             end else if (g0_is_statbit && ea_is_alt_mem) begin
                 // Static bit ops on memory are byte-sized and leave both the
                 // writeback and the flags to the RMW FSM.
@@ -499,6 +520,7 @@ module mh030p_decode (
                 uop.siz         = UZ_BYTE;
                 uop.src_kind    = US_IMM;
                 uop.imm         = ext;
+                uop.subop       = 4'd1;          // static: one immediate word
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
@@ -520,6 +542,7 @@ module mh030p_decode (
                 uop.src_kind    = g0_is_dynbit ? US_DREG : US_IMM;
                 uop.src_reg     = rn_dn;
                 uop.imm         = ext;
+                uop.subop       = g0_is_dynbit ? 4'd0 : 4'd1;
                 uop.dst_kind    = US_DREG;
                 uop.dst_reg     = rn_src_dn;
                 uop.writes_reg  = (b_op != 2'b00);   // BTST writes nothing
@@ -1448,6 +1471,14 @@ module mh030p_decode (
                                ? 3'd0
                                : (ea_words(ea_mode_w)
                                   + (ea_is_imm ? 3'd1 : 3'd0)))
+                          // A STATIC bit operation carries its bit number in an
+                          // immediate word, on top of whatever the EA needs;
+                          // the dynamic forms take it from a register. Neither
+                          // was counted, so even BTST #n,Dn -- a two-word
+                          // instruction -- reported zero.
+                          : (uop.uclass == UC_BITOP)
+                            ? (((uop.subop == 4'd1) ? 3'd1 : 3'd0)
+                               + ea_words(ea_mode_w))
                           // STOP's operand is the SR value to load.
                           : ((uop.uclass == UC_NOP) && (uop.subop == 4'd2))
                             ? 3'd1

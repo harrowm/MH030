@@ -149,6 +149,13 @@ module mh030p_core (
     // Dn-direct only, and only with an immediate offset and width. A Dn offset
     // or width would need two more read ports than exist, and the memory forms
     // need the byte/word/longword sub-access sizing rtl/ only got at Phase 276.
+    // Reads memory, writes nothing, and names memory as its DESTINATION: TST
+    // and BTST-on-memory. For these the memory value is the operand the unit
+    // tests, not an ALU source, and any register named is the bit number rather
+    // than a second operand -- so both the read selector and the operand routing
+    // differ from an ordinary memory-source instruction like ADD <ea>,Dn.
+    wire dec_mem_operand = dec_uop.reads_mem && !dec_uop.writes_mem
+                        && (dec_uop.dst_kind == US_MEM);
     wire dec_is_movep = (dec_uop.uclass == UC_MOVEP);
     wire dec_is_cas    = (dec_uop.uclass == UC_ATOMIC)
                       && (dec_uop.subop == 4'd1);
@@ -215,12 +222,15 @@ module mh030p_core (
                            || ((dec_uop.uclass == UC_ATOMIC)
                                && (dec_uop.subop <= 4'd1) && dec_ea_ok)
                            || dec_bf_ok
-                           // Reads memory and commits nothing: TST, and CMP
-                           // against a memory source. The destination check
-                           // below demands a register, which these do not have.
-                           || ((dec_uop.uclass == UC_ALU) && dec_uop.reads_mem
-                               && !dec_uop.writes_mem && !dec_uop.writes_reg
-                               && dec_ea_ok)
+                           // Reads memory and commits nothing at all: TST, CMP
+                           // against a memory source, BTST on memory. The
+                           // destination check below demands a register, which
+                           // none of these have -- so they were not failing,
+                           // they were never executing. Stated as the general
+                           // shape rather than per class, which is how it came
+                           // to miss the bit tests after covering TST.
+                           || (dec_uop.reads_mem && !dec_uop.writes_mem
+                               && !dec_uop.writes_reg && dec_ea_ok)
                            || (dec_is_movep && dec_ea_ok)
                            // MOVEC only; MOVES (sub-op 0) needs the alternate
                            // function codes to mean something first.
@@ -332,10 +342,13 @@ module mh030p_core (
     wire [3:0] ag_c_sel = (ag_is_push || ag_is_link) ? 4'd15
                         : ag_is_cas                  ? ag_uop.imm[3:0]
                                                      : ag_uop.ea_idx_reg;
+    wire ag_mem_operand = ag_uop.reads_mem && !ag_uop.writes_mem
+                       && (ag_uop.dst_kind == US_MEM);
     wire [3:0] ag_a_sel = ag_is_cas ? ag_uop.dst_reg
                         : ag_is_movep ? ag_uop.imm[3:0]
                         : ag_is_bf ? ag_uop.imm[15:12]
                         : (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
+                        : ag_mem_operand ? ag_uop.src_reg
                         : (ag_uop.reads_mem && !ag_uop.writes_mem)
                           ? ag_uop.dst_reg : ag_uop.src_reg;
 
@@ -826,6 +839,7 @@ module mh030p_core (
                    : dec_is_movep ? dec_uop.imm[3:0]
                    : dec_is_bf ? dec_uop.imm[15:12]
                    : (dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
+                   : dec_mem_operand ? dec_uop.src_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
                      ? dec_uop.dst_reg : dec_uop.src_reg),
         .rd_b_sel (dec_is_bf ? {1'b0, dec_uop.ea_reg[2:0]}
@@ -1178,10 +1192,13 @@ module mh030p_core (
     //   otherwise     : A = ALU source,      B = ALU destination
     wire ex_rmw_op = ex_uop.reads_mem && ex_uop.writes_mem;
     wire ex_is_bf = ex_valid && (ex_uop.uclass == UC_BITFIELD);
+    wire ex_mem_operand = ex_uop.reads_mem && !ex_uop.writes_mem
+                       && (ex_uop.dst_kind == US_MEM);
     wire [3:0] ex_a_sel = ex_is_cas ? ex_uop.dst_reg
                         : ex_is_movep ? ex_uop.imm[3:0]
                         : ex_is_bf ? ex_uop.imm[15:12]
                         : (ex_uop.dst_ea_mode != UEA_NONE) ? ex_uop.dst_ea_reg
+                        : ex_mem_operand ? ex_uop.src_reg
                         : (ex_uop.reads_mem && !ex_uop.writes_mem)
                           ? ex_uop.dst_reg : ex_uop.src_reg;
     // The B port's forwarding compared ex_uop.dst_reg, which is only the right
@@ -1272,11 +1289,16 @@ module mh030p_core (
     wire [31:0] ex_src = ex_m2m                      ? mem_hold
                        : ex_rmw_op
                          ? ((ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a_u)
+                       // TST/BTST-on-memory: the register or immediate is the
+                       // bit number, and memory is the operand below.
+                       : ex_mem_operand
+                         ? ((ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a_u)
                        : ex_uop.reads_mem            ? mem_hold
                        : (ex_uop.src_kind == US_IMM) ? ex_uop.imm
                                                      : ex_a_u;
     wire [31:0] ex_dst = ex_m2m           ? mem_hold
                        : ex_rmw_op        ? mem_hold
+                       : ex_mem_operand   ? mem_hold
                        : ex_uop.reads_mem ? ex_a_u
                                           : ex_b_u;
 
@@ -1497,8 +1519,13 @@ module mh030p_core (
     // operand mod 32 for a Dn destination.
     wire [31:0] bit_result;
     wire        bit_z;
+    // A bit number is taken modulo 8 when the operand is a memory BYTE, and
+    // modulo 32 when it is a data register. Using 32 everywhere tested the wrong
+    // bit of the right byte.
+    wire [4:0] bit_num = (ex_uop.siz == UZ_BYTE) ? {2'b00, ex_src[2:0]}
+                                                 : ex_src[4:0];
     eu_bitops u_bit (
-        .dst(ex_dst), .bit_num(ex_src[4:0]),
+        .dst(ex_dst), .bit_num(bit_num),
         .op(ex_uop.alu_op[1:0]), .result(bit_result), .z_out(bit_z)
     );
 
