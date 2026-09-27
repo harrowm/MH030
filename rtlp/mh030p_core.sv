@@ -531,9 +531,29 @@ module mh030p_core (
     // stall_ex, which comes first. Declared here, assigned there.
     reg  cond_true;
     wire chk_traps;
-    // See the note on exc_req below: both are latched once the decision is made
-    // and cleared when the instruction leaves EX.
-    reg  exc_pend, exc_disc_pend;
+    // ── The exception decision, taken once, behind a register ────────────────
+    // These used to be combinational, and that was a real timing mistake:
+    // exc_req fed stall_ex, which gates the AG-to-EX register, the writeback
+    // latch, instr_ready and the memory port -- so CHK's signed 32-bit bound
+    // compare, CMP2/CHK2's two signed compares and TRAPcc's condition mux all
+    // sat in front of everything in the core. Measured: logic delay 8.56 ->
+    // 11.89 ns and Fmax 29.11 -> 21.46, with 74 of the worst path's 105 hops
+    // being carry-chain cells.
+    //
+    // Now an instruction that MIGHT trap spends one extra cycle deciding, and
+    // the comparators feed only these registers. stall_ex sees nothing but
+    // cheap flags. One cycle on a possibly-trapping instruction is
+    // architecturally free -- real CHK is eight-plus clocks.
+    //
+    // Latching the whole decision, not just the fact of it, also removes a
+    // class of bug rather than one instance: the vector, the return-PC rule,
+    // the interrupt level and both flag contributions were all being re-read
+    // from operands the exception sequence itself overwrites.
+    reg        exc_pend, trap_decided;
+    reg  [9:0] exc_vec_r;
+    reg        exc_retself_r, exc_disc_r, exc_isint_r;
+    reg  [2:0] exc_ilevel_r;
+    reg        chk_n_r, chk_z_r, cmp2_c_r, cmp2_z_r;
     // CMP2/CHK2's out-of-range result, resolved once both bounds have arrived.
     wire cmp2_c;
     reg  cmp2_done;
@@ -632,24 +652,33 @@ module mh030p_core (
                     || (ex_trapcc && cond_true) || ex_linea
                     || (ex_is_chk && chk_traps) || div_zero
                     || (ex_is_chk2 && cmp2_done && cmp2_c);
-    wire exc_req = exc_req_raw || exc_pend;
+    // What stall_ex is allowed to see: class comparisons, a three-bit interrupt
+    // level compare, and flags. No 32-bit arithmetic.
+    wire ex_may_trap = ex_trap_cls || ex_is_div || int_take;
+    // The FSM runs off the latched decision alone.
+    wire exc_req = exc_pend;
     // An exception that ABANDONS its instruction must suppress that
     // instruction's register and flag writes. CHK and TRAPV are not in that
     // set: both leave defined flags behind even when they trap. Held for the
     // same reason as the request itself.
-    wire exc_discards = int_take || div_zero || exc_disc_pend;
+    wire exc_discards = exc_disc_r;
     // Vectors 5 and 7 are architectural (MC68030UM Table 8-1); TRAP #n carries
     // its own, already resolved to 32+n at decode.
     // Autovectored: level n takes vector 24+n. A real IACK bus cycle fetching a
     // vector FROM the peripheral is the other half of this and is not here yet.
     // Vectors from MC68030UM Table 8-1. TRAPcc shares vector 7 with TRAPV,
     // and CHK takes 6; A-line is the Line-1010 emulator at 10.
-    wire [9:0] exc_vec_num = int_take  ? (10'd24 + {7'h0, int_level})
+    // Resolved at the decision cycle and latched; the sequence reads the
+    // register. Autovectored: level n takes vector 24+n. A real IACK bus cycle
+    // fetching a vector FROM the peripheral is the other half of this and is not
+    // here yet.
+    wire [9:0] exc_vec_sel = int_take  ? (10'd24 + {7'h0, int_level})
                            : div_zero  ? 10'd5
                            : (ex_is_chk || ex_is_cmp2) ? 10'd6
                            : ex_linea  ? 10'd10
                            : (ex_trapv || ex_trapcc) ? 10'd7
                                        : ex_uop.imm[9:0];
+    wire [9:0] exc_vec_num = exc_vec_r;
 
     wire ex_is_trap  = exc_req;
     wire exc_running = (exc_state != XS_IDLE);
@@ -665,7 +694,7 @@ module mh030p_core (
     // A-line stacks the address of the unimplemented instruction itself, so
     // the emulator handler can decode it -- the same rule as an interrupt, for
     // a different reason.
-    wire [31:0] exc_ret_pc = (int_take || ex_linea) ? ex_pc
+    wire [31:0] exc_ret_pc = exc_retself_r ? ex_pc
                            : (ex_pc + 32'd2
                               + {27'h0, ex_uop.ext_words, 1'b0});
 
@@ -676,18 +705,29 @@ module mh030p_core (
     // or a run of same-direction beats.
     wire ex_wait_cmp2 = ex_is_cmp2 && !cmp2_done;
 
-    wire stall_ex = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
-                 || ex_wait_cmp2
-                 || (ex_is_trap && !exc_taken)
-                 || (ex_is_movem && !mvm_done)
-                 || (ex_is_movep && !mvp_done);
+    // Everything an instruction waits for that is NOT an exception decision:
+    // its own operands, its own multi-cycle sequence. All cheap flags.
+    wire ex_other_stall = ex_wait_mem || ex_wait_div || ex_wait_mul
+                       || ex_wait_rte || ex_wait_cmp2
+                       || (ex_is_movem && !mvm_done)
+                       || (ex_is_movep && !mvp_done);
+
+    // The decision cycle: one tick, after the operands have arrived, in which
+    // the trap conditions are evaluated and latched. Placed AFTER the operand
+    // waits so a CHK reading its bound from memory, a CHK2 reading a pair, and
+    // a divide reporting a zero divisor all get a settled answer.
+    wire ex_decide = ex_may_trap && !trap_decided && !ex_other_stall;
+
+    wire stall_ex = ex_other_stall
+                 || (ex_may_trap && !trap_decided)
+                 || (exc_pend && !exc_taken);
     wire stall_ag = ag_base_busy;
 
     assign instr_ready = !stall_ex && !stall_ag;
 
     // The cycle an interrupt actually lands: used to clear the level-7 latch
     // and to raise the mask. Needs stall_ex, so it sits after it.
-    wire int_dispatched = int_take && exc_taken && !stall_ex;
+    wire int_dispatched = exc_isint_r && exc_taken && !stall_ex;
 
     // A7 as of right now, including a commit landing this very cycle. Same
     // shape as the register file's own write-first bypass, and needed for the
@@ -1416,13 +1456,13 @@ module mh030p_core (
 
     wire ex_n = ex_is_cmp2 ? ccr_live[3] :
                 ex_is_bf ? bf_n :
-                ex_is_chk ? (chk_traps ? chk_below : ccr_live[3]) : ex_is_tas ? tas_orig[7] :
+                ex_is_chk ? chk_n_r : ex_is_tas ? tas_orig[7] :
                 use_bit ? ccr_live[3] : use_bcd ? bcd_n
               : use_md  ? md_n : use_shf ? shf_n
               : (use_mv || use_ext || use_swap) ? mv_like_n : alu_n;
-    wire ex_z = ex_is_cmp2 ? cmp2_z :
+    wire ex_z = ex_is_cmp2 ? cmp2_z_r :
                 ex_is_bf ? bf_z :
-                ex_is_chk ? chk_z : ex_is_tas ? (tas_orig == 8'h0) :
+                ex_is_chk ? chk_z_r : ex_is_tas ? (tas_orig == 8'h0) :
                 use_bit ? bit_z : use_bcd ? bcd_z
               : use_md  ? md_z  : use_shf ? shf_z
               : (use_mv || use_ext || use_swap) ? mv_like_z : alu_z;
@@ -1432,7 +1472,7 @@ module mh030p_core (
                 use_bit ? ccr_live[1] : use_bcd ? bcd_v
               : use_md  ? md_v : use_shf ? shf_v
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_v;
-    wire ex_c = ex_is_cmp2 ? cmp2_c :
+    wire ex_c = ex_is_cmp2 ? cmp2_c_r :
                 ex_is_bf ? bf_c :
                 (ex_is_chk || ex_is_tas) ? 1'b0 :
                 use_bit ? ccr_live[0] : use_bcd ? bcd_c
@@ -1659,7 +1699,7 @@ module mh030p_core (
         else if (int_dispatched)
                                               sr_sys_r <= {2'b00, 1'b1,
                                                            sr_sys_r[4], 1'b0,
-                                                           int_level};
+                                                           exc_ilevel_r};
         else if (ex_is_trap && exc_taken && !stall_ex)
                                               sr_sys_r <= (sr_sys_r | 8'h20)
                                                           & 8'h3F;
@@ -1763,13 +1803,44 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             exc_pend      <= 1'b0;
-            exc_disc_pend <= 1'b0;
+            trap_decided  <= 1'b0;
+            exc_vec_r     <= 10'h0;
+            exc_retself_r <= 1'b0;
+            exc_disc_r    <= 1'b0;
+            exc_isint_r   <= 1'b0;
+            exc_ilevel_r  <= 3'h0;
+            chk_n_r       <= 1'b0;
+            chk_z_r       <= 1'b0;
+            cmp2_c_r      <= 1'b0;
+            cmp2_z_r      <= 1'b0;
         end else if (!stall_ex) begin
-            exc_pend      <= 1'b0;      // instruction leaving EX
-            exc_disc_pend <= 1'b0;
-        end else begin
-            if (exc_req_raw)              exc_pend      <= 1'b1;
-            if (int_take || div_zero)     exc_disc_pend <= 1'b1;
+            // Instruction leaving EX. exc_disc_r must clear here too: it
+            // suppresses register and flag writes, and leaving it set made
+            // every instruction AFTER a fault -- the handler's own first
+            // instruction included -- silently commit nothing.
+            exc_pend      <= 1'b0;
+            trap_decided  <= 1'b0;
+            exc_disc_r    <= 1'b0;
+            exc_isint_r   <= 1'b0;
+        end else if (ex_decide) begin
+            trap_decided  <= 1'b1;
+            exc_pend      <= exc_req_raw;
+            exc_vec_r     <= exc_vec_sel;
+            // An interrupt and an A-line trap both return to the instruction
+            // itself: one because nothing of it ran, the other so the emulator
+            // handler can decode it.
+            exc_retself_r <= int_take || ex_linea;
+            // Only an abandoned instruction suppresses its own writes. CHK and
+            // TRAPV leave defined flags behind even when they trap.
+            exc_disc_r    <= int_take || div_zero;
+            exc_isint_r   <= int_take;
+            exc_ilevel_r  <= int_level;
+            // Both flag contributions, captured here so the comparators stay
+            // out of the flag mux as well as out of the stall.
+            chk_n_r       <= chk_traps ? chk_below : ccr_live[3];
+            chk_z_r       <= chk_z;
+            cmp2_c_r      <= cmp2_c;
+            cmp2_z_r      <= cmp2_z;
         end
     end
 
