@@ -135,9 +135,11 @@ $(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 $(SIM)/uop_equiv: rtlp/mh030p_decode.sv rtlp/mh030p_uop.svh \
                   rtl/opcode_fields.sv rtl/eu_seq.sv rtl/eu_seq_decode.svh \
                   rtl/eu_seq_execute.svh rtl/eu_seq_preview.svh \
+                  rtl/m68030_seq.sv \
                   rtl/eu_bitfield.sv tb/uop_decode_equiv_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_decode.sv rtl/opcode_fields.sv \
-	    rtl/eu_seq.sv rtl/eu_bitfield.sv tb/uop_decode_equiv_tb.sv 2>&1 \
+	    rtl/eu_seq.sv rtl/m68030_seq.sv \
+	    rtl/eu_bitfield.sv tb/uop_decode_equiv_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 

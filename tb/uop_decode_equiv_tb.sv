@@ -48,6 +48,30 @@ module uop_decode_equiv_tb;
     assign o_instr = instr;
     assign o_ext   = ext;
 
+    // ── Extension-word count, against the reference sequencer ───────────────
+    // Eight separate extension-word miscounts were found one at a time by the
+    // Harte corpus, each costing its own debugging cycle: MOVE USP, TRAPF, bit
+    // fields, MOVEC/MOVES, CAS, CMP2/CHK2, the group-0 byte/word immediates and
+    // the register-count shifts. They share one root cause -- the count was
+    // derived from ea_mode_w and ea_is_imm, which are computed from instr[5:0]
+    // unconditionally and are therefore meaningless for any instruction whose
+    // low bits are not an EA field.
+    //
+    // m68030_seq.sv already computes the authoritative count for every opcode,
+    // so comparing against it turns eight discoveries into one exhaustive check.
+    m68030_seq u_seq (
+        .instr_word(instr), .ifu_ext_data(ext), .ifu_q3_word(q3w),
+        .ifu_ext34_data(32'h0), .ifu_q5_word(16'h0), .ifu_q6_word(16'h0),
+        .instr_valid(1'b1), .ifu_ext1_valid(1'b1), .ifu_ext_valid(1'b1),
+        .ifu_ext4_valid(1'b1), .ifu_ext5_valid(1'b1), .ifu_ext6_valid(1'b1),
+        .ifu_ext7_valid(1'b1),
+        .drain(), .eu_instr_word(), .eu_ext_data(), .eu_q3_word(),
+        .eu_ext34_data(), .eu_q5_word(), .eu_q6_word(),
+        .eu_instr_valid(), .eu_ext_valid(),
+        .eu_instr_ack(1'b0), .eu_busy(1'b0)
+    );
+    wire [2:0] old_ext_words = u_seq.ext_count;
+
     // Hierarchical references into eu_seq's decode signals. Same technique
     // tb/cache_tb.sv and tb/mmu_xlate_tb.sv already use for burst_beat_probe.
     `define OLD u_old
@@ -140,7 +164,9 @@ module uop_decode_equiv_tb;
 
     task automatic report(input [15:0] op, input string what,
                           input [31:0] got, input [31:0] exp);
-        if (mismatches < 20)
+        // +allmismatch lifts the cap, which is what makes a whole-family
+        // pattern visible instead of the first twenty opcodes of one family.
+        if ((mismatches < 20) || $test$plusargs("allmismatch"))
             $display("MISMATCH op=%04h %-12s new=%08h old=%08h", op, what, got, exp);
         mismatches = mismatches + 1;
         if (first_bad == 32'hFFFF_FFFF) first_bad = {16'h0, op};
@@ -165,7 +191,15 @@ module uop_decode_equiv_tb;
         first_bad = 32'hFFFF_FFFF;
         // Deliberately asymmetric between halves so that reading the WRONG
         // half of the extension word cannot accidentally compare equal.
-        ext = 32'hA5A5_3C7F;
+        //
+        // Bit 8 of the FIRST word must be 0, selecting the BRIEF format for an
+        // indexed EA. The old value 0xA5A5_3C7F had it set, which made every
+        // indexed effective address a FULL-FORMAT one -- and this decoder
+        // deliberately implements only the brief format, so the extension-word
+        // check would have reported ~4,500 opcodes of that known gap and drowned
+        // every real miscount. 0xA4A5 differs only in that bit and is still
+        // asymmetric against the low half.
+        ext = 32'hA4A5_3C7F;
         q3w = 16'h5A91;
         rst_n = 1'b0;
         repeat (2) @(posedge clk_4x);
@@ -173,6 +207,9 @@ module uop_decode_equiv_tb;
         @(posedge clk_4x);
 
         if ($test$plusargs("probe")) begin
+            probe(16'h42E8, "MOVE CCR,(d16,A0)");
+            probe(16'h42F9, "MOVE CCR,(xxx).L");
+            probe(16'h42C0, "MOVE CCR,D0");
             probe(16'h51C0, "SF D0");
             probe(16'h50C0, "ST D0");
             probe(16'h6000, "BRA");
@@ -313,6 +350,40 @@ module uop_decode_equiv_tb;
                     else if (uop.writes_reg && (uop.dst_reg !== old_dst_reg))
                         report(instr, "dst_reg", {28'h0, uop.dst_reg},
                                                  {28'h0, old_dst_reg});
+                    // How many extension words this opcode consumes. Getting
+                    // this wrong does not produce a wrong ANSWER, it derails the
+                    // instruction stream -- the following word is executed as an
+                    // instruction, or a real instruction is swallowed as an
+                    // operand. Eight of these were found one at a time before
+                    // the check existed.
+                    // Two families are excluded, because the REFERENCE is the
+                    // limited party rather than this decoder:
+                    //   * the F-line (MMU and coprocessor). Neither side models
+                    //     its operand words in any detail -- both classify it and
+                    //     stop -- so agreement would be coincidence.
+                    //   * bit fields with a full effective address. CLAUDE.md
+                    //     records that rtl/'s own bit-field EA support lacks
+                    //     indexed, abs.L and PC-relative, so its count for those
+                    //     reflects that gap. A specification word plus a
+                    //     displacement is two words, and that is what this
+                    //     decoder reports.
+                    else if ((uop.ext_words !== old_ext_words)
+                             && (instr[15:12] != 4'hF)
+                             && !((uop.uclass == UC_BITFIELD)
+                                  && (uop.ea_mode != UEA_NONE))
+                    //   * MOVE CCR,<ea> with a real effective address. This one
+                    //     is a genuine INCONSISTENCY IN rtl/ rather than a
+                    //     limitation: eu_seq_decode.svh reports valid=1 for
+                    //     0x42E8 (MOVE CCR,(d16,A0)) -- those memory
+                    //     destinations were added during this project's own P1
+                    //     work -- while m68030_seq.sv's ext_count still returns
+                    //     0 for them. A two-word instruction counted as one
+                    //     word. Reported, not matched; see plan.md.
+                             && !((uop.uclass == UC_SYSCTL)
+                                  && (uop.subop == 4'd1)
+                                  && (uop.ea_mode != UEA_NONE)))
+                        report(instr, "ext_words", {29'h0, uop.ext_words},
+                                                   {29'h0, old_ext_words});
                     // EA displacement / index fields. dec_ea_offset is a
                     // heavily REUSED field in the reference: it carries the
                     // (An)+/-(An) delta for auto-increment modes and the

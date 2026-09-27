@@ -1483,7 +1483,15 @@ module mh030p_decode (
         // carry their displacement in the opcode unless the 8-bit field is
         // zero, in which case one extension word follows.
         uop.ext_words     = (uop.uclass == UC_BRANCH)
-                          ? ((instr[7:0] == 8'h00) ? 3'd1 : 3'd0)
+                          // 0x00 is the word form (one displacement word)
+                          // and 0xFF the LONG form (two). The long form is
+                          // not claimed for EXECUTION, but its count still
+                          // has to be right: the fetch unit drains
+                          // 1 + ext_words even for an instruction the core
+                          // declines, so a wrong count derails the stream
+                          // after it.
+                          ? ((instr[7:0] == 8'h00) ? 3'd1 :
+                             (instr[7:0] == 8'hFF) ? 3'd2 : 3'd0)
                           : (uop.uclass == UC_DBCC) ? 3'd1   // displacement word
                           // TRAP #n, TRAPV and the whole A-line group have no
                           // operand at all; TRAPcc names its own operand size
@@ -1513,6 +1521,42 @@ module mh030p_decode (
                                ? 3'd0
                                : (ea_words(ea_mode_w)
                                   + (ea_is_imm ? 3'd1 : 3'd0)))
+                          // RTS, RTE and RTR take no extension words. Their own
+                          // low six bits read as an indexed EA, so the generic
+                          // accounting claimed one -- harmless in practice only
+                          // because a return's redirect flushes the queue before
+                          // a miscount can be observed, which is exactly the kind
+                          // of "got away with it" this check exists to end.
+                          : (uop.uclass == UC_RETURN) ? 3'd0
+                          // MOVEQ's immediate is IN the opcode.
+                          : (uop.uclass == UC_MOVEQ) ? 3'd0
+                          // A shift or rotate on a REGISTER has no extension
+                          // word at all -- its low six bits are the count
+                          // source, the operation and the register, not an EA.
+                          // The memory forms do have a real EA.
+                          : (uop.uclass == UC_SHIFT)
+                            ? ((uop.reads_mem || uop.writes_mem)
+                               ? ea_words(ea_mode_w) : 3'd0)
+                          // MOVEP always carries a d16, and its own mode field
+                          // is An-direct, so the generic EA accounting sees none.
+                          : (uop.uclass == UC_MOVEP) ? 3'd1
+                          // The whole F-line -- MMU, coprocessor and the F-line
+                          // trap -- carries one extension word. None of it is
+                          // executable here, which does NOT make the count
+                          // irrelevant: the fetch unit drains 1 + ext_words even
+                          // for an instruction the core declines, so a wrong
+                          // count derails everything after it.
+                          : ((uop.uclass == UC_MMU) || (uop.uclass == UC_COPROC))
+                            ? 3'd1
+                          // The F-line TRAP -- any CpID that is not the MMU's or
+                          // the coprocessor's -- carries nothing.
+                          : (f_group == 4'hF) ? 3'd0
+                          // MUL/DIV with an immediate source: one word for the
+                          // word forms, two for long. The generic accounting
+                          // sized it from a MOVE opcode's field, which means
+                          // nothing here.
+                          : ((uop.uclass == UC_MULDIV) && ea_is_imm)
+                            ? (uop.opnd_word ? 3'd1 : 3'd2)
                           // The group-0 immediate ALU family: ADDI, SUBI, ANDI,
                           // ORI, EORI, CMPI. Their immediate is ONE word for
                           // byte and word sizes and two for long, on top of
@@ -1521,10 +1565,26 @@ module mh030p_decode (
                           // ADDI.b reported zero extension words and their own
                           // immediate was executed as the next instruction --
                           // which ran the program off its end past the STOP.
+                          // Any ALU operation with an IMMEDIATE source, in any
+                          // group: ADDI/SUBI/ANDI/ORI/EORI/CMPI (group 0, where
+                          // the EA field is the destination) and the #imm forms
+                          // of ADD/SUB/AND/OR/EOR/CMP and ADDA/SUBA/CMPA (groups
+                          // 8-D, where the EA field itself says immediate). One
+                          // word for byte and word operands, two for long --
+                          // from the uop's OWN size, not from a MOVE opcode's
+                          // size field, which is what the generic accounting was
+                          // reading and which means nothing here.
                           : ((uop.uclass == UC_ALU) && (uop.src_kind == US_IMM)
-                             && (f_group == 4'h0))
-                            ? (((uop.siz == UZ_LONG) ? 3'd2 : 3'd1)
-                               + ea_words(ea_mode_w))
+                             && ((f_group == 4'h0) || ea_is_imm))
+                            ? ((((uop.siz == UZ_LONG) && !uop.opnd_word)
+                                ? 3'd2 : 3'd1)
+                               + ((f_group == 4'h0) ? ea_words(ea_mode_w) : 3'd0))
+                          // CHK's bound can be an immediate too, with the same
+                          // rule.
+                          : ((uop.uclass == UC_TRAP) && (uop.subop == 4'd2))
+                            ? ((ea_is_imm
+                                ? ((uop.siz == UZ_LONG) ? 3'd2 : 3'd1) : 3'd0)
+                               + (ea_is_imm ? 3'd0 : ea_words(ea_mode_w)))
                           // A STATIC bit operation carries its bit number in an
                           // immediate word, on top of whatever the EA needs;
                           // the dynamic forms take it from a register. Neither

@@ -3925,3 +3925,54 @@ figure runs ~15% pessimistic. But it is necessary, not sufficient: nt6 -> nt7 cu
 depth 64 -> 57 and moved Fmax not at all, which says the design is congestion-
 limited as well as depth-limited at this size. Use it to reject ideas cheaply and
 to aim; still confirm with a multi-seed measurement before claiming anything.
+
+
+## A genuine inconsistency found in rtl/, the frozen reference
+
+Adding an extension-word-count check to the decoder equivalence sweep (see
+below) surfaced one in `rtl/` itself, which is the outcome the plan explicitly
+said to welcome rather than treat as scope creep.
+
+`rtl/eu_seq_decode.svh` reports **valid=1** for `MOVE CCR,<ea>` with a memory
+destination -- 0x42E8 `(d16,A0)`, 0x42F0 `(d8,A0,Xn)`, 0x42F8 `(xxx).W`,
+0x42F9 `(xxx).L`. Those forms were added during this project's own P1 work
+(recorded above: "MOVE CCR,<ea> memory destinations were missing entirely --
+FIXED, with test system_tb MOVE_SR-03b").
+
+But `rtl/m68030_seq.sv`'s `ext_count` still returns **0** for all four. Since
+`drain = eu_instr_ack ? (3'd1 + ext_count) : 3'd0` is the only path that
+retires words from the prefetch queue, a two-word instruction is counted as
+one: the displacement would be executed as the next instruction.
+
+**Not fixed here, deliberately.** `rtl/` is frozen for this effort, and
+changing its sequencer requires the full mandatory gate including the
+124-suite Harte sweep -- a separate piece of work with its own verification
+cost. What is NOT yet established is whether it manifests: that depends on
+whether any existing test actually executes one of those four forms, which
+has not been checked. The decoder/sequencer disagreement is certain; the
+observable failure is not.
+
+### Why the check was worth building
+
+Eight extension-word miscounts had been found ONE AT A TIME by the Harte
+corpus, each costing its own debugging cycle: MOVE USP, TRAPF, bit fields,
+MOVEC/MOVES, CAS, CMP2/CHK2, the group-0 byte/word immediates, and the
+register-count shifts. Two of them (the group-0 immediates and the shifts)
+presented as CPU HANGS, because a miscount does not produce a wrong answer --
+it derails the instruction stream, and the fetch unit drains `1 + ext_words`
+even for an instruction the core declines to execute.
+
+They share one root cause: the count was derived from `ea_mode_w` and
+`ea_is_imm`, which are computed from `instr[5:0]` unconditionally and are
+therefore meaningless for any instruction whose low six bits are not an EA
+field. `m68030_seq.sv` already computes the authoritative count for all 65,536
+opcodes, so comparing against it turned eight discoveries into one exhaustive
+check -- which then found three more immediately (RTS, RTE and RTR, all of
+which had been claiming a word they do not have).
+
+One methodological note. The sweep's own test extension word was
+`0xA5A5_3C7F`, whose bit 8 is SET -- which makes every indexed effective
+address a FULL-FORMAT one. Since this decoder deliberately implements only the
+brief format, the check reported ~4,500 opcodes of that known gap and drowned
+every real miscount. Changing it to `0xA4A5_3C7F` -- one bit, still asymmetric
+between halves -- was the difference between a useless check and a decisive one.
