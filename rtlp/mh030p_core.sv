@@ -510,8 +510,23 @@ module mh030p_core (
     // one-shot rather than a level that re-triggers every stalled cycle --
     // the same shape the (An)+ side effect already had to be fixed for.
     wire ex_is_div = ex_valid && (ex_uop.unit == UU_DIV);
+    // A divide that OVERFLOWS leaves its destination completely unaffected --
+    // only the flags move. Writing the (meaningless) quotient anyway destroyed
+    // the register, which is what every DIVS vector in the corpus objected to.
+    // eu_mul_div reports it in v_out, registered at completion. Assigned below,
+    // where md_v is selected between the two arithmetic units.
+    wire div_ovf;
     reg  div_started;
-    wire md_div_start = ex_is_div && !div_started;
+    // Both arithmetic units LATCH their operands on the start pulse, so neither
+    // may be started before the operands exist. For a memory source that means
+    // waiting for the read: starting on the divide's first EX cycle handed the
+    // divider whatever mem_hold held from the previous instruction, which is why
+    // DIVS <mem>,Dn produced a wrong quotient and a bogus overflow. rtl/ hit the
+    // same shape at P0 from the other direction -- stale flags rather than a
+    // stale operand -- and the note there says exactly this: latch the
+    // operand-derived state WITH the operands.
+    wire div_can_start = ex_is_div && (!ex_uop.reads_mem || mem_got);
+    wire md_div_start  = div_can_start && !div_started;
     wire md_div_busy;
     // Driven by the mul/div unit below; declared here because the exception
     // request above needs it.
@@ -525,7 +540,8 @@ module mh030p_core (
     // divider both had to be fixed for.
     wire ex_is_mul = ex_valid && (ex_uop.unit == UU_MUL);
     reg  mul_started;
-    wire mul_start = ex_is_mul && !mul_started;
+    wire mul_can_start = ex_is_mul && (!ex_uop.reads_mem || mem_got);
+    wire mul_start     = mul_can_start && !mul_started;
     wire mul_busy;
     wire ex_wait_mul = ex_is_mul && (!mul_started || mul_busy);
 
@@ -1521,6 +1537,7 @@ module mh030p_core (
     assign md_n  = is_mul_op ? ml_n  : dv_n;
     assign md_z  = is_mul_op ? ml_z  : dv_z;
     assign md_v  = is_mul_op ? 1'b0  : dv_v;
+    assign div_ovf = ex_is_div && md_v;
     assign md_c  = is_mul_op ? 1'b0  : dv_c;
 
     wire [31:0] ex_m2m_step = (ex_uop.siz == UZ_BYTE) ? 32'd1
@@ -1624,13 +1641,17 @@ module mh030p_core (
     wire mv_like_z = use_ext  ? (ext_result == 32'h0)
                    : use_swap ? (swap_result == 32'h0) : mv_z;
 
-    wire ex_n = ex_is_cmp2 ? ccr_live[3] :
+    // A divide that overflowed reports V and nothing else; the rest are
+    // architecturally undefined and the reference leaves them clear.
+    wire ex_n = div_ovf ? 1'b0 :
+                ex_is_cmp2 ? ccr_live[3] :
                 ex_is_bf ? bf_n :
                 ex_is_chk ? chk_n_r : ex_is_tas ? tas_orig[7] :
                 use_bit ? ccr_live[3] : use_bcd ? bcd_n
               : use_md  ? md_n : use_shf ? shf_n
               : (use_mv || use_ext || use_swap) ? mv_like_n : alu_n;
-    wire ex_z = ex_is_cmp2 ? cmp2_z_r :
+    wire ex_z = div_ovf ? 1'b0 :
+                ex_is_cmp2 ? cmp2_z_r :
                 ex_is_bf ? bf_z :
                 ex_is_chk ? chk_z_r : ex_is_tas ? (tas_orig == 8'h0) :
                 use_bit ? bit_z : use_bcd ? bcd_z
@@ -1642,7 +1663,8 @@ module mh030p_core (
                 use_bit ? ccr_live[1] : use_bcd ? bcd_v
               : use_md  ? md_v : use_shf ? shf_v
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_v;
-    wire ex_c = ex_is_cmp2 ? cmp2_c_r :
+    wire ex_c = div_ovf ? 1'b0 :
+                ex_is_cmp2 ? cmp2_c_r :
                 ex_is_bf ? bf_c :
                 (ex_is_chk || ex_is_tas) ? 1'b0 :
                 use_bit ? ccr_live[0] : use_bcd ? bcd_c
@@ -1817,7 +1839,7 @@ module mh030p_core (
             wb_data    <= ex_commit;
             // DBcc writes Dn only when it actually decrements.
             wb_writes  <= (ex_valid && ex_uop.writes_reg && !ex_is_branch
-                                    && !exc_discards
+                                    && !exc_discards && !div_ovf
                                     && !ex_uop.writes_mem
                                     && (!ex_is_dbcc || dbcc_dec)
                                     && !ex_is_rts)
@@ -1897,13 +1919,13 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)          div_started <= 1'b0;
         else if (!stall_ex)  div_started <= 1'b0;   // instruction leaving EX
-        else if (ex_is_div)  div_started <= 1'b1;
+        else if (div_can_start) div_started <= 1'b1;
     end
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)          mul_started <= 1'b0;
         else if (!stall_ex)  mul_started <= 1'b0;
-        else if (ex_is_mul)  mul_started <= 1'b1;
+        else if (mul_can_start) mul_started <= 1'b1;
     end
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
