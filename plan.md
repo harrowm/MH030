@@ -3758,3 +3758,79 @@ The area question is also looking better than the LUT count alone implies: at
 operands, RMW, memory-to-memory, indexed EA, mul/div, branches, DBcc/Scc,
 BSR/RTS, TRAP, bit operations, BCD and MOVEM. It is not remotely 1/3 of the
 way through the old core's function at 1/3 of its area.
+
+
+## MH030-P: what the core actually is, as of commit `f0e032f`
+
+An inventory, because "are we at parity" is the question that keeps coming up
+and the honest answer needs a list rather than a number.
+
+### Executable: 27 of 33 µop classes
+
+`UC_ALU` `UC_MOVE` `UC_MOVEQ` `UC_ADDQ` `UC_SHIFT` `UC_MULDIV` `UC_BITOP`
+`UC_BCD` `UC_EXT` `UC_SWAP` `UC_EXG` `UC_SCC` `UC_BRANCH` `UC_DBCC` `UC_JMP`
+`UC_RETURN` `UC_LEA` `UC_LINK` `UC_TRAP` `UC_SYSCTL` `UC_MOVEM` `UC_MOVEP`
+`UC_BITFIELD` `UC_ATOMIC` `UC_MOVEC` `UC_ADDX` `UC_NOP`
+
+Which in instruction terms means: the integer ALU set with memory operands and
+read-modify-write, MOVE in every direction including memory-to-memory,
+multiply and divide, all shifts and rotates, bit operations, BCD, MOVEM,
+MOVEP, bit fields, TAS and CAS with a genuine bus lock, EXG, LINK/UNLK,
+LEA/PEA/JMP/JSR, BSR/RTS, RTE/RTR with a real status register and Format $0
+frame, DBcc/Scc, TRAP/TRAPV/TRAPcc/CHK/CHK2/Line-A, divide-by-zero,
+autovectored interrupts with a non-maskable level 7, MOVEC with a real VBR,
+and MOVE to/from SR/CCR/USP. EA modes: register direct, `(An)`, `(An)+`,
+`-(An)`, `(d16,An)`, `(d8,An,Xn)`, absolute short and long, `(d16,PC)`,
+`(d8,PC,Xn)`.
+
+### Not executable, and why
+
+| Gap | Reason |
+|---|---|
+| `UC_PACK` (PACK/UNPK) | **not decoded at all** -- needs decoder work first |
+| `UC_CACHE`, `UC_MMU`, `UC_COPROC` | not decoded; out of scope for an integer core |
+| CAS2 | immediate-mode encoding, two extension words, every field moves |
+| MOVES | needs the alternate function codes to mean something |
+| Bit-field MEMORY forms | needs the byte/word/longword sub-access sizing rtl/ got at Phase 276 |
+| Bit-field Dn offset/width | two more register read ports than exist |
+| Scc / MOVE SR / MOVE CCR to memory | write data is only known in EX; needs a write-from-EX path |
+| Memory-indirect and full-format EA | needs the `ext_count` chain ported |
+| Privilege violation, illegal instruction | no vector for either; the decoder reports UNIMPL rather than distinguishing illegal |
+| Bus error, address error, formats $1/$2/$A/$B | only Format $0 exists |
+| Trace (T0/T1) | no trace bit handling |
+| Real IACK bus cycles | interrupts are autovectored only |
+| The protocol-exact BIU, caches, MMU | P3/P6; the bus is still an abstract `mem_req`/`mem_ack` |
+
+### The verification position, stated plainly
+
+The core is held by **121 hand-written program checks** in
+`tb/mh030p_top_tb.sv`, a 2,000-case differential test of the multiplier
+against `rtl/eu_mul_div.sv`, and the 65,536-opcode decoder equivalence sweep.
+`rtl/` is held by 702,142 Harte vectors, 8 cosim groups, 33 memind targets and
+50 dat-synth vectors, **none of which has ever been pointed at this core.**
+
+That gap is not academic. Building the classes above surfaced **16 real bugs in
+already-shipped `rtlp/` code**, every one found by a test written to check
+something else:
+
+1. CCR never forwarded into EX -- `Bcc` after `CMP` used the previous comparison
+2. `alu_x` absent from the X mux -- ADD/SUB/NEG/ADDX left X unchanged
+3. No memory-destination RMW ever updated the CCR
+4. `mem_hold` captured on any ack -- an RMW's write ack overwrote its read data
+5. Forwarding expires under a stall -- CHK lost its operand mid-decision
+6. `UC_TRAP` sub-op collision -- CHK, CHK2, TRAPcc and 4,096 A-line opcodes jumped through address 0
+7. B-port forwarding selector never mirrored the B-port read
+8. Bit-op flags zeroed N/V/C where the reference leaves them
+9-13. `ext_words` miscounted five separate times (MOVE USP, TRAPF, bit fields, MOVEC/MOVES, CAS)
+14. `ag_is_trap` blocked CHK's and CMP2's own reads -- memory-bound CHK could never have worked
+15. Exception request re-evaluated from operands the exception sequence overwrites
+16. `exc_disc_r` never cleared -- every instruction after a fault committed nothing
+
+Items 3, 4, 5, 7 and 14 were all in code that had been passing its own tests
+for many commits. The finding rate has not fallen off as the core matured; it
+has stayed roughly constant per increment, which is what one would expect of a
+core whose only net is its own hand-written tests.
+
+**The single highest-value next step remains pointing Harte at `mh030p_top`.**
+It compares architectural state only, so it transfers essentially unchanged,
+and it would turn 121 checks into ~700k vectors.
