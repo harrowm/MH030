@@ -1207,6 +1207,12 @@ module mh030p_decode (
                 uop.src_kind    = src_is_dn ? US_DREG :
                                   ea_is_imm ? US_IMM  : US_MEM;
                 uop.src_reg     = rn_src_dn;
+                // The immediate itself was never captured, so MULU/DIVU #imm,Dn
+                // got a divisor of ZERO -- which for DIVU means it took a
+                // divide-by-zero exception the program never asked for and ran
+                // off through an uninitialised vector. A hang, not a wrong
+                // answer, which is why it showed up as a timeout.
+                uop.imm         = ext;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
                 uop.reads_mem   = !src_is_dn && !ea_is_imm;

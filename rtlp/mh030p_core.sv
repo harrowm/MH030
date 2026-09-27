@@ -961,9 +961,16 @@ module mh030p_core (
     // A BYTE access through A7 adjusts the pointer by TWO, not one, because the
     // stack pointer has to stay even -- the one place where the operand size and
     // the pointer step genuinely disagree on a 68k.
-    wire [31:0] ea_step = (ag_uop.siz == UZ_BYTE)
+    // The autoincrement step follows the OPERAND size, not the write size --
+    // the same distinction the bus access needed. DIVU.W -(A7) predecrements by
+    // TWO; using the write size stepped by four, read the wrong word AND left
+    // the stack pointer four bytes low, which is why those vectors hung rather
+    // than merely answering wrongly. Same for MOVEA.W, ADDA.W, SUBA.W and
+    // CMPA.W through an autoincrement mode.
+    wire [1:0] ag_opnd_siz = ag_uop.opnd_word ? UZ_WORD : ag_uop.siz;
+    wire [31:0] ea_step = (ag_opnd_siz == UZ_BYTE)
                           ? ((ag_uop.ea_reg == 4'd15) ? 32'd2 : 32'd1)
-                        : (ag_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
+                        : (ag_opnd_siz == UZ_WORD) ? 32'd2 : 32'd4;
     // Absolute modes have no base register; the address is the displacement.
     // PC-relative modes take the address of their own EXTENSION WORD as the
     // base, which is the instruction address plus two -- not the address of
@@ -1067,8 +1074,7 @@ module mh030p_core (
             // all of which write 32 bits from a 16-bit operand. A return that
             // pops a status word reads a WORD too; the PC that follows is a
             // separate longword, issued from EX.
-            mem_siz  <= ag_is_rte      ? UZ_WORD
-                      : ag_uop.opnd_word ? UZ_WORD : ag_uop.siz;
+            mem_siz  <= ag_is_rte ? UZ_WORD : ag_opnd_siz;
             // A pure write's data is the source operand, which AG already
             // has: the A port for a register source, or the immediate.
             // BSR stores the RETURN ADDRESS, not a register: the address of
@@ -1641,16 +1647,18 @@ module mh030p_core (
     wire mv_like_z = use_ext  ? (ext_result == 32'h0)
                    : use_swap ? (swap_result == 32'h0) : mv_z;
 
-    // A divide that overflowed reports V and nothing else; the rest are
-    // architecturally undefined and the reference leaves them clear.
-    wire ex_n = div_ovf ? 1'b0 :
+    // A divide that OVERFLOWS sets V and leaves N, Z and C exactly as it
+    // found them. Verified against six vectors' initial-versus-final SR
+    // rather than assumed: forcing them to zero was wrong, and passing the
+    // divider's own values through was wrong too.
+    wire ex_n = div_ovf ? ccr_live[3] :
                 ex_is_cmp2 ? ccr_live[3] :
                 ex_is_bf ? bf_n :
                 ex_is_chk ? chk_n_r : ex_is_tas ? tas_orig[7] :
                 use_bit ? ccr_live[3] : use_bcd ? bcd_n
               : use_md  ? md_n : use_shf ? shf_n
               : (use_mv || use_ext || use_swap) ? mv_like_n : alu_n;
-    wire ex_z = div_ovf ? 1'b0 :
+    wire ex_z = div_ovf ? ccr_live[2] :
                 ex_is_cmp2 ? cmp2_z_r :
                 ex_is_bf ? bf_z :
                 ex_is_chk ? chk_z_r : ex_is_tas ? (tas_orig == 8'h0) :
@@ -1663,6 +1671,8 @@ module mh030p_core (
                 use_bit ? ccr_live[1] : use_bcd ? bcd_v
               : use_md  ? md_v : use_shf ? shf_v
               : (use_mv || use_ext || use_swap) ? 1'b0 : alu_v;
+    // C is ALWAYS cleared by a divide, overflow or not (MC68030UM's own DIVU
+    // and DIVS entries), so unlike N and Z it is not preserved here.
     wire ex_c = div_ovf ? 1'b0 :
                 ex_is_cmp2 ? cmp2_c_r :
                 ex_is_bf ? bf_c :
