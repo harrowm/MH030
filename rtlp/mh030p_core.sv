@@ -141,6 +141,7 @@ module mh030p_core (
     // Dn-direct only, and only with an immediate offset and width. A Dn offset
     // or width would need two more read ports than exist, and the memory forms
     // need the byte/word/longword sub-access sizing rtl/ only got at Phase 276.
+    wire dec_is_movep = (dec_uop.uclass == UC_MOVEP);
     wire dec_is_bf = (dec_uop.uclass == UC_BITFIELD);
     wire dec_bf_ok = dec_is_bf && !dec_uop.reads_mem && !dec_uop.writes_mem
                   && !dec_uop.imm[11] && !dec_uop.imm[5];
@@ -191,6 +192,7 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_ATOMIC)
                         || (dec_uop.uclass == UC_BITFIELD)
                         || (dec_uop.uclass == UC_MOVEC)
+                        || (dec_uop.uclass == UC_MOVEP)
                         || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
@@ -207,6 +209,7 @@ module mh030p_core (
                            || ((dec_uop.uclass == UC_ATOMIC)
                                && (dec_uop.subop == 4'd0) && dec_ea_ok)
                            || dec_bf_ok
+                           || (dec_is_movep && dec_ea_ok)
                            // MOVEC only; MOVES (sub-op 0) needs the alternate
                            // function codes to mean something first.
                            || ((dec_uop.uclass == UC_MOVEC)
@@ -264,6 +267,7 @@ module mh030p_core (
     // Which register the B port carried; needed by the interlock below.
     wire ag_is_trap  = (ag_uop.uclass == UC_TRAP);
     wire ag_is_movem = (ag_uop.uclass == UC_MOVEM);
+    wire ag_is_movep = (ag_uop.uclass == UC_MOVEP);
     // LEA/PEA/JMP/JSR need the EA base on the B port exactly as a memory
     // operand does, even though LEA and JMP issue no bus cycle at all.
     wire ag_ea_class = (ag_uop.uclass == UC_LEA) || (ag_uop.uclass == UC_JMP);
@@ -292,7 +296,8 @@ module mh030p_core (
     // and the interlock track a different register than the one actually read.
     wire [3:0] ag_c_sel = (ag_is_push || ag_is_link) ? 4'd15
                                                       : ag_uop.ea_idx_reg;
-    wire [3:0] ag_a_sel = ag_is_bf ? ag_uop.imm[15:12]
+    wire [3:0] ag_a_sel = ag_is_movep ? ag_uop.imm[3:0]
+                        : ag_is_bf ? ag_uop.imm[15:12]
                         : (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
                         : (ag_uop.reads_mem && !ag_uop.writes_mem)
                           ? ag_uop.dst_reg : ag_uop.src_reg;
@@ -385,6 +390,27 @@ module mh030p_core (
     // is repurposed: an indexed EA and a MOVEM cannot both be in AG at once,
     // since MOVEM's own EA modes exclude indexing here.
     wire [31:0] mvm_wdata   = rf_c;
+
+    // ── MOVEP ───────────────────────────────────────────────────────────────
+    // Two or four BYTE accesses at a stride of two, most significant first --
+    // the instruction exists to talk to an 8-bit peripheral sitting on half of
+    // a 16-bit bus, so the gaps are the point.
+    //
+    // Simpler than MOVEM in the one way that matters: the byte count is fixed
+    // by the opcode rather than by data, so there is no mask to walk and no
+    // register-file port to borrow. The address comes from ex_ea, the EA the AG
+    // stage already computed, which is cleaner than MOVEM having to rebuild it
+    // from a base register.
+    reg  [2:0]  mvp_idx;
+    reg  [31:0] mvp_addr;
+    reg  [31:0] mvp_sh;        // write data, shifted left a byte per beat
+    reg  [31:0] mvp_acc;       // read data, shifted in a byte per beat
+    reg         mvp_run, mvp_done;
+
+    wire        ex_is_movep = ex_valid && (ex_uop.uclass == UC_MOVEP);
+    wire        ex_movep_rd = ex_is_movep && ex_uop.reads_mem;
+    wire [2:0]  mvp_n       = ex_uop.xfer_long ? 3'd4 : 3'd2;
+    wire        mvp_last    = (mvp_idx == (mvp_n - 3'd1));
 
     // ── Exception sequence ──────────────────────────────────────────────────
     // A trap is three bus cycles: push the return PC, push the SR, then read
@@ -528,7 +554,8 @@ module mh030p_core (
     // Deliberately NOT written in terms of stall_ex: stall_ex depends on the
     // exception request, which would depend on this, which is a loop.
     wire ex_busy_own = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
-                    || (ex_is_movem && !mvm_done);
+                    || (ex_is_movem && !mvm_done)
+                    || (ex_is_movep && !mvp_done);
     wire ex_interruptible = ex_valid && !ex_busy_own
                          && !ex_uop.reads_mem && !ex_uop.writes_mem
                          && (ex_uop.uclass != UC_TRAP)
@@ -584,7 +611,8 @@ module mh030p_core (
 
     wire stall_ex = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
                  || (ex_is_trap && !exc_taken)
-                 || (ex_is_movem && !mvm_done);
+                 || (ex_is_movem && !mvm_done)
+                 || (ex_is_movep && !mvp_done);
     wire stall_ag = ag_base_busy;
 
     assign instr_ready = !stall_ex && !stall_ag;
@@ -639,7 +667,8 @@ module mh030p_core (
         // dst_reg is unset -- using it read D0 by accident.
         // For a memory-to-memory move the source comes from memory and there
         // is no register operand, so the A port carries the DESTINATION base.
-        .rd_a_sel (dec_is_bf ? dec_uop.imm[15:12]
+        .rd_a_sel (dec_is_movep ? dec_uop.imm[3:0]
+                   : dec_is_bf ? dec_uop.imm[15:12]
                    : (dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
                      ? dec_uop.dst_reg : dec_uop.src_reg),
@@ -776,6 +805,7 @@ module mh030p_core (
     // because AG's step is derived from the operand size and cannot express
     // either. Leaving the AG update in as well would apply BOTH.
     wire ag_an_upd = ag_valid && ag_mem && !ag_is_trap && !ag_is_movem
+                  && !ag_is_movep
                   && !ag_is_push && !ag_is_rte && !ag_ea_class
                   && !stall_ex && !stall_ag
                   && ((ag_uop.ea_mode == UEA_AN_POST)
@@ -818,7 +848,8 @@ module mh030p_core (
             // That is exactly what happened -- the first memory access went
             // out with addr=0 before A3 had been written.
             mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
-                                 && !stall_ag && !ag_is_trap && !ag_is_movem;
+                                 && !stall_ag && !ag_is_trap && !ag_is_movem
+                                 && !ag_is_movep;
             // A push goes to -(A7); everything else to the computed EA.
             // LINK pushes the old frame pointer below A7; UNLK pops from
             // wherever An points. Neither address comes from the EA adder.
@@ -857,6 +888,18 @@ module mh030p_core (
                 mem_siz   <= ex_uop.xfer_long ? UZ_LONG : UZ_WORD;
                 mem_addr  <= mvm_predec ? (mvm_addr - mvm_step) : mvm_addr;
                 mem_wdata <= mvm_wdata;
+            end else if (mem_ack) begin
+                mem_req   <= 1'b0;
+            end
+        end else if (ex_is_movep && !mvp_done) begin
+            if (!mvp_run) begin
+                mem_req <= 1'b0;             // first cycle: latch, issue nothing
+            end else if (!mem_req) begin
+                mem_req   <= 1'b1;
+                mem_rw    <= ex_uop.reads_mem;
+                mem_siz   <= UZ_BYTE;
+                mem_addr  <= mvp_addr;
+                mem_wdata <= {24'h0, mvp_sh[31:24]};
             end else if (mem_ack) begin
                 mem_req   <= 1'b0;
             end
@@ -946,7 +989,8 @@ module mh030p_core (
     //   otherwise     : A = ALU source,      B = ALU destination
     wire ex_rmw_op = ex_uop.reads_mem && ex_uop.writes_mem;
     wire ex_is_bf = ex_valid && (ex_uop.uclass == UC_BITFIELD);
-    wire [3:0] ex_a_sel = ex_is_bf ? ex_uop.imm[15:12]
+    wire [3:0] ex_a_sel = ex_is_movep ? ex_uop.imm[3:0]
+                        : ex_is_bf ? ex_uop.imm[15:12]
                         : (ex_uop.dst_ea_mode != UEA_NONE) ? ex_uop.dst_ea_reg
                         : (ex_uop.reads_mem && !ex_uop.writes_mem)
                           ? ex_uop.dst_reg : ex_uop.src_reg;
@@ -1009,6 +1053,13 @@ module mh030p_core (
 
     wire [31:0] ex_a_u = ex_held ? ex_a_h : ex_a_f;
     wire [31:0] ex_b_u = ex_held ? ex_b_h : ex_b_f;
+
+    // A word transfer moves Dn[15:0], so the working copy is pre-aligned and
+    // every beat then sends the top byte.
+    wire [31:0] mvp_sh_init = ex_uop.xfer_long ? ex_a_u : {ex_a_u[15:0], 16'h0};
+    // The result: a long transfer replaces Dn, a word one only its low half.
+    wire [31:0] mvp_result  = ex_uop.xfer_long ? mvp_acc
+                                              : {ex_a_u[31:16], mvp_acc[15:0]};
 
     // Which side the memory value lands on differs between the two shapes:
     //   plain memory read (ADD.L (An),Dn) : memory is the SOURCE
@@ -1382,7 +1433,8 @@ module mh030p_core (
     // RTE pops a Format $0 frame -- status word, PC, format/vector word, eight
     // bytes. RTR pops only a CCR word and the PC, six. Wider frame formats
     // need the format field decoded, which is a later phase.
-    assign ex_commit = ex_movec_rd              ? movec_rd_val
+    assign ex_commit = ex_movep_rd              ? mvp_result
+                     : ex_movec_rd              ? movec_rd_val
                      : ex_is_bf                 ? bf_result
                      : ex_is_tas                ? tas_res
                      : ex_is_exg                ? ex_a_u
@@ -1412,7 +1464,9 @@ module mh030p_core (
             wb_valid   <= ex_valid;
             // A push and a status-word return both commit A7, which is not
             // the destination their encoding names.
-            wb_reg     <= (ex_is_push || ex_is_rte) ? REG_A7 : ex_uop.dst_reg;
+            wb_reg     <= (ex_is_push || ex_is_rte) ? REG_A7
+                        : ex_movep_rd               ? ex_uop.imm[3:0]
+                                                    : ex_uop.dst_reg;
             wb_data    <= ex_commit;
             // DBcc writes Dn only when it actually decrements.
             wb_writes  <= (ex_valid && ex_uop.writes_reg && !ex_is_branch
@@ -1423,7 +1477,8 @@ module mh030p_core (
                        || ex_is_push || ex_is_rte
                        // LINK commits An although it also writes memory,
                        // which the clause above excludes.
-                       || (ex_is_link && ex_uop.writes_reg);
+                       || (ex_is_link && ex_uop.writes_reg)
+                       || ex_movep_rd;
             // MOVE <ea>,CCR and MOVE <ea>,SR write the status register
             // DIRECTLY, in EX. Letting the ordinary WB flag update run as well
             // would land a cycle later and overwrite the transferred value
@@ -1495,6 +1550,32 @@ module mh030p_core (
         if (!rst_n)          mul_started <= 1'b0;
         else if (!stall_ex)  mul_started <= 1'b0;
         else if (ex_is_mul)  mul_started <= 1'b1;
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            mvp_idx  <= 3'd0;
+            mvp_addr <= 32'h0;
+            mvp_sh   <= 32'h0;
+            mvp_acc  <= 32'h0;
+            mvp_run  <= 1'b0;
+            mvp_done <= 1'b0;
+        end else if (!ex_is_movep) begin
+            mvp_idx  <= 3'd0;
+            mvp_run  <= 1'b0;
+            mvp_done <= 1'b0;
+        end else if (!mvp_run) begin
+            mvp_run  <= 1'b1;
+            mvp_addr <= ex_ea;
+            mvp_sh   <= mvp_sh_init;
+            mvp_acc  <= 32'h0;
+        end else if (mem_ack) begin
+            mvp_addr <= mvp_addr + 32'd2;        // every OTHER byte
+            mvp_sh   <= {mvp_sh[23:0], 8'h0};
+            mvp_acc  <= {mvp_acc[23:0], mem_rdata[7:0]};
+            if (mvp_last) mvp_done <= 1'b1;
+            else          mvp_idx  <= mvp_idx + 3'd1;
+        end
     end
 
     always_ff @(posedge clk_4x or negedge rst_n) begin

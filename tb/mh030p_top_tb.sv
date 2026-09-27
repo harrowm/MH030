@@ -947,6 +947,59 @@ module mh030p_top_tb;
         chk("old base NOT used",    dut.u_core.u_rf.regs[6], 32'd0);
         chk("TRAP skipped inline",  dut.u_core.u_rf.regs[4], 32'd0);
 
+        // ── MOVEP: bytes at a stride of two ──────────────────────────────────
+        // The instruction exists to reach an 8-bit peripheral wired to half of
+        // a 16-bit bus, so the GAPS are the point: four bytes land at +0, +2,
+        // +4 and +6, most significant first, and the odd bytes between them must
+        // be left alone. The memory here is word-granular, so a byte written to
+        // an even address lands in the high half of a word and the low half is
+        // pre-seeded with 0xBB -- if MOVEP wrote a contiguous longword instead,
+        // those markers would be destroyed.
+        //  0: MOVE.L #0x11223344,D1
+        //  6: MOVEQ #0x40,D0 ; 8: MOVEA.L D0,A2    A2 = 0x40
+        // 10: MOVEP.L D1,(0,A2)    0x0B8A 0x0000
+        // 14: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h223C; prog[1] = 16'h1122; prog[2] = 16'h3344;
+        prog[3] = MOVEQ(0, 8'h40);
+        prog[4] = 16'h2440;                 // MOVEA.L D0,A2
+        prog[5] = 16'h03CA; prog[6] = 16'h0000;   // MOVEP.L D1,(0,A2)
+        prog[7] = 16'h60FE;
+        for (i = 32; i < 36; i++) prog[i] = 16'h00BB;   // markers at 0x40..0x47
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("MOVEP.L byte 0", {16'h0, prog[32]}, 32'h0000_11BB);
+        chk("MOVEP.L byte 1", {16'h0, prog[33]}, 32'h0000_22BB);
+        chk("MOVEP.L byte 2", {16'h0, prog[34]}, 32'h0000_33BB);
+        chk("MOVEP.L byte 3", {16'h0, prog[35]}, 32'h0000_44BB);
+
+        // And back the other way, into a register. MOVEP.W reads only two
+        // bytes and must leave the UPPER half of Dn untouched, which is what
+        // separates it from a longword transfer.
+        //  0: MOVE.L #0xAAAA5555,D2
+        //  6: MOVEQ #0x50,D0 ; 8: MOVEA.L D0,A3   A3 = 0x50
+        // 10: MOVEP.W (0,A3),D2   0x0513 0x0000
+        // 14: park
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0] = 16'h243C; prog[1] = 16'hAAAA; prog[2] = 16'h5555;
+        prog[3] = MOVEQ(0, 8'h50);
+        prog[4] = 16'h2640;                 // MOVEA.L D0,A3
+        prog[5] = 16'h050B; prog[6] = 16'h0000;   // MOVEP.W (0,A3),D2
+        prog[7] = 16'h60FE;
+        prog[40] = 16'h7700;                // 0x50: byte 0x77, then filler
+        prog[41] = 16'h8800;                // 0x52: byte 0x88
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (300) @(negedge clk_4x);
+
+        chk("MOVEP.W into Dn", dut.u_core.u_rf.regs[2], 32'hAAAA_7788);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

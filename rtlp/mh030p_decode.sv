@@ -429,6 +429,13 @@ module mh030p_decode (
                 uop.first       = 1'b1;
                 uop.last        = 1'b0;      // expands to per-byte uops
                 uop.x_unchanged = 1'b1;
+                // The data register and the transfer width. The reference
+                // reports dest_reg=0 here and resolves Dn inside its own MOVEP
+                // state machine, so this cannot go in dst_reg without breaking
+                // the equivalence sweep -- imm is free, MOVEP's displacement
+                // living in ea_disp like any other (d16,An).
+                uop.imm         = {28'h0, rn_dn};
+                uop.xfer_long   = instr[6];
             end else if (g0_is_cmp2) begin
                 uop.uclass      = UC_TRAP;      // CHK2 can trap
                 uop.subop       = 4'd3;         // CHK2/CMP2
