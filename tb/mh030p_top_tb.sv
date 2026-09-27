@@ -896,6 +896,57 @@ module mh030p_top_tb;
         chk("BFTST left D0",   dut.u_core.u_rf.regs[0], 32'h00F0_F0F0);
         chk("BFTST Z on zero", {28'h0, ccr_out[2]},     32'h0000_0001);
 
+        // ── MOVEC and a movable vector base ──────────────────────────────────
+        // The vector base was hardcoded to 0, so every handler had to live in
+        // the bottom 1KB. This moves VBR to 0x100 and takes a TRAP through it:
+        // vector 32 is then read from 0x180, and the old location is left
+        // holding a DIFFERENT address so a stale base would jump somewhere
+        // visibly wrong rather than somewhere that happens to work.
+        //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7
+        //  4: MOVE.L #0x100,D0
+        // 10: MOVEC D0,VBR          0x4E7B 0x0801
+        // 14: MOVEC VBR,D1          0x4E7A 0x1801   -> D1 = 0x100
+        // 18: MOVEQ #0x2A,D2 ; 20: MOVEC D2,CACR    0x4E7B 0x2002
+        // 24: MOVEC CACR,D3         0x4E7A 0x3002   -> D3 = 0x2A
+        // 28: TRAP #0               -> vector 32 at VBR+0x80 = 0x180
+        // 30: MOVEQ #0x7F,D4        must NOT run
+        // 32: park
+        // 0x60 is the stack, so the handler goes at 0x90.
+        for (i = 0; i < 1024; i++) prog[i] = 16'h4E71;
+        prog[0]  = MOVEQ(7, 8'h60);
+        prog[1]  = 16'h2E47;
+        prog[2]  = 16'h203C; prog[3] = 16'h0000; prog[4] = 16'h0100;
+        prog[5]  = 16'h4E7B; prog[6]  = 16'h0801;   // MOVEC D0,VBR
+        prog[7]  = 16'h4E7A; prog[8]  = 16'h1801;   // MOVEC VBR,D1
+        prog[9]  = MOVEQ(2, 8'h2A);
+        prog[10] = 16'h4E7B; prog[11] = 16'h2002;   // MOVEC D2,CACR
+        prog[12] = 16'h4E7A; prog[13] = 16'h3002;   // MOVEC CACR,D3
+        prog[14] = 16'h4E40;                        // TRAP #0
+        prog[15] = MOVEQ(4, 8'h7F);                 // must not run
+        prog[16] = 16'h60FE;
+        prog[72] = MOVEQ(5, 8'd9);                  // handler at 0x90
+        prog[73] = 16'h60FE;
+        // Vector 32 through the MOVED base, at 0x180.
+        prog[32'h180 >> 1]       = 16'h0000;
+        prog[(32'h180 >> 1) + 1] = 16'h0090;
+        // The OLD location holds a decoy: if VBR were still 0 the handler would
+        // be entered at 0xB0 and D6, not D5, would be set.
+        prog[32'h80 >> 1]        = 16'h0000;
+        prog[(32'h80 >> 1) + 1]  = 16'h00B0;
+        prog[88] = MOVEQ(6, 8'd9);                  // decoy handler at 0xB0
+        prog[89] = 16'h60FE;
+
+        rst_n = 1'b0;
+        repeat (3) @(negedge clk_4x);
+        rst_n = 1'b1;
+        repeat (450) @(negedge clk_4x);
+
+        chk("MOVEC read back VBR",  dut.u_core.u_rf.regs[1], 32'h0000_0100);
+        chk("MOVEC read back CACR", dut.u_core.u_rf.regs[3], 32'h0000_002A);
+        chk("VBR moved the vector", dut.u_core.u_rf.regs[5], 32'd9);
+        chk("old base NOT used",    dut.u_core.u_rf.regs[6], 32'd0);
+        chk("TRAP skipped inline",  dut.u_core.u_rf.regs[4], 32'd0);
+
         $display("");
         if (fails == 0) begin
             $display("=== 0 failure(s) ===");

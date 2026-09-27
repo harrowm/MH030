@@ -363,7 +363,14 @@ module mh030p_decode (
     // named by the extension word, not the opcode.
     wire g4_is_movec = (instr[15:1] == 15'b0100_1110_0111_101);
     wire movec_to_reg = !instr[0];
-    wire [3:0] movec_rn = ext[31:28];
+    // ext[15:12], NOT ext[31:28]. MOVEC carries exactly one extension word, and
+    // a single extension word arrives in the LOW half (m68030_seq.sv:1160) --
+    // the reference reads ext_data[15:12] here for the same reason. This was
+    // written the other way round, and left MOVEC unclaimed while the
+    // convention was in doubt; the bit-field work settled it empirically, by
+    // reading a register field out of [15:12] and executing correctly.
+    // Bit 15 is the D/A select, [14:12] the number.
+    wire [3:0] movec_rn = ext[15:12];
 
     // Group E shift/rotate. bits[4:3] select op, bit[8] direction,
     // bit[5] = count from register.
@@ -823,6 +830,25 @@ module mh030p_decode (
                 uop.dst_kind    = sys_is_uspr ? US_AREG : US_USP;
                 uop.dst_reg     = rn_src_an;
                 uop.writes_reg  = sys_is_uspr;
+            end else if (g4_is_movec) begin
+                // MOVEC Rc,Rn (0x4E7A) and MOVEC Rn,Rc (0x4E7B). Supervisor
+                // only on real silicon; this core has no privilege-violation
+                // vector yet, so the check is deliberately absent rather than
+                // half-built.
+                uop.uclass      = UC_MOVEC;
+                uop.unit        = UU_MOVE;
+                uop.siz         = UZ_LONG;
+                uop.subop       = movec_to_reg ? 4'd1 : 4'd2;
+                uop.imm         = {20'h0, ext[11:0]};   // which control register
+                uop.x_unchanged = 1'b1;
+                if (movec_to_reg) begin
+                    uop.dst_kind   = movec_rn[3] ? US_AREG : US_DREG;
+                    uop.dst_reg    = movec_rn;
+                    uop.writes_reg = 1'b1;
+                end else begin
+                    uop.src_kind   = movec_rn[3] ? US_AREG : US_DREG;
+                    uop.src_reg    = movec_rn;
+                end
             end else if (sys_is_misc) begin
                 // 0x4E70 RESET, 71 NOP, 72 STOP, 73 RTE, 74 RTD, 75 RTS,
                 // 76 TRAPV, 77 RTR.
@@ -1395,6 +1421,13 @@ module mh030p_decode (
                           // decoded as the following instruction.
                           : (uop.uclass == UC_BITFIELD)
                             ? (3'd1 + ea_words(ea_mode_w))
+                          // MOVEC names its control register in an extension
+                          // word and has no EA at all, so its own low six bits
+                          // must NOT be counted as one. MOVES (sub-op 0) does
+                          // have a real EA on top of its extension word.
+                          : (uop.uclass == UC_MOVEC)
+                            ? ((uop.subop == 4'd0)
+                               ? (3'd1 + ea_words(ea_mode_w)) : 3'd1)
                           // An instruction that declares NO effective address
                           // cannot be consuming extension words for one, but
                           // ea_words_total is computed from the raw opcode's EA

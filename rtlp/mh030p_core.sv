@@ -190,6 +190,7 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_SYSCTL)
                         || (dec_uop.uclass == UC_ATOMIC)
                         || (dec_uop.uclass == UC_BITFIELD)
+                        || (dec_uop.uclass == UC_MOVEC)
                         || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
                            || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
@@ -206,6 +207,10 @@ module mh030p_core (
                            || ((dec_uop.uclass == UC_ATOMIC)
                                && (dec_uop.subop == 4'd0) && dec_ea_ok)
                            || dec_bf_ok
+                           // MOVEC only; MOVES (sub-op 0) needs the alternate
+                           // function codes to mean something first.
+                           || ((dec_uop.uclass == UC_MOVEC)
+                               && (dec_uop.subop != 4'd0))
                            || (dec_uop.uclass == UC_NOP)
                            || ((dec_uop.uclass == UC_MOVEM) && dec_ea_ok)
                            || dec_ea_class_ok
@@ -321,6 +326,16 @@ module mh030p_core (
     reg [7:0] sr_sys_r;
     // The user stack pointer, shadowed while in supervisor state.
     reg [31:0] usp_r;
+
+    // ── Control registers (MOVEC) ───────────────────────────────────────────
+    // VBR is the one that matters here: the exception vector base was hardcoded
+    // to 0 because there was no register to hold it, so every handler had to
+    // live in the bottom 1KB. CACR and CAAR are plain registers with nothing
+    // behind them -- this core has no caches -- and SFC/DFC likewise, since
+    // MOVES is not executable yet. Readback is real in every case, which is
+    // what software actually checks.
+    reg [31:0] vbr_r, cacr_r, caar_r;
+    reg [2:0]  sfc_r, dfc_r;
 
     wire ex_rmw = ex_valid && ex_uop.reads_mem && ex_uop.writes_mem;
     wire ex_m2m = ex_rmw && (ex_uop.dst_ea_mode != UEA_NONE);
@@ -878,7 +893,7 @@ module mh030p_core (
                 XS_SR: if (mem_ack) begin            // fetch the vector
                     mem_req   <= 1'b1;
                     mem_rw    <= 1'b1;
-                    mem_addr  <= {20'h0, exc_vec_num, 2'b00};
+                    mem_addr  <= vbr_r + {20'h0, exc_vec_num, 2'b00};
                 end
                 default: if (mem_ack) mem_req <= 1'b0;
             endcase
@@ -1050,6 +1065,46 @@ module mh030p_core (
     // mem_hold is right-justified for reads, so the byte is in [7:0].
     wire [7:0]  tas_orig = mem_hold[7:0];
     wire [31:0] tas_res  = {24'h0, tas_orig | 8'h80};
+
+    // ── MOVEC ───────────────────────────────────────────────────────────────
+    // Control-register numbers from MC68030UM Table 6-1 / section 2.
+    wire ex_is_movec = ex_valid && (ex_uop.uclass == UC_MOVEC);
+    wire ex_movec_rd = ex_is_movec && (ex_uop.subop == 4'd1);   // Rc -> Rn
+    wire ex_movec_wr = ex_is_movec && (ex_uop.subop == 4'd2);   // Rn -> Rc
+    wire [11:0] movec_rc = ex_uop.imm[11:0];
+
+    // MSP and ISP are the master and interrupt stack pointers. This core has no
+    // M-bit stack split, so both read as the single A7 -- deliberately, and
+    // stated here rather than silently returning zero.
+    wire [31:0] movec_rd_val =
+          (movec_rc == 12'h000) ? {29'h0, sfc_r}
+        : (movec_rc == 12'h001) ? {29'h0, dfc_r}
+        : (movec_rc == 12'h002) ? cacr_r
+        : (movec_rc == 12'h800) ? usp_r
+        : (movec_rc == 12'h801) ? vbr_r
+        : (movec_rc == 12'h802) ? caar_r
+        : (movec_rc == 12'h803) ? sp_live
+        : (movec_rc == 12'h804) ? sp_live
+                                : 32'h0;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            vbr_r  <= 32'h0;
+            cacr_r <= 32'h0;
+            caar_r <= 32'h0;
+            sfc_r  <= 3'h0;
+            dfc_r  <= 3'h0;
+        end else if (ex_movec_wr && !stall_ex) begin
+            case (movec_rc)
+                12'h000: sfc_r  <= ex_a_u[2:0];
+                12'h001: dfc_r  <= ex_a_u[2:0];
+                12'h002: cacr_r <= ex_a_u;
+                12'h801: vbr_r  <= ex_a_u;
+                12'h802: caar_r <= ex_a_u;
+                default: ;      // USP/MSP/ISP go through their own paths
+            endcase
+        end
+    end
 
     // ── Bit-field unit ──────────────────────────────────────────────────────
     // rtl/eu_bitfield.sv verbatim: a pure combinational leaf, and a Tier-1
@@ -1327,7 +1382,8 @@ module mh030p_core (
     // RTE pops a Format $0 frame -- status word, PC, format/vector word, eight
     // bytes. RTR pops only a CCR word and the PC, six. Wider frame formats
     // need the format field decoded, which is a later phase.
-    assign ex_commit = ex_is_bf                 ? bf_result
+    assign ex_commit = ex_movec_rd              ? movec_rd_val
+                     : ex_is_bf                 ? bf_result
                      : ex_is_tas                ? tas_res
                      : ex_is_exg                ? ex_a_u
                      : ex_is_link               ? (ex_sp - 32'd4)
@@ -1587,6 +1643,8 @@ module mh030p_core (
         if (!rst_n) usp_r <= 32'h0;
         else if (ex_is_sys && (ex_uop.subop == 4'd4) && !stall_ex)
             usp_r <= ex_b_u;
+        else if (ex_movec_wr && (movec_rc == 12'h800) && !stall_ex)
+            usp_r <= ex_a_u;
     end
 
     // One-cycle history of the commit, for the second forwarding level.
