@@ -1399,9 +1399,17 @@ module mh030p_core (
                          ? {{16{ex_src_raw[15]}}, ex_src_raw[15:0]}
                          : ex_src_raw;
 
+    // ADDA/SUBA/CMPA -(An),An: the address register is decremented FIRST, and
+    // the decremented value is the destination operand. ex_a_u is the value read
+    // in ID, before that decrement, so the result came out one step high.
+    wire dst_is_src_areg = ex_uop.reads_mem && (ex_uop.dst_kind == US_AREG)
+                        && (ex_uop.dst_reg == ex_uop.ea_reg)
+                        && (ex_uop.ea_mode == UEA_AN_PRE);
+
     wire [31:0] ex_dst = ex_m2m           ? mem_hold
                        : ex_rmw_op        ? mem_hold
                        : ex_mem_operand   ? mem_hold
+                       : dst_is_src_areg  ? ex_ea
                        : ex_uop.reads_mem ? ex_a_u
                                           : ex_b_u;
 
@@ -1628,8 +1636,21 @@ module mh030p_core (
     wire m2m_same_reg = (ex_uop.dst_ea_reg == ex_uop.ea_reg);
     wire m2m_dst_abs = (ex_uop.dst_ea_mode == UEA_ABS_W)
                     || (ex_uop.dst_ea_mode == UEA_ABS_L);
+    // The source's own step, at the OPERAND size, with the A7 byte rule -- the
+    // same computation AG does, needed here because the destination of a
+    // same-register pair starts from where the source left the register.
+    wire [1:0]  ex_opnd_siz = ex_uop.opnd_word ? UZ_WORD : ex_uop.siz;
+    wire [31:0] ex_src_step = (ex_opnd_siz == UZ_BYTE)
+                              ? ((ex_uop.ea_reg == 4'd15) ? 32'd2 : 32'd1)
+                            : (ex_opnd_siz == UZ_WORD) ? 32'd2 : 32'd4;
+    // For a POSTincrement source the register has already moved past the operand,
+    // so the destination starts one step further on: CMPM.l (A7)+,(A7)+ compares
+    // A7 against A7+4 and leaves A7 eight higher. For a PREdecrement source the
+    // source's own computed address IS the new value, so ex_ea serves directly.
     wire [31:0] m2m_base = m2m_dst_abs  ? 32'h0
-                         : m2m_same_reg ? ex_ea : ex_a_u;
+                         : !m2m_same_reg ? ex_a_u
+                         : (ex_uop.ea_mode == UEA_AN_POST) ? (ex_ea + ex_src_step)
+                                                           : ex_ea;
 
     assign ex_m2m_addr = m2m_base + ex_uop.dst_ea_disp
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
