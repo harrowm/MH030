@@ -1053,10 +1053,18 @@ fmax-p:
 	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/fmaxp.v $(SIM)/fmaxp_wrap.v; \
 	    synth_lattice -family ecp5 -top wrap_fmax; \
 	    write_json $(SIM)/fmaxp.json' -l $(SIM)/fmaxp_yosys.log > /dev/null
+# NO --ignore-loops, deliberately. The flag was in this recipe when the first
+# measurement ran, and it was hiding SIX combinational loops in the new core --
+# worth 78% of the worst path, and worth ~10 MHz once broken. Verilator's
+# UNOPTFLAT did NOT report them (they closed through instance ports at the top
+# level, and per-bit the cycle is false), so nextpnr's own loop detection is the
+# stronger check and the only one that caught it. Leaving the flag off makes a
+# new loop a hard failure instead of a slow mystery. fmax-rtl keeps it: rtl/ is
+# frozen, and this is the recipe every trustworthy measurement of it used.
 	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxp.json \
-	    --seed $(SEED) --ignore-loops --timing-allow-fail \
+	    --seed $(SEED) --timing-allow-fail \
 	    --report $(SIM)/fmaxp_report-$(SEED).json 2>&1 \
-	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF"
+	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
 fmax-rtl:
 	@mkdir -p $(SIM)
 	@sv2v -I rtl $(TOP_SRCS) > $(SIM)/fmaxr.v

@@ -4156,3 +4156,28 @@ data points behind it.
 (the same harness around `m68030_top`, the apples-to-apples baseline) had not
 finished at the time of writing -- the reference core is much larger and its
 ABC9 stage runs for hours -- so the architectural delta is still unquantified.
+
+### The loop diagnosis, confirmed independently -- and the detector that missed it
+
+The "+78%" claim above rested on a single pre-fix seed, so the mechanism was
+checked directly rather than inferred: synthesise the pre-fix tree and run
+nextpnr **without** `--ignore-loops`.
+
+    pre-fix:   Info: Found 6 combinational loops:   (refuses to place)
+    post-fix:  places and routes cleanly
+
+Decisive, and it carries two consequences.
+
+**`--ignore-loops` is now OFF for `make fmax-p`.** It was in the recipe when the
+first measurement ran, and it was hiding these six. A flag that turns "your
+design has a combinational loop" into "your design is mysteriously slow" is
+worth more as a hard failure. `make fmax-rtl` keeps it: `rtl/` is frozen, and
+that is the recipe every trustworthy measurement of it used.
+
+**Verilator's UNOPTFLAT did not report them.** A full `--lint-only` over `rtlp/`
+is clean, and so is `yosys proc; check` for multiple drivers. The loops close
+through *instance ports at the top level*, and per-bit the cycle is genuinely
+false, which is presumably why Verilator's analysis let them through. This
+matters because Phase 284 used UNOPTFLAT as *the* detector for `rtl/`'s loops --
+it is necessary but demonstrably not sufficient, and nextpnr's own loop check is
+the one that finds this shape.
