@@ -174,6 +174,9 @@ typedef struct packed {
     logic [3:0]  dst_ea_mode;
     logic [3:0]  dst_ea_reg;
     logic [31:0] dst_ea_disp;
+    logic [3:0]  dst_ea_idx_reg;
+    logic        dst_ea_idx_long;
+    logic [1:0]  dst_ea_idx_scale;
 
     // Side effects.
     logic        writes_reg;
@@ -247,6 +250,9 @@ function automatic uop_t uop_clear();
     u.dst_ea_mode  = UEA_NONE;
     u.dst_ea_reg   = 4'h0;
     u.dst_ea_disp  = 32'h0;
+    u.dst_ea_idx_reg   = 4'h0;
+    u.dst_ea_idx_long  = 1'b0;
+    u.dst_ea_idx_scale = 2'h0;
     u.xfer_long    = 1'b0;
     u.ext_words    = 3'd0;
     u.subop        = 4'd0;

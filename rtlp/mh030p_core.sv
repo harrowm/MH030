@@ -180,14 +180,16 @@ module mh030p_core (
     // cycles like an RMW, but the second uses dst_ea_*.
     wire dec_mem2mem = dec_uop.writes_mem && dec_uop.reads_mem
                     && (dec_uop.dst_ea_mode != UEA_NONE);
-    // Absolute destinations are in scope; an INDEXED one is not, and for a
-    // structural reason rather than effort: the uop carries exactly one set of
-    // index fields, so a memory-to-memory move cannot describe an index register
-    // on both sides.
+    // Every alterable memory destination is now in scope, indexed included:
+    // the uop carries its own dst_ea_idx_* set and the register file has a
+    // fourth read port for it, so a move with (d8,An,Xn) at BOTH ends has all
+    // four registers -- two bases, two indices -- in the same cycle. PC-relative
+    // is correctly absent; it is not alterable.
     wire dec_dst_ea_ok = (dec_uop.dst_ea_mode == UEA_AN_IND)
                       || (dec_uop.dst_ea_mode == UEA_AN_POST)
                       || (dec_uop.dst_ea_mode == UEA_AN_PRE)
                       || (dec_uop.dst_ea_mode == UEA_AN_D16)
+                      || (dec_uop.dst_ea_mode == UEA_AN_IDX)
                       || (dec_uop.dst_ea_mode == UEA_ABS_W)
                       || (dec_uop.dst_ea_mode == UEA_ABS_L);
 
@@ -202,8 +204,11 @@ module mh030p_core (
                       || (m == UEA_PC_IDX)) ? 2'd1
                       : (m == UEA_ABS_L)    ? 2'd2 : 2'd0;
     endfunction
-    wire dec_m2m_disp_ok = (ea_disp_words(dec_uop.ea_mode) == 2'd0)
-                        || (ea_disp_words(dec_uop.dst_ea_mode) == 2'd0);
+    // The decoder now places each side's displacement at its own extension-word
+    // offset, so a displacement at BOTH ends is expressible. What is still not
+    // is a fourth extension word -- an absolute long at each end, or a long
+    // immediate feeding one -- which is exactly what ea_disp_valid reports.
+    wire dec_m2m_disp_ok = dec_uop.ea_disp_valid;
 
     wire dec_executable = dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
@@ -363,6 +368,10 @@ module mh030p_core (
     wire [3:0] ag_c_sel = (ag_is_push || ag_is_link) ? 4'd15
                         : ag_is_cas                  ? ag_uop.imm[3:0]
                                                      : ag_uop.ea_idx_reg;
+    // Must mirror rd_d_sel exactly, for the same reason ag_c_sel mirrors
+    // rd_c_sel: the index register of an INDEXED DESTINATION, which only a
+    // memory-to-memory move has.
+    wire [3:0] ag_d_sel = ag_uop.dst_ea_idx_reg;
     wire ag_mem_operand = ag_uop.reads_mem && !ag_uop.writes_mem
                        && (ag_uop.dst_kind == US_MEM);
     wire [3:0] ag_a_sel = ag_is_cas ? ag_uop.dst_reg
@@ -470,7 +479,7 @@ module mh030p_core (
 
     // Register-file read data; declared here because the MOVEM sequencer
     // below repurposes the C port.
-    wire [31:0] rf_a, rf_b, rf_c;
+    wire [31:0] rf_a, rf_b, rf_c, rf_d;
 
     // ── MOVEM ───────────────────────────────────────────────────────────────
     // One register per bus cycle, walking the 16-bit mask in the extension
@@ -611,7 +620,9 @@ module mh030p_core (
                       || (((ag_uop.ea_mode == UEA_AN_IDX)
                            || (ag_uop.ea_mode == UEA_PC_IDX) || ag_is_push
                            || ag_is_link || ag_is_cas)
-                          && (ex_uop.dst_reg == ag_c_sel)))
+                          && (ex_uop.dst_reg == ag_c_sel))
+                           || ((ag_uop.dst_ea_mode == UEA_AN_IDX)
+                               && (ex_uop.dst_reg == ag_d_sel)))
                      // The second write port's target has to be interlocked
                      // too, or an EXG/LINK/UNLK in EX is invisible to the AG
                      // stage for half of what it commits.
@@ -919,7 +930,9 @@ module mh030p_core (
                    : dec_needs_sp ? 4'd15 : dec_uop.ea_idx_reg),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
+        .rd_d_sel (dec_uop.dst_ea_idx_reg),
         .rd_c_data(rf_c),
+        .rd_d_data(rf_d),
         .wr_en    (wb_wr_en),
         .wr_sel   (wb_wr_sel),
         .wr_data  (wb_wr_data),
@@ -1006,6 +1019,12 @@ module mh030p_core (
     wire fwd_i_wbp2 = wbp2_en && (wbp2_sel == ag_c_sel);
     wire [31:0] ag_c = fwd_i_wb  ? wb_data  : fwd_i_wb2  ? wb2_data
                      : fwd_i_wbp ? wbp_data : fwd_i_wbp2 ? wbp2_data : rf_c;
+    wire fwd_j_wb   = wb_valid  && wb_writes  && (wb_reg  == ag_d_sel);
+    wire fwd_j_wbp  = wbp_valid && wbp_writes && (wbp_reg == ag_d_sel);
+    wire fwd_j_wb2  = wb2_en  && (wb2_sel  == ag_d_sel);
+    wire fwd_j_wbp2 = wbp2_en && (wbp2_sel == ag_d_sel);
+    wire [31:0] ag_d = fwd_j_wb  ? wb_data  : fwd_j_wb2  ? wb2_data
+                     : fwd_j_wbp ? wbp_data : fwd_j_wbp2 ? wbp2_data : rf_d;
 
     // ── AG: effective address, on its own adder ─────────────────────────────
     // A BYTE access through A7 adjusts the pointer by TWO, not one, because the
@@ -1050,6 +1069,15 @@ module mh030p_core (
 
     wire [31:0] ea_adj_idx = (ag_uop.ea_mode == UEA_AN_PRE) ? ea_adj : ag_idx;
 
+    // The DESTINATION's index term, scaled here in AG where the adder already
+    // lives, and carried into EX as one value. EX adds it to the destination
+    // base; re-deriving it there would need a second scaling shifter for no
+    // benefit.
+    wire [31:0] ag_dxn  = ag_uop.dst_ea_idx_long
+                          ? ag_d : {{16{ag_d[15]}}, ag_d[15:0]};
+    wire [31:0] ag_didx = (ag_uop.dst_ea_mode == UEA_AN_IDX)
+                          ? (ag_dxn << ag_uop.dst_ea_idx_scale) : 32'h0;
+
     // Two adds in series from registers, where this was four: (ag_pc + 2), then
     // + ea_disp, + ea_adj, + ag_idx.
     wire [31:0] ag_ea   = ea_base + ag_uop.ea_disp + ea_adj_idx;
@@ -1078,6 +1106,8 @@ module mh030p_core (
     reg [31:0] ex_ea;
     // The C port, carried forward. For a push it holds A7.
     reg [31:0] ex_sp;
+    // The destination's scaled index term (memory-to-memory, indexed dst).
+    reg [31:0] ex_didx;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -1087,6 +1117,7 @@ module mh030p_core (
             ex_b     <= 32'h0;
             ex_ea    <= 32'h0;
             ex_sp    <= 32'h0;
+            ex_didx  <= 32'h0;
             mem_req  <= 1'b0;
             mem_addr <= 32'h0;
             mem_rw   <= 1'b1;
@@ -1097,6 +1128,7 @@ module mh030p_core (
             ex_pc    <= ag_pc;
             ex_uop   <= ag_uop;
             ex_a     <= ag_a;
+            ex_didx  <= ag_didx;
             ex_b     <= ag_b;
             ex_ea    <= ag_ea;
             ex_sp    <= ag_c;
@@ -1633,7 +1665,13 @@ module mh030p_core (
     // the value the SOURCE already left behind, so the register moves twice.
     // ex_a_u is the base as read in ID, before the source's own decrement, so
     // the source's computed address is the right starting point instead.
-    wire m2m_same_reg = (ex_uop.dst_ea_reg == ex_uop.ea_reg);
+    // Only a source that MOVES the register makes the destination's own base
+    // differ from the value read in ID. MOVE.w (d16,A7),(A7)+ shares the
+    // register but leaves it alone, so the displaced source address must not
+    // become the destination's base.
+    wire m2m_same_reg = (ex_uop.dst_ea_reg == ex_uop.ea_reg)
+                     && ((ex_uop.ea_mode == UEA_AN_POST)
+                      || (ex_uop.ea_mode == UEA_AN_PRE));
     wire m2m_dst_abs = (ex_uop.dst_ea_mode == UEA_ABS_W)
                     || (ex_uop.dst_ea_mode == UEA_ABS_L);
     // The source's own step, at the OPERAND size, with the A7 byte rule -- the
@@ -1652,7 +1690,7 @@ module mh030p_core (
                          : (ex_uop.ea_mode == UEA_AN_POST) ? (ex_ea + ex_src_step)
                                                            : ex_ea;
 
-    assign ex_m2m_addr = m2m_base + ex_uop.dst_ea_disp
+    assign ex_m2m_addr = m2m_base + ex_uop.dst_ea_disp + ex_didx
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
                           ? (32'h0 - ex_m2m_step) : 32'h0);
 

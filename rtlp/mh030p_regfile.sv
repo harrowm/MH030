@@ -51,9 +51,18 @@ module mh030p_regfile (
     // Third port, for the index register of an indexed effective address:
     // (d8,An,Xn) needs the base, the index AND the ALU operand at once.
     input  wire [3:0]  rd_c_sel,
+    // Fourth port, for the index register of an indexed DESTINATION effective
+    // address. A memory-to-memory MOVE with (d8,An,Xn) at both ends needs four
+    // registers in the same cycle -- two bases and two indices -- and the port
+    // is the cheap way to have them: one more 16-to-1 mux and one more
+    // register, against a stall on an instruction that already costs several
+    // cycles. It freezes with A and B, since it belongs to the same held
+    // instruction's operands.
+    input  wire [3:0]  rd_d_sel,
     output reg  [31:0] rd_a_data,
     output reg  [31:0] rd_b_data,
     output reg  [31:0] rd_c_data,
+    output reg  [31:0] rd_d_data,
 
     // Write (commit stage).
     input  wire        wr_en,
@@ -90,21 +99,26 @@ module mh030p_regfile (
     wire hit_a  = wr_en && (wr_sel == rd_a_sel);
     wire hit_b  = wr_en && (wr_sel == rd_b_sel);
     wire hit_c  = wr_en && (wr_sel == rd_c_sel);
+    wire hit_d  = wr_en && (wr_sel == rd_d_sel);
     wire hit2_a = wr2_en && (wr2_sel == rd_a_sel);
     wire hit2_b = wr2_en && (wr2_sel == rd_b_sel);
     wire hit2_c = wr2_en && (wr2_sel == rd_c_sel);
+    wire hit2_d = wr2_en && (wr2_sel == rd_d_sel);
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             rd_a_data <= 32'h0;
             rd_b_data <= 32'h0;
             rd_c_data <= 32'h0;
+            rd_d_data <= 32'h0;
         end else begin
             if (rd_en) begin
                 rd_a_data <= hit_a ? wr_data
                            : hit2_a ? wr2_data : regs[rd_a_sel];
                 rd_b_data <= hit_b ? wr_data
                            : hit2_b ? wr2_data : regs[rd_b_sel];
+                rd_d_data <= hit_d ? wr_data
+                           : hit2_d ? wr2_data : regs[rd_d_sel];
             end
             if (rd_c_en) rd_c_data <= hit_c ? wr_data
                                     : hit2_c ? wr2_data : regs[rd_c_sel];

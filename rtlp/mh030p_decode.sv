@@ -212,13 +212,6 @@ module mh030p_decode (
     // eu_seq_decode.svh:609. So the displacement source depends on what
     // precedes it, not on the EA mode alone.
     // (imm_is_long_pre is declared above, before first use)
-    wire [31:0] ea_d16 = imm_takes_ext ? {{16{q3[15]}}, q3}
-                                       : {{16{ext[15]}}, ext[15:0]};
-    wire [31:0] ea_d8  = imm_takes_ext ? {{24{q3[7]}},  q3[7:0]}
-                                       : {{24{ext[7]}},  ext[7:0]};
-    wire [3:0]  ea_xn      = imm_takes_ext ? q3[15:12] : ext[15:12];
-    wire        ea_xn_long = imm_takes_ext ? q3[11]    : ext[11];
-    wire [1:0]  ea_xn_scl  = imm_takes_ext ? q3[10:9]  : ext[10:9];
 
     // Destination EA (MOVE only): the mode/reg fields are swapped relative
     // to the source, which is a documented source of confusion in this
@@ -250,6 +243,29 @@ module mh030p_decode (
     wire [2:0] imm_words    = ea_is_imm ? ((f_move_siz == UZ_LONG) ? 3'd2 : 3'd1)
                             : (imm_takes_ext ? 3'd2 : 3'd0);
     wire [2:0] ea_words_total = src_ea_words + dst_ea_words + imm_words;
+
+    // Extension words are numbered from 0 in instruction order, and each side
+    // of the instruction reads the one at its own offset: whatever an
+    // immediate consumes comes first, then the SOURCE's own words, then the
+    // DESTINATION's. Only indices 0-2 are reachable (ext carries two words,
+    // q3 the third), which is what ea_disp_valid reports on.
+    //
+    // This replaces a narrower imm_takes_ext special case that could only
+    // shift the SOURCE past a long immediate. It could not express a
+    // displacement at each end, so MOVE.w (d16,A5),(d8,A0,Xn) read both
+    // displacements out of the same half of `ext`.
+    // The word count the FETCH UNIT normalises against is the decoded
+    // uop.ext_words, not this raw-field sum, so it is passed in rather than
+    // read here: several families report a count their own low six bits do not
+    // imply, and every one of those was a real bug at some point.
+    function automatic logic [15:0] xword(input logic [2:0] i,
+                                          input logic [2:0] tot);
+        case (i)
+            3'd0:    xword = (tot <= 3'd1) ? ext[15:0] : ext[31:16];
+            3'd1:    xword = ext[15:0];
+            default: xword = q3;
+        endcase
+    endfunction
 
     // Control addressing modes (no Dn/An/(An)+/-(An)/#imm): what LEA, PEA,
     // JMP and JSR accept.
@@ -401,8 +417,18 @@ module mh030p_decode (
                                                         (e_left ? 4'h4 : 4'h5);
 
     // ── Decode ──────────────────────────────────────────────────────────────
+    // Scratch for the central EA fill-in at the end of the decode block.
+    reg [2:0]  ew_tot, ew_side, ew_pre;
+    // Set when the single EA slot holds the DESTINATION rather than the source,
+    // which happens whenever the source needs no address of its own -- a
+    // register or an immediate. The fill-in then has to read the extension word
+    // at the DESTINATION's offset, past whatever the immediate consumed.
+    reg        ea_slot_is_dst;
+    reg [15:0] sxw, dxw;
+
     always_comb begin
         uop = uop_clear();
+        ea_slot_is_dst = 1'b0;
         uop.valid  = 1'b1;
         uop.uclass = UC_UNIMPL;   // honest default; overridden on a real match
 
@@ -566,9 +592,6 @@ module mh030p_decode (
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.ea_idx_reg  = ea_xn;
-                uop.ea_idx_long = ea_xn_long;
-                uop.ea_idx_scale= ea_xn_scl;
                 uop.reads_mem   = 1'b1;
                 uop.writes_mem  = (g0_alu_op != UA_CMP);
                 uop.writes_reg  = 1'b0;
@@ -612,10 +635,6 @@ module mh030p_decode (
                     uop.imm         = ext;
                     uop.ea_mode     = ea_mode_w;
                     uop.ea_reg      = rn_src_an;
-                    uop.ea_idx_reg  = ea_xn;
-                    uop.ea_idx_long = ea_xn_long;
-                    uop.ea_idx_scale= ea_xn_scl;
-                    uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
                     uop.reads_mem   = !ea_is_imm;
                 end else begin
                     uop.src_kind = src_is_dn ? US_DREG : US_AREG;
@@ -634,9 +653,15 @@ module mh030p_decode (
                     // and cannot be expressed this way; it stays unexecutable
                     // (the core's own scope check rejects it) rather than
                     // silently using the wrong one.
-                    if (!ea_src_ok) begin
-                        uop.ea_mode = ea_dst_mode_w;
-                        uop.ea_reg  = rn_dst_an;
+                    // An immediate source needs no address either, so the EA
+                    // field is just as free as it is for a register source. The
+                    // destination's own displacement then sits PAST the
+                    // immediate's words, which is what ea_slot_is_dst tells the
+                    // fill-in below.
+                    if (!ea_src_ok || ea_is_imm) begin
+                        uop.ea_mode    = ea_dst_mode_w;
+                        uop.ea_reg     = rn_dst_an;
+                        ea_slot_is_dst = 1'b1;
                     end else begin
                         // Memory to memory: the source EA stays in ea_*, the
                         // destination goes in dst_ea_*.
@@ -706,10 +731,6 @@ module mh030p_decode (
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.ea_idx_reg  = ea_xn;
-                uop.ea_idx_long = ea_xn_long;
-                uop.ea_idx_scale= ea_xn_scl;
-                uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
                 uop.reads_mem   = !g4_is_clr;
                 uop.writes_mem  = !g4_is_tst;
                 uop.writes_reg  = 1'b0;
@@ -1029,9 +1050,6 @@ module mh030p_decode (
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.ea_idx_reg  = ea_xn;
-                uop.ea_idx_long = ea_xn_long;
-                uop.ea_idx_scale= ea_xn_scl;
                 uop.reads_mem   = 1'b1;
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
@@ -1257,9 +1275,6 @@ module mh030p_decode (
                     uop.imm         = ext;
                     uop.ea_mode     = ea_mode_w;
                     uop.ea_reg      = rn_src_an;
-                    uop.ea_idx_reg  = ea_xn;
-                    uop.ea_idx_long = ea_xn_long;
-                    uop.ea_idx_scale= ea_xn_scl;
                     uop.reads_mem   = !ea_is_imm;
                 end else begin
                     uop.src_kind = src_is_dn ? US_DREG : US_AREG;
@@ -1305,9 +1320,6 @@ module mh030p_decode (
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.ea_idx_reg  = ea_xn;
-                uop.ea_idx_long = ea_xn_long;
-                uop.ea_idx_scale= ea_xn_scl;
                 uop.reads_mem   = 1'b1;
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
@@ -1336,10 +1348,6 @@ module mh030p_decode (
                 uop.imm         = ext;
                 uop.ea_mode     = alu_an_src_ok ? UEA_NONE : ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.ea_idx_reg  = ea_xn;
-                uop.ea_idx_long = ea_xn_long;
-                uop.ea_idx_scale= ea_xn_scl;
-                uop.ea_disp     = (ea_mode_w == UEA_AN_IDX) ? ea_d8 : ea_d16;
                 uop.reads_mem   = !ea_is_imm && !alu_an_src_ok;
                 uop.dst_kind    = US_DREG;
                 uop.dst_reg     = rn_dn;
@@ -1449,9 +1457,6 @@ module mh030p_decode (
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.ea_idx_reg  = ea_xn;
-                uop.ea_idx_long = ea_xn_long;
-                uop.ea_idx_scale= ea_xn_scl;
                 uop.reads_mem   = 1'b1;
                 uop.writes_mem  = 1'b1;
                 uop.writes_reg  = 1'b0;
@@ -1481,50 +1486,6 @@ module mh030p_decode (
         default: ;   // stays UC_UNIMPL
         endcase
 
-        // ── Central EA field fill-in ────────────────────────────────────────
-        // Every branch above sets ea_mode; the displacement and index fields
-        // are derived from it exactly once, here. Doing it per-branch meant
-        // several families silently carried ea_disp = 0 -- caught the moment
-        // the sweep started comparing these fields. One place to be right
-        // beats twenty places to remember, which is the same reasoning
-        // rtl/opcode_fields.sv exists for.
-        if ((uop.ea_mode == UEA_AN_D16) || (uop.ea_mode == UEA_PC_D16)
-            || (uop.ea_mode == UEA_ABS_W))
-            uop.ea_disp = ea_d16;
-        else if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX))
-            uop.ea_disp = ea_d8;
-        else if (uop.ea_mode == UEA_ABS_L)
-            uop.ea_disp = ext;          // two extension words: the full address
-        else
-            // CLEARED for every mode that has no displacement. The fill-in only
-            // OVERRODE the displaced modes, and several branches above assign
-            // ea_disp unconditionally -- so (A2)+ carried whatever extension
-            // word happened to be there and read from base+disp instead of base.
-            // Visible only when the OTHER side of a memory-to-memory move
-            // supplied that word.
-            uop.ea_disp = 32'h0;
-
-        // The DESTINATION's displacement, from the same derivation. It was never
-        // filled in at all, so a memory-to-memory MOVE with a displaced
-        // destination -- MOVE.b (A2)+,(d16,A2) -- computed its write address as
-        // the bare base register and wrote to the wrong place.
-        if ((uop.dst_ea_mode == UEA_AN_D16) || (uop.dst_ea_mode == UEA_ABS_W))
-            uop.dst_ea_disp = ea_d16;
-        else if (uop.dst_ea_mode == UEA_AN_IDX)
-            uop.dst_ea_disp = ea_d8;
-        else if (uop.dst_ea_mode == UEA_ABS_L)
-            uop.dst_ea_disp = ext;      // two extension words: the full address
-        else
-            uop.dst_ea_disp = 32'h0;
-
-        // Is the displacement position unambiguous? Only when the whole
-        // instruction carries exactly ONE extension word. With two or more,
-        // m68030_seq packs them as {word1, word2} and which half holds which
-        // displacement depends on the full ext_count chain -- MOVE
-        // (d16,An),(d16,An) is the clear case, with a displacement at each
-        // end. Porting ext_count is its own task; until then the decoder says
-        // honestly that it does not know, rather than emitting a wrong value.
-        uop.ea_disp_valid = (ea_words_total == 3'd1);
         // How far the fetch unit must drain for this instruction. Branches
         // carry their displacement in the opcode unless the 8-bit field is
         // zero, in which case one extension word follows.
@@ -1693,11 +1654,79 @@ module mh030p_decode (
                             ? (imm_words + dst_ea_words)
                           : ea_words_total;
 
+        // ── Central EA field fill-in ───────────────────────────────────────
+        // Deliberately LAST, because it needs uop.ext_words: extension words
+        // are numbered from 0 in instruction order, and each side reads the one
+        // at its own offset -- whatever precedes the EA fields (an immediate,
+        // a register-spec word) comes first, then the SOURCE's own words, then
+        // the DESTINATION's. Deriving the leading count by subtraction reuses
+        // the ext_words chain above, which is swept, instead of restating the
+        // per-family exceptions a second time and getting a different answer.
+        //
+        // Only indices 0-2 are reachable (ext carries two words, q3 the
+        // third), which is what ea_disp_valid reports on.
+        ew_tot  = uop.ext_words;
+        ew_side = src_ea_words + dst_ea_words;
+        ew_pre  = (ew_tot > ew_side) ? (ew_tot - ew_side) : 3'd0;
+        sxw     = xword(ea_slot_is_dst ? (ew_pre + src_ea_words) : ew_pre,
+                        ew_tot);
+        dxw     = xword(ew_pre + src_ea_words, ew_tot);
+
+        // Every branch above sets ea_mode; the displacement and index fields
+        // are derived from it exactly once, here. Doing it per-branch meant
+        // several families silently carried ea_disp = 0 -- caught the moment
+        // the sweep started comparing these fields. One place to be right
+        // beats twenty places to remember, which is the same reasoning
+        // rtl/opcode_fields.sv exists for.
+        if ((uop.ea_mode == UEA_AN_D16) || (uop.ea_mode == UEA_PC_D16)
+            || (uop.ea_mode == UEA_ABS_W))
+            uop.ea_disp = {{16{sxw[15]}}, sxw};
+        else if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX))
+            uop.ea_disp = {{24{sxw[7]}}, sxw[7:0]};
+        else if (uop.ea_mode == UEA_ABS_L)
+            uop.ea_disp = {sxw, xword((ea_slot_is_dst
+                                       ? (ew_pre + src_ea_words) : ew_pre)
+                                      + 3'd1, ew_tot)};
+        else
+            // CLEARED for every mode that has no displacement. The fill-in only
+            // OVERRODE the displaced modes, and several branches above assign
+            // ea_disp unconditionally -- so (A2)+ carried whatever extension
+            // word happened to be there and read from base+disp instead of base.
+            // Visible only when the OTHER side of a memory-to-memory move
+            // supplied that word.
+            uop.ea_disp = 32'h0;
+
         if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX)) begin
-            uop.ea_idx_reg   = ea_xn;
-            uop.ea_idx_long  = ea_xn_long;
-            uop.ea_idx_scale = ea_xn_scl;
+            uop.ea_idx_reg   = sxw[15:12];
+            uop.ea_idx_long  = sxw[11];
+            uop.ea_idx_scale = sxw[10:9];
         end
+
+        // The DESTINATION's own displacement and index, from the same
+        // derivation at its own offset. The displacement was never filled in at
+        // all, so a memory-to-memory MOVE with a displaced destination --
+        // MOVE.b (A2)+,(d16,A2) -- computed its write address as the bare base
+        // register; and with a displacement at BOTH ends both sides read the
+        // same half of `ext`.
+        if ((uop.dst_ea_mode == UEA_AN_D16) || (uop.dst_ea_mode == UEA_ABS_W))
+            uop.dst_ea_disp = {{16{dxw[15]}}, dxw};
+        else if (uop.dst_ea_mode == UEA_AN_IDX)
+            uop.dst_ea_disp = {{24{dxw[7]}}, dxw[7:0]};
+        else if (uop.dst_ea_mode == UEA_ABS_L)
+            uop.dst_ea_disp = {dxw, xword(ew_pre + src_ea_words + 3'd1, ew_tot)};
+        else
+            uop.dst_ea_disp = 32'h0;
+
+        if (uop.dst_ea_mode == UEA_AN_IDX) begin
+            uop.dst_ea_idx_reg   = dxw[15:12];
+            uop.dst_ea_idx_long  = dxw[11];
+            uop.dst_ea_idx_scale = dxw[10:9];
+        end
+
+        // Every displacement word sits at index 0, 1 or 2, so all three are
+        // reachable. A fourth is not, which rules out an absolute long at
+        // BOTH ends and a long immediate feeding an absolute long.
+        uop.ea_disp_valid = (ew_tot <= 3'd3);
     end
 
 endmodule
