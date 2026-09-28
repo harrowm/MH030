@@ -1489,6 +1489,27 @@ module mh030p_decode (
             uop.ea_disp = ea_d8;
         else if (uop.ea_mode == UEA_ABS_L)
             uop.ea_disp = ext;          // two extension words: the full address
+        else
+            // CLEARED for every mode that has no displacement. The fill-in only
+            // OVERRODE the displaced modes, and several branches above assign
+            // ea_disp unconditionally -- so (A2)+ carried whatever extension
+            // word happened to be there and read from base+disp instead of base.
+            // Visible only when the OTHER side of a memory-to-memory move
+            // supplied that word.
+            uop.ea_disp = 32'h0;
+
+        // The DESTINATION's displacement, from the same derivation. It was never
+        // filled in at all, so a memory-to-memory MOVE with a displaced
+        // destination -- MOVE.b (A2)+,(d16,A2) -- computed its write address as
+        // the bare base register and wrote to the wrong place.
+        if ((uop.dst_ea_mode == UEA_AN_D16) || (uop.dst_ea_mode == UEA_ABS_W))
+            uop.dst_ea_disp = ea_d16;
+        else if (uop.dst_ea_mode == UEA_AN_IDX)
+            uop.dst_ea_disp = ea_d8;
+        else if (uop.dst_ea_mode == UEA_ABS_L)
+            uop.dst_ea_disp = ext;      // two extension words: the full address
+        else
+            uop.dst_ea_disp = 32'h0;
 
         // Is the displacement position unambiguous? Only when the whole
         // instruction carries exactly ONE extension word. With two or more,

@@ -180,10 +180,30 @@ module mh030p_core (
     // cycles like an RMW, but the second uses dst_ea_*.
     wire dec_mem2mem = dec_uop.writes_mem && dec_uop.reads_mem
                     && (dec_uop.dst_ea_mode != UEA_NONE);
+    // Absolute destinations are in scope; an INDEXED one is not, and for a
+    // structural reason rather than effort: the uop carries exactly one set of
+    // index fields, so a memory-to-memory move cannot describe an index register
+    // on both sides.
     wire dec_dst_ea_ok = (dec_uop.dst_ea_mode == UEA_AN_IND)
                       || (dec_uop.dst_ea_mode == UEA_AN_POST)
                       || (dec_uop.dst_ea_mode == UEA_AN_PRE)
-                      || (dec_uop.dst_ea_mode == UEA_AN_D16);
+                      || (dec_uop.dst_ea_mode == UEA_AN_D16)
+                      || (dec_uop.dst_ea_mode == UEA_ABS_W)
+                      || (dec_uop.dst_ea_mode == UEA_ABS_L);
+
+    // How many extension words an EA mode needs. A memory-to-memory move can
+    // only be executed when at most ONE side needs any, because with a
+    // displacement at each end the decoder cannot say which half of `ext` holds
+    // which -- that needs the full ext_count chain ported, and until then saying
+    // "cannot do this one" is the honest answer rather than using a wrong value.
+    function automatic logic [1:0] ea_disp_words(input logic [3:0] m);
+        ea_disp_words = ((m == UEA_AN_D16) || (m == UEA_ABS_W)
+                      || (m == UEA_AN_IDX) || (m == UEA_PC_D16)
+                      || (m == UEA_PC_IDX)) ? 2'd1
+                      : (m == UEA_ABS_L)    ? 2'd2 : 2'd0;
+    endfunction
+    wire dec_m2m_disp_ok = (ea_disp_words(dec_uop.ea_mode) == 2'd0)
+                        || (ea_disp_words(dec_uop.dst_ea_mode) == 2'd0);
 
     wire dec_executable = dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
@@ -242,7 +262,8 @@ module mh030p_core (
                            || (dec_uop.uclass == UC_EXG)
                            || dec_is_link
                            || dec_sysctl_ok
-                           || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok)
+                           || (dec_mem2mem ? (dec_ea_ok && dec_dst_ea_ok
+                                              && dec_m2m_disp_ok)
                            :   dec_rmw     ? dec_ea_ok
                            // A pure memory write used to require UC_MOVE, which
                            // silently excluded CLR -- write-only on 68010+ and
@@ -1596,7 +1617,10 @@ module mh030p_core (
     // ex_a_u is the base as read in ID, before the source's own decrement, so
     // the source's computed address is the right starting point instead.
     wire m2m_same_reg = (ex_uop.dst_ea_reg == ex_uop.ea_reg);
-    wire [31:0] m2m_base = m2m_same_reg ? ex_ea : ex_a_u;
+    wire m2m_dst_abs = (ex_uop.dst_ea_mode == UEA_ABS_W)
+                    || (ex_uop.dst_ea_mode == UEA_ABS_L);
+    wire [31:0] m2m_base = m2m_dst_abs  ? 32'h0
+                         : m2m_same_reg ? ex_ea : ex_a_u;
 
     assign ex_m2m_addr = m2m_base + ex_uop.dst_ea_disp
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
