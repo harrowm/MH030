@@ -5169,3 +5169,67 @@ Gate after the fix, with B-1 in: `make test` 43/43 (cache included), `cosim_grp`
 8/8, `cosim_memind` 33/33, `dat-synth` 50/50, `make bench` both programs correct,
 and the 124-suite Harte sweep bit-identical (run before B-1 was added; B-1 is
 testbench-only and cannot affect it).
+
+## Stage 1: rtl/'s full-format MOVE ext_count -- two real omissions, and a reclassification
+
+`m68030_seq.sv`'s `is_move_idx_src_memdst_full` listed destination modes
+`{010,011,100,101}` and **omitted `110` (indexed) and `111` (absolute)**, so those
+fell through to `is_memind_full`'s generic formula and reported the SOURCE's word
+count alone. The sweep gives each an unarguable repro, because a full-format word
+with a null base displacement and no memory indirection needs exactly as many words
+as brief:
+
+    op 0x11b0 brief             ext_count = 2   correct
+    op 0x11b0 full, ext 0x3110  ext_count = 1   WRONG -- dst word lost
+    op 0x11f0 full, ext 0x3110  needs 2 ((xxx).W dst), reported 1
+    op 0x13f0 full, ext 0x3110  needs 3 ((xxx).L dst), reported 1
+
+Fixed: an indexed destination adds its own brief extension word, exactly as
+`(d16,An)` adds its displacement; an absolute destination adds 1 or 2 by its
+sub-type, which lives in the MOVE destination register field `instr[11:9]`
+(`f_dn` here). Same failure mode as the gap this block was originally written
+for -- the IFU under-drains and decodes the destination's extension word as the
+next instruction. Invisible to Harte (68000-captured, zero full-format coverage)
+and to the memind suite, whose indexed-source cases all pair with a register
+destination.
+
+**Completion criterion, and it is met: zero MOVE-group disagreements remain for a
+null-bd non-indirect full-format word.** 240 opcodes fixed (64 + 16 per group,
+i.e. every register combination of each shape).
+
+### The reclassification, which matters more than the fix
+
+The sweep's 6,475 disagreements were described earlier in this file as evidence of
+a bug in `rtl/`. Splitting them by the full-format word actually used shows that
+was only true for a small part:
+
+| full-format word | extra words it asks for | disagreements |
+|---|---|---|
+| `3110` | 0 | **499** |
+| `3122` | 2 (word bd + word od) | 2,880 |
+| `3133` | 4 (long bd + long od) | 2,856 |
+
+Everything with extra > 0 is `rtl/`'s **documented scope boundary**, not a defect.
+`is_move_idx_src_memdst_full`'s own comment says it is "scoped to non-indirect
+full-format (fi_iis==000) only, matching the established boundary the entire
+mode=110 EA rollout (Phases 116-147) already drew for genuine memory-indirect" --
+so `memind_bd_words` counts base displacements and never outer ones, full-format
+*destinations* are not handled, and full-format PC-indexed is a different decode
+path entirely. `rtlp`'s decoder counts all of them, because it derives the count
+straight from the manual's bit layout. **It is more complete than the reference, not
+in disagreement with it.**
+
+And the 499 that remain at extra=0 are all accounted for:
+
+    group 4  18  -- MOVE CCR,<ea>: Stage 3's own bug, fixed separately
+    group E  80  -- the documented bitfield-EA gap (no indexed/abs.L/PC-indexed)
+    group F 401  -- F-line/coprocessor, which rtlp declines and the main pass excludes
+
+So the sweep's full-format pass still cannot become a hard gate, but for a much
+better-understood reason than "the reference is wrong": it is measuring a genuine
+capability difference. Making it a gate needs either `rtl/` to implement the full
+envelope or the check to exclude the documented boundary explicitly.
+
+Gate: `make test` 43/43, `cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50,
+`make bench` both correct, 124-suite Harte sweep bit-identical at
+`PASS 702142 FAIL 2 SKIP 281221`.

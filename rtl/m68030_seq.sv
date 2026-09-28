@@ -535,13 +535,56 @@ module m68030_seq (
     // established boundary the entire mode=110 EA rollout (Phases
     // 116-147) already drew for genuine memory-indirect -- see
     // eu_seq.sv's own matching fix for the EA-value side of this.
+    //
+    // LATER FIX (found by MH030-P's own decoder sweep, once it grew a
+    // full-format pass): dst mode 110 -- an INDEXED destination -- was missing
+    // from this list, so `MOVE (d8,An,Xn),(d8,An,Xn)` in full-format form fell
+    // through to is_memind_full's generic formula and reported the SOURCE's word
+    // count alone. Confirmed directly against the brief-format case, which is the
+    // unambiguous control:
+    //
+    //     op 0x11b0 brief format         ext_count = 2   (correct)
+    //     op 0x11b0 full fmt, ext 0x3110 ext_count = 1   (WRONG, dst word lost)
+    //     op 0x2e34 full fmt, ext 0x3110 ext_count = 1   (indexed SRC only: right)
+    //
+    // 0x3110 is full format with a NULL base displacement and no memory
+    // indirection, so it needs exactly as many words as brief -- which makes the
+    // 2-vs-1 difference unarguable. An indexed destination carries its own brief
+    // extension word, exactly as dst==101 carries its own displacement word, so it
+    // adds 1 by the same rule.
+    //
+    // Same failure mode as the original gap this block was written for: the IFU
+    // under-drains and decodes the destination's extension word as the next
+    // instruction. Invisible to Harte (68000-captured, zero full-format coverage)
+    // and to this project's own memind suite, whose indexed-source cases all pair
+    // with a REGISTER destination.
+    //
+    // dst mode 111 -- an ABSOLUTE destination -- was missing for the same reason,
+    // and the sweep gives it the same kind of unarguable repro. Its sub-type lives
+    // in the MOVE destination REGISTER field, instr[11:9], which is f_dn here:
+    //
+    //     op 0x11f0 full fmt, ext 0x3110  -> (xxx).W dst: needs 2, reported 1
+    //     op 0x13f0 full fmt, ext 0x3110  -> (xxx).L dst: needs 3, reported 1
+    //
+    // Only 000 (abs.W, +1) and 001 (abs.L, +2) are real destinations; the other
+    // f_dn encodings of mode 111 are PC-relative, which cannot be written to, so
+    // they add nothing and those opcodes are not valid instructions anyway.
     logic is_move_idx_src_memdst_full;
     assign is_move_idx_src_memdst_full = is_move_idx_src && peek_fi_full &&
         (f_move_dst_mode_s == 3'b010 || f_move_dst_mode_s == 3'b011 ||
-         f_move_dst_mode_s == 3'b100 || f_move_dst_mode_s == 3'b101);
+         f_move_dst_mode_s == 3'b100 || f_move_dst_mode_s == 3'b101 ||
+         f_move_dst_mode_s == 3'b110 ||
+         (f_move_dst_mode_s == 3'b111 && (f_dn == 3'b000 || f_dn == 3'b001)));
     logic [2:0] move_idx_src_memdst_ext_count;
     assign move_idx_src_memdst_ext_count =
-        3'd1 + memind_bd_words + ((f_move_dst_mode_s == 3'b101) ? 3'd1 : 3'd0);
+        3'd1 + memind_bd_words
+             + (((f_move_dst_mode_s == 3'b101)     // (d16,An): its displacement
+              || (f_move_dst_mode_s == 3'b110))    // (d8,An,Xn): its own ext word
+                ? 3'd1
+              : (f_move_dst_mode_s == 3'b111)
+                ? ((f_dn == 3'b001) ? 3'd2         // (xxx).L: two address words
+                                    : 3'd1)        // (xxx).W: one
+                : 3'd0);
 
     // absolute EA (xxx).W/(xxx).L
     // PC-relative (d16,PC) and (d8,PC,Xn) also use f_mode=111
