@@ -597,6 +597,17 @@ module mh030p_core (
     // single tick. Same handshake shape -- a one-tick start so a stalled cycle
     // cannot retrigger it, which is the bug the (An)+ side effect and the
     // divider both had to be fixed for.
+    // The shifter is sequential now (one bit per tick), so it needs the same
+    // start/busy handshake the multiplier and divider use. mem_got qualifies the
+    // start for the memory-EA shift forms, whose operand is only valid on the
+    // ack tick.
+    wire ex_is_shf = ex_valid && (ex_uop.unit == UU_SHF);
+    reg  shf_started;
+    wire shf_can_start = ex_is_shf && (!ex_uop.reads_mem || mem_got);
+    wire shf_start     = shf_can_start && !shf_started;
+    wire shf_busy;
+    wire ex_wait_shf   = ex_is_shf && (!shf_started || shf_busy);
+
     wire ex_is_mul = ex_valid && (ex_uop.unit == UU_MUL);
     reg  mul_started;
     wire mul_can_start = ex_is_mul && (!ex_uop.reads_mem || mem_got);
@@ -754,7 +765,8 @@ module mh030p_core (
     // sequence is already part-way through its own side effects, so those wait.
     // Deliberately NOT written in terms of stall_ex: stall_ex depends on the
     // exception request, which would depend on this, which is a loop.
-    wire ex_busy_own = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_rte
+    wire ex_busy_own = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_shf
+                    || ex_wait_rte
                     || (ex_is_movem && !mvm_done)
                     || (ex_is_movep && !mvp_done)
                     || (ex_is_cmp2 && !cmp2_done);
@@ -843,7 +855,7 @@ module mh030p_core (
 
     // Everything an instruction waits for that is NOT an exception decision:
     // its own operands, its own multi-cycle sequence. All cheap flags.
-    wire ex_other_stall = ex_wait_mem || ex_wait_div || ex_wait_mul
+    wire ex_other_stall = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_shf
                        || ex_wait_rte || ex_wait_cmp2
                        || (ex_is_movem && !mvm_done)
                        || (ex_is_movep && !mvp_done);
@@ -1616,7 +1628,16 @@ module mh030p_core (
 
     wire [5:0] shf_count = (ex_uop.src_kind == US_IMM) ? ex_uop.imm[5:0]
                                                        : ex_src[5:0];
-    eu_shifter u_shf (
+    // SEQUENTIAL shifter, not rtl/eu_shifter.sv. That module is combinational
+    // and needs ~14 variable-distance barrel shifters, 2,084 cells, all
+    // re-evaluating every cycle whether or not the instruction is a shift. This
+    // one steps a bit per tick with a single fixed 1-bit shift per direction,
+    // and produces identical values and flags. rtl/ keeps eu_shifter unchanged.
+    mh030p_shift u_shf (
+        .clk_4x (clk_4x),
+        .rst_n  (rst_n),
+        .start  (shf_start),
+        .busy   (shf_busy),
         .operand(ex_dst),
         .count  (shf_count),
         .op     (ex_uop.alu_op),
@@ -2093,6 +2114,15 @@ module mh030p_core (
         if (!rst_n)          mul_started <= 1'b0;
         else if (!stall_ex)  mul_started <= 1'b0;
         else if (mul_can_start) mul_started <= 1'b1;
+    end
+
+    // Same shape, and it must be qualified the same way: a *_started flag that
+    // clears only on !ex_valid lingers into the next instruction under zero-gap
+    // dispatch (feedback_sequentializing_combinational_unit, point 3).
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)             shf_started <= 1'b0;
+        else if (!stall_ex)     shf_started <= 1'b0;
+        else if (shf_can_start) shf_started <= 1'b1;
     end
 
     always_ff @(posedge clk_4x or negedge rst_n) begin

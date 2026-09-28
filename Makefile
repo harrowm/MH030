@@ -78,22 +78,22 @@ $(SIM)/eu_mul_div: rtl/eu_mul_div.sv                 tb/eu_mul_div_tb.sv | $(SIM
 
 # MH030-P: the pipelined integer core (P2).
 $(SIM)/mh030p_core: rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-                    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_uop.svh \
+                    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtlp/mh030p_uop.svh \
                     rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
                     rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv rtl/eu_bitfield.sv \
                     tb/mh030p_core_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtl/opcode_fields.sv rtl/eu_alu.sv \
+	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/opcode_fields.sv rtl/eu_alu.sv \
 	    rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv rtl/eu_bitfield.sv \
 	    tb/mh030p_core_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
 # MH030-P: the new pipelined multiplier against the frozen reference.
-$(SIM)/mh030p_mul: rtlp/mh030p_mul.sv rtl/eu_mul_div.sv \
+$(SIM)/mh030p_mul: rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/eu_mul_div.sv \
                    tb/mh030p_mul_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ tb/mh030p_mul_tb.sv \
-	    rtlp/mh030p_mul.sv rtl/eu_mul_div.sv 2>&1 \
+	    rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/eu_mul_div.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
@@ -101,14 +101,14 @@ $(SIM)/mh030p_mul: rtlp/mh030p_mul.sv rtl/eu_mul_div.sv \
 $(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                    rtlp/mh030p_core.sv \
                    rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
-                   rtlp/mh030p_mul.sv \
+                   rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
                    rtlp/mh030p_uop.svh rtl/opcode_fields.sv rtl/eu_alu.sv \
                    rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
                    rtl/eu_bcd.sv tb/mh030p_top_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv \
 	    rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
-	    rtlp/mh030p_mul.sv \
+	    rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
 	    rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv \
 	    rtl/eu_bitops.sv rtl/eu_bcd.sv rtl/eu_bitfield.sv tb/mh030p_top_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
@@ -118,13 +118,13 @@ $(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 # contract as $(SIM)/harte_dat, so scripts/run_harte.py --sim drives either.
 $(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                 rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-                rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_uop.svh \
+                rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtlp/mh030p_uop.svh \
                 rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
                 rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
                 rtl/eu_bitfield.sv tb/cosim_p_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtl/opcode_fields.sv \
+	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/opcode_fields.sv \
 	    rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
 	    rtl/eu_bcd.sv rtl/eu_bitfield.sv tb/cosim_p_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
@@ -132,13 +132,13 @@ $(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 
 $(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                 rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-                rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_uop.svh \
+                rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtlp/mh030p_uop.svh \
                 rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
                 rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
                 rtl/eu_bitfield.sv tb/harte_p_tb.sv | $(SIM)
 	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtl/opcode_fields.sv \
+	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/opcode_fields.sv \
 	    rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
 	    rtl/eu_bcd.sv rtl/eu_bitfield.sv tb/harte_p_tb.sv 2>&1 \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
@@ -344,7 +344,7 @@ sim/harte_vbatch: $(VOBJ_HARTE)/Vharte_verilator_tb | $(SIM)
 # exactly the reason the rtl/ Verilator backend exists.
 RTLP_SRCS := rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
              rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-             rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv \
+             rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
              rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
              rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
              rtl/eu_bitfield.sv
@@ -1057,7 +1057,7 @@ help:
 # instead. See scripts/logic_depth.py's header for the calibration.
 DEPTH_SRC := rtl/opcode_fields.sv rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
              rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
-             rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtl/eu_alu.sv \
+             rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/eu_alu.sv \
              rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
              rtl/eu_bcd.sv rtl/eu_bitfield.sv
 YOSYS_OSS ?= $(HOME)/oss-cad-suite/bin/yosys

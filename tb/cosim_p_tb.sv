@@ -160,8 +160,13 @@ module cosim_p_tb;
     // execution event while rtl/ watches the fetch.
     longint unsigned cyc = 0;
     longint unsigned stop_cyc = 0;
+    // See the note in tb/cosim_grp_tb.sv: EXECUTION completion is the fair
+    // cross-core point, not the fetch of the STOP opcode.
+    longint unsigned exec_cyc = 0;
     logic stop_fetched = 1'b0;
     always_ff @(posedge clk_4x) if (rst_n) cyc <= cyc + 1;
+    always_ff @(posedge clk_4x)
+        if (rst_n && dut.u_core.stopped_r && (exec_cyc == 0)) exec_cyc <= cyc;
     always_ff @(posedge clk_4x) begin
         if (bus_req && !bus_ack && bus_rw && is_ifu) begin
             if ((rdb(bus_addr[23:0]) == 8'h4E && rdb(bus_addr[23:0] + 24'd1) == 8'h72)
@@ -207,6 +212,7 @@ module cosim_p_tb;
         join
 
         $display("CYCLES %0d", stop_cyc);
+        $display("EXECCYCLES %0d", exec_cyc);
         check({grpname, " STOP reached"}, stopped);
         if (check_d0)
             check({grpname, " D0 correct"},

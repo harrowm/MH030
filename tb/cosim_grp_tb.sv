@@ -177,7 +177,14 @@ module cosim_grp_tb;
     // the point each core happens to stop executing would not be like for like.
     longint unsigned cyc = 0;
     longint unsigned stop_cyc = 0;
+    // EXECUTION completion, which is the only fair cross-core point. A
+    // fetch-based event is not: this core's prefetch queue is 4-7 words and
+    // rtlp/'s is 8, so the two run different distances ahead of execution and
+    // "cycle when STOP was fetched" flatters whichever fetches further.
+    longint unsigned exec_cyc = 0;
     always_ff @(posedge clk_4x) if (rst_n) cyc <= cyc + 1;
+    always_ff @(posedge clk_4x)
+        if (rst_n && u_top.u_eu.u_seq.stop_r && (exec_cyc == 0)) exec_cyc <= cyc;
 
     logic stop_seen = 1'b0;
     always_ff @(posedge clk_4x) begin
@@ -228,6 +235,7 @@ module cosim_grp_tb;
         join
 
         $display("CYCLES %0d", stop_cyc);
+        $display("EXECCYCLES %0d", exec_cyc);
         check({grpname, " STOP opcode fetched"}, stop_seen);
         check({grpname, " No address errors"},   ~any_addr_err);
         if (check_d0)

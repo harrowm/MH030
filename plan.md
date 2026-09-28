@@ -4572,3 +4572,95 @@ The pipelined core is roughly **65% faster than the reference at the same
 treatment**, a gap far outside the noise floor. That is the P2 go/no-go answer
 the plan asked for, and it is a clear yes on architecture even though the
 target band is 25-50 MHz and this core sits below it.
+
+## Sequential shifter: 21.60 -> 29.16 MHz (+35%), and into the target band
+
+Plan item 5, narrowed to its strongest form -- not "give the shifter its own
+cycle" but **make it sequential, one bit per tick**, the same shape as the P0
+divider fix. Measured with 9 seeds on both arms:
+
+| arm | n | mean | min | max |
+|---|---|---|---|---|
+| original baseline | 9 | 22.54 | 21.81 | 23.13 |
+| item 2 only (the arm this builds on) | 9 | 21.60 | 20.87 | 22.30 |
+| **+ `mh030p_shift`** | 9 | **29.16** | 28.39 | 30.14 |
+
+**+7.56 MHz on the arm it replaces, +6.62 on the original baseline.** The ranges
+are nowhere near overlapping -- this is five times the 1.4 MHz noise floor and
+the first change in this project's history to clear it by a wide margin. It also
+puts the core **inside the 25-50 MHz target band** for the first time.
+
+### Why it worked, and why the area number is beside the point
+
+`rtl/eu_shifter.sv` is combinational and needs roughly **fourteen
+variable-distance barrel shifters** to be: lsl, lsr, asr plus its sign fill, two
+each for rol and ror, two 33-bit ones each for roxl and roxr, and three mask
+generators of the form `result_mask >> eff_shift`. 2,084 cells, all
+re-evaluating every cycle whether or not the instruction is a shift.
+
+`rtlp/mh030p_shift.sv` steps one bit per tick and needs exactly one fixed 1-bit
+shift per direction, which costs wiring: **220 cells**, a 9.5x reduction on the
+unit. The core itself grew by 874 (the handshake and the extra stall term), so
+design-wide area only fell 4.2%, 30,083 -> 28,827.
+
+**A 4% area reduction bought a 35% clock gain**, which is the clearest
+demonstration yet that cell count is not the metric -- what matters is *what kind*
+of logic leaves the timing graph. A barrel shifter is depth; a mux tree is width.
+
+### Single-bit iteration is the ground truth, which is why it is simpler
+
+The awkward corners of 68k shift semantics need no special cases when you
+iterate, because iteration is what the silicon does:
+
+* `count > size_bits` clearing C and X falls out -- by then the value is zero and
+  every further step shifts a zero out.
+* ROXL/ROXR's period of `size_bits+1` falls out of rotating through X.
+* ASL's V ("the MSB changed at any point during the shift") is a running OR,
+  rather than the reference's windowed-mask reconstruction of the same question.
+
+Only the `count == 0` case is special, and it is latched at start: C clears for
+every op except ROXL/ROXR, which take the current X instead.
+
+`rtl/eu_shifter.sv` is **untouched** and remains the reference; `rtl/` keeps
+using it. The three documented sequentialisation hazards were all applied up
+front (`feedback_sequentializing_combinational_unit`): every output is latched
+with the operands, `start` is qualified by `mem_got` for the memory-EA forms, and
+`shf_started` is qualified by instruction type so it cannot linger into the next
+instruction under zero-gap dispatch.
+
+Verification: full corpus bit-identical at `PASS 702142 FAIL 2 SKIP 281221` with
+the only imperfect suite being ASL.b's two known corpus anomalies -- and the
+corpus contains about two dozen shift suites, so this is strong equivalence
+evidence. `make test` 42/42, decoder sweep clean, `cosim_p` 2/2, `cosim_grp` 8/8,
+`make lint-drivers` clean.
+
+### Throughput cost: not visible on these programs
+
+A shift of count N now costs ~N ticks rather than 1. MC68030UM's own figure is
+6 + 2n, so this is still faster than real silicon, and `rtl/` pays the 6 + 2n.
+Execution-cycle counts on grp0-7 are unchanged at 3.33x faster than `rtl/`, but
+those programs do not stress shift counts, so the cost is simply not
+characterised by them. A shift-heavy benchmark would be needed to quote it.
+
+### The throughput metric, corrected
+
+The first version of the cross-core tick comparison measured "cycle when the
+STOP opcode was fetched". That is **not** a fair point: `rtl/`'s prefetch queue
+is 4-7 words and rtlp's is 8, so they run different distances ahead of execution
+and the metric flatters whichever fetches further. Both testbenches now report
+`EXECCYCLES`, taken from each core's own execution-stop register
+(`u_seq.stop_r` and `u_core.stopped_r`). The corrected numbers give the **same
+3.33x** (1185 vs 356 ticks), so the earlier figure survives -- but on a basis
+that can be defended.
+
+### What this says about where to go next
+
+Three of this project's four large wins now share one shape: remove a big
+always-evaluating arithmetic block from the timing graph (divider 5.8x, cache
+BRAM +37%, shifter +35%). Every local restructuring was unmeasurable, and the two
+array-packing changes were measurably negative.
+
+The obvious next candidate is the same shape: **`eu_bitfield`, 1,459 cells**,
+combinational, always evaluating, serving instructions that are rare and that the
+manual already makes slow. After that the list thins -- `eu_bcd` is only 117
+cells and `eu_alu`'s 592 genuinely must be single-cycle.
