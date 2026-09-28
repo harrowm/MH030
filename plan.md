@@ -4763,3 +4763,45 @@ Caveats that ride along with the 24.3 MHz: it comes from 23-67-tick programs
 (prologue-heavy, no loops or real memory traffic), and both cores were measured
 standalone through the `gen_fmax_wrapper.py` harness rather than in the SoC. A
 real benchmark and SoC integration are what would firm it up.
+
+## Stage 2 (register-file area) -- analysed, and deliberately not done
+
+The measured prize was real: the register file is 9,513 combinational cells,
+~34% of the design, and its cost decomposes as **second write port 2,039**,
+**fourth read port 1,464**, **write-first bypass 1,122**. Together the first two
+are ~12% of the design. Every route to them turned out to be invasive surgery in
+the read or commit network, for an area win with no expected speed benefit:
+
+* **Fourth read port.** It exists solely for `dst_ea_idx_reg`, consumed only via
+  `ex_didx`, for one instruction shape (memory-to-memory MOVE with `(d8,An,Xn)`
+  at the destination). Removing it means time-multiplexing port C, and because
+  the reads are REGISTERED -- address in cycle N, data in N+1 -- that is a
+  **two**-cycle phase, not one: present the destination index, take it a cycle
+  later, then present the source index and take that. It needs a 2-bit phase
+  threaded through `rd_c_sel`, `rd_c_en`, `stall_ag`, the `ag_base_busy`
+  interlock and the AG->EX boundary, plus a 32-bit holding register for the
+  captured index (so the win is ~1,400 not 1,464).
+* **Second write port.** Serialising EXG/LINK/UNLK means committing twice
+  through port 1, and `wb_en` is forced low during a stall, so the commit path
+  itself has to change. The write order also matters: the regfile documents that
+  port 1 must win a same-register conflict because `UNLK A7` sets A7 from An and
+  then pops into An, so the secondary write has to land FIRST.
+* **Write-first bypass on ports C and D** looked like a cheap ~560 cells, on the
+  theory that `ag_base_busy` already interlocks those registers. It does not
+  cover the same hazard: the interlock catches a producer sitting in EX, while
+  the bypass catches a read ISSUED in the very cycle a producer commits, whose
+  value has fallen out of both forwarding levels by the time it is consumed.
+  The regfile's own header justifies it for exactly that case.
+
+**Why stop rather than push.** This session established, with 9 seeds on both
+arms, that cell count is not just a poor proxy for the clock here but an
+*anti*-correlated one: packing the register file and prefetch queue removed
+**17.9%** of the design's combinational cells and measured **1.67 MHz slower**.
+So the 12% buys area alone -- worth having eventually, for headroom to fit an
+FPU, MMU and caches -- while the risk lands squarely on the read/commit network
+that produced the session's one real win (the 29.16 MHz shifter result).
+
+The honest conclusion is that this is the right change at the *wrong time*: it
+belongs with a deliberate area campaign when something actually needs the space,
+not in a speed programme. The numbers above are recorded so it does not have to
+be re-derived.
