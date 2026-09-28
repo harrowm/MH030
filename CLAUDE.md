@@ -1208,7 +1208,33 @@ of area and lost 1.67 MHz -- reverted). What works is removing a large
 +37%, shifter +35%. Next candidate of that shape: `eu_bitfield` (1,459 cells). See
 `plan.md`'s own "Sequential shifter" section.
 
-**Current state**: `make test` 42/42, `make
+**MH030-P throughput + full-format work (a later session)**: **`make bench`**
+(`tests/bench1.s`, loops with real memory traffic, result-checked) is the
+cross-core throughput gate -- the old opcode-group programs are 23-67 ticks and
+prologue-dominated. Result: **rtl/ 23,665 execution ticks vs rtlp/ 6,116 (3.87x),
+8.30x wall-clock, i.e. rtlp equals a real 68030 at ~28.2 MHz**. Both cosim
+testbenches now take `+cycles`/`+settle` and report `EXECCYCLES` from each core's
+own execution-stop register (a fetch-based event is NOT comparable -- the two
+prefetch queues run different distances ahead). **The finding that reframes the
+speed problem: EX is idle 52% of all ticks** (`BUDGET issued=1419 stalled=1544
+idle=3163 redirects=253 fetch=1352 data=258`) -- the front end issues nearly one
+instruction fetch per instruction because 253 taken branches flush the prefetch
+queue every ~5 instructions. **Neither the clock nor the execute pipeline is the
+bottleneck; an instruction cache (plan P6) is worth ~2x throughput**, about as
+much as the entire Fmax programme achieved. Also this session: **full-format
+extension words** are now counted (`uop.ea_full_fmt`, extras from bits 5:4/2:0,
+read via a new `ext_raw` port so the count never depends on the normalised `ext`)
+and **declined** rather than silently decoded as brief format -- `ext[8]` had
+never been tested anywhere in the core. The new full-format sweep pass found a
+real bug in frozen `rtl/`: `m68030_seq.sv`'s `ext_count` for MOVE with an indexed
+EA at BOTH ends counts 2 words in brief format but 1 in full format even for a
+null-bd/no-indirect word, dropping the destination's word (repro: op 0x11b0 with
+ext 0x3110). That pass is REPORTING-ONLY for now, since the reference is not a
+trustworthy oracle there. Register-file area reduction was analysed and
+**deliberately not done** -- see `plan.md`'s Stage 2 section for the numbers and
+why.
+
+**Current state**: `make test` 43/43, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
