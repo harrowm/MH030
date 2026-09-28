@@ -5324,3 +5324,62 @@ Gate: `make test` 43/43, decoder sweep 0 mismatches with the exclusion removed,
 `cosim_grp` 8/8, `cosim_memind` 33/33, `cosim_p` 4/4, `dat-synth` 50/50,
 `make bench` both correct, 124-suite Harte sweep bit-identical at
 `PASS 702142 FAIL 2 SKIP 281221`.
+
+## Stage 4 (caches into rtlp): measured first, and the answer is not what P6 assumed
+
+P6 says to reuse `biu_icache_if.sv` and `biu_cache_if.sv` under the A4 registered-
+dispatch contract. Those modules talk to the whole BIU -- CACR, CDIS#, CBREQ/CBACK
+and `biu_burst_ctrl`, `biu_cycle_gen`'s S-state FSM, `biu_sizing_fsm`'s DSACK
+handling -- so reusing them means giving `rtlp` a real 68030 bus. Measuring what
+that costs, before doing it, changes the conclusion.
+
+**Cost of one bus transaction, measured from the benchmark:**
+
+    rtl/  caches off   24,689 ticks / 1,546 transactions = 16.0 ticks each
+    rtl/  caches on     8,929 ticks /   289 transactions = 30.9 ticks each
+    rtlp/ abstract      6,116 ticks / 1,610 transactions =  3.8 ticks each
+
+A real bus access costs `rtlp` **about four times** what its abstract one does --
+6 S-states at 2 `clk_4x` ticks each is 12 ticks before any dispatch overhead.
+Consequently:
+
+| rtlp configuration | bus transactions | bus ticks alone | vs today's 6,116 total |
+|---|---|---|---|
+| today (abstract, no caches) | 1,610 | ~6,100 | -- |
+| real BIU, no caches | 1,610 | **~25,760** | ~3x WORSE than rtl/ with caches |
+| real BIU + real caches | ~300 | ~4,800 | roughly break-even |
+
+**So for `rtlp` the real BIU and the real caches very nearly cancel out.** The
+1.44x a cache measured earlier exists *because* this core's bus is cheap; a faithful
+bus eats it. Stage 4 as P6 specifies it therefore buys **fidelity, not speed** --
+which is a perfectly good reason to do it, but not the reason recorded.
+
+It also reframes the caches: on the abstract bus they are an optimisation worth
+1.44x, but under A4 they stop being optional. Without them a real-bus `rtlp` is
+three times slower than `rtl/`; with them it is competitive. They pay for the BIU.
+
+### The three real options
+
+**A -- faithful caches plus the real BIU (P6/A4 as written).** Real pins, S-states,
+DSACK, burst, CACR-controlled 256-byte caches, reusing verified `rtl/` modules.
+Throughput roughly unchanged from today. Large effort. Buys architectural fidelity,
+SoC integration and the first real-hardware number.
+
+**B -- a faithful 68030 cache on the existing abstract bus.** 256 bytes, 16 lines x
+4 longwords, CACR bits 0/1/3/2 and 8/9/11/10, write-through, no snooping (matching
+silicon), plus `UC_CACHE` made executable so software can flush. Honest on geometry
+and control, but **not** on fill: with no burst on this bus a 4-longword line costs
+four separate transactions, so a miss costs 8 ticks where the reverted
+longword-per-entry version cost 2. Roughly break-even on sequential code, winning
+only on loops -- i.e. much of the 1.44x comes back only because the line is already
+resident.
+
+**C -- do not cache `rtlp` yet.** Record that the 1.44x is contingent on the cheap
+bus and will evaporate under A4, and spend the effort on the A4 contract itself,
+which is the actual blocker for a hardware number and for the SoC.
+
+**Recommendation: C then A.** Treat the A4 bus contract as the next real piece and
+bring the caches in *with* it, because that is when they stop being a nicety and
+become the thing that makes a faithful-bus `rtlp` viable at all (25,760 -> 4,800
+ticks of bus). Building a cache now tunes a configuration A4 is going to replace,
+and B's unfaithful fill behaviour would have to be undone anyway.
