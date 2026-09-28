@@ -539,6 +539,20 @@ buscmp-p-$(1): $(SIM)/cosim_p winuae/tests/$(1)_ref.log tests/$(1).hex
 endef
 $(foreach t,$(PCOSIM_TARGETS),$(eval $(call PCOSIM_RULE,$(t))))
 
+# Cross-core THROUGHPUT benchmark. tests/bench1.s is loops with real memory
+# traffic, unlike the 23-67 tick opcode-group programs, which are
+# prologue-dominated and measure startup rather than execution. Both cores stop
+# on the same event (their own execution-stop register) and cosim_p also reports
+# where the ticks went.
+.PHONY: bench
+bench: $(SIM)/cosim_grp $(SIM)/cosim_p tests/bench1.hex
+	@echo "-- rtl/ (cycle-accurate)"
+	@$(VVP) $(SIM)/cosim_grp +hexfile=tests/bench1.hex +grp=bench1 \
+	    +cycles=400000 +settle=40000 2>&1 | grep -E "^EXECCYCLES|^PASS|^FAIL"
+	@echo "-- rtlp/ (pipelined)"
+	@$(VVP) $(SIM)/cosim_p +hexfile=tests/bench1.hex +grp=bench1 \
+	    +expected_d0=000007E0 2>&1 | grep -E "^EXECCYCLES|^BUDGET|^PASS|^FAIL"
+
 .PHONY: cosim_p
 cosim_p: $(patsubst %,buscmp-p-%,$(PCOSIM_TARGETS))
 

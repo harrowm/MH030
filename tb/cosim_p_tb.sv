@@ -178,6 +178,29 @@ module cosim_p_tb;
         end
     end
 
+    // ── Tick budget ───────────────────────────────────────────────────────────
+    // Where the cycles actually go, so tick reduction can be aimed rather than
+    // guessed. Counted only while the program is still running.
+    longint unsigned n_stall = 0;    // EX held
+    longint unsigned n_redir = 0;    // taken branch / return: queue flushed
+    longint unsigned n_bus   = 0;    // bus transactions
+    longint unsigned n_issue = 0;    // instructions entering EX
+    longint unsigned n_fetch = 0;    // of which were instruction fetches
+    longint unsigned n_idle  = 0;    // EX had nothing at all -- front end starved
+    always_ff @(posedge clk_4x) begin
+        if (rst_n && !dut.u_core.stopped_r) begin
+            if (dut.u_core.stall_ex)                     n_stall <= n_stall + 1;
+            if (dut.redirect)                            n_redir <= n_redir + 1;
+            if (bus_req && !bus_ack) begin
+                n_bus <= n_bus + 1;
+                if (is_ifu) n_fetch <= n_fetch + 1;
+            end
+            if (rst_n && !dut.u_core.ex_valid)           n_idle  <= n_idle  + 1;
+            if (dut.u_core.ex_valid && !dut.u_core.stall_ex)
+                                                         n_issue <= n_issue + 1;
+        end
+    end
+
     // ── Run control ───────────────────────────────────────────────────────────
     int  fail_count = 0;
     task automatic check(input string name, input logic cond);
@@ -213,6 +236,9 @@ module cosim_p_tb;
 
         $display("CYCLES %0d", stop_cyc);
         $display("EXECCYCLES %0d", exec_cyc);
+        $display("BUDGET issued=%0d stalled=%0d idle=%0d redirects=%0d bus=%0d fetch=%0d data=%0d",
+                 n_issue, n_stall, n_idle, n_redir, n_bus, n_fetch,
+                 n_bus - n_fetch);
         check({grpname, " STOP reached"}, stopped);
         if (check_d0)
             check({grpname, " D0 correct"},

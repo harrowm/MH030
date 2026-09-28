@@ -4805,3 +4805,62 @@ The honest conclusion is that this is the right change at the *wrong time*: it
 belongs with a deliberate area campaign when something actually needs the space,
 not in a speed programme. The numbers above are recorded so it does not have to
 be re-derived.
+
+## Stage 3: a real benchmark, and the finding that reframes the speed problem
+
+`tests/bench1.s` + `make bench`. Three loops with genuine memory traffic -- a
+bus-bound copy, an execute-bound register chain, and an address-generation-bound
+indexed sum -- 64 iterations each, with the result checked (`D0 = 2016`) so a
+wrong answer cannot masquerade as a fast one. This replaces the 23-67 tick
+opcode-group programs, which are prologue-dominated and measure startup.
+
+    benchmark execution ticks:  rtl/ 23,665   rtlp/ 6,116
+      tick ratio        3.87x   (the toy programs said 3.33x)
+      wall-clock ratio  8.30x
+      => rtlp/ equals a real 68030 at 28.2 MHz
+
+So the toy programs were *understating* the advantage. 28.2 MHz-equivalent is the
+number to quote, not 24.3.
+
+Both testbenches needed their fixed budgets made configurable to run this at all
+(`+cycles`, and for `rtl/` a `+settle` -- it fetches the terminating STOP some
+17,000 cycles before it executes it, so the old hardcoded 500-cycle settle
+reported zero).
+
+### Where the 6,116 ticks go, and it is not the execute pipeline
+
+`make bench` now reports the budget:
+
+    issued=1419  stalled=1544  idle=3163  redirects=253  bus=1610
+                                          fetch=1352  data=258
+
+**EX is idle -- nothing to execute at all -- for 3,163 of 6,116 ticks, 52%.**
+And the front end issues **1,352 instruction fetches for 1,419 instructions**,
+nearly one bus transaction per instruction, when a longword fetch supplies two.
+
+The cause is visible in the same line: **253 taken branches**. The loops are 4-7
+instructions long, so a branch flushes the prefetch queue roughly every five
+instructions, discarding everything fetched past it and then refilling from the
+target. The execute pipeline is not the bottleneck and neither is the clock --
+the front end is.
+
+### What that is worth
+
+If fetch overhead vanished, the tick count would fall toward `issued + stalled`
+= ~3,000, i.e. **roughly 2x the throughput**, which at the present 29.16 MHz
+`clk_4x` would be equivalent to a real 68030 at **~56 MHz**.
+
+The fix is the one real 68030 silicon uses and this core does not have: an
+**instruction cache**. 256 bytes, direct-mapped, is enough to make a 4-7
+instruction loop almost entirely fetch-free. That is plan item P6, and it is now
+quantified rather than assumed: it is worth about as much as everything the Fmax
+programme achieved, for a feature that has to be built anyway.
+
+A cheaper intermediate, if P6 is too large to take on directly, is a loop buffer
+-- keep the last N fetched words and satisfy a backward branch from them without
+going to the bus. It captures most of the same win for tight loops specifically.
+
+**This reframes the remaining speed question.** Eleven RTL changes were measured
+against the clock this session for one resolvable win of +35%; the front end is
+sitting on a 2x, it is measurable without any of the Fmax noise, and the work is
+a feature the plan already schedules.

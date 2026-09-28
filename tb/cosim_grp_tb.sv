@@ -205,6 +205,8 @@ module cosim_grp_tb;
 
     // ── Test ─────────────────────────────────────────────────────────────────
     int  fail_count = 0;
+    integer run_cycles;
+    integer settle_cycles;
     task automatic check(input string name, input logic cond);
         if (cond) $display("PASS  %s", name);
         else begin $display("FAIL  %s", name); fail_count++; end
@@ -220,16 +222,24 @@ module cosim_grp_tb;
         #1; rst_n = 1;
 
         if (!$value$plusargs("grp=%s", grpname)) grpname = "grp?";
+        // Configurable, because a real benchmark needs far more than the 8000
+        // that sufficed for the 23-67 tick opcode-group programs.
+        if (!$value$plusargs("cycles=%d", run_cycles)) run_cycles = 8000;
+        if (!$value$plusargs("settle=%d", settle_cycles)) settle_cycles = 500;
 
         check_d0 = $value$plusargs("expected_d0=%h", exp_d0);
 
         fork
             begin : blk_timeout
-                repeat(8000) @(posedge clk_4x);
+                repeat(run_cycles) @(posedge clk_4x);
             end
             begin : blk_stop
                 wait(stop_seen == 1'b1);
-                repeat(500) @(posedge clk_4x);
+                // Settle after the STOP opcode is FETCHED, which this core does
+                // well ahead of executing it. 500 covered the short opcode-group
+                // programs; a real benchmark needs far more, so it is
+                // configurable.
+                repeat(settle_cycles) @(posedge clk_4x);
                 disable blk_timeout;
             end
         join
