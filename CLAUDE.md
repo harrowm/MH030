@@ -1259,9 +1259,16 @@ waiting in its burst state consumes the other's `burst_rdata0..3`. Fixed by
 qualifying both acks with the same grants. Best configuration is now **CACR=$1111
 (both caches, both bursts, NO write allocate): 8,929 ticks vs 24,689 with caches
 off = 2.77x**; write allocate measures SLOWER (10,273) because SRC/DST alias
-exactly. `tests/bench2.s` is the regression, in `make bench` with a D0 check --
-nothing else exercises IBE+DBE together, which is why it went unnoticed; a
-dedicated `tb/cache_tb.sv` unit test would be stronger and is not yet added. Also
+exactly. Two regressions now: `tests/bench2.s`
+(in `make bench`, D0-checked) and **`tb/cache_tb.sv`'s B-1** -- three fresh lines
+read at their last longword under `CACR=$1111`, with address-gated non-vacuity
+monitors, **verified to fail without the fix** (D4 comes back `207c0000`, i.e.
+`MOVEA.L #imm,A0` from B-1's own instruction stream, landing in a data-cache
+line). Writing B-1 surfaced three properties of `cache_tb.sv` worth knowing: test
+blocks chain by `JMP_ABS_L_OP` and the CPU arrives while the PREVIOUS block's
+checks still run, so code must be emitted "up front"; ROM setup and checks live in
+different regions of the same `initial` block and the section comments appear in
+both; and `emit_set_cacr` uses D7 as scratch. Also
 closed a dormant gap: `tb/cosim_grp_tb.sv` lacked `burst_beat_probe` so a burst
 returned the same word four times -- the gap CLAUDE.md called "inapplicable because
 none of those testbenches enable CACR", which stopped being true. **A `rtlp/`-only
