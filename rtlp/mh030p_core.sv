@@ -425,7 +425,11 @@ module mh030p_core (
     // decode, for the same reason no memory RMW's are.
     wire ex_is_alu_mem_wr = ex_valid && (ex_uop.uclass == UC_ALU)
                          && ex_uop.writes_mem && !ex_uop.reads_mem;
-    wire ex_m2m = ex_rmw && (ex_uop.dst_ea_mode != UEA_NONE);
+    // Two memory operands. Not tied to ex_rmw any more: CMPM reads two
+    // addresses and writes NEITHER, so requiring writes_mem left its
+    // destination address uncomputed and its Ax un-incremented.
+    wire ex_m2m = ex_valid && ex_uop.reads_mem
+               && (ex_uop.dst_ea_mode != UEA_NONE);
     // ── Two-address arithmetic through memory ────────────────────────────────
     // SBCD/ABCD and ADDX/SUBX in their -(Ay),-(Ax) form are the only
     // instructions here that READ TWO different addresses and write one:
@@ -433,8 +437,13 @@ module mh030p_core (
     // memory-to-memory MOVE reads one and writes the other, so the existing
     // path is one access short -- it computed with the destination operand it
     // had never fetched.
+    // Which of those need the DESTINATION fetched as well: anything whose
+    // arithmetic uses the destination's old value. A memory-to-memory MOVE does
+    // not, which is the whole distinction -- so it is keyed on class rather than
+    // on the operand kinds, which are identical for both shapes.
     wire ex_m2m_2rd = ex_m2m && ((ex_uop.uclass == UC_BCD)
-                              || (ex_uop.uclass == UC_ADDX));
+                              || (ex_uop.uclass == UC_ADDX)
+                              || (ex_uop.uclass == UC_ALU));
     // An explicit phase, not a set of flags keyed off mem_got: mem_got stays
     // high for the whole stall and so cannot tell "the FIRST read finished" from
     // "the SECOND read finished". Keying the write on it cancelled the second
@@ -1213,7 +1222,7 @@ module mh030p_core (
                     mem_req  <= 1'b1;    // fetch the DESTINATION operand
                     mem_rw   <= 1'b1;
                     mem_addr <= ex_m2m_addr;
-                end else if (bcdm_ph == 2'd2) begin
+                end else if ((bcdm_ph == 2'd2) && ex_uop.writes_mem) begin
                     mem_req   <= 1'b1;   // write the result back to it
                     mem_rw    <= 1'b0;
                     mem_wdata <= ex_commit;
@@ -2209,7 +2218,10 @@ module mh030p_core (
             // The source value has to be kept: mem_hold is about to be
             // overwritten by the destination read.
             if (bcdm_ph == 2'd0) bcdm_src <= mem_rdata;
-            if (bcdm_ph != 2'd3) bcdm_ph  <= bcdm_ph + 2'd1;
+            // CMPM compares and writes nothing, so it retires at the end of the
+            // second READ rather than going on to a write phase.
+            if (bcdm_ph == 2'd1) bcdm_ph <= ex_uop.writes_mem ? 2'd2 : 2'd3;
+            else if (bcdm_ph != 2'd3) bcdm_ph <= bcdm_ph + 2'd1;
         end
     end
 

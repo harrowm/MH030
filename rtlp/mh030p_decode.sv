@@ -1280,6 +1280,12 @@ module mh030p_decode (
                 uop.src_kind    = US_MEM;
                 uop.ea_mode     = UEA_AN_POST;
                 uop.ea_reg      = rn_src_an;
+                // CMPM has TWO memory operands, both postincrementing, and only
+                // the source was described -- so the comparison used whatever
+                // the destination register happened to hold and Ax never moved.
+                uop.dst_kind    = US_MEM;
+                uop.dst_ea_mode = UEA_AN_POST;
+                uop.dst_ea_reg  = {1'b1, f_dn};
                 uop.reads_mem   = 1'b1;
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = 1'b1;
