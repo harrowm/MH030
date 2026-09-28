@@ -187,6 +187,14 @@ typedef struct packed {
                                  // siz is not the transfer size there.
     logic [2:0]  ext_words;      // extension words this instruction consumes,
                                  // so the fetch unit knows how far to drain
+    // FULL-FORMAT suppression bits. A full-format extension word can suppress
+    // the base register (BS, bit 7) and/or the index register (IS, bit 6), so
+    // `(bd,An,Xn)` covers `(bd,Xn)`, `(bd,An)` and a bare `(bd)` too. Brief
+    // format has neither, so these are simply 0 there.
+    logic        ea_bs;
+    logic        ea_is;
+    logic        dst_ea_bs;
+    logic        dst_ea_is;
     logic        ea_full_fmt;    // an EA uses a 68020+ FULL-FORMAT extension
                                  // word. Its extra displacement words ARE
                                  // counted in ext_words, so the instruction
@@ -265,6 +273,10 @@ function automatic uop_t uop_clear();
     u.ext_words    = 3'd0;
     u.subop        = 4'd0;
     u.opnd_word    = 1'b0;
+    u.ea_bs        = 1'b0;
+    u.ea_is        = 1'b0;
+    u.dst_ea_bs    = 1'b0;
+    u.dst_ea_is    = 1'b0;
     u.ea_full_fmt  = 1'b0;
     u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;

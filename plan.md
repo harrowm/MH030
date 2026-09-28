@@ -5233,3 +5233,54 @@ envelope or the check to exclude the documented boundary explicitly.
 Gate: `make test` 43/43, `cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50,
 `make bench` both correct, 124-suite Harte sweep bit-identical at
 `PASS 702142 FAIL 2 SKIP 281221`.
+
+## Stage 2: non-indirect full-format EAs implemented in rtlp
+
+Full-format extension words went from *counted and declined* to **executed**, for
+the case that is plain arithmetic: `I/IS == 000`, no memory indirection, so the
+address is base + base-displacement + scaled index. Genuine memory indirection
+(`([bd,An],Xn,od)`) still declines, because it needs a memory read in the middle of
+address generation and this core has no path for that.
+
+Scoped from evidence rather than guessed. Looking at what the blocked cosim targets
+actually use:
+
+    memind7   ($100,a0,d1.l)       non-indirect full format, word bd
+    memind13  (-$10000,a0,d1.l)    non-indirect full format, long bd
+    memind2   ([$10,a0],d1.l)      GENUINE memory indirect -- still out
+
+What it took:
+
+* `ff_indirect()` / `ff_bd_words()` in the decoder, and `uop.ea_full_fmt` narrowed
+  to mean "full format **and** genuinely indirect" so the arithmetic case becomes
+  executable.
+* The base displacement read from the word(s) following the EA's own extension
+  word, sign-extended for the word form. Brief format's 8-bit displacement lives
+  *inside* the extension word, and full format's low byte means BD SIZE / I/IS
+  instead, so it must not be sign-extended as a displacement.
+* `ea_bs` / `ea_is` (and destination equivalents) for full format's BASE SUPPRESS
+  and INDEX SUPPRESS bits, which is how `(bd,Xn)`, `(bd,An)` and a bare `(bd)` are
+  expressed. The core zeroes `ea_base` and `ag_idx` accordingly.
+
+**Result: the data-order cosim goes from 2 of 67 targets to 4** -- exactly the two
+identified above, which is the confirmation that matters. Both are now in
+`make cosim_p`.
+
+### One real bug, found by trace rather than inspection
+
+The first attempt produced no change at all, and the reason is worth keeping. The
+central EA fill-in recomputed the leading-word offset by subtracting the EA widths
+from `uop.ext_words` -- but by then `ext_words` had already been *increased* by the
+full-format extras, so the offset pointed one word too far and `sxw` read the
+**base-displacement word instead of the EA extension word**. That silently wrecked
+the displacement, the index register and the scale together. The cosim trace showed
+it plainly: `add.l ($100,a0,d1.l),d2` read `A0` with no displacement and no index.
+
+Fixed by computing the leading offset exactly once, from the BRIEF count, and
+having the fill-in reuse it -- along with `ew_dst_at`, the destination's offset,
+which has to step over the source's **full** width including its extras. The brief
+count is the right basis and must stay so: these offsets locate the words that tell
+us how many extras exist, so deriving them from the adjusted total is circular.
+
+Gate: `make test` 43/43, decoder sweep clean, corpus bit-identical at
+`PASS 702142 FAIL 2 SKIP 281221`, `cosim_p` 4/4, `make bench` both correct.

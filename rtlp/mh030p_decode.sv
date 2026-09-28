@@ -57,6 +57,20 @@ module mh030p_decode (
     //   bit 6    IS  (index suppress)
     //   bits 5:4 base displacement size: 01 null, 10 word, 11 long
     //   bits 2:0 I/IS: 000 no memory indirect, x01 null od, x10 word, x11 long
+    // Genuine MEMORY INDIRECTION -- I/IS (bits 2:0) nonzero. That needs a memory
+    // read in the middle of address generation, which this core has no path for,
+    // so it stays declined. I/IS == 000 is "no memory indirect": the EA is just
+    // base + base-displacement + scaled index, which is ordinary arithmetic and is
+    // implemented.
+    function automatic logic ff_indirect(input logic [15:0] w);
+        ff_indirect = (w[2:0] != 3'b000);
+    endfunction
+
+    // Base-displacement words alone (the od words belong to the indirect case).
+    function automatic logic [2:0] ff_bd_words(input logic [15:0] w);
+        ff_bd_words = (w[5:4] == 2'b10) ? 3'd1 : (w[5:4] == 2'b11) ? 3'd2 : 3'd0;
+    endfunction
+
     function automatic logic [2:0] ff_extra(input logic [15:0] w);
         logic [2:0] bd, od;
         begin
@@ -453,9 +467,11 @@ module mh030p_decode (
 
     // ── Decode ──────────────────────────────────────────────────────────────
     // Scratch for the central EA fill-in at the end of the decode block.
-    reg [2:0]  ew_tot, ew_side, ew_pre;
+    reg [2:0]  ew_tot;
+    reg [2:0]  ew_src_total, ew_dst_at;
     reg [2:0]  ew_lead;
     reg [15:0] ew_srcw, ew_dstw;
+    reg [15:0] bd_w1, bd_w2, dbd_w1, dbd_w2;
     reg        src_ff, dst_ff;
     // Set when the single EA slot holds the DESTINATION rather than the source,
     // which happens whenever the source needs no address of its own -- a
@@ -1728,16 +1744,49 @@ module mh030p_decode (
         // Hoisted into variables because Icarus rejects a bit-select applied
         // to a function call.
         ew_srcw = rawword(ew_lead);
-        ew_dstw = rawword(ew_lead + src_ea_words);
 
         src_ff = ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX))
                  && ew_srcw[8];
-        dst_ff = (uop.dst_ea_mode == UEA_AN_IDX) && ew_dstw[8];
 
-        uop.ea_full_fmt = src_ff || dst_ff;
+        // How many words the SOURCE EA really occupies, full-format extras
+        // included -- which is what the DESTINATION's own offset has to step over.
+        ew_src_total = src_ea_words + (src_ff ? ff_extra(ew_srcw) : 3'd0);
+        ew_dst_at    = ew_lead + ew_src_total;
+        ew_dstw      = rawword(ew_dst_at);
+        dst_ff       = (uop.dst_ea_mode == UEA_AN_IDX) && ew_dstw[8];
+
+        // Base displacements follow each EA's own extension word.
+        bd_w1  = rawword(ew_lead + 3'd1);
+        bd_w2  = rawword(ew_lead + 3'd2);
+        dbd_w1 = rawword(ew_dst_at + 3'd1);
+        dbd_w2 = rawword(ew_dst_at + 3'd2);
+
+        // Only GENUINE memory indirection is undecodable here. A full-format word
+        // with I/IS == 000 is plain arithmetic and is handled below.
+        uop.ea_full_fmt = (src_ff && ff_indirect(ew_srcw))
+                       || (dst_ff && ff_indirect(ew_dstw));
+
+        // Full-format base and index suppression.
+        if (src_ff) begin
+            uop.ea_bs = ew_srcw[7];
+            uop.ea_is = ew_srcw[6];
+        end
+        if (dst_ff) begin
+            uop.dst_ea_bs = ew_dstw[7];
+            uop.dst_ea_is = ew_dstw[6];
+        end
         uop.ext_words   = uop.ext_words
                         + (src_ff ? ff_extra(ew_srcw) : 3'd0)
                         + (dst_ff ? ff_extra(ew_dstw) : 3'd0);
+        // The leading count and both EA offsets above were all derived from the
+        // BRIEF word count, which is correct and must stay that way: they locate
+        // the words that TELL us how many extras there are, so deriving them from
+        // the adjusted total would be circular. The central fill-in below reuses
+        // them rather than recomputing -- recomputing from the adjusted total made
+        // sxw read the base-displacement word instead of the EA extension word,
+        // which silently wrecked the displacement, index register and scale
+        // together. Found via a cosim trace: `add.l ($100,a0,d1.l),d2` read A0
+        // with no displacement and no index at all.
 
         // ── Central EA field fill-in ───────────────────────────────────────
         // Deliberately LAST, because it needs uop.ext_words: extension words
@@ -1751,11 +1800,8 @@ module mh030p_decode (
         // Only indices 0-2 are reachable (ext carries two words, q3 the
         // third), which is what ea_disp_valid reports on.
         ew_tot  = uop.ext_words;
-        ew_side = src_ea_words + dst_ea_words;
-        ew_pre  = (ew_tot > ew_side) ? (ew_tot - ew_side) : 3'd0;
-        sxw     = xword(ea_slot_is_dst ? (ew_pre + src_ea_words) : ew_pre,
-                        ew_tot);
-        dxw     = xword(ew_pre + src_ea_words, ew_tot);
+        sxw     = xword(ea_slot_is_dst ? ew_dst_at : ew_lead, ew_tot);
+        dxw     = xword(ew_dst_at, ew_tot);
 
         // Every branch above sets ea_mode; the displacement and index fields
         // are derived from it exactly once, here. Doing it per-branch meant
@@ -1767,10 +1813,17 @@ module mh030p_decode (
             || (uop.ea_mode == UEA_ABS_W))
             uop.ea_disp = {{16{sxw[15]}}, sxw};
         else if ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX))
-            uop.ea_disp = {{24{sxw[7]}}, sxw[7:0]};
+            // Brief format carries an 8-bit displacement in the extension word
+            // itself. Full format carries a base displacement in the NEXT one or
+            // two words instead, and its own low byte means something else
+            // entirely (BD SIZE / I/IS), so it must not be sign-extended as a
+            // displacement.
+            uop.ea_disp = !src_ff                    ? {{24{sxw[7]}}, sxw[7:0]}
+                        : (ff_bd_words(sxw) == 3'd1) ? {{16{bd_w1[15]}}, bd_w1}
+                        : (ff_bd_words(sxw) == 3'd2) ? {bd_w1, bd_w2}
+                                                     : 32'h0;   // null bd
         else if (uop.ea_mode == UEA_ABS_L)
-            uop.ea_disp = {sxw, xword((ea_slot_is_dst
-                                       ? (ew_pre + src_ea_words) : ew_pre)
+            uop.ea_disp = {sxw, xword((ea_slot_is_dst ? ew_dst_at : ew_lead)
                                       + 3'd1, ew_tot)};
         else
             // CLEARED for every mode that has no displacement. The fill-in only
@@ -1796,9 +1849,12 @@ module mh030p_decode (
         if ((uop.dst_ea_mode == UEA_AN_D16) || (uop.dst_ea_mode == UEA_ABS_W))
             uop.dst_ea_disp = {{16{dxw[15]}}, dxw};
         else if (uop.dst_ea_mode == UEA_AN_IDX)
-            uop.dst_ea_disp = {{24{dxw[7]}}, dxw[7:0]};
+            uop.dst_ea_disp = !dst_ff                    ? {{24{dxw[7]}}, dxw[7:0]}
+                            : (ff_bd_words(dxw) == 3'd1) ? {{16{dbd_w1[15]}}, dbd_w1}
+                            : (ff_bd_words(dxw) == 3'd2) ? {dbd_w1, dbd_w2}
+                                                         : 32'h0;
         else if (uop.dst_ea_mode == UEA_ABS_L)
-            uop.dst_ea_disp = {dxw, xword(ew_pre + src_ea_words + 3'd1, ew_tot)};
+            uop.dst_ea_disp = {dxw, xword(ew_dst_at + 3'd1, ew_tot)};
         else
             uop.dst_ea_disp = 32'h0;
 

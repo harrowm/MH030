@@ -524,11 +524,13 @@ $(foreach n,0 1 2 3 4 5 6 7,$(eval $(call GRP_RULE,$(n))))
 # data port where rtl/ issues them on the program port (see plan.md -- rtl/'s FC
 # there is an unoverridden default, so which is right is genuinely open).
 #
-# ONLY TWO TARGETS, and that is the finding rather than the scope. Every other
-# reference log in winuae/tests/ exercises a FULL-FORMAT extension word, which
-# this core does not implement -- see plan.md for why that is currently worse
-# than "absent".
-PCOSIM_TARGETS := smoke timing_preview_idx_current_idx
+# FOUR targets. memind7 and memind13 joined once rtlp gained non-indirect
+# full-format EAs -- they use ($100,a0,d1.l) and (-$10000,a0,d1.l), which are
+# plain base + base-displacement + scaled-index arithmetic. The other 63
+# reference logs need GENUINE memory indirection (a memory read in the middle of
+# address generation, which this core has no path for) or one of the four uop
+# classes rtlp still cannot execute. See plan.md.
+PCOSIM_TARGETS := smoke timing_preview_idx_current_idx memind7 memind13
 
 define PCOSIM_RULE
 buscmp-p-$(1): $(SIM)/cosim_p winuae/tests/$(1)_ref.log tests/$(1).hex

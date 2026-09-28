@@ -1070,8 +1070,12 @@ module mh030p_core (
     // the next instruction, and not the instruction address itself.
     wire ag_pc_rel = (ag_uop.ea_mode == UEA_PC_D16)
                   || (ag_uop.ea_mode == UEA_PC_IDX);
+    // ea_bs is full format's BASE SUPPRESS: the base register (or the PC, for a
+    // PC-relative form) is simply not added, which is how `(bd,Xn)` and a bare
+    // `(bd)` are expressed. Brief format never sets it.
     wire [31:0] ea_base = ((ag_uop.ea_mode == UEA_ABS_W)
                         || (ag_uop.ea_mode == UEA_ABS_L)) ? 32'h0
+                        : ag_uop.ea_bs                    ? 32'h0
                         : ag_pc_rel                       ? ag_pc2
                                                           : ag_b;
     // Predecrement applies to the address used THIS cycle; postincrement
@@ -1087,8 +1091,9 @@ module mh030p_core (
     // base displacement and memory indirection is a later phase.
     wire [31:0] ag_xn   = ag_uop.ea_idx_long ? ag_c
                                              : {{16{ag_c[15]}}, ag_c[15:0]};
-    wire [31:0] ag_idx  = ((ag_uop.ea_mode == UEA_AN_IDX)
-                        || (ag_uop.ea_mode == UEA_PC_IDX))
+    // ea_is is INDEX SUPPRESS, the other half of the same idea.
+    wire [31:0] ag_idx  = (((ag_uop.ea_mode == UEA_AN_IDX)
+                         || (ag_uop.ea_mode == UEA_PC_IDX)) && !ag_uop.ea_is)
                         ? (ag_xn << ag_uop.ea_idx_scale) : 32'h0;
 
     wire [31:0] ea_adj_idx = (ag_uop.ea_mode == UEA_AN_PRE) ? ea_adj : ag_idx;
@@ -1099,7 +1104,8 @@ module mh030p_core (
     // benefit.
     wire [31:0] ag_dxn  = ag_uop.dst_ea_idx_long
                           ? ag_d : {{16{ag_d[15]}}, ag_d[15:0]};
-    wire [31:0] ag_didx = (ag_uop.dst_ea_mode == UEA_AN_IDX)
+    wire [31:0] ag_didx = ((ag_uop.dst_ea_mode == UEA_AN_IDX)
+                           && !ag_uop.dst_ea_is)
                           ? (ag_dxn << ag_uop.dst_ea_idx_scale) : 32'h0;
 
     // Two adds in series from registers, where this was four: (ag_pc + 2), then
@@ -1726,8 +1732,9 @@ module mh030p_core (
                       || (ex_uop.ea_mode == UEA_AN_PRE));
     wire m2m_dst_abs = (ex_uop.dst_ea_mode == UEA_ABS_W)
                     || (ex_uop.dst_ea_mode == UEA_ABS_L);
-    wire [31:0] m2m_base = m2m_dst_abs  ? 32'h0
-                         : !m2m_same_reg ? ex_a_u : ex_src_an_post;
+    wire [31:0] m2m_base = m2m_dst_abs        ? 32'h0
+                         : ex_uop.dst_ea_bs    ? 32'h0   // full format, base suppressed
+                         : !m2m_same_reg       ? ex_a_u : ex_src_an_post;
 
     assign ex_m2m_addr = m2m_base + ex_uop.dst_ea_disp + ex_didx
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
