@@ -1234,6 +1234,23 @@ trustworthy oracle there. Register-file area reduction was analysed and
 **deliberately not done** -- see `plan.md`'s Stage 2 section for the numbers and
 why.
 
+**MH030-P instruction cache (same later session, `rtlp/mh030p_icache.sv`)**: acting
+on the tick-budget finding, a **16-longword (64-byte) direct-mapped I-cache** between
+the fetch unit and the arbiter, with a **same-cycle ack on a hit** (which is why its
+data is NOT in BRAM -- a registered read would make every one of ~1,300 hits two
+ticks and give back most of the win). Tag carries address bit 1 (fetch addresses are
+2-mod-4 after a branch to an odd word address); it snoops the data side to invalidate,
+unlike real 68030 silicon, because the Harte harness writes wherever it likes.
+**Result: benchmark fetches 1,352 -> 43 (-97%), ticks 6,116 -> 4,025 (-34%), idle
+3,163 -> 1,321.** Size was MEASURED -- 16/32/64 entries give identical ticks and
+identical fetch counts, because the loops are 4-7 instructions, so the larger sizes
+paid thousands of cells for nothing (`ENTRIES` is a parameter). Area +13.6%.
+**The cache costs clock: 29.16 -> 27.70 MHz mean, negative on all 9 seeds (-1.46,
+sd 0.80) -- a real effect, not noise.** It is kept anyway, and this is the first
+change in the project accepted while measuring slower on the clock: net throughput
+is **1.44x** and the 68030-equivalent goes **28.2 -> 40.7 MHz**. Judging by Fmax
+alone would have rejected it. Remaining budget: `idle=1321`, `stalled=1295` of 4,025.
+
 **Current state**: `make test` 43/43, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS

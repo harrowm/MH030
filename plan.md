@@ -4933,11 +4933,31 @@ packing measure 1.67 MHz slower in the register file.
 Verified: `make test` 43/43, corpus bit-identical at `PASS 702142 FAIL 2
 SKIP 281221`, `cosim_p` 2/2, `cosim_grp` 8/8, `make lint-drivers` clean.
 
-Timing: the 64-entry variant measured 29.11 and 29.40 MHz on seeds 1-2 against a
-29.16 mean baseline, i.e. neutral, which is the expected result for a mux tree
-that terminates in flip-flops. The 16-entry version shipped here is strictly
-smaller. A full 9-seed sweep was still running at the time of writing -- do not
-quote a final figure until it lands.
+### The clock cost, and the first change that traded it away on purpose
+
+The 9-seed sweep landed and the cache **does** cost clock:
+
+| arm | n | mean | min | max |
+|---|---|---|---|---|
+| before the cache | 9 | **29.16** | 28.39 | 30.14 |
+| with the cache | 9 | **27.70** | 27.09 | 28.41 |
+
+Paired difference **-1.46 MHz, negative on all nine seeds** (sd 0.80), so unlike
+most things measured in this project it is a real effect rather than placement
+noise -- the added mux tree is not free after all, despite terminating in
+flip-flops.
+
+**It is still clearly worth it, and this is the first change here judged on
+throughput rather than clock:**
+
+    time per benchmark run   before 209.7   after 145.3   ->  1.44x net
+    68030-equivalent         28.2 MHz       ->  40.7 MHz
+
+Trading 5% of the clock for 34% fewer ticks is exactly the trade the plan's own
+"the honest metric is Fmax / ticks-per-instruction" line asks for, and it is the
+first time in this project that a change has been accepted while measuring
+*slower* on the clock. Judging it by Fmax alone would have rejected a 1.44x
+throughput win.
 
 ### What remains in the tick budget
 
