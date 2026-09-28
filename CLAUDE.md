@@ -1248,11 +1248,20 @@ already near-optimal** (97.6% of fetches removed). The **D-cache delivers almost
 nothing** on that workload for two legitimate reasons: 128 of 256 accesses are
 write-through writes (unavoidable by design), and the other 128 reads alias exactly
 (index is `addr[7:4]`, so two 256-byte arrays cannot coexist in a 256-byte
-direct-mapped cache) -- WA recovers only 16. **REAL BUG FOUND, not fixed: CACR bit
-12 (data-cache burst) makes the program compute a wrong answer** while its write
-stream still looks correct; instruction burst on the same shared burst controller
-is fine, so the fault is data-side (`biu_cache_if.sv`'s Phase A burst completion +
-`dtrickle_*` sequencer is the place to look, and it needs its own session). Also
+direct-mapped cache) -- WA recovers only 16. **REAL BUG FOUND AND FIXED -- both caches shared one unqualified
+burst ack.** `m68030_biu.sv` gave the D-cache and I-cache the SAME
+`eu_burst_ack`, so both were told any completing burst was theirs, while the
+request side had always been grant-gated (`cg_burst_req_mux` =
+`eu_burst_req | (dc_burst_req && grant_eu) | (ic_burst_req && grant_ifu)`). Either
+burst ALONE is fine (a stray ack hits an idle module whose `state ==
+..._BURST0 && ack` guard fails); **only IBE+DBE together corrupt data**, as a cache
+waiting in its burst state consumes the other's `burst_rdata0..3`. Fixed by
+qualifying both acks with the same grants. Best configuration is now **CACR=$1111
+(both caches, both bursts, NO write allocate): 8,929 ticks vs 24,689 with caches
+off = 2.77x**; write allocate measures SLOWER (10,273) because SRC/DST alias
+exactly. `tests/bench2.s` is the regression, in `make bench` with a D0 check --
+nothing else exercises IBE+DBE together, which is why it went unnoticed; a
+dedicated `tb/cache_tb.sv` unit test would be stronger and is not yet added. Also
 closed a dormant gap: `tb/cosim_grp_tb.sv` lacked `burst_beat_probe` so a burst
 returned the same word four times -- the gap CLAUDE.md called "inapplicable because
 none of those testbenches enable CACR", which stopped being true. **A `rtlp/`-only
