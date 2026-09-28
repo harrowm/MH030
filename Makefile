@@ -1083,12 +1083,24 @@ depth:
 # rtl/-vs-rtlp/ DIFFERENCE is what this measures, and that is the number the
 # go/no-go rests on.
 #
-# SEED is fixed and explicit, never --randomize-seed: an earlier session
-# compared runs that differed only by placement seed and read the ~0.5 MHz
-# spread as an RTL effect. Sweep SEED across at least three values before
-# believing a difference smaller than ~2 MHz.
+# SEED is fixed and explicit, never --randomize-seed. THREE SEEDS IS NOT
+# ENOUGH -- measured directly: the unmodified baseline over seeds 1-9 gives
+# 23.13 22.82 22.84 22.49 23.00 22.64 22.10 21.81 21.99, a range of 1.32 MHz,
+# and seeds 1-3 happen to be its three BEST. Five separate RTL experiments were
+# each measured at seeds 1-3, all landed ~1 MHz "below baseline", and every one
+# of their means sits inside that range -- including one that only DELETED
+# logic, which cannot lengthen a critical path. Use `make fmax-p-sweep` and
+# treat anything under ~2 MHz as unresolved.
 NEXTPNR_OSS ?= $(HOME)/oss-cad-suite/bin/nextpnr-ecp5
 SEED        ?= 1
+# TARGET FREQUENCY. Suspected of mattering -- without --freq, nextpnr
+# constrains an unconstrained clock to 12 MHz and reports "PASS at 12.00 MHz",
+# which looks like it would stop the tool optimising once cleared. TESTED, and
+# it does NOT: the baseline gives bit-identical results at seeds 1/2/3 with and
+# without it, so the ECP5 placer and router are timing-driven regardless and
+# that line is reporting only. Kept because it states the intent and would
+# matter if the design ever exceeded it.
+FREQ        ?= 60
 
 
 .PHONY: fmax-p fmax-rtl
@@ -1109,7 +1121,7 @@ fmax-p:
 # new loop a hard failure instead of a slow mystery. fmax-rtl keeps it: rtl/ is
 # frozen, and this is the recipe every trustworthy measurement of it used.
 	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxp.json \
-	    --seed $(SEED) --timing-allow-fail \
+	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail \
 	    --report $(SIM)/fmaxp_report-$(SEED).json 2>&1 \
 	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
 fmax-rtl:
@@ -1121,6 +1133,24 @@ fmax-rtl:
 	    synth_lattice -family ecp5 -top wrap_fmax; \
 	    write_json $(SIM)/fmaxr.json' -l $(SIM)/fmaxr_yosys.log > /dev/null
 	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxr.json \
-	    --seed $(SEED) --ignore-loops --timing-allow-fail \
+	    --seed $(SEED) --freq $(FREQ) --ignore-loops --timing-allow-fail \
 	    --report $(SIM)/fmaxr_report-$(SEED).json 2>&1 \
 	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF"
+
+# Sweep seeds and report mean/min/max, because one seed says almost nothing and
+# three says less than it appears to (see the SEED note above). SEEDS defaults
+# to 9, which is what it took to see the baseline's real 1.32 MHz spread.
+SEEDS ?= 9
+.PHONY: fmax-p-sweep
+fmax-p-sweep:
+	@rm -f $(SIM)/fmax_sweep.txt
+	@for s in $$(seq 1 $(SEEDS)); do \
+	    v=$$($(MAKE) -s fmax-p SEED=$$s 2>&1 \
+	         | grep -E "Max frequency" | tail -1 \
+	         | grep -oE "[0-9.]+ MHz" | head -1 | cut -d' ' -f1); \
+	    echo "seed $$s: $$v MHz"; echo "$$v" >> $(SIM)/fmax_sweep.txt; \
+	done
+	@python3 -c "import sys; v=[float(x) for x in open('$(SIM)/fmax_sweep.txt')]; \
+	    v.sort(); n=len(v); \
+	    print('n=%d  mean=%.2f  min=%.2f  max=%.2f  range=%.2f MHz' \
+	          % (n, sum(v)/n, v[0], v[-1], v[-1]-v[0]))"

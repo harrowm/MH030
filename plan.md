@@ -4249,3 +4249,82 @@ properly rather than a workaround.
 So the next phase is: positional access off `ext_raw`, then reject-or-implement
 full format. It unblocks ~60 of the 67 cosim targets, which are the only tests
 in the project that can see memory access order at all.
+
+## Five Fmax hypotheses, and the measurement that invalidated all five verdicts
+
+Ran the loop the plan asks for -- checkpoint, implement, measure, accept or
+roll back -- five times. **Every one came back ~1 MHz "below baseline", and
+that turned out to be an artefact of the measurement, not a property of any of
+the changes.**
+
+| # | hypothesis | 3-seed mean | first verdict | real verdict |
+|---|---|---|---|---|
+| 1 | precompute BSR/JSR return address into a register | 21.68 | reject | unresolved |
+| 2 | carry-save the 3-input `ag_ea` adder | 22.04 | reject | unresolved |
+| 3 | pass `--freq` so nextpnr targets a real frequency | 22.93 | no effect | **confirmed** no effect |
+| 4 | remove `eu_mul_div`'s multiply logic from the netlist | 21.49 | reject | unresolved |
+| 5 | (not reached -- superseded by the finding below) | -- | -- | -- |
+
+Hypothesis 4 is what broke it open. It only **deletes** logic -- a LUT-mapped
+16x16 multiplier -- and deleting logic cannot lengthen a critical path. Measuring
+it 1.4 MHz slower was impossible, so the measurement was wrong, not the change.
+
+### The real number: the baseline's own spread is 1.32 MHz, not ~0.5
+
+Measured directly, the unmodified baseline over nine placement seeds:
+
+    23.13  22.82  22.84  22.49  23.00  22.64  22.10  21.81  21.99
+    min 21.81   max 23.13   range 1.32 MHz   mean 22.54
+
+**Seeds 1, 2 and 3 are its three best.** Every hypothesis was measured at seeds
+1-3 against a "baseline" of 22.93 that was really the top of the distribution,
+and every hypothesis' mean (21.49-22.04) sits inside the baseline's own range.
+The earlier reasoning -- "the ranges do not overlap, so the difference is real"
+-- was wrong in a specific way worth naming: **varying the seed samples
+placement variation within a FIXED netlist, and says nothing about the
+netlist-to-netlist variation that any RTL edit introduces.** Three seeds of each
+is not a controlled comparison.
+
+`make fmax-p-sweep` (SEEDS=9) now reports mean/min/max, and the recipe's own
+comment carries the numbers so the next person does not redo this.
+
+### This retroactively weakens two verdicts recorded earlier in this session
+
+The prefetch-queue head-pointer change and the `ext_words` chain-to-case change
+were both rolled back on exactly this basis -- 3 seeds each, "non-overlapping
+ranges". Their means (21.80 and 21.69) also sit inside the baseline's 9-seed
+range, so **neither is established as a regression.** Both remain rolled back,
+which is still the right call on a different ground -- neither showed a
+*benefit* either, and the simpler existing code is preferable absent evidence --
+but the comments left in `mh030p_ifu.sv` and `mh030p_decode.sv` overstate the
+case and have been corrected to say "unresolved" rather than "measured slower".
+
+What survives unchanged from that episode is the narrower, still-valid point:
+**the logic-depth proxy is not evidence.** It liked both changes; neither was
+shown to help. It counts levels without knowing which endpoints have slack.
+
+### One genuine code finding, independent of timing
+
+`eu_mul_div`'s multiply logic reaches the `rtlp/` netlist as a **LUT-mapped
+16x16 multiplier**, even though `mh030p_core.sv` ties its `op[2]` high (divide
+only, `MUL_*` are ops 0-3) and every real multiply goes through `mh030p_mul`
+instead. `MULT18X18D` count is exactly 5, which is `mh030p_mul`'s own five
+17x17 partial products -- so `u_md`'s surviving product got no DSP and sits in
+LUTs. Yosys's log shows it being narrowed (`Removed top 16 bits (of 32) from
+port A`) rather than removed.
+
+That is real dead area whether or not it costs frequency. Fixing it cleanly
+means not instantiating `eu_mul_div`'s multiplier from `rtlp/` at all -- a
+divide-only variant, or an opt-out parameter on the frozen module defaulting to
+"on" so `rtl/` is unaffected. Not done here: the measurement cannot currently
+show whether it is worth anything, and `rtl/` is frozen.
+
+### Where this leaves Fmax
+
+**22.54 MHz mean (21.81-23.13) standalone**, against the 25-50 MHz target. The
+honest position is that this measurement cannot resolve a change worth less than
+about 2 MHz, so the remaining route is not incremental restructuring -- it is
+either a change large enough to clear that bar (the kind that has actually paid:
+a combinational loop removed, a combinational divider made sequential, cache
+arrays given real BRAM) or a better measurement, e.g. sweeping many seeds on
+both arms of every comparison rather than three.
