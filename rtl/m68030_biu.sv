@@ -782,7 +782,24 @@ module m68030_biu #(
         .dc_burst_ciin1 (cg_burst_ciin1),
         .dc_burst_ciin2 (cg_burst_ciin2),
         .dc_burst_ciin3 (cg_burst_ciin3),
-        .dc_burst_ack   (eu_burst_ack),
+        // QUALIFIED BY THE GRANT. This was the unqualified eu_burst_ack, and so
+        // was the I-cache's own ic_burst_ack below -- both caches were told that
+        // ANY completing burst was theirs. The request side has always been
+        // grant-gated (cg_burst_req_mux uses dc_burst_req && grant_eu and
+        // ic_burst_req && grant_ifu); the ack side simply was not, and the
+        // asymmetry is the bug.
+        //
+        // Harmless while only ONE of CACR's two burst-enable bits was set: the
+        // stray ack reaches a module sitting in an idle state, whose own
+        // `state == ..._BURST0 && ack` guards then fail. With BOTH set it
+        // corrupts data -- a cache waiting in its burst state consumes the OTHER
+        // cache's burst_rdata0..3 as its own line fill. Found by enabling the
+        // caches for the first time (tests/bench2.s): IBE alone and DBE alone
+        // both give correct answers, IBE+DBE together does not.
+        //
+        // The arbiter holds a grant for the whole bus cycle, and a burst is one
+        // bus cycle, so the grant still identifies the owner when the ack lands.
+        .dc_burst_ack   (eu_burst_ack && grant_eu),
         .dc_burst_berr  (eu_burst_berr),
         .cacr        (cacr),
         .caar        (caar),
@@ -906,7 +923,8 @@ module m68030_biu #(
         .ic_burst_rdata3(eu_burst_rdata3),
         .ic_burst_beat  (cg_eu_burst_beat),
         .ic_burst_beat_at_berr (cg_eu_burst_beat_at_berr),
-        .ic_burst_ack   (eu_burst_ack),
+        // Grant-qualified for the same reason; see dc_burst_ack above.
+        .ic_burst_ack   (eu_burst_ack && grant_ifu),
         .ic_burst_berr  (eu_burst_berr),
         .tc             (tc),
         .cdis_n         (cdis_s),

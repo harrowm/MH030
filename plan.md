@@ -5060,3 +5060,69 @@ active, so a no-op for every existing test). Gate confirms: `make test` 43/43,
    68030.
 5. **For `rtlp/`, P6 is now quantified**: reusing these caches is worth ~2.7x on the
    fetch side, which is far more than the entire Fmax programme achieved.
+
+## The data-burst bug: both caches shared one unqualified burst ack
+
+Diagnosed and **fixed**. My first characterisation of this was wrong and worth
+correcting: I reported it as "data-cache burst returns bad data, instruction burst
+on the same controller is fine, so the fault is data-side". Narrowing the CACR
+bits showed something else entirely:
+
+| CACR | IBE | DBE | ticks | D0 |
+|---|---|---|---|---|
+| `0101` | 0 | 0 | 9,360 | correct |
+| `1101` | 0 | **1** | 8,941 | correct |
+| `1111` | **1** | **1** | 6,582 | **WRONG** |
+| `2111` | **1** | 0 | 9,185 | correct |
+
+**Data burst alone is fine, and faster. Instruction burst alone is fine. Only
+both together fail.** So it was never a data-side fault -- it was the two clients
+of the single shared burst controller interfering.
+
+### Root cause
+
+`rtl/m68030_biu.sv`, lines 785 and 909:
+
+    .dc_burst_ack   (eu_burst_ack),     // D-cache
+    .ic_burst_ack   (eu_burst_ack),     // I-cache
+
+**Both caches were told that ANY completing burst was theirs.** The request side
+has always been grant-gated -- `cg_burst_req_mux` is
+`eu_burst_req | (dc_burst_req && grant_eu) | (ic_burst_req && grant_ifu)` -- and
+the ack side simply was not. That asymmetry is the whole bug.
+
+Why it survived: with only one burst-enable bit set, only one client ever has a
+burst outstanding, so the stray ack reaches a module sitting in an idle state and
+its own `state == ..._BURST0 && ack` guard fails harmlessly. With both set, a
+cache waiting in its burst state consumes the OTHER cache's `burst_rdata0..3` as
+its own line fill.
+
+Fixed by qualifying both acks with the same grants the request side uses. The
+arbiter holds a grant for the whole bus cycle and a burst is one bus cycle, so
+the grant still identifies the owner when the ack lands.
+
+    CACR=1111  before: D0 WRONG      after: 8,929 ticks, D0 correct
+    CACR=3111  before: never completed  after: 10,273 ticks, D0 correct
+
+### What the caches are worth, finally
+
+    caches off (CACR=0000)                 24,689 ticks
+    best configuration (CACR=1111)          8,929 ticks   ->  2.77x
+
+Write allocate (`3111`) measures **slower** at 10,273, for the aliasing reason
+above: allocating on write evicts the line the next read needs when SRC and DST
+map to identical lines. So the best setting for this workload is both caches and
+both bursts, no write allocate.
+
+### Verification
+
+Full mandatory gate, since this is a change to frozen `rtl/`: `make test` 43/43,
+`cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50, `lint-drivers` clean,
+and the **124-suite Harte sweep bit-identical at `PASS 702142 FAIL 2
+SKIP 281221`**.
+
+`tests/bench2.s` is now the regression, wired into `make bench` with its own D0
+check -- nothing else in the repo exercises IBE and DBE together, which is exactly
+why this went unnoticed. A dedicated unit test in `tb/cache_tb.sv` (both bursts
+enabled, data integrity checked) would be the stronger net and is **not** added
+here.

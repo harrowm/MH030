@@ -545,11 +545,17 @@ $(foreach t,$(PCOSIM_TARGETS),$(eval $(call PCOSIM_RULE,$(t))))
 # on the same event (their own execution-stop register) and cosim_p also reports
 # where the ticks went.
 .PHONY: bench
-bench: $(SIM)/cosim_grp $(SIM)/cosim_p tests/bench1.hex
+bench: $(SIM)/cosim_grp $(SIM)/cosim_p tests/bench1.hex tests/bench2.hex
 	@echo "-- rtl/ (cycle-accurate)"
 	@$(VVP) $(SIM)/cosim_grp +hexfile=tests/bench1.hex +grp=bench1 \
 	    +cycles=400000 +settle=40000 2>&1 | grep -E "^EXECCYCLES|^PASS|^FAIL"
-	@echo "-- rtlp/ (pipelined)"
+	@echo "-- rtl/ with its OWN caches enabled (CACR=\$$1111)"
+	@echo "   also the regression for the burst-ack bug: both caches were given"
+	@echo "   the same unqualified eu_burst_ack, so D0 came out wrong."
+	@$(VVP) $(SIM)/cosim_grp +hexfile=tests/bench2.hex +grp=bench2 \
+	    +cycles=400000 +settle=40000 +expected_d0=000007E0 2>&1 \
+	    | grep -E "^EXECCYCLES|D0 correct|^FAIL"
+	@echo "-- rtlp/ (pipelined, no caches)"
 	@$(VVP) $(SIM)/cosim_p +hexfile=tests/bench1.hex +grp=bench1 \
 	    +expected_d0=000007E0 2>&1 | grep -E "^EXECCYCLES|^BUDGET|^PASS|^FAIL"
 

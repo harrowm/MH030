@@ -7,21 +7,27 @@
 ; comparison unfair to rtl/ and means this project has never measured what its
 ; own caches are worth.
 ;
-; CACR = $2111: bit 0 EI (instruction cache), bit 8 ED (data cache),
-; bit 13 WA (write allocate), bit 4 IBE (instruction burst).
+; CACR = $1111: bit 0 EI (instruction cache), bit 4 IBE (instruction burst),
+; bit 8 ED (data cache), bit 12 DBE (data burst). This is the fastest measured
+; configuration: 24,689 ticks with the caches off, 8,929 with this.
 ;
-; bit 12 DBE (DATA burst) is deliberately NOT set, and not for a testbench
-; reason: it produces a WRONG ANSWER. With $3111 this program's own D0 check
-; fails and execution never completes, while the write stream still looks
-; correct -- so a data-cache burst fill is returning bad data. A real bug in
-; rtl/, found the moment anything enabled the caches. Instruction burst on the
-; same shared burst controller works fine (misses 33 -> 17), which is what makes
-; it specifically a data-side fault.
+; bit 13 WA (write allocate) is deliberately NOT set. It measures SLOWER here
+; (10,273), because this program's SRC and DST alias exactly -- the D-cache index
+; is addr[7:4], so 0x1000 and 0x1400 map to identical lines -- and allocating on
+; write then evicts the very line the next read needs.
 ;
-; tb/cosim_grp_tb.sv needed burst_beat_probe added before any of this could be
-; measured -- one of the dormant gaps CLAUDE.md records as "structurally
-; inapplicable because none of those testbenches enable CACR", which stopped
-; being true here.
+; THIS PROGRAM IS ALSO THE REGRESSION FOR A REAL BUG IT FOUND. With IBE and DBE
+; both set, m68030_biu.sv gave BOTH caches the same unqualified eu_burst_ack, so
+; a burst completing for one was consumed by the other as its own line fill, and
+; this program's D0 check failed. Either burst alone was fine, which is why it
+; survived: the stray ack reached a module in an idle state whose own
+; `state == ..._BURST0 && ack` guard then failed. Now grant-qualified, matching
+; how the request side was already gated.
+;
+; Getting this far also needed burst_beat_probe added to tb/cosim_grp_tb.sv --
+; one of the dormant gaps CLAUDE.md records as "structurally inapplicable
+; because none of those testbenches ever enable CACR", which stopped being true
+; the moment this file did.
 ;
 ; Otherwise identical to bench1.s, so the two are directly comparable.
 
@@ -35,7 +41,7 @@ N       equ     64
 
 start:
         ; ── enable both caches ─────────────────────────────────────────────
-        move.l  #$00002111,d0
+        move.l  #$00001111,d0
         movec   d0,cacr
 
         ; ── fill the source block: N longwords, value = index ──────────────
