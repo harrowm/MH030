@@ -22,6 +22,13 @@ module mh030p_core_tb;
 
     logic [15:0] instr = 16'h0;
     logic [31:0] ext   = 32'h0;
+    // The core now takes the UNNORMALISED extension words as well, because the
+    // full-format check has to read a specific word by position and `ext`'s
+    // layout depends on ext_words (see mh030p_decode.sv's ext_raw port). This
+    // testbench drives `ext` in the EU's normalised convention -- a single word
+    // in the LOW half -- so the raw form is that word moved back to the high
+    // half. A two-word `ext` already matches the raw layout.
+    wire [31:0] ext_raw = (ext[31:16] == 16'h0) ? {ext[15:0], 16'h0} : ext;
     logic [15:0] q3    = 16'h0;
     logic        instr_valid = 1'b0;
     wire         instr_ready;
@@ -56,7 +63,7 @@ module mh030p_core_tb;
 
     mh030p_core dut (
         .clk_4x(clk_4x), .rst_n(rst_n),
-        .instr(instr), .ext(ext), .q3(q3),
+        .instr(instr), .ext(ext), .ext_raw(ext_raw), .q3(q3),
         .instr_valid(instr_valid), .instr_ready(instr_ready),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .pc_in(pc_in), .redirect(redirect), .redirect_pc(redirect_pc),

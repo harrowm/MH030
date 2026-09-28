@@ -52,6 +52,10 @@ module mh030p_core (
     // presented directly so the pipeline below can be measured and tested.
     input  wire [15:0] instr,
     input  wire [31:0] ext,
+    // Unnormalised extension words, passed straight through to the decoder --
+    // see the note on its own ext_raw port for why the full-format check cannot
+    // read them from `ext`.
+    input  wire [31:0] ext_raw,
     input  wire [15:0] q3,
     input  wire        instr_valid,
     output wire        instr_ready,   // core can accept an instruction this cycle
@@ -96,6 +100,7 @@ module mh030p_core (
     // ── Decode (combinational) ──────────────────────────────────────────────
     uop_t dec_uop;
     mh030p_decode u_dec (
+        .ext_raw (ext_raw),
         .instr (instr),
         .ext   (ext),
         .q3    (q3),
@@ -210,7 +215,14 @@ module mh030p_core (
     // immediate feeding one -- which is exactly what ea_disp_valid reports.
     wire dec_m2m_disp_ok = dec_uop.ea_disp_valid;
 
-    wire dec_executable = dec_uop.valid
+    // A FULL-FORMAT extension word is counted (so the instruction stream stays
+    // intact) but not executed. Before this, ext[8] was never tested anywhere in
+    // the core: a full-format EA was claimed and decoded AS IF brief, reading a
+    // base-displacement size field and an I/IS field as though they were a scale
+    // and an index register -- a wrong address, silently. Declining it is the
+    // honest behaviour until the addressing mode is actually implemented.
+    wire dec_executable = !dec_uop.ea_full_fmt
+                       && dec_uop.valid
                        && ((dec_uop.uclass == UC_ALU)   || (dec_uop.uclass == UC_MOVE)
                         || (dec_uop.uclass == UC_MOVEQ) || (dec_uop.uclass == UC_ADDQ)
                         || (dec_uop.uclass == UC_SHIFT)

@@ -33,11 +33,16 @@ module uop_decode_equiv_tb;
     uop_t        uop;
 
     logic [15:0] q3w;
+    // ext_raw is driven independently of ext so the two properties below can be
+    // separated: the DISPLACEMENT fields depend on `ext`'s normalised layout,
+    // while ext_words must depend only on instr/ext_raw/q3.
+    logic [31:0] ext_rawv;
     mh030p_decode u_new (
-        .instr (instr),
-        .ext   (ext),
-        .q3    (q3w),
-        .uop   (uop)
+        .instr  (instr),
+        .ext    (ext),
+        .ext_raw(ext_rawv),
+        .q3     (q3w),
+        .uop    (uop)
     );
 
     // ── Old decoder, driven through eu_seq's decode inputs ──────────────────
@@ -149,6 +154,11 @@ module uop_decode_equiv_tb;
     // ── Sweep ───────────────────────────────────────────────────────────────
     integer claimed, agreed, mismatches, old_only;
     integer ext_alt_bad;
+    integer ffv;
+    integer ff_checked = 0;
+    integer ff_bad = 0;
+    integer ff_grp [0:15];
+    logic [15:0] ffw;
     logic [2:0] ew_ref;
     integer gap_by_group [0:15];
     integer gap_sample_n  [0:15];
@@ -201,7 +211,9 @@ module uop_decode_equiv_tb;
         // check would have reported ~4,500 opcodes of that known gap and drowned
         // every real miscount. 0xA4A5 differs only in that bit and is still
         // asymmetric against the low half.
+        for (ffv = 0; ffv < 16; ffv = ffv + 1) ff_grp[ffv] = 0;
         ext = 32'hA4A5_3C7F;
+        ext_rawv = 32'hA4A5_3C7F;
         q3w = 16'h5A91;
         rst_n = 1'b0;
         repeat (2) @(posedge clk_4x);
@@ -303,31 +315,36 @@ module uop_decode_equiv_tb;
             $finish;
         end
 
-        // ── ext_words must be a function of the OPCODE alone ────────────────
+        // ── ext_words must not depend on the NORMALISED ext ─────────────────
         // mh030p_top relies on this: the peek decoder that tells the fetch unit
         // how many words to drain is fed ext_raw rather than the fetch unit's
         // own ext, because ext is muxed BY ext_words and taking it there closes
-        // a combinational cycle (a false one, precisely because of this
-        // property -- but place-and-route unrolls it regardless, and it cost
-        // 78% of the core's worst path). If a future decode branch ever derives
-        // ext_words from an extension word, the top level would silently drain
-        // the wrong number. So check it here, where it is cheap: decode every
-        // opcode twice with unrelated ext/q3 and require the same count.
+        // a combinational cycle (a false one, but place-and-route unrolls it
+        // regardless, and it cost 78% of the core's worst path).
+        //
+        // The property was originally stated as "ext_words is a function of the
+        // OPCODE alone", which was true while only the brief format was counted.
+        // It is not true any more and must not be: a full-format extension word
+        // carries extra displacement words, and they have to be counted or the
+        // instruction stream derails. The real requirement -- the one the
+        // loop-break actually needs -- is the narrower one checked here:
+        // ext_words must not depend on the NORMALISED `ext`. So this varies
+        // `ext` while holding instr, ext_raw and q3 fixed.
         ext_alt_bad = 0;
         for (i = 0; i < 65536; i = i + 1) begin
             instr = i[15:0];
-            ext = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
+            ext = 32'hA4A5_3C7F; #1;
             ew_ref = uop.ext_words;
-            ext = 32'h5B5A_C380; q3w = 16'hA56E; #1;
+            ext = 32'h5B5A_C380; #1;
             if (uop.ext_words !== ew_ref) begin
                 if (ext_alt_bad < 10)
-                    $display("EXTWORDS-NOT-OPCODE-ONLY op=%04h %0d vs %0d",
+                    $display("EXTWORDS-DEPENDS-ON-NORMALISED-EXT op=%04h %0d vs %0d",
                              instr, ew_ref, uop.ext_words);
                 ext_alt_bad = ext_alt_bad + 1;
             end
         end
-        ext = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
-        $display("  ext_words opcode-only: %s (%0d opcodes differ)",
+        ext = 32'hA4A5_3C7F; #1;
+        $display("  ext_words independent of normalised ext: %s (%0d differ)",
                  (ext_alt_bad == 0) ? "yes" : "NO", ext_alt_bad);
 
         for (i = 0; i < 65536; i = i + 1) begin
@@ -454,6 +471,63 @@ module uop_decode_equiv_tb;
             end
         end
 
+        // ── FULL-FORMAT extension-word count ────────────────────────────────
+        // The pass above runs with bit 8 CLEAR, i.e. brief format everywhere,
+        // which is deliberate (see the note at the drive) but it means the
+        // full-format count was never checked at all -- and it was wrong, in the
+        // way that derails the instruction stream rather than giving a wrong
+        // answer. This pass drives a genuine full-format word and compares the
+        // count against the reference sequencer, which does implement it.
+        //
+        // The words are driven SYMMETRICALLY -- both halves of ext and ext_raw
+        // and q3 all the same -- so that whichever position either side reads as
+        // "the EA's extension word", it sees the same value. That removes
+        // positional ambiguity from the comparison, which is about the COUNT.
+        for (ffv = 0; ffv < 3; ffv = ffv + 1) begin
+            case (ffv)
+                // bit 8 set in each; bd size in [5:4], I/IS in [2:0].
+                0: ffw = 16'h3110;   // null bd, no memory indirect -> +0 words
+                1: ffw = 16'h3122;   // word bd, word od            -> +2 words
+                default: ffw = 16'h3133;  // long bd, long od        -> +4 words
+            endcase
+            ext = {ffw, ffw}; ext_rawv = {ffw, ffw}; q3w = ffw;
+            for (i = 0; i < 65536; i = i + 1) begin
+                instr = i[15:0]; #1;
+                if (uop.valid && (uop.uclass != UC_UNIMPL)
+                              && (uop.uclass != UC_INVALID) && old_valid) begin
+                    ff_checked = ff_checked + 1;
+                    if (uop.ext_words !== old_ext_words) begin
+                        if (ff_bad < 12)
+                            $display("FF-EXTWORDS op=%04h ffw=%04h new=%0d old=%0d",
+                                     instr, ffw, uop.ext_words, old_ext_words);
+                        ff_bad = ff_bad + 1;
+                        ff_grp[i[15:12]] = ff_grp[i[15:12]] + 1;
+                    end
+                end
+            end
+        end
+        ext = 32'hA4A5_3C7F; ext_rawv = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
+        $display("  full-format ext_words: %0d checked, %0d disagreement(s)",
+                 ff_checked, ff_bad);
+        $write("    disagreements by opcode group:");
+        for (ffv = 0; ffv < 16; ffv = ffv + 1)
+            if (ff_grp[ffv] != 0) $write("  %1h:%0d", ffv[3:0], ff_grp[ffv]);
+        $display("");
+        // REPORTING ONLY, deliberately. The reference is NOT trustworthy here:
+        // for MOVE with an indexed EA at BOTH ends it counts 2 words in brief
+        // format but only 1 once the source word is full format, even for a
+        // null-bd/no-memory-indirect word that needs exactly as many words as
+        // brief -- so it drops the DESTINATION's extension word and would drain
+        // one word short. Confirmed directly:
+        //     op 0x11b0 brief   new=2 old=2   (agree)
+        //     op 0x11b0 ff 3110 new=2 old=1   (reference loses the dst word)
+        //     op 0x2e34 ff 3110 new=1 old=1   (indexed source only: agree)
+        // That is a genuine bug in frozen rtl/, of the stream-derailment class
+        // this project has hit repeatedly. Fixing it there needs its own full
+        // gate including the 124-suite sweep, so it is recorded rather than
+        // silently matched -- and until it is resolved this check cannot be a
+        // hard gate in either direction. See plan.md.
+
         $display("");
         $display("claimed by new decoder : %0d", claimed);
         $display("  agreed with old      : %0d", agreed);
@@ -474,7 +548,7 @@ module uop_decode_equiv_tb;
                 end
         $display("");
         if (ext_alt_bad != 0) begin
-            $display("=== %0d opcode(s) derive ext_words from an extension word ===",
+            $display("=== %0d opcode(s) derive ext_words from the NORMALISED ext ===",
                      ext_alt_bad);
             $fatal(1);
         end

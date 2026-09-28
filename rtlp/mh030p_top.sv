@@ -63,7 +63,8 @@ module mh030p_top (
     // clock: 78% of the core's worst path, 151 of its 179 hops, before this.
     uop_t peek;
     mh030p_decode u_peek (
-        .instr(if_instr), .ext(if_ext_raw), .q3(if_q3), .uop(peek)
+        .instr(if_instr), .ext(if_ext_raw), .ext_raw(if_ext_raw),
+        .q3(if_q3), .uop(peek)
     );
 
     // Issue only once the whole instruction is in the queue.
@@ -83,7 +84,7 @@ module mh030p_top (
 
     mh030p_core u_core (
         .clk_4x(clk_4x), .rst_n(rst_n),
-        .instr(if_instr), .ext(if_ext), .q3(if_q3),
+        .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
         .ipl(ipl),
         .instr_valid(have_all), .instr_ready(core_ready),
         .pc_in(if_pc), .redirect(redirect), .redirect_pc(redirect_pc),

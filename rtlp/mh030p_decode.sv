@@ -27,9 +27,44 @@
 module mh030p_decode (
     input  wire [15:0] instr,
     input  wire [31:0] ext,      // extension words, EU convention (see below)
+    // The SAME two words WITHOUT the one-word normalisation `ext` carries.
+    // Needed because the full-format check has to read a specific extension
+    // word by POSITION, and `ext`'s layout depends on ext_words -- reading the
+    // full-format bits from it would make ext_words depend on itself.
+    // ext_raw and q3 are plain queue registers, so indexing them is free of
+    // that circularity, and it is also what keeps mh030p_top's peek decoder out
+    // of a combinational loop (see the note on `ext` in mh030p_ifu.sv).
+    input  wire [31:0] ext_raw,
     input  wire [15:0] q3,       // third extension word
     output uop_t       uop
 );
+
+    // ── Positional extension-word access, normalisation-free ────────────────
+    // Word 0 and 1 come from ext_raw's two halves, word 2 from q3. No dependence
+    // on ext_words, by construction.
+    function automatic logic [15:0] rawword(input logic [2:0] i);
+        case (i)
+            3'd0:    rawword = ext_raw[31:16];
+            3'd1:    rawword = ext_raw[15:0];
+            default: rawword = q3;
+        endcase
+    endfunction
+
+    // A 68020+ FULL-FORMAT extension word carries extra displacement words that
+    // a brief-format one does not, and miscounting them does not produce a wrong
+    // answer -- it derails the instruction stream. Layout:
+    //   bit 8    1 = full format
+    //   bit 6    IS  (index suppress)
+    //   bits 5:4 base displacement size: 01 null, 10 word, 11 long
+    //   bits 2:0 I/IS: 000 no memory indirect, x01 null od, x10 word, x11 long
+    function automatic logic [2:0] ff_extra(input logic [15:0] w);
+        logic [2:0] bd, od;
+        begin
+            bd = (w[5:4] == 2'b10) ? 3'd1 : (w[5:4] == 2'b11) ? 3'd2 : 3'd0;
+            od = (w[1:0] == 2'b10) ? 3'd1 : (w[1:0] == 2'b11) ? 3'd2 : 3'd0;
+            ff_extra = bd + od;
+        end
+    endfunction
 
     // ── Opcode fields (hoisted; see header) ─────────────────────────────────
     wire [3:0] f_group = opf_group(instr);
@@ -419,6 +454,9 @@ module mh030p_decode (
     // ── Decode ──────────────────────────────────────────────────────────────
     // Scratch for the central EA fill-in at the end of the decode block.
     reg [2:0]  ew_tot, ew_side, ew_pre;
+    reg [2:0]  ew_lead;
+    reg [15:0] ew_srcw, ew_dstw;
+    reg        src_ff, dst_ff;
     // Set when the single EA slot holds the DESTINATION rather than the source,
     // which happens whenever the source needs no address of its own -- a
     // register or an immediate. The fill-in then has to read the extension word
@@ -1672,6 +1710,34 @@ module mh030p_decode (
                              && (uop.dst_ea_mode == UEA_NONE))
                             ? (imm_words + dst_ea_words)
                           : ea_words_total;
+
+        // ── Full-format extension words ─────────────────────────────────────
+        // The chain above counts the BRIEF-format case: one word per indexed EA.
+        // A full-format word carries a base displacement and an outer
+        // displacement on top of that, so the count has to grow -- and a wrong
+        // count derails the instruction stream rather than giving a wrong answer.
+        //
+        // The offset of the EA's own first extension word is what makes this
+        // delicate. It is derived by subtraction from the BRIEF count, which is a
+        // function of the opcode alone, so it does NOT depend on the full-format
+        // extras being computed here -- full format only ever adds words AFTER
+        // that first one. That is what keeps this out of a circular definition.
+        ew_lead = (uop.ext_words > (src_ea_words + dst_ea_words))
+                  ? (uop.ext_words - src_ea_words - dst_ea_words) : 3'd0;
+
+        // Hoisted into variables because Icarus rejects a bit-select applied
+        // to a function call.
+        ew_srcw = rawword(ew_lead);
+        ew_dstw = rawword(ew_lead + src_ea_words);
+
+        src_ff = ((uop.ea_mode == UEA_AN_IDX) || (uop.ea_mode == UEA_PC_IDX))
+                 && ew_srcw[8];
+        dst_ff = (uop.dst_ea_mode == UEA_AN_IDX) && ew_dstw[8];
+
+        uop.ea_full_fmt = src_ff || dst_ff;
+        uop.ext_words   = uop.ext_words
+                        + (src_ff ? ff_extra(ew_srcw) : 3'd0)
+                        + (dst_ff ? ff_extra(ew_dstw) : 3'd0);
 
         // ── Central EA field fill-in ───────────────────────────────────────
         // Deliberately LAST, because it needs uop.ext_words: extension words

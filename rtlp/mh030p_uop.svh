@@ -187,6 +187,14 @@ typedef struct packed {
                                  // siz is not the transfer size there.
     logic [2:0]  ext_words;      // extension words this instruction consumes,
                                  // so the fetch unit knows how far to drain
+    logic        ea_full_fmt;    // an EA uses a 68020+ FULL-FORMAT extension
+                                 // word. Its extra displacement words ARE
+                                 // counted in ext_words, so the instruction
+                                 // stream stays intact, but the address itself
+                                 // is not computed -- the core declines to
+                                 // execute it rather than silently reading a
+                                 // base-displacement size field as a scale and
+                                 // an index register.
     logic        ea_disp_valid;  // ea_disp/ea_idx_* are trustworthy. False when
                                  // the instruction has several extension words
                                  // and this decoder cannot yet say which one
@@ -257,6 +265,7 @@ function automatic uop_t uop_clear();
     u.ext_words    = 3'd0;
     u.subop        = 4'd0;
     u.opnd_word    = 1'b0;
+    u.ea_full_fmt  = 1'b0;
     u.ea_disp_valid= 1'b0;
     u.sext_src     = 1'b0;
     u.x_unchanged  = 1'b0;
