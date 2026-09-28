@@ -5284,3 +5284,43 @@ us how many extras exist, so deriving them from the adjusted total is circular.
 
 Gate: `make test` 43/43, decoder sweep clean, corpus bit-identical at
 `PASS 702142 FAIL 2 SKIP 281221`, `cosim_p` 4/4, `make bench` both correct.
+
+## Stage 3: rtl/'s MOVE SR/CCR,<ea> ext_count -- the chain had no arm at all
+
+`m68030_seq.sv`'s `ext_count` had **no arm matching `MOVE SR,<ea>` or
+`MOVE CCR,<ea>` with a memory destination**, so all 18 such opcodes fell through
+to 0: a two-word instruction counted as one, with its displacement then decoded as
+the next instruction. Meanwhile `eu_seq_decode.svh` reports `valid=1` for them --
+the CCR forms were added deliberately, with test `system_tb` MOVE_SR-03b -- so the
+decoder and the sequencer disagreed about the very same opcodes.
+
+This had been recorded several sessions ago as "the disagreement is certain; the
+observable failure is not", and left. It is now fixed, and one thing that was *not*
+known then is settled: **it affects brief format exactly as much as full format.**
+Driving the sweep with a bit-8-clear word gives the identical 18 disagreements, so
+this was never a full-format corner -- any `MOVE CCR,(d16,An)` in ordinary code
+would derail the instruction stream.
+
+The 18: `(d16,An)` x8, `(d8,An,Xn)` x8, `(xxx).W`, `(xxx).L`.
+
+    op 0x42e8  needs 1, reported 0
+    op 0x42f9  needs 2, reported 0
+
+New `is_move_sr_ccr_memdst` covering `f_dn` 000 (SR) and 001 (CCR) across those
+modes, placed **after** `is_memind_full` in the chain so it is strictly additive --
+anything that arm already handles keeps its existing, more complete count, and only
+what previously fell through to 0 is caught.
+
+### The sweep's exclusion is gone, which is the real win
+
+`tb/uop_decode_equiv_tb.sv` had to **exclude `MOVE CCR,<ea>`** from its ext_count
+comparison to stay green, with a comment explaining it was "a genuine inconsistency
+in rtl/ rather than a limitation". That exclusion has been deleted: all 18 agree,
+and the check now covers them like any other opcode. One of the sweep's three
+documented blind spots is closed -- the remaining two (F-line, and bit fields with
+a real EA) are genuine `rtl/` capability boundaries rather than inconsistencies.
+
+Gate: `make test` 43/43, decoder sweep 0 mismatches with the exclusion removed,
+`cosim_grp` 8/8, `cosim_memind` 33/33, `cosim_p` 4/4, `dat-synth` 50/50,
+`make bench` both correct, 124-suite Harte sweep bit-identical at
+`PASS 702142 FAIL 2 SKIP 281221`.

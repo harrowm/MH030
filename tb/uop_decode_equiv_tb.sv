@@ -221,7 +221,7 @@ module uop_decode_equiv_tb;
         @(posedge clk_4x);
 
         if ($test$plusargs("probe")) begin
-            probe(16'h42E8, "MOVE CCR,(d16,A0)");
+            probe(16'h42E8, "MOVE CCR,(d16,A0)");   // was the rtl/ ext_count gap
             probe(16'h42F9, "MOVE CCR,(xxx).L");
             probe(16'h42C0, "MOVE CCR,D0");
             probe(16'h51C0, "SF D0");
@@ -417,17 +417,14 @@ module uop_decode_equiv_tb;
                              && (instr[15:12] != 4'hF)
                              && !((uop.uclass == UC_BITFIELD)
                                   && (uop.ea_mode != UEA_NONE))
-                    //   * MOVE CCR,<ea> with a real effective address. This one
-                    //     is a genuine INCONSISTENCY IN rtl/ rather than a
-                    //     limitation: eu_seq_decode.svh reports valid=1 for
-                    //     0x42E8 (MOVE CCR,(d16,A0)) -- those memory
-                    //     destinations were added during this project's own P1
-                    //     work -- while m68030_seq.sv's ext_count still returns
-                    //     0 for them. A two-word instruction counted as one
-                    //     word. Reported, not matched; see plan.md.
-                             && !((uop.uclass == UC_SYSCTL)
-                                  && (uop.subop == 4'd1)
-                                  && (uop.ea_mode != UEA_NONE)))
+                    // The MOVE CCR,<ea> exclusion that used to sit here is GONE,
+                    // because the inconsistency it tolerated is fixed. It read:
+                    // eu_seq_decode.svh reports valid=1 for 0x42E8
+                    // (MOVE CCR,(d16,A0)) while m68030_seq.sv's ext_count returned
+                    // 0 -- a two-word instruction counted as one. m68030_seq.sv now
+                    // has an is_move_sr_ccr_memdst arm, all 18 such opcodes agree,
+                    // and this check covers them like any other.
+                                  )
                         report(instr, "ext_words", {29'h0, uop.ext_words},
                                                    {29'h0, old_ext_words});
                     // EA displacement / index fields. dec_ea_offset is a

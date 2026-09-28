@@ -458,6 +458,34 @@ module m68030_seq (
     // Icarus's forward-reference limitation (see Stage 2's own comment on
     // is_alu_mem_src above) applies here too, so both conditions are
     // inlined rather than referenced, narrowed to mode=110 directly.
+    // MOVE SR,<ea> and MOVE CCR,<ea> with a MEMORY destination. ext_count had no
+    // arm matching these AT ALL, so every one fell through to 0 -- a two-word
+    // instruction counted as one, with its displacement then decoded as the next
+    // instruction. eu_seq_decode.svh reports valid=1 for them (the CCR forms were
+    // added deliberately, with test system_tb MOVE_SR-03b), so the decoder and the
+    // sequencer disagreed about the very same opcodes.
+    //
+    // Found by MH030-P's decoder sweep, which had to EXCLUDE `MOVE CCR,<ea>`
+    // precisely because of this, and confirmed to affect brief and full format
+    // alike -- the 18 opcodes are (d16,An) x8, (d8,An,Xn) x8, (xxx).W and (xxx).L:
+    //
+    //     op 0x42e8  needs 1, reported 0
+    //     op 0x42f9  needs 2, reported 0
+    //
+    // Placed AFTER is_memind_full in the chain below, so it is strictly additive:
+    // anything that arm already handles keeps its existing, more complete count.
+    logic is_move_sr_ccr_memdst;
+    assign is_move_sr_ccr_memdst = (f_group == 4'h4) && !f_dir && (f_ss == 2'b11)
+        && ((f_dn == 3'b000) || (f_dn == 3'b001))
+        && ((f_mode == 3'b101) || (f_mode == 3'b110)
+         || ((f_mode == 3'b111) && ((f_reg == 3'b000) || (f_reg == 3'b001))));
+    logic [2:0] move_sr_ccr_memdst_ext_count;
+    assign move_sr_ccr_memdst_ext_count =
+          (f_mode == 3'b101) ? 3'd1                       // (d16,An): displacement
+        : (f_mode == 3'b110) ? 3'd1                       // (d8,An,Xn): brief descriptor
+        : (f_reg  == 3'b001) ? 3'd2                       // (xxx).L
+                             : 3'd1;                      // (xxx).W
+
     logic is_chk_mode110, is_scc_mode110, is_move_sr_ccr_mode110, is_addq_subq_mode110;
     logic is_pea_mode110;
     assign is_chk_mode110 = (f_group == 4'h4) && f_dir &&
@@ -895,6 +923,8 @@ module m68030_seq (
             ext_count = move_idx_src_memdst_ext_count;
         else if (is_memind_full)
             ext_count = memind_ext_count;
+        else if (is_move_sr_ccr_memdst)
+            ext_count = move_sr_ccr_memdst_ext_count;
         else if (is_imm_g0)
             ext_count = ((f_dn != 3'b100) && (f_ss == 2'b10)) ? 3'd2 : 3'd1;
         else if (is_imm_g0_absl)
