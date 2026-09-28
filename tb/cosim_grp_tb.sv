@@ -171,12 +171,23 @@ module cosim_grp_tb;
     end
 
     // ── STOP detection ───────────────────────────────────────────────────────
+    // Cycle accounting, so the two cores can be compared on THROUGHPUT and not
+    // only on clock rate. The event is "the STOP opcode was fetched from
+    // program space", which both testbenches now detect identically -- picking
+    // the point each core happens to stop executing would not be like for like.
+    longint unsigned cyc = 0;
+    longint unsigned stop_cyc = 0;
+    always_ff @(posedge clk_4x) if (rst_n) cyc <= cyc + 1;
+
     logic stop_seen = 1'b0;
     always_ff @(posedge clk_4x) begin
         if (!ext_as_n && !ext_ds_n && ext_rw &&
             (ext_fc == 3'b110 || ext_fc == 3'b010)) begin
             if (rd_word[31:16] == 16'h4E72 || rd_word[15:0] == 16'h4E72)
+            begin
+                if (!stop_seen) stop_cyc <= cyc;
                 stop_seen <= 1'b1;
+            end
         end
     end
 
@@ -216,6 +227,7 @@ module cosim_grp_tb;
             end
         join
 
+        $display("CYCLES %0d", stop_cyc);
         check({grpname, " STOP opcode fetched"}, stop_seen);
         check({grpname, " No address errors"},   ~any_addr_err);
         if (check_d0)

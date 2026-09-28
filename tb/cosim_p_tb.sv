@@ -152,6 +152,27 @@ module cosim_p_tb;
         end
     end
 
+    // ── Cycle accounting ──────────────────────────────────────────────────────
+    // Detects the SAME event tb/cosim_grp_tb.sv does -- the STOP opcode
+    // appearing in a program-space read -- so cycles-to-here is a like-for-like
+    // throughput comparison between the two cores. Comparing each core's own
+    // "stopped executing" point would not be: this core's `stopped` is an
+    // execution event while rtl/ watches the fetch.
+    longint unsigned cyc = 0;
+    longint unsigned stop_cyc = 0;
+    logic stop_fetched = 1'b0;
+    always_ff @(posedge clk_4x) if (rst_n) cyc <= cyc + 1;
+    always_ff @(posedge clk_4x) begin
+        if (bus_req && !bus_ack && bus_rw && is_ifu) begin
+            if ((rdb(bus_addr[23:0]) == 8'h4E && rdb(bus_addr[23:0] + 24'd1) == 8'h72)
+             || (rdb(bus_addr[23:0] + 24'd2) == 8'h4E
+                 && rdb(bus_addr[23:0] + 24'd3) == 8'h72)) begin
+                if (!stop_fetched) stop_cyc <= cyc;
+                stop_fetched <= 1'b1;
+            end
+        end
+    end
+
     // ── Run control ───────────────────────────────────────────────────────────
     int  fail_count = 0;
     task automatic check(input string name, input logic cond);
@@ -185,6 +206,7 @@ module cosim_p_tb;
             end
         join
 
+        $display("CYCLES %0d", stop_cyc);
         check({grpname, " STOP reached"}, stopped);
         if (check_d0)
             check({grpname, " D0 correct"},
