@@ -1627,10 +1627,14 @@ module mh030p_core (
     );
 
     // EXT sign-extends in place; EXTB.L reaches from byte to longword.
-    wire [31:0] ext_result = (ex_uop.siz == UZ_WORD)
-                           ? {ex_dst[31:16], {8{ex_dst[7]}}, ex_dst[7:0]}
-                           : (ex_uop.ext_words == 3'd0 && ex_uop.siz == UZ_LONG)
-                             ? {{16{ex_dst[15]}}, ex_dst[15:0]} : ex_dst;
+    // Sub-op 0 = EXT.W (byte -> word, upper half untouched), 1 = EXT.L
+    // (word -> long), 2 = EXTB.L (BYTE -> long). The last was being extended
+    // from the word, which is a different instruction.
+    wire [31:0] ext_result = (ex_uop.subop == 4'd0)
+                             ? {ex_dst[31:16], {8{ex_dst[7]}}, ex_dst[7:0]}
+                           : (ex_uop.subop == 4'd1)
+                             ? {{16{ex_dst[15]}}, ex_dst[15:0]}
+                             : {{24{ex_dst[7]}},  ex_dst[7:0]};
     wire [31:0] swap_result = {ex_dst[15:0], ex_dst[31:16]};
 
     wire [31:0] mv_result = (ex_uop.siz == UZ_BYTE) ? {ex_dst[31:8],  ex_src[7:0]}
@@ -1692,9 +1696,14 @@ module mh030p_core (
                           : use_shf  ? shf_sized
                           : use_mv   ? mv_result : alu_sized;
 
-    wire mv_like_n = use_ext  ? ext_result[31]
+    // EXT.W's result is a WORD, so its flags come from the low half. Reading
+    // bit 31 reported the sign of the half the instruction never touched.
+    wire mv_like_n = use_ext  ? ((ex_uop.subop == 4'd0) ? ext_result[15]
+                                                       : ext_result[31])
                    : use_swap ? swap_result[31] : mv_n;
-    wire mv_like_z = use_ext  ? (ext_result == 32'h0)
+    wire mv_like_z = use_ext  ? ((ex_uop.subop == 4'd0)
+                                 ? (ext_result[15:0] == 16'h0)
+                                 : (ext_result == 32'h0))
                    : use_swap ? (swap_result == 32'h0) : mv_z;
 
     // A divide that OVERFLOWS sets V and leaves N, Z and C exactly as it

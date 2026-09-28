@@ -947,6 +947,11 @@ module mh030p_decode (
                 uop.uclass      = UC_EXT;
                 uop.unit        = UU_MOVE;   // reference decoder uses MOVE, as for SWAP
                 uop.siz         = (g4_ext_sel == 3'b010) ? UZ_WORD : UZ_LONG;
+                // Three forms, and siz cannot tell the last two apart: EXT.W
+                // widens a byte to a word, EXT.L a word to a long, and EXTB.L a
+                // BYTE to a long. Both long forms report siz=long.
+                uop.subop       = (g4_ext_sel == 3'b010) ? 4'd0 :
+                                  (g4_ext_sel == 3'b011) ? 4'd1 : 4'd2;
                 uop.dst_kind    = US_DREG;
                 uop.dst_reg     = rn_src_dn;
                 uop.writes_reg  = 1'b1;
