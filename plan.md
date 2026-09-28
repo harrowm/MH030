@@ -4073,3 +4073,86 @@ An immediate source also frees the single EA slot, since an immediate needs
 no address, so `MOVE.l #imm,-(A0)` and `MOVE.b #imm,(d16,A0)` now execute
 with the destination in `ea_*` and `ea_slot_is_dst` telling the fill-in to
 read the destination's own offset.
+
+## MH030-P's first real Fmax, and two restructurings the clock rejected
+
+The plan's P2 gate was "a real Fmax number for the new architecture". The new
+core cannot be dropped into the SoC -- its bus is abstract, not 68030 pins --
+so `make fmax-p` / `make fmax-rtl` put **both** cores through the identical
+`gen_fmax_wrapper.py` harness `make depth` already used, which equalises their
+very different port counts (see that script's header). The absolute numbers are
+therefore NOT comparable to the ~13.8 MHz whole-SoC figure; the rtl/-vs-rtlp/
+difference is the measurement. `SEED` is explicit and fixed, never
+`--randomize-seed`.
+
+### The first number was 12.97 MHz, and 78% of it was a false loop
+
+Attribution put 151 of the worst path's 179 hops in `u_peek` -- the small
+decoder at the top level whose only job is telling the fetch unit how many
+extension words to drain. It was a **cycle**: the fetch unit's `ext` is muxed
+BY `ext_words` (one extension word is normalised into the low half), and
+`u_peek` was fed that same `ext` to compute `ext_words`.
+
+The cycle is false. Every read of `ext` in the decoder feeds `uop.imm`,
+`uop.dst_reg` or a bitfield register select -- never `uclass`, `subop` or
+`ea_mode` -- so `ext_words` is a function of the opcode alone and it settles
+immediately in simulation. Place-and-route does not care: it unrolls the cycle
+and charges two full passes through the decoder to one clock. The module walk
+showed exactly that -- `u_peek` 59 hops, `u_ifu` 4, `u_peek` again 92, then
+`u_core`.
+
+Same class as Phase 284's loops in `rtl/`, invisible for the same reason:
+simulation has no propagation delay. Broken with an `ext_raw` output (the two
+words without the normalisation), and the property it relies on is now **tested
+rather than commented**: the equivalence sweep decodes all 65,536 opcodes twice
+with unrelated `ext`/`q3` and requires the same `ext_words`, failing hard
+otherwise. **12.97 -> 23.13 MHz, +78%.**
+
+### Then two "obvious" fixes, both of which made it slower
+
+| change | mean Fmax (3 fixed seeds) | verdict |
+|---|---|---|
+| baseline | **22.93** (23.13 / 22.82 / 22.84) | -- |
+| prefetch queue: shift -> head pointer | 21.80 (21.47 / 22.08 / 21.84) | reverted |
+| `ext_words`: priority chain -> case | 21.69 (21.50 / 21.76 / 21.82) | reverted |
+
+Both ranges are non-overlapping with the baseline's, so neither is the ~0.5 MHz
+seed spread. Both were *correct* -- the queue change kept the full corpus
+bit-identical, and the case was proven byte-identical on `ext_words` for all
+65,536 opcodes via a throwaway dumping testbench, not merely on the subset the
+sweep claims. Both were reverted on the measurement, with the finding left as a
+comment at the site someone would next reach for them.
+
+**The queue:** retiring words assigned all eight entries from a
+variable-distance shift, every entry carrying a five-way mux driven by `drain`,
+which decode produces -- the whole array downstream of a decode cone every
+cycle. A head pointer does it with a 3-bit add. But the shift network
+**terminates at flip-flops**, which have a whole clock to settle, whereas a head
+pointer puts a variable eight-way read mux on `instr`/`ext`/`q3`, directly in
+front of the decoder -- the one consumer with no slack. The change moved work
+off a path with room onto the path that binds.
+
+**The chain:** 25 conditions deep, feeding `issue`/`drain`. A case over `uclass`
+is a balanced tree about six deep, and it was slower. The likely reason is that
+the chain's early arms are cheap constants, so common cases exit in a few levels
+and ABC9 maps that shape directly, while a case makes every arm pay full depth.
+
+### What this says about the method
+
+The logic-depth proxy predicted BOTH of these wrong, and in the same direction:
+it liked the queue change (fetch unit 50 -> 32 levels, design-wide population at
+or above 35 levels 679 -> 402) and it liked the case. It counts levels to each
+endpoint without knowing which endpoints have slack, so it cannot distinguish
+"deep path into a flip-flop with a clock to spare" from "deep path into the one
+consumer that binds". **Treat it as a filter for candidates, never as evidence.**
+
+What DID work, by a wide margin, was finding a structural defect -- a false
+combinational cycle -- rather than trying to make correct logic shallower. That
+is the same lesson Phase 284/285 recorded for `rtl/` (`wdata_hold_r` fully
+verified and worth zero; the D-cache loop a genuine bug) and it now has two more
+data points behind it.
+
+**Position: 22.93 MHz standalone**, against a 25-50 MHz target. `make fmax-rtl`
+(the same harness around `m68030_top`, the apples-to-apples baseline) had not
+finished at the time of writing -- the reference core is much larger and its
+ABC9 stage runs for hours -- so the architectural delta is still unquantified.
