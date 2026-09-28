@@ -116,6 +116,17 @@ $(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 
 # MH030-P: the Tom Harte corpus against the pipelined core. Same output
 # contract as $(SIM)/harte_dat, so scripts/run_harte.py --sim drives either.
+# Bit-field equivalence sweep. The Harte corpus is 68000-captured and has ZERO
+# bit-field coverage (68020+ instructions), so sequentialising that unit needed a
+# net built from scratch -- this compares rtlp/mh030p_bitfield.sv against
+# rtl/eu_bitfield.sv over every offset, width and op.
+$(SIM)/bf_equiv: rtlp/mh030p_bitfield.sv rtl/eu_bitfield.sv tb/bf_equiv_tb.sv \
+                 | $(SIM)
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_bitfield.sv \
+	    rtl/eu_bitfield.sv tb/bf_equiv_tb.sv 2>&1 \
+	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
+	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
+
 $(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                 rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
                 rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtlp/mh030p_uop.svh \
@@ -382,7 +393,7 @@ ALL_TESTS := \
     $(SIM)/eu_seq_tb $(SIM)/eu_tb \
     $(SIM)/ctrl_flow $(SIM)/ea_modes $(SIM)/data_move $(SIM)/alu_reg $(SIM)/alu_mem $(SIM)/bitfield $(SIM)/bcd_pack $(SIM)/system $(SIM)/exception $(SIM)/atomic \
     $(SIM)/special_instr $(SIM)/ea_extended $(SIM)/cmpm \
-    $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/ext_count_overlap $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
+    $(SIM)/bf_equiv $(SIM)/ifu $(SIM)/seq_ctrl $(SIM)/ext_count_overlap $(SIM)/pipeline $(SIM)/stall_hazard $(SIM)/exc $(SIM)/mmu \
     $(SIM)/biu $(SIM)/biu_int \
     $(SIM)/top $(SIM)/cosim_boot $(SIM)/cosim_smoke $(SIM)/stall_fsm $(SIM)/cache $(SIM)/mmu_xlate \
     $(SIM)/minrepro $(SIM)/uop_equiv $(SIM)/mh030p_mul $(SIM)/mh030p_core $(SIM)/mh030p_top
