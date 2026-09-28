@@ -4965,3 +4965,98 @@ throughput win.
 the front end has more to give even now -- the remaining misses are cold and the
 253 redirects still cost refill latency. Beyond that, `stalled` is the execute
 path, where the sequential shifter and divider now deliberately spend cycles.
+
+## The caches were never switched on -- and that corrects every cross-core figure
+
+Reverting the `rtlp/` instruction cache prompted the obvious question: what do
+the 68030's OWN caches do? The answer is that nobody in this project had ever
+looked, because **only two programs in the repo (`timing_manual_738/739`) ever
+write CACR**, and the 68030 comes out of reset with both caches disabled.
+
+`tests/bench2.s` is `bench1.s` plus a `movec` to CACR. Sweeping the enable bits:
+
+| CACR | ticks | program fetches | data accesses | |
+|---|---|---|---|---|
+| `0000` | 24,689 | 1,354 | 256 | both caches off |
+| `0101` | 9,360 | 33 | 256 | EI + ED |
+| `2101` | 9,199 | 33 | 240 | + WA (write allocate) |
+| `2111` | **9,185** | **17** | 240 | + IBE (instruction burst) |
+| `3111` | -- | -- | -- | + DBE: **WRONG ANSWER**, see below |
+
+**Simply enabling the caches is worth 2.69x on `rtl/`.**
+
+### This invalidates figures I reported earlier in this session
+
+Every cross-core number was measured against a reference running with its caches
+off, which is not a fair comparison -- it is a comparison against a deliberately
+crippled 68030. Corrected:
+
+| | claimed earlier | actual (rtl/ caches on) |
+|---|---|---|
+| tick ratio | 3.87x | **1.50x** |
+| wall-clock ratio | 8.30x | **3.22x** |
+| rtlp/ as a real 68030 | 28.2 MHz | **10.9 MHz** |
+
+The reverted I-cache experiment would have taken rtlp to ~16 MHz-equivalent on
+the corrected basis, not 40.7. The *direction* of every conclusion holds -- the
+front end really was costing 52% of rtlp's ticks, and fixing it really is worth
+~1.44x -- but the headline magnitudes were inflated about 2.6x and should not be
+quoted.
+
+### Where the two caches stand, separately
+
+**The instruction cache is already near-optimal.** 1,354 misses -> 33 with the
+cache on, -> 17 with burst. There is essentially nothing left to win there; the
+97.6% it removes is the same effect the reverted `rtlp` experiment measured.
+
+**The data cache delivers almost nothing on this workload**, and the reasons
+decompose cleanly:
+
+* **128 of the 256 accesses are write-through writes.** Architecturally
+  unavoidable -- the 68030 D-cache is write-through by design, so every write
+  reaches the bus regardless.
+* **The remaining 128 reads miss because of exact aliasing.** The index is
+  `addr[7:4]` over 16 lines, so bits [11:8] are ignored: `SRC` at 0x1000 and
+  `DST` at 0x1400 map to the identical lines. Two 256-byte arrays cannot coexist
+  in a 256-byte direct-mapped cache, so every write evicts the line the next read
+  needs. Write allocate recovers only 16 of 256 for exactly this reason.
+
+That second point is faithful to the real chip, not a defect -- it is what a
+256-byte direct-mapped cache does. Improving it means deviating from the
+architecture (more lines, or associativity), which is a deliberate decision
+rather than an optimisation.
+
+### A real bug found: data-cache burst returns bad data
+
+`CACR = $3111` (adding bit 12, DBE) makes this program compute the **wrong D0**
+and never complete, while its write stream still looks correct -- so a data-cache
+burst fill is returning bad data. Instruction burst on the *same shared burst
+controller* works fine (33 -> 17 misses, answer correct), which places the fault
+specifically on the data side.
+
+Not chased further here: it is in frozen `rtl/`, `biu_cache_if.sv`'s burst
+completion is the most intricate part of Phase A's work (an immediate write of
+the requested word plus a `dtrickle_*` background sequencer arbitrating against
+the main FSM), and it deserves its own session with the full gate.
+
+### One dormant testbench gap closed on the way
+
+`tb/cosim_grp_tb.sv` had no `burst_beat_probe`, so during a burst it returned the
+same word four times. CLAUDE.md records that class of gap as "structurally
+inapplicable because none of those testbenches ever enable CACR" -- which stopped
+being true the moment `bench2.s` did. Added (two lines, reads 0 when no burst is
+active, so a no-op for every existing test). Gate confirms: `make test` 43/43,
+`cosim_grp` 8/8, `cosim_memind` 33/33, `dat-synth` 50/50.
+
+### What "more efficient caches" actually means now
+
+1. **Use them.** 2.69x, available today, costing nothing. Every future measurement
+   on `rtl/` should enable CACR or say explicitly that it does not.
+2. **Fix the data-burst bug.** It is the one unexplored efficiency feature and it
+   is currently unusable.
+3. **The instruction cache needs nothing.**
+4. **The data cache's limit is architectural**, not implementational: write-through
+   plus 256 bytes direct-mapped. Going further is a deliberate departure from the
+   68030.
+5. **For `rtlp/`, P6 is now quantified**: reusing these caches is worth ~2.7x on the
+   fetch side, which is far more than the entire Fmax programme achieved.

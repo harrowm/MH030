@@ -49,7 +49,21 @@ module cosim_grp_tb;
         $readmemh(hexfile, rom);
     end
 
-    wire [31:0] rd_word = (ext_a[13:2] < MEM_WORDS) ? rom[ext_a[13:2]] : 32'hDEAD_DEAD;
+    // Burst-beat aware read, mirroring tb/cache_tb.sv. During a burst the DUT
+    // holds ext_a at the line base and tracks the beat internally, so a memory
+    // model that indexes on ext_a alone returns the SAME word four times.
+    // burst_beat_probe is testbench-only instrumentation referencing the DUT's
+    // own beat counter -- what a real peripheral would track for itself -- and
+    // reads 0 whenever no burst is in progress, so this is a no-op for every
+    // ordinary access.
+    //
+    // This closes one of the dormant gaps CLAUDE.md records as "structurally
+    // inapplicable because none of those testbenches ever enable CACR". That
+    // stopped being true the moment tests/bench2.s enabled the caches.
+    wire [1:0]  burst_beat_probe = u_top.u_biu.u_cg.u_bc.burst_beat;
+    wire [11:0] beat_word_addr   = ext_a[13:2] + {10'h0, burst_beat_probe};
+    wire [31:0] rd_word = (beat_word_addr < MEM_WORDS) ? rom[beat_word_addr]
+                                                       : 32'hDEAD_DEAD;
 
     logic ds_active_r;
     always_ff @(posedge clk_4x or negedge rst_n) begin
