@@ -4664,3 +4664,60 @@ The obvious next candidate is the same shape: **`eu_bitfield`, 1,459 cells**,
 combinational, always evaluating, serving instructions that are rare and that the
 manual already makes slow. After that the list thins -- `eu_bcd` is only 117
 cells and `eu_alu`'s 592 genuinely must be single-cycle.
+
+## Sequential bit-field unit: built, proven, measured, not adopted
+
+The same lever that took the shifter from 21.60 to 29.16 MHz, applied to
+`eu_bitfield`'s five variable-distance shifters (`(1<<aw)-1`, `data>>sr`,
+`1<<(aw-1)`, `wmask<<sr`, `(src&wmask)<<sr`) and its **32-deep FFO priority
+chain with a 32-bit subtract per level**. `rtlp/mh030p_bitfield.sv` removes all
+of them: two fixed 32-tick passes, every step a 1-bit shift, no priority chain.
+
+| arm | n | mean | min | max | bitfield comb |
+|---|---|---|---|---|---|
+| combinational `eu_bitfield` | 9 | **29.16** | 28.39 | 30.14 | 1,459 |
+| `mh030p_bitfield` | 9 | 28.29 | 27.26 | 29.38 | 845 (+324 FF) |
+
+Ranges overlap heavily, 7 of 9 seeds are lower, mean 0.87 MHz down --
+**unresolved and leaning negative**, against a real cost of ~66 ticks per
+bit-field instruction. So the core keeps `rtl/eu_bitfield.sv` and the new module
+is left in the tree, clearly marked as not instantiated.
+
+### Why it failed where the shifter succeeded
+
+This is the transferable part. The shifter went **2,084 -> 220** cells with
+almost no new state. The bit-field unit goes **1,459 -> 845 and adds 324
+flip-flops** -- nine 32-bit registers (`data_r`, `src_r`, `wmask`, `dsh`,
+`field_r`, `flag_r`, `fsh`, `pmask`, `splc`) -- and still leaves a combinational
+output mux computing `~pmask`, `^pmask`, `|pmask`, `field_r | exts_sign` and the
+FFO arithmetic, all now fed from those registers.
+
+**Removing variable shifters only wins if you do not spend the depth again on the
+way out.** A version holding less state might pay; that is the thing to try if
+this is revisited.
+
+### The verification net had to be built from scratch, and it earned its place
+
+Bit-field instructions are 68020+, so the 68000-captured Harte corpus has **zero**
+coverage of them -- sequentialising this unit with no net would have been
+unverifiable. `tb/bf_equiv_tb.sv` compares the two units directly over 8 ops x 32
+offsets x 32 widths x 12 operand pairs: **50,688 vectors, 0 mismatches** on the
+result and all four flags, first run. It is in `make test` (43/43) so the module
+cannot rot even though nothing instantiates it.
+
+It also caught a real integration bug immediately -- and precisely the fallout
+`feedback_sequentializing_combinational_unit` predicts. `tb/mh030p_top_tb.sv`'s
+bit-field program had a fixed `repeat (350)` budget, ample for a combinational
+unit but not for five sequential ops at ~66 ticks each: the last one was cut off
+mid-flight, so BFCLR's result and its N flag were simply never written. Found by
+instrumenting the unit and reading the trace rather than guessing, which showed
+four ops completing correctly and the fifth starting but never finishing.
+
+### Standing position after this
+
+The core stays at **29.16 MHz mean (28.39-30.14)**, inside the 25-50 MHz band,
+against the reference's 13.59 MHz and at 3.33x fewer ticks. Of the two
+always-evaluating blocks left, `eu_bcd` is only 117 cells and `eu_alu`'s 592
+genuinely must be single-cycle -- so **this line of attack is now exhausted**.
+The remaining candidates worth real effort are SoC integration (a real hardware
+number, and the 25-50 MHz target lives there) and a proper throughput benchmark.
