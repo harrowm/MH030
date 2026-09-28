@@ -1234,22 +1234,34 @@ trustworthy oracle there. Register-file area reduction was analysed and
 **deliberately not done** -- see `plan.md`'s Stage 2 section for the numbers and
 why.
 
-**MH030-P instruction cache (same later session, `rtlp/mh030p_icache.sv`)**: acting
-on the tick-budget finding, a **16-longword (64-byte) direct-mapped I-cache** between
-the fetch unit and the arbiter, with a **same-cycle ack on a hit** (which is why its
-data is NOT in BRAM -- a registered read would make every one of ~1,300 hits two
-ticks and give back most of the win). Tag carries address bit 1 (fetch addresses are
-2-mod-4 after a branch to an odd word address); it snoops the data side to invalidate,
-unlike real 68030 silicon, because the Harte harness writes wherever it likes.
-**Result: benchmark fetches 1,352 -> 43 (-97%), ticks 6,116 -> 4,025 (-34%), idle
-3,163 -> 1,321.** Size was MEASURED -- 16/32/64 entries give identical ticks and
-identical fetch counts, because the loops are 4-7 instructions, so the larger sizes
-paid thousands of cells for nothing (`ENTRIES` is a parameter). Area +13.6%.
-**The cache costs clock: 29.16 -> 27.70 MHz mean, negative on all 9 seeds (-1.46,
-sd 0.80) -- a real effect, not noise.** It is kept anyway, and this is the first
-change in the project accepted while measuring slower on the clock: net throughput
-is **1.44x** and the 68030-equivalent goes **28.2 -> 40.7 MHz**. Judging by Fmax
-alone would have rejected it. Remaining budget: `idle=1321`, `stalled=1295` of 4,025.
+**The 68030's own caches were never enabled -- worth 2.69x (a later session)**:
+**only `timing_manual_738/739` ever write CACR** in this whole repo, and the 68030
+resets with both caches off, so every other measurement -- including the cross-core
+throughput comparison -- ran `rtl/` with them DISABLED. `tests/bench2.s` (= `bench1`
+plus a `movec` to CACR) sweeps the enables: `0000` 24,689 ticks / 1,354 program
+fetches; `0101` (EI+ED) 9,360 / 33; `2101` (+WA) 9,199 / 33 / 240 data; `2111`
+(+IBE) **9,185 / 17**. **CORRECTS EARLIER FIGURES IN THIS FILE**: against a
+cache-enabled reference the tick ratio is **1.50x not 3.87x**, wall-clock **3.22x
+not 8.30x**, and rtlp is **~10.9 MHz-68030-equivalent, not 28.2** -- the direction
+of every conclusion holds but the magnitudes were inflated ~2.6x. The **I-cache is
+already near-optimal** (97.6% of fetches removed). The **D-cache delivers almost
+nothing** on that workload for two legitimate reasons: 128 of 256 accesses are
+write-through writes (unavoidable by design), and the other 128 reads alias exactly
+(index is `addr[7:4]`, so two 256-byte arrays cannot coexist in a 256-byte
+direct-mapped cache) -- WA recovers only 16. **REAL BUG FOUND, not fixed: CACR bit
+12 (data-cache burst) makes the program compute a wrong answer** while its write
+stream still looks correct; instruction burst on the same shared burst controller
+is fine, so the fault is data-side (`biu_cache_if.sv`'s Phase A burst completion +
+`dtrickle_*` sequencer is the place to look, and it needs its own session). Also
+closed a dormant gap: `tb/cosim_grp_tb.sv` lacked `burst_beat_probe` so a burst
+returned the same word four times -- the gap CLAUDE.md called "inapplicable because
+none of those testbenches enable CACR", which stopped being true. **A `rtlp/`-only
+instruction cache was built, measured (fetches 1,352->43, ticks -34%, net 1.44x
+throughput even after costing 1.46 MHz of clock) and then REVERTED**: it was not the
+68030's cache (64B of single longwords, no burst, no CACR, and it snooped) and the
+plan specifies caches as Tier 2 reuse of `biu_icache_if.sv` at P6. The measurement
+stands as the justification for doing P6 properly; `tests/bench1.s`, `make bench`
+and the tick-budget instrumentation remain.
 
 **Current state**: `make test` 43/43, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
