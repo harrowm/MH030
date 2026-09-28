@@ -1140,6 +1140,22 @@ fmax-rtl:
 # Sweep seeds and report mean/min/max, because one seed says almost nothing and
 # three says less than it appears to (see the SEED note above). SEEDS defaults
 # to 9, which is what it took to see the baseline's real 1.32 MHz spread.
+# Per-module area, with attribution that is actually trustworthy. A FLATTENED
+# netlist's cell names lie -- all five of mh030p_mul's DSPs come out named
+# `u_dut.u_ifu.req_epoch_...` -- so this synthesises with -noflatten and counts
+# each module's own cells. ~15 s. Use this, never cell-name prefixes, to decide
+# where the logic is.
+.PHONY: area-p
+area-p:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(DEPTH_SRC) > $(SIM)/areap.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/areap.v mh030p_top \
+	    wrap_fmax $(SIM)/areap_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/areap.v $(SIM)/areap_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax -noflatten; \
+	    write_json $(SIM)/areap.json' -l $(SIM)/areap_yosys.log > /dev/null
+	@python3 scripts/module_area.py $(SIM)/areap.json
+
 SEEDS ?= 9
 .PHONY: fmax-p-sweep
 fmax-p-sweep:

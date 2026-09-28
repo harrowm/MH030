@@ -32,8 +32,19 @@ ON ATTRIBUTION
 nextpnr names synthesised cells after the nearest still-traceable ancestor
 register, so a suffix like `wb_result_TRELLIS_FF_...` does NOT mean the
 delay belongs to `wb_result`; ABC9 may have created that cell many hops
-away.  Only the dotted hierarchical *prefix* (`u_cpu.u_eu.u_seq.`) is
-trustworthy, so that is the only thing this script attributes by.
+away.
+
+**THE DOTTED PREFIX IS NOT TRUSTWORTHY EITHER.**  This script used to claim
+it was, and that claim is false, checked against a known ground truth: in
+the flattened MH030-P build every one of the five MULT18X18D cells -- which
+can only be mh030p_mul's, inside u_core -- is named
+`u_dut.u_ifu.req_epoch_LUT4_D_Z_...`.  ABC9 carries the surviving ancestor's
+whole hierarchy path, so a merged cell can be attributed to a module it has
+nothing to do with.  The per-module figures this script prints are therefore
+INDICATIVE ONLY and must not be used to decide where to work.
+
+For real attribution use `make area-p` (synthesis with `-noflatten`, counting
+each module's own cells) -- see scripts/module_area.py.
 
 A note on `detailed_net_timings`: its per-endpoint `delay` is that net's own
 routing delay, NOT a cumulative arrival time at the endpoint.  Earlier

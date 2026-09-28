@@ -4328,3 +4328,162 @@ either a change large enough to clear that bar (the kind that has actually paid:
 a combinational loop removed, a combinational divider made sequential, cache
 arrays given real BRAM) or a better measurement, e.g. sweeping many seeds on
 both arms of every comparison rather than three.
+
+## Plan: larger structural changes for Fmax, ordered by likely impact
+
+Written after five small hypotheses all came back unresolved (above). Two things
+changed the basis for planning:
+
+1. **Cell-name attribution is worthless in a flattened build, and that was
+   believed for a whole session.** Ground truth: all five `MULT18X18D` cells --
+   which can only be `mh030p_mul`'s, inside `u_core` -- are named
+   `u_dut.u_ifu.req_epoch_LUT4_D_Z_...`. ABC9 carries the surviving ancestor's
+   entire hierarchy path. The earlier claim that "67.8% of the worst path is in
+   the fetch unit" is withdrawn; so is the flattened per-module breakdown.
+2. **`make area-p` now gives real attribution** (`-noflatten` synthesis, each
+   module's own cells, ~15 s). `scripts/measure_fmax.py`'s docstring, which
+   asserted the dotted prefix was trustworthy, has been corrected.
+
+Real per-module combinational cells:
+
+| module | comb | % | carry | DSP | FF |
+|---|---|---|---|---|---|
+| `mh030p_core` | 10,714 | 35.6% | 480 | 0 | 1,430 |
+| `mh030p_regfile` | 9,513 | 31.6% | 0 | 0 | 640 |
+| `mh030p_decode` | 2,132 | 7.1% | 0 | 0 | 0 |
+| `eu_shifter` | 2,084 | 6.9% | 34 | 0 | 0 |
+| `mh030p_ifu` | 1,749 | 5.8% | 31 | 0 | 231 |
+| `eu_bitfield` | 1,459 | 4.8% | 56 | 0 | 0 |
+| `eu_mul_div` | 976 | 3.2% | 137 | **4** | 173 |
+| `eu_alu` | 592 | 2.0% | 17 | 0 | 0 |
+| `mh030p_mul` | 310 | 1.0% | 32 | 5 | 167 |
+| others | 502 | 1.7% | | | |
+| **TOTAL** | **30,083** | | | | |
+
+**Acceptance criterion for every item below**: `make fmax-p-sweep` (9 seeds) on
+*both* arms, `make test` 42/42, decoder sweep clean, full Harte corpus
+`PASS 702142 FAIL 2`. Treat an Fmax difference under ~2 MHz as unresolved and
+judge the item on its area/structure evidence instead. Items 1-3 are
+independent and should be **batched** into one measurement, because
+individually they may each sit under the resolution bar.
+
+### 1. Register file: pack the array (MEASURED: 9,513 -> 4,697 comb, -51%)
+
+The biggest single anomaly in the design, and the cheapest to fix. A 16x32
+register file is 31.6% of all combinational logic. Yosys reports
+`Replacing memory \regs with list of registers` -- correct, since a 4-read /
+2-write file with a write-first bypass cannot be block RAM -- but the resulting
+mux tree costs ~1,450 cells per read port, about **9x** what a 16:1 32-bit mux
+needs (5 LUT4 per bit).
+
+Cause is the *indexed unpacked array*. Replacing `reg [31:0] regs [0:15]` with
+one packed `reg [511:0]` and part-select reads/writes (`regs_flat[{sel,5'b0} +:
+32]`) makes yosys emit one `$shiftx` per port instead. Measured on the module in
+isolation, same function and same 640 flip-flops:
+
+    as-is                     comb 9513
+    packed + part-select      comb 4697      -51%, and -16% of the WHOLE design
+
+Cost decomposition, for further reduction if wanted:
+
+| feature | cells |
+|---|---|
+| second write port | 2,039 |
+| fourth read port | 1,464 |
+| write-first bypass | 1,122 |
+
+The fourth read port exists solely for the index register of an indexed
+*destination* EA, which only memory-to-memory MOVE with `(d8,An,Xn)` at the
+destination uses -- time-multiplexing it with port C at the cost of one stall
+cycle on that one family is available if the packing alone is not enough.
+
+Risk: low. Mechanical, behaviour-preserving, and the whole corpus exercises the
+register file on every instruction. **Ready to implement.**
+
+### 2. Divide-only unit for `rtlp/`: `eu_mul_div`'s multiplier is dead weight
+
+`eu_mul_div` carries **4 MULT18X18D** plus most of its 976 comb cells for
+multiply hardware that `rtlp/` can never reach: `mh030p_core` ties its `op[2]`
+high, `MUL_*` are ops 0-3, and every real multiply goes through `mh030p_mul`
+(which has its own 5 DSPs). In the *flattened* build yosys prunes it down to a
+single LUT-mapped 16x16 product rather than removing it.
+
+Fix without touching frozen `rtl/`: add `parameter MUL_ENABLE = 1` to
+`rtl/eu_mul_div.sv` -- default leaves `rtl/` bit-identical -- and instantiate
+with 0 from `rtlp/`. Alternative: a `rtlp/mh030p_div.sv` of its own, at the cost
+of re-verifying divide.
+
+Risk: very low. Expected: pure area plus 4 DSPs returned; may or may not move
+the clock.
+
+### 3. Prefetch queue: the same packing trick
+
+`mh030p_ifu`'s `q` array draws the identical `Replacing memory \q with list of
+registers` warning, and the module is 1,749 comb. The queue is read at four
+rolling offsets and written at a variable index, so it has the same
+indexed-array shape the register file does. Smaller prize, nearly free once item
+1 establishes the pattern.
+
+### 4. Forwarding network: one commit bus instead of two write ports per mux
+
+`ag_a`/`ag_b`/`ag_c`/`ag_d` and `ex_a_f`/`ex_b_f` are each a 5-way 32-bit select
+over `wb`, `wb2`, `wbp`, `wbp2` and the register read -- eight such muxes, all
+sitting directly in front of the functional units and the address adders, inside
+`mh030p_core`'s 10,714. Resolving the two write ports into a single prioritised
+commit bus *once* turns every one of them into a 3-way select. A further step,
+dropping one forwarding level in favour of an interlock, is available because
+cycle counts are free under the signed-off timing model.
+
+Risk: moderate. Forwarding produced this session's subtlest failures (a CHK that
+detected its trap then lost the operand); full corpus after each step, not at
+the end.
+
+### 5. Give the slow, rare units their own cycle
+
+`eu_shifter` (2,084) and `eu_bitfield` (1,459) are 11.7% of combinational logic,
+both purely combinational, and both sit in the single-cycle EX result mux
+alongside the ALU. Registering their results and stalling one cycle for those op
+classes takes their depth out of the EX critical path entirely. Bit-field and
+shift-by-register instructions are rare, and the manual already makes them slow.
+
+Risk: moderate -- touches `ex_result` and the CCR source selection, which is
+where several real bugs have lived.
+
+### 6. Decode: registered predecode, or a positional-word convention
+
+Two decode cones sit in series today: the fetch unit's `ext` output is muxed by
+`ext_words`, which comes from a *full decode* of the same word (`u_peek`), and
+that muxed `ext` is then the core decoder's input. `mh030p_decode` is 7.1% of
+comb logic and is instantiated twice.
+
+The clean fix is the positional-word convention already scoped for full-format
+EA support: every field read takes its word by static index from the
+unnormalised `ext_raw`, so the mux -- and the serialisation -- disappears. That
+gives it **feature value independent of timing**, since it is also the
+prerequisite for rejecting or implementing full-format extension words (see the
+cosim section above).
+
+Risk: moderate-to-high on its own terms -- a wrong `ext_words` derails the
+instruction stream rather than giving a wrong answer -- but the exhaustive
+65,536-opcode sweep covers exactly that.
+
+### Considered and rejected, with reasons
+
+* **Global stall network.** Inspected: `stall_ex` is already a shallow OR of
+  cheap registered flags. Nothing to win.
+* **Local arithmetic restructuring** (precomputed return address, carry-save EA
+  adder, priority-chain-to-case, head-pointer queue). Five attempts, none
+  resolvable by a measurement whose seed spread is 1.32 MHz. Not a lever.
+* **`--freq` on nextpnr.** Tested, bit-identical results. The ECP5 placer is
+  timing-driven regardless.
+
+### Honest expectation
+
+None of these can be promised a number in advance; that is the point of the
+acceptance criterion. What can be said is that the three historical wins in this
+project were all of the same shape as items 1, 2 and 5 -- removing or
+sequentialising a large always-evaluating block (a combinational loop, +10 MHz;
+a combinational divider, 5.8x; cache arrays to real BRAM, +37%) -- while every
+attempt at making correct logic locally shallower has been unmeasurable. Item 1
+alone removes 16% of the design's combinational logic, which is the largest
+single lever now visible.
