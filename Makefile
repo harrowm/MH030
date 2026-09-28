@@ -116,6 +116,20 @@ $(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 
 # MH030-P: the Tom Harte corpus against the pipelined core. Same output
 # contract as $(SIM)/harte_dat, so scripts/run_harte.py --sim drives either.
+$(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+                rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
+                rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_uop.svh \
+                rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
+                rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
+                rtl/eu_bitfield.sv tb/cosim_p_tb.sv | $(SIM)
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+	    rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
+	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtl/opcode_fields.sv \
+	    rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
+	    rtl/eu_bcd.sv rtl/eu_bitfield.sv tb/cosim_p_tb.sv 2>&1 \
+	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
+	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
+
 $(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                 rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
                 rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_uop.svh \
@@ -483,6 +497,39 @@ buscmp-grp$(1): $(SIM)/cosim_grp winuae/tests/grp$(1)_ref.log tests/grp$(1).hex
 	    --reads-only $(if $(filter 6,$(1)),--max 6,--dut-may-continue)
 endef
 $(foreach n,0 1 2 3 4 5 6 7,$(eval $(call GRP_RULE,$(n))))
+
+# ── MH030-P bus data-order comparison ───────────────────────────────────────
+# What Harte cannot check. The corpus compares architectural state at the end of
+# one instruction, so it is blind to the ORDER of memory accesses -- a
+# memory-to-memory move that writes before it reads, a MOVEM walking its
+# registers backwards, PACK's two reversed byte accesses would all pass it.
+#
+# --data-only, because this core's fetch unit fills its queue a LONGWORD at a
+# time where rtl/ fetches a word: the two program streams differ in count and
+# size by design, so comparing them says nothing, while the data stream is
+# exactly the part that carries access-order information.
+#
+# --skip-dut 2 drops this core's own reset-vector reads, which it issues on the
+# data port where rtl/ issues them on the program port (see plan.md -- rtl/'s FC
+# there is an unoverridden default, so which is right is genuinely open).
+#
+# ONLY TWO TARGETS, and that is the finding rather than the scope. Every other
+# reference log in winuae/tests/ exercises a FULL-FORMAT extension word, which
+# this core does not implement -- see plan.md for why that is currently worse
+# than "absent".
+PCOSIM_TARGETS := smoke timing_preview_idx_current_idx
+
+define PCOSIM_RULE
+buscmp-p-$(1): $(SIM)/cosim_p winuae/tests/$(1)_ref.log tests/$(1).hex
+	$$(VVP) $$(SIM)/cosim_p +hexfile=tests/$(1).hex +grp=$(1) 2>&1 \
+	    | grep "^BUS" > /tmp/_dutp_$(1).log || true
+	python3 tools/buscmp.py /tmp/_dutp_$(1).log winuae/tests/$(1)_ref.log \
+	    --data-only --skip-dut 2
+endef
+$(foreach t,$(PCOSIM_TARGETS),$(eval $(call PCOSIM_RULE,$(t))))
+
+.PHONY: cosim_p
+cosim_p: $(patsubst %,buscmp-p-%,$(PCOSIM_TARGETS))
 
 # Run all 8 group tests
 cosim_grp: buscmp-grp0 buscmp-grp1 buscmp-grp2 buscmp-grp3 \

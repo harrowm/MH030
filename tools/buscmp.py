@@ -75,7 +75,13 @@ _LINE_RE = re.compile(
 )
 
 
-def parse_log(path, skip=0, reads_only=False, addr_mask=None, max_cycles=None):
+# Program space is supervisor or user PROGRAM: fc 110 and 010. Everything else
+# a core in this project can generate is data space.
+_PROGRAM_FC = ('110', '010')
+
+
+def parse_log(path, skip=0, reads_only=False, addr_mask=None, max_cycles=None,
+              data_only=False):
     """Return list of (rw, addr, data, fc, siz) tuples."""
     cycles = []
     skipped = 0
@@ -87,6 +93,15 @@ def parse_log(path, skip=0, reads_only=False, addr_mask=None, max_cycles=None):
                 continue
             rw, addr_s, data_s, fc_s, siz_s = m.groups()
             if reads_only and rw == 'W':
+                continue
+            # --data-only drops instruction fetches from BOTH logs. It exists for
+            # MH030-P, whose fetch unit fills its queue a LONGWORD at a time
+            # where rtl/ fetches a word, so the two program streams differ in
+            # transaction count and size by design and comparing them says
+            # nothing. The data stream is the part that carries real
+            # information about access order -- which is exactly what the Harte
+            # corpus cannot see, since it compares only final state.
+            if data_only and fc_s in _PROGRAM_FC:
                 continue
             if skipped < skip:
                 skipped += 1
@@ -206,6 +221,9 @@ def main():
     p.add_argument('--skip-dut',  type=int, default=0,    metavar='N')
     p.add_argument('--skip-ref',  type=int, default=0,    metavar='N')
     p.add_argument('--reads-only', action='store_true')
+    p.add_argument('--data-only', action='store_true',
+                   help='ignore instruction fetches (fc=110/010) in both logs; '
+                        'for a core whose fetch granularity differs by design')
     p.add_argument('--addr-mask', type=lambda x: int(x, 16), default=None, metavar='HEX')
     p.add_argument('--max',       type=int, default=None, metavar='N')
     p.add_argument('--dut-may-continue', action='store_true',
@@ -221,10 +239,12 @@ def main():
     args = p.parse_args()
 
     dut = parse_log(args.dut, skip=args.skip + args.skip_dut,
-                    reads_only=args.reads_only, addr_mask=args.addr_mask,
+                    reads_only=args.reads_only,
+                     data_only=args.data_only, addr_mask=args.addr_mask,
                     max_cycles=args.max)
     ref = parse_log(args.ref, skip=args.skip + args.skip_ref,
-                    reads_only=args.reads_only, addr_mask=args.addr_mask,
+                    reads_only=args.reads_only,
+                     data_only=args.data_only, addr_mask=args.addr_mask,
                     max_cycles=args.max)
 
     if args.allow_fetch_interleave:

@@ -4181,3 +4181,71 @@ false, which is presumably why Verilator's analysis let them through. This
 matters because Phase 284 used UNOPTFLAT as *the* detector for `rtl/`'s loops --
 it is necessary but demonstrably not sufficient, and nextpnr's own loop check is
 the one that finds this shape.
+
+## Bus data-order cosimulation for MH030-P -- and a real bug it exposed
+
+The full Harte corpus passing says less than it sounds. Harte compares
+architectural state at the end of one instruction and nothing else, so it is
+blind to the ORDER of memory accesses: a memory-to-memory move that writes
+before it reads, a MOVEM walking its registers backwards, PACK's two reversed
+byte accesses -- every one of those passes it. `tools/buscmp.py` is what checks
+order, and no part of it had ever been pointed at the new core.
+
+`tb/cosim_p_tb.sv` + `make cosim_p` do that now. Two things this core lacks had
+to be supplied:
+
+* **No function-code output** -- the bus is abstract. FC is synthesised from the
+  two facts that define it: program-vs-data from which requester the arbiter
+  granted (`u_arb.owner`), supervisor-vs-user from `sr_sys_r`. Not a guess.
+* **A different fetch granularity** -- this fetch unit fills its queue a
+  longword at a time where `rtl/` fetches a word, so the two *program* streams
+  differ in transaction count and size by design and comparing them says
+  nothing. New `buscmp.py --data-only` drops fetches from both logs and compares
+  the data stream, which is where access order actually lives.
+
+One incidental open question: this core reads its reset vectors on the DATA port
+(fc=101) where `rtl/` reads them on the program port (fc=110). `rtl/`'s value
+there turns out to be an **unoverridden default** (`biu_cycle_gen.sv`'s
+`cyc_fc = 3'b110` initialiser, which the init states never set), so which is
+correct per MC68030UM §8.1.1 is genuinely unsettled and was NOT "fixed" to match.
+`--skip-dut 2` sets it aside for now.
+
+### The bug: full-format extension words are silently misread, not rejected
+
+Only 2 of 67 reference logs compare clean, and the reason is a single feature --
+but its failure mode is worse than absence. `UEA_MEMIND` is never produced by
+`mh030p_decode.sv`, and **`ext[8]` -- the bit that distinguishes a full-format
+extension word from a brief-format one -- is never tested anywhere in the core.**
+So a full-format EA is not declined; it is claimed and decoded *as if* it were
+brief format, reading a base-displacement size field and an I/IS field as though
+they were a scale, an index register and an 8-bit displacement.
+
+Worse, `ea_words()` returns 1 for an indexed EA unconditionally, while a real
+full-format EA carries 1 to 5 words (the extension word, plus a null/word/long
+base displacement, plus a null/word/long outer displacement). The count is
+therefore wrong, and a wrong count does not produce a wrong answer -- it derails
+the instruction stream, which is the hang class this project has now documented
+about a dozen times. `memind2` shows it exactly: its first two data writes match
+the reference **precisely**, then the memory-indirect load at 0x24 is misread and
+the core runs off fetching NOPs to 0x1f24 forever.
+
+That the decoder equivalence sweep never caught this is itself instructive: its
+test extension word is `0xA4A5_3C7F`, chosen with **bit 8 deliberately clear**
+so that the known full-format gap would not drown every other miscount. The one
+check that would have found it has the case excluded by construction.
+
+### What closing it needs, and why it is not a patch
+
+Rejecting full format correctly still requires reading bit 8 of *the EA's own
+first extension word*, and that position is not currently reachable at the point
+it is needed: `ea_words()` feeds the offset computation (`ew_pre`), so having it
+depend on a word selected BY that computation is circular. The clean answer is
+to give the decoder the fetch unit's `ext_raw` as a second input and do all
+positional access from unnormalised words -- which has no dependence on
+`ext_words` at all -- leaving `ext` for the legacy field reads. That is a
+contained refactor, and it is the prerequisite for implementing full format
+properly rather than a workaround.
+
+So the next phase is: positional access off `ext_raw`, then reject-or-implement
+full format. It unblocks ~60 of the 67 cosim targets, which are the only tests
+in the project that can see memory access order at all.
