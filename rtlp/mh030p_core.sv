@@ -405,6 +405,25 @@ module mh030p_core (
     wire ex_is_alu_mem_wr = ex_valid && (ex_uop.uclass == UC_ALU)
                          && ex_uop.writes_mem && !ex_uop.reads_mem;
     wire ex_m2m = ex_rmw && (ex_uop.dst_ea_mode != UEA_NONE);
+    // ── Two-address arithmetic through memory ────────────────────────────────
+    // SBCD/ABCD and ADDX/SUBX in their -(Ay),-(Ax) form are the only
+    // instructions here that READ TWO different addresses and write one:
+    // source, destination, then the result back to the destination. A
+    // memory-to-memory MOVE reads one and writes the other, so the existing
+    // path is one access short -- it computed with the destination operand it
+    // had never fetched.
+    wire ex_m2m_2rd = ex_m2m && ((ex_uop.uclass == UC_BCD)
+                              || (ex_uop.uclass == UC_ADDX));
+    // An explicit phase, not a set of flags keyed off mem_got: mem_got stays
+    // high for the whole stall and so cannot tell "the FIRST read finished" from
+    // "the SECOND read finished". Keying the write on it cancelled the second
+    // read one cycle after issuing it.
+    //   0 = source read outstanding (dispatched by AG)
+    //   1 = destination read outstanding
+    //   2 = write outstanding
+    //   3 = done
+    reg [1:0]  bcdm_ph;
+    reg [31:0] bcdm_src;
     reg  rmw_wr_issued, rmw_done;
     // Declared here so the ONE always_ff that drives the memory port can use
     // it; assigned below once the ALU result exists. Splitting the port
@@ -500,7 +519,8 @@ module mh030p_core (
 
 
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
-                    && (ex_rmw ? !rmw_done : !mem_got);
+                    && (ex_m2m_2rd ? (bcdm_ph != 2'd3)
+                        : ex_rmw   ? !rmw_done : !mem_got);
 
     // Divide is multi-cycle: rtl/eu_mul_div.sv iterates one 32-bit
     // compare+subtract per tick rather than instantiating a combinational
@@ -1164,7 +1184,23 @@ module mh030p_core (
                 end
                 default: if (mem_ack) mem_req <= 1'b0;
             endcase
-        end else if (ex_rmw && mem_got && !rmw_wr_issued && !cas_skip_wr) begin
+        end else if (ex_m2m_2rd && (bcdm_ph != 2'd3)) begin
+            if (mem_ack) begin
+                mem_req <= 1'b0;         // the next phase re-issues
+            end else if (!mem_req) begin
+                if (bcdm_ph == 2'd1) begin
+                    mem_req  <= 1'b1;    // fetch the DESTINATION operand
+                    mem_rw   <= 1'b1;
+                    mem_addr <= ex_m2m_addr;
+                end else if (bcdm_ph == 2'd2) begin
+                    mem_req   <= 1'b1;   // write the result back to it
+                    mem_rw    <= 1'b0;
+                    mem_wdata <= ex_commit;
+                    mem_addr  <= ex_m2m_addr;
+                end
+            end
+        end else if (ex_rmw && mem_got && !rmw_wr_issued && !cas_skip_wr
+                     && !ex_m2m_2rd) begin
             // Read captured: turn the same address around as a write of the
             // ALU result. The address is already in mem_addr, so only the
             // direction and data change.
@@ -1312,7 +1348,8 @@ module mh030p_core (
     // destination was adding a leftover register value instead of its own
     // constant. Found by the Harte corpus in its first forty vectors; no
     // hand-written test had ever used an immediate against memory.
-    wire [31:0] ex_src_raw = ex_m2m                  ? mem_hold
+    wire [31:0] ex_src_raw = ex_m2m_2rd              ? bcdm_src
+                           : ex_m2m                  ? mem_hold
                        : ex_rmw_op
                          ? ((ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a_u)
                        // TST/BTST-on-memory: the register or immediate is the
@@ -1546,9 +1583,22 @@ module mh030p_core (
     assign div_ovf = ex_is_div && md_v;
     assign md_c  = is_mul_op ? 1'b0  : dv_c;
 
-    wire [31:0] ex_m2m_step = (ex_uop.siz == UZ_BYTE) ? 32'd1
+    // ONE definition of the destination's step. There were two -- this one for
+    // the ADDRESS and another for the register UPDATE -- and the A7 byte rule
+    // had been added to the second but not the first, so SBCD -(Ay),-(A7)
+    // accessed 0x7FF while correctly leaving A7 at 0x7FE.
+    wire [31:0] ex_m2m_step = (ex_uop.siz == UZ_BYTE)
+                              ? ((ex_uop.dst_ea_reg == 4'd15) ? 32'd2 : 32'd1)
                             : (ex_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
-    assign ex_m2m_addr = ex_a_u + ex_uop.dst_ea_disp
+    // When BOTH operands name the SAME address register -- SBCD -(A1),-(A1) is
+    // legal and the corpus tests it -- the destination's adjustment applies to
+    // the value the SOURCE already left behind, so the register moves twice.
+    // ex_a_u is the base as read in ID, before the source's own decrement, so
+    // the source's computed address is the right starting point instead.
+    wire m2m_same_reg = (ex_uop.dst_ea_reg == ex_uop.ea_reg);
+    wire [31:0] m2m_base = m2m_same_reg ? ex_ea : ex_a_u;
+
+    assign ex_m2m_addr = m2m_base + ex_uop.dst_ea_disp
                        + ((ex_uop.dst_ea_mode == UEA_AN_PRE)
                           ? (32'h0 - ex_m2m_step) : 32'h0);
 
@@ -2118,6 +2168,20 @@ module mh030p_core (
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
+            bcdm_ph  <= 2'd0;
+            bcdm_src <= 32'h0;
+        end else if (!stall_ex) begin
+            bcdm_ph  <= 2'd0;           // instruction leaving EX
+        end else if (ex_m2m_2rd && mem_ack) begin
+            // The source value has to be kept: mem_hold is about to be
+            // overwritten by the destination read.
+            if (bcdm_ph == 2'd0) bcdm_src <= mem_rdata;
+            if (bcdm_ph != 2'd3) bcdm_ph  <= bcdm_ph + 2'd1;
+        end
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
             rmw_wr_issued <= 1'b0;
             rmw_done      <= 1'b0;
         end else if (!stall_ex) begin
@@ -2140,9 +2204,7 @@ module mh030p_core (
     // nothing handled dst_ea_reg. So MOVE.b (A7)+,(A4)+ advanced A7 and left A4
     // where it was. The second write port already exists for EXG and LINK, and
     // this is the same shape -- one instruction, two register commits.
-    wire [31:0] m2m_step = (ex_uop.siz == UZ_BYTE)
-                           ? ((ex_uop.dst_ea_reg == 4'd15) ? 32'd2 : 32'd1)
-                         : (ex_uop.siz == UZ_WORD) ? 32'd2 : 32'd4;
+    wire [31:0] m2m_step = ex_m2m_step;
     wire ex_m2m_an = ex_m2m
                   && ((ex_uop.dst_ea_mode == UEA_AN_POST)
                    || (ex_uop.dst_ea_mode == UEA_AN_PRE));
@@ -2154,7 +2216,8 @@ module mh030p_core (
     wire [31:0] ex_wr2_data = ex_is_exg  ? ex_b_u
                             : ex_m2m_an
                               ? ((ex_uop.dst_ea_mode == UEA_AN_POST)
-                                 ? (ex_a_u + m2m_step) : (ex_a_u - m2m_step))
+                                 ? (m2m_base + m2m_step)
+                                 : (m2m_base - m2m_step))
                             : ex_is_link ? (ex_sp - 32'd4 + ex_uop.imm)
                                          : (ex_b_u + 32'd4);   // UNLK
 

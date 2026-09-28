@@ -1160,6 +1160,14 @@ module mh030p_decode (
                 uop.alu_op      = g_is_bcd_mem ? ((f_group == 4'hC) ? 4'h0 : 4'h1)
                                                : ((f_group == 4'hD) ? UA_ADDX : UA_SUBX);
                 uop.siz         = g_is_bcd_mem ? UZ_BYTE : f_siz;
+                // TWO addresses: the source predecrements Ay (the low register
+                // field) and the destination predecrements Ax (the high one).
+                // Only the source was described, so the core treated the whole
+                // thing as a single-address read-modify-write and wrote its
+                // result back over the SOURCE -- leaving Ax undecremented and
+                // the destination byte untouched.
+                uop.dst_ea_mode = UEA_AN_PRE;
+                uop.dst_ea_reg  = {1'b1, f_dn};
                 uop.src_kind    = US_MEM;
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = UEA_AN_PRE;
