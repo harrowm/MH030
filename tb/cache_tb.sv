@@ -186,6 +186,22 @@ module cache_tb;
     always_ff @(posedge clk_4x)
         if (u_top.u_biu.u_cache.dc_burst_req) dc_burst_req_seen_r <= 1'b1;
 
+    // B-1's own burst monitors, gated on ITS OWN addresses rather than sticky
+    // globals. The globals above are set by earlier tests (D-10 bursts on the
+    // data side), so proving B-1 bursted would need them cleared just before it
+    // runs -- and the testbench cannot know exactly when the CPU arrives, so that
+    // clear is a race. Address gating sidesteps it entirely.
+    logic b1_ic_burst_r = 1'b0;
+    logic b1_dc_burst_r = 1'b0;
+    always_ff @(posedge clk_4x) begin
+        if (u_top.u_biu.u_icache.ic_burst_req
+            && (u_top.u_biu.u_icache.ic_burst_addr >= 32'h0000_3800)
+            && (u_top.u_biu.u_icache.ic_burst_addr <  32'h0000_3900)) b1_ic_burst_r <= 1'b1;
+        if (u_top.u_biu.u_cache.dc_burst_req
+            && (u_top.u_biu.u_cache.dc_burst_addr >= 32'h0000_3400)
+            && (u_top.u_biu.u_cache.dc_burst_addr <  32'h0000_3440)) b1_dc_burst_r <= 1'b1;
+    end
+
     // Data-space (fc=101) DS# assertion counter -- Step 5's own D-cache
     // counterpart of code_ds_count. Unlike the I-cache's IFU-driven
     // readahead, EU data accesses are purely demand-driven (issued exactly
@@ -426,6 +442,54 @@ module cache_tb;
         rom[0] = 32'h0000_3F00;
         rom[1] = 32'h0000_0100;
 
+        // B-1's own code, up front for the same reason I-5's is: the CPU reaches
+        // it via a JMP emitted inside the D-12 block, and it gets there while the
+        // testbench is still running D-12's own checks -- so code written later in
+        // the initial block below would not exist yet. See B-1's own check block
+        // for what it tests.
+        begin
+            logic [31:0] b, b2;
+            int i;
+            logic [31:0] b1_addrs [0:2];
+            logic [15:0] b1_ldops [0:2];
+            b1_addrs[0] = 32'h0000_340C; b1_ldops[0] = MOVE_L_A0_D4;
+            b1_addrs[1] = 32'h0000_341C; b1_ldops[1] = MOVE_L_A0_D5;
+            b1_addrs[2] = 32'h0000_342C; b1_ldops[2] = MOVE_L_A0_D6;
+
+            // CACR = EI | IBE | ED | DBE -- the one combination no other test sets.
+            b = emit_set_cacr(32'h0000_3800, 32'h0000_1111);
+
+            // Placeholders, so a checkpoint can tell "not run yet" from "ran and
+            // got this value" (the hazard D-9/D-10 document). D5 gets CLR: there
+            // is no MOVE_L_IMM_D5 constant, and 0 is a fine placeholder since no
+            // expected value is 0. Stepped a longword at a time because Icarus
+            // rejects a bit-select applied to an expression.
+            b2 = b;          rom[b2[31:2]] = {MOVE_L_IMM_D4, 16'hFFFF};
+            b2 = b2 + 32'd4; rom[b2[31:2]] = {16'hFFFF,      CLR_L_D5};
+            b2 = b2 + 32'd4; rom[b2[31:2]] = {MOVE_L_IMM_D6, 16'hFFFF};
+            b2 = b2 + 32'd4; rom[b2[31:2]] = {16'hFFFF,      NOP_OP};
+            b = b + 32'd16;
+
+            // Three fresh lines, read at their LAST longword -- the one a
+            // whole-line fill must have fetched, and the one a wrong-burst fill is
+            // most likely to corrupt. MOVEA.L #addr,A0 ; MOVE.L (A0),Dn is four
+            // words, exactly two longwords, so there is no packing drift.
+            for (i = 0; i < 3; i++) begin
+                rom[b[31:2]]  = {MOVEA_L_IMM_A0, b1_addrs[i][31:16]};
+                b2 = b + 32'd4;
+                rom[b2[31:2]] = {b1_addrs[i][15:0], b1_ldops[i]};
+                b = b + 32'd8;
+            end
+
+            // Restore the CACR value D-12 left, because D-13/D-14/I-5 inherit it,
+            // then continue the chain. D7 is deliberately unused by this test:
+            // emit_set_cacr uses it as scratch and would clobber it here.
+            b = emit_set_cacr(b, 32'h0000_0100);
+            rom[b[31:2]] = {JMP_ABS_L_OP, 16'h0000};
+            b2 = b + 32'd4;
+            rom[b2[31:2]] = {16'h1900, NOP_OP};
+        end
+
         // I-5's own ROM content (vector-2 handler, F's subroutine, and its
         // own controller code) is written here, up front alongside the
         // boot vector -- see I-5's own section further down for why this
@@ -475,6 +539,20 @@ module cache_tb;
         rom[16'h3004/4] = 32'h3333_4444;  // W4+4 (woff=1)
         rom[16'h3008/4] = 32'h5555_6666;  // W4+8 (woff=2)
         rom[16'h300C/4] = 32'h7777_8888;  // W4+C (woff=3, the whole-line-fill proof target)
+        // B-1 (both-burst test): four fresh 16-byte lines, every longword a
+        // distinct value, so a line filled from the WRONG burst's data shows up
+        // as a visibly wrong value rather than a coincidental match. Deliberately
+        // four separate lines, each read twice, so the test issues several
+        // D-cache bursts while the I-cache is also missing on this test's own
+        // fresh code -- the overlap is what the bug needed.
+        rom[16'h3400/4] = 32'h0F0F_1A1A;  rom[16'h3404/4] = 32'h1E1E_2B2B;
+        rom[16'h3408/4] = 32'h2D2D_3C3C;  rom[16'h340C/4] = 32'h3C3C_4D4D;
+        rom[16'h3410/4] = 32'h4A4A_5B5B;  rom[16'h3414/4] = 32'h5C5C_6D6D;
+        rom[16'h3418/4] = 32'h6E6E_7F7F;  rom[16'h341C/4] = 32'h7A7A_8B8B;
+        rom[16'h3420/4] = 32'h8C8C_9D9D;  rom[16'h3424/4] = 32'h9E9E_AFAF;
+        rom[16'h3428/4] = 32'hA0A0_B1B1;  rom[16'h342C/4] = 32'hB2B2_C3C3;
+        rom[16'h3430/4] = 32'hC4C4_D5D5;  rom[16'h3434/4] = 32'hD6D6_E7E7;
+        rom[16'h3438/4] = 32'hE8E8_F9F9;  rom[16'h343C/4] = 32'hFAFA_0B0B;
         rom[16'h3200/4] = 32'hDEAD_1234;  // W6 (Phase 158 Stage 5: D-cache freeze write-hit-still-updates target)
         rom[16'h3300/4] = 32'h0000_0000;  // W7 (Phase 158 Stage 5: D-cache freeze write-miss-must-not-allocate target)
         rom[16'h2440/4] = 32'hAAAA_BBBB;  // WFC (D-13: FC-aware D-cache tag aliasing target -- idx=4, tag=0x24,
@@ -736,7 +814,7 @@ module cache_tb;
                                                                // anything here.
             rom[p[31:2]] = {JMP_ABS_L_OP, 16'h0000};
             p4 = p + 32'd4;
-            rom[p4[31:2]] = {16'h1900, NOP_OP};              // on to D-13 (which itself continues to I-5)
+            rom[p4[31:2]] = {16'h3800, NOP_OP};              // on to B-1, which continues to D-13
         end
 
         // ===================================================================
@@ -1917,6 +1995,44 @@ module cache_tb;
                 @(posedge clk_4x);
             check32("D-12: MOVEC CACR,D6 masks CD/CED/CI/CEI + reserved bits to 0",
                     u_top.u_eu.u_rf.d_reg[6], 32'h0000_3313);
+        end
+
+        // ===================================================================
+        // B-1: BOTH bursts enabled at once (CACR IBE=1 and DBE=1).
+        //
+        // The regression for a real bug nothing else here could catch.
+        // m68030_biu.sv gave the D-cache and the I-cache the SAME unqualified
+        // eu_burst_ack, so both were told any completing burst was theirs -- while
+        // the REQUEST side had always been grant-gated (cg_burst_req_mux uses
+        // dc_burst_req && grant_eu and ic_burst_req && grant_ifu). That asymmetry
+        // was the bug.
+        //
+        // Every other test here sets at most ONE burst-enable bit, and with only
+        // one client ever holding a burst outstanding the stray ack lands on a
+        // module in an idle state whose own `state == ..._BURST0 && ack` guard
+        // then fails harmlessly -- which is why D-10 (DBE alone) and I-1..I-5 (IBE
+        // alone) all passed throughout. With BOTH set, a cache waiting in its
+        // burst state consumes the OTHER cache's burst_rdata0..3 as its own line
+        // fill and the values come back wrong.
+        //
+        // The code lives up front (see the ROM section) because the CPU arrives
+        // here via a JMP spliced into the D-12 block, while this testbench is
+        // still running D-12's checks.
+        // ===================================================================
+        begin
+            // D6 is loaded last, so waiting on it means all three reads completed.
+            run_and_check("B-1: both bursts -- D6 got the right line data",
+                          6, 32'hB2B2_C3C3, 20000);
+            check32("B-1: both bursts -- D4 line data correct",
+                    u_top.u_eu.u_rf.d_reg[4], 32'h3C3C_4D4D);
+            check32("B-1: both bursts -- D5 line data correct",
+                    u_top.u_eu.u_rf.d_reg[5], 32'h7A7A_8B8B);
+            // Non-vacuity: both burst paths must genuinely have been used on THIS
+            // test's own addresses, or it proves nothing about their interaction.
+            check("B-1: the I-cache really did burst on B-1's own code",
+                  b1_ic_burst_r);
+            check("B-1: the D-cache really did burst on B-1's own data",
+                  b1_dc_burst_r);
         end
 
         // D-13: FC-aware D-cache tag prevents supervisor/user aliasing (see

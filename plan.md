@@ -5126,3 +5126,46 @@ check -- nothing else in the repo exercises IBE and DBE together, which is exact
 why this went unnoticed. A dedicated unit test in `tb/cache_tb.sv` (both bursts
 enabled, data integrity checked) would be the stronger net and is **not** added
 here.
+
+### B-1: the unit test that catches it
+
+`tb/cache_tb.sv` gains **B-1**, the regression the fix deserved, and it is verified
+to fail without the fix rather than merely assumed to.
+
+Three fresh 16-byte lines are read at their **last** longword -- the one a
+whole-line fill must have fetched and the one a wrong-burst fill is most likely to
+corrupt -- with `CACR = $1111` (EI | IBE | ED | DBE), the one combination no other
+test in the file sets. B-1's own code is cold in the I-cache, so D-cache bursts are
+issued while I-cache bursts are in flight, which is the overlap the bug needs.
+
+**Confirmed to catch it.** With the fix reverted:
+
+    FAIL  B-1: D4 line data correct: got 207c0000 exp 3c3c4d4d
+
+`0x207C` is `MOVEA.L #imm,A0` -- B-1's **own instruction stream**, delivered into a
+data-cache line. That is the bug stated as plainly as it can be.
+
+Three things about writing it are worth recording, because each cost a rebuild and
+all three are properties of this file rather than of the bug:
+
+* **The code has to be emitted "up front."** Test blocks chain by `JMP_ABS_L_OP`,
+  and the CPU reaches a spliced-in block while the testbench is still running the
+  *previous* block's checks -- so code written later in the `initial` block does
+  not exist yet when the CPU arrives. I-5's own ROM is up front for the same
+  reason, and says so.
+* **ROM setup and checks live in different regions of the same `initial` block**,
+  and the section comments appear in both. Anchoring the check block on the
+  `// D-13:` comment put it in the setup region, where it ran before the CPU had
+  executed anything -- 5 spurious failures and a broken chain.
+* **`emit_set_cacr` uses D7 as scratch**, so B-1 restores CACR (D-13/D-14/I-5
+  inherit it) *after* its reads and deliberately never uses D7 as a result
+  register.
+* The non-vacuity checks are **address-gated** rather than the file's existing
+  sticky `ic_burst_req_seen_r`/`dc_burst_req_seen_r`. Those are already set by
+  earlier tests, and clearing them "just before B-1" is a race the testbench cannot
+  win, since it does not know when the CPU arrives.
+
+Gate after the fix, with B-1 in: `make test` 43/43 (cache included), `cosim_grp`
+8/8, `cosim_memind` 33/33, `dat-synth` 50/50, `make bench` both programs correct,
+and the 124-suite Harte sweep bit-identical (run before B-1 was added; B-1 is
+testbench-only and cannot affect it).
