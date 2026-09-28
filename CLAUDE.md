@@ -1184,6 +1184,30 @@ supported via a **fourth register-file read port** plus `dst_ea_idx_*` in the uo
 since `(d8,An,Xn)` at both ends needs two bases and two indices at once. See
 `plan.md`'s own "MH030-P reaches the reference" section.
 
+**MH030-P Fmax program (a later session, standalone-core measurements via
+`make fmax-p-sweep`; `make area-p` for real per-module area)**: the core measures
+**29.16 MHz mean over 9 seeds (28.39-30.14)**, inside the 25-50 MHz target band,
+against the reference `m68030_top` standalone at **13.59 MHz** through the identical
+wrapper -- and it executes the same programs in **3.33x fewer ticks** (protocol-exact
+but timing-free, the signed-off divergence), so net throughput is ~7x. **The one
+change that produced the gain was sequentialising the shifter**
+(`rtlp/mh030p_shift.sv`, one bit per tick, 220 cells replacing `eu_shifter`'s 2,084
+and its ~14 variable-distance barrel shifters): 21.60 -> 29.16 MHz. `rtl/eu_shifter.sv`
+is untouched. Also landed: `eu_mul_div` gained `MUL_ENABLE` (default 1, so `rtl/` is
+unaffected) so rtlp stops instantiating multiply hardware it can never reach (4 unused
+DSPs freed). **Two hard-won methodology facts, both of which cost a session:**
+(1) **Fmax here has a ~1.4 MHz floor that seeds cannot sample** -- it is nextpnr's P&R
+outcome varying with the *netlist*, and eight changes measured ~1 MHz "worse" including
+two that only DELETED logic; use 9 seeds on BOTH arms and treat <2 MHz as unresolved.
+(2) **Cell-name attribution in a flattened netlist lies, prefix included** -- all five
+of `mh030p_mul`'s DSPs are named `u_dut.u_ifu.req_epoch_*`; use `make area-p`
+(`-noflatten`). Both proxies are dead: logic depth is blind to slack, and cell count is
+*anti*-correlated with the clock (packing the register file and prefetch queue cut 18%
+of area and lost 1.67 MHz -- reverted). What works is removing a large
+**always-evaluating arithmetic block** from the timing graph: divider 5.8x, cache BRAM
++37%, shifter +35%. Next candidate of that shape: `eu_bitfield` (1,459 cells). See
+`plan.md`'s own "Sequential shifter" section.
+
 **Current state**: `make test` 42/42, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
