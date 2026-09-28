@@ -10,6 +10,7 @@ tools/mustest
 
 # Verilator/build output directories
 obj_harte_vbatch/
+obj_harte_p_vbatch/
 obj_mustest/
 
 # Throwaway test scripts / scratch cosim binaries

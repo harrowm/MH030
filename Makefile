@@ -324,6 +324,36 @@ $(VOBJ_HARTE):
 sim/harte_vbatch: $(VOBJ_HARTE)/Vharte_verilator_tb | $(SIM)
 	cp $< $@
 
+# ── Verilator build for the batched MH030-P Harte runner ────────────────────
+# The Icarus runner (sim/harte_p) stays the per-suite debugging tool; this is
+# the only practical way to sweep the full corpus against the new core, for
+# exactly the reason the rtl/ Verilator backend exists.
+RTLP_SRCS := rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+             rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
+             rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv \
+             rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
+             rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
+             rtl/eu_bitfield.sv
+VOBJ_HARTE_P := obj_harte_p_vbatch
+VLATOR_FLAGS_HARTE_P := --cc -sv -Irtlp -Irtl --Mdir $(VOBJ_HARTE_P) \
+                --top-module harte_p_verilator_tb \
+                --x-assign 0 --x-initial 0 -Wno-fatal -Wno-WIDTHTRUNC \
+                -Wno-WIDTHEXPAND -Wno-CASEINCOMPLETE -Wno-INITIALDLY \
+                --public -fno-dfg
+
+$(VOBJ_HARTE_P)/Vharte_p_verilator_tb: $(RTLP_SRCS) rtlp/mh030p_uop.svh \
+                tb/harte_p_verilator_tb.sv tb/harte_p_verilator_main.cpp \
+                | $(VOBJ_HARTE_P)
+	$(VLATOR) $(VLATOR_FLAGS_HARTE_P) --exe ../tb/harte_p_verilator_main.cpp \
+	    $(RTLP_SRCS) tb/harte_p_verilator_tb.sv
+	$(MAKE) -C $(VOBJ_HARTE_P) -f Vharte_p_verilator_tb.mk OPT_FAST="-O2"
+
+$(VOBJ_HARTE_P):
+	mkdir -p $(VOBJ_HARTE_P)
+
+sim/harte_pvbatch: $(VOBJ_HARTE_P)/Vharte_p_verilator_tb | $(SIM)
+	cp $< $@
+
 # ── Bare-metal test hex generation (requires vasmm68k_mot in PATH) ──────────
 tests/%.bin: tests/%.s
 	vasmm68k_mot -Fbin -m68030 $< -o $@

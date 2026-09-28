@@ -207,6 +207,10 @@ def main():
                     help='parallel batch processes (default 8)')
     ap.add_argument('--backend',        choices=['icarus', 'verilator'], default='icarus',
                     help='simulation backend (default icarus)')
+    ap.add_argument('--sim',            default=None,
+                    help='simulator binary, overriding the backend default '
+                         '(e.g. sim/harte_pvbatch for the MH030-P core -- it '
+                         'speaks the same manifest/blob protocol)')
     args = ap.parse_args()
 
     if args.backend == 'verilator':
@@ -215,6 +219,10 @@ def main():
     else:
         sim_bin, run_fn = SIM_BIN, run_chunk
         build_hint = 'make sim/harte_batch'
+
+    if args.sim:
+        sim_bin = Path(args.sim)
+        build_hint = f'make {args.sim}'
 
     if not sim_bin.exists():
         print(f"ERROR: {sim_bin} not found — run: {build_hint}", file=sys.stderr)
