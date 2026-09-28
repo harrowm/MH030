@@ -95,10 +95,29 @@ module mh030p_top (
         .wb_wr_data(wb_wr_data), .ccr_out(ccr_out), .stopped(stopped)
     );
 
-    mh030p_arb u_arb (
+    // Instruction cache between the fetch unit and the arbiter. `make bench`
+    // showed EX idle for 52% of all ticks with the front end issuing nearly one
+    // bus transaction per instruction, because a taken branch flushes the
+    // prefetch queue every few instructions in a tight loop. A hit here costs a
+    // tick instead of a bus cycle. It snoops the data side so a write over a
+    // cached instruction cannot be read back stale.
+    wire        ic_req;
+    wire [31:0] ic_addr;
+    wire [31:0] ic_rdata;
+    wire        ic_ack;
+    mh030p_icache u_ic (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .if_req(if_req), .if_addr(if_addr),
         .if_rdata(if_rdata), .if_ack(if_ack),
+        .m_req(ic_req), .m_addr(ic_addr),
+        .m_rdata(ic_rdata), .m_ack(ic_ack),
+        .d_req(mem_req), .d_rw(mem_rw), .d_addr(mem_addr)
+    );
+
+    mh030p_arb u_arb (
+        .clk_4x(clk_4x), .rst_n(rst_n),
+        .if_req(ic_req), .if_addr(ic_addr),
+        .if_rdata(ic_rdata), .if_ack(ic_ack),
         .d_req(mem_req), .d_addr(mem_addr), .d_rw(mem_rw),
         .d_siz(mem_siz), .d_wdata(mem_wdata), .d_lock(mem_lock),
         .d_rdata(mem_rdata), .d_ack(mem_ack),

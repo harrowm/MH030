@@ -4864,3 +4864,84 @@ going to the bus. It captures most of the same win for tight loops specifically.
 against the clock this session for one resolvable win of +35%; the front end is
 sitting on a 2x, it is measurable without any of the Fmax noise, and the work is
 a feature the plan already schedules.
+
+## Instruction cache: 6,116 -> 4,025 ticks, and fetches 1,352 -> 43
+
+Acting directly on Stage 3's finding. `rtlp/mh030p_icache.sv` sits between the
+fetch unit and the arbiter: **16 longwords, 64 bytes, direct-mapped**, with a
+same-cycle ack on a hit.
+
+    make bench, rtlp/:
+      before   EXECCYCLES 6116   issued=1419 stalled=1544 idle=3163
+                                bus=1610 fetch=1352 data=258
+      after    EXECCYCLES 4025   issued=1419 stalled=1295 idle=1321
+                                bus= 301 fetch=  43 data=258
+
+**Instruction fetches fell 1,352 -> 43, a 97% reduction**, idle time more than
+halved, and the tick count fell 34%. `D0` still checks correct, so the speed is
+not bought with a wrong answer.
+
+Updated cross-core position:
+
+    execution ticks:  rtl/ 23,665   rtlp/ 4,025   ->  5.88x
+    wall-clock (13.59 vs ~29.1 MHz)               ->  12.6x
+    => rtlp/ equals a real 68030 at ~42.8 MHz     (was 28.2)
+
+### Design choices, each with its reason
+
+* **A longword per entry, not a 16-byte line.** This core's bus has no burst
+  transfer -- the arbiter moves one longword per transaction -- so a line would
+  need four separate misses to fill and would buy nothing over caching each
+  longword as it arrives.
+* **Same-cycle ack on a hit.** The fetch unit samples `if_ack` in a clocked
+  block, so a combinational ack retires the request on that edge: a hit costs one
+  tick. This is why the data is NOT in BRAM -- a registered read would make every
+  hit two ticks, and with ~1,300 hits that would give back most of the win.
+* **The tag carries address bit 1.** Fetch addresses are not longword-aligned in
+  general: `fetch_pc` comes from `redirect_pc` and then adds 4, so a branch to an
+  odd word address makes every later fetch 2 mod 4. The bytes at 0x08 and 0x0A
+  overlap but are different requests returning different data.
+* **It snoops the data side.** The real 68030's I-cache is not coherent with
+  writes and expects software to flush. This one invalidates a matching entry,
+  which costs one comparator and removes the whole class of risk -- the Harte
+  harness synthesises programs whose writes can land anywhere.
+
+### Size was measured, not assumed -- and 64 bytes is enough
+
+Built and benchmarked at three sizes:
+
+    entries   ticks   fetches   icache cells   design total
+      16      4,025      43        3,257          32,116
+      32      4,025      43        7,683          36,542
+      64      4,025      43       10,583          39,442
+
+**Identical ticks and identical fetch counts at every size**, because the loops
+that matter are 4-7 instructions and 64 bytes already holds them whole. The read
+muxes are what cost area and they grow with the entry count, so 32 and 64 were
+paying ~4,400 and ~7,300 cells for nothing measurable. `ENTRIES` is a parameter;
+raise it when a workload with bigger loops demonstrates a benefit, which this
+benchmark cannot.
+
+Area: 28,283 -> 32,116, **+13.6% for a 34% throughput gain**. The first cut of
+the module used indexed unpacked arrays and cost 13,940 cells at 64 entries --
+the same per-bit priority-mux pathology the register file has. Packing into
+vectors with part-selects brought that to 10,583, and this is the case where
+packing is right: the read feeds the fetch unit's queue write, a flip-flop with a
+whole clock to settle, rather than the decoder and address adder that made
+packing measure 1.67 MHz slower in the register file.
+
+Verified: `make test` 43/43, corpus bit-identical at `PASS 702142 FAIL 2
+SKIP 281221`, `cosim_p` 2/2, `cosim_grp` 8/8, `make lint-drivers` clean.
+
+Timing: the 64-entry variant measured 29.11 and 29.40 MHz on seeds 1-2 against a
+29.16 mean baseline, i.e. neutral, which is the expected result for a mux tree
+that terminates in flip-flops. The 16-entry version shipped here is strictly
+smaller. A full 9-seed sweep was still running at the time of writing -- do not
+quote a final figure until it lands.
+
+### What remains in the tick budget
+
+`idle=1321` and `stalled=1295` of 4,025. Idle is still a third of all ticks, so
+the front end has more to give even now -- the remaining misses are cold and the
+253 redirects still cost refill latency. Beyond that, `stalled` is the execute
+path, where the sequential shifter and divider now deliberately spend cycles.
