@@ -1489,6 +1489,21 @@ module mh030p_decode (
         // How far the fetch unit must drain for this instruction. Branches
         // carry their displacement in the opcode unless the 8-bit field is
         // zero, in which case one extension word follows.
+        // THIS IS A PRIORITY CHAIN AND IT SHOULD STAY ONE -- measured, not
+        // assumed. 25 conditions deep, every one an equality against uclass or
+        // subop, sitting directly between the opcode and the top level's
+        // issue/drain: it looks exactly like something to flatten into a case
+        // over uclass, a balanced tree six deep instead of a chain of 25. That
+        // was written, proven byte-identical for all 65,536 opcodes, and
+        // measured: 22.93 MHz -> 21.69 (three fixed seeds each, non-overlapping
+        // ranges). The chain is FASTER.
+        //
+        // The likely reason is that the early arms are cheap constants, so the
+        // common cases exit the chain in a few levels and ABC9 maps that
+        // structure directly, whereas a case makes every arm pay the full tree
+        // depth. Second of two hand-restructurings in a row that the depth
+        // proxy liked and the clock did not -- see mh030p_ifu.sv's queue note
+        // for the other.
         uop.ext_words     = (uop.uclass == UC_BRANCH)
                           // 0x00 is the word form (one displacement word)
                           // and 0xFF the LONG form (two). The long form is
