@@ -3976,3 +3976,100 @@ address a FULL-FORMAT one. Since this decoder deliberately implements only the
 brief format, the check reported ~4,500 opcodes of that known gap and drowned
 every real miscount. Changing it to `0xA4A5_3C7F` -- one bit, still asymmetric
 between halves -- was the difference between a useless check and a decisive one.
+
+## MH030-P reaches the reference: `PASS 702142 FAIL 2`
+
+The full 124-suite Tom Harte sweep against the pipelined core:
+
+    PASS 702142  FAIL 2  SKIP 281221  TIMEOUT 0
+
+That is MH030's own number, to the vector. Every one of the 123 runnable
+suites is at 100%; the two failures are the documented ASL.b corpus data
+anomaly that `rtl/` cannot pass either, and the SKIP count matches because
+the skip decision belongs to `can_run`/`gen_hex` in the harness, not to the
+core.
+
+This closes the integer-ISA-breadth work that had been running since the
+core first executed an instruction. It does NOT mean the two cores are
+equivalent: Harte compares architectural state only, so bus transaction
+order (`buscmp.py`) and the multi-cycle families that no Harte suite covers
+(they are 68020+-only) are still unmeasured against the new core.
+
+### Getting there needed a faster sweep first
+
+The Icarus runner was the real constraint on every remaining gap: one suite
+at 1500 of its 8065 vectors took about as long as the whole corpus takes
+now. `sim/harte_pvbatch` (`make sim/harte_pvbatch`) is a Verilator build of
+the same manifest/blob protocol `sim/harte_vbatch` already spoke, so
+`run_harte_batch.py --sim sim/harte_pvbatch` drives it unchanged. Validated
+the way the `rtl/` backend was: ADDA.l gives the identical verdict through
+both backends, 5256/5256, in 5 seconds instead of 30 for a third of it.
+`sim/harte_p` (Icarus) remains the per-suite debugging tool -- it is what
+`--verbose` diagnosis and `+bustrace`/`+ccrtrace` run on.
+
+### The last gaps, and what they had in common
+
+Three of the four were one bug wearing different clothes: **a destination
+whose address register the source had already moved.**
+
+| Form | Wrong by | Real rule |
+|---|---|---|
+| `ADDA.l -(A3),A3` | +4 | destination operand is A3 AFTER the decrement |
+| `ADDA.l (A7)+,A7` | -4 | destination operand is A7 AFTER the increment |
+| `CMPM.l (A7)+,(A7)+` | -4 | second address is A7+4; A7 ends 8 higher |
+| `MOVE.w (A1)+,-(A1)` | -2 | must end where it started |
+
+All four now come from one expression, `ex_src_an_post` -- the source
+register's value after its own autoincrement, which for a predecrement is
+just the computed address and for a postincrement is one step past it. The
+step has to be at the OPERAND size with the A7-byte rule, not the write
+size, which is the same distinction that made `DIVU.W -(A7)` hang earlier.
+
+A fourth, unrelated one: `MOVE.w (d16,A7),(A7)+` shares the register but
+the source does not MOVE it, so the displaced source address must not become
+the destination's base. The same-register redirect is now gated on the source
+mode actually being an autoincrement.
+
+### Extension words are numbered, and each side reads its own
+
+The decoder read every displacement out of the same half of `ext`. That is
+correct only while at most one side of the instruction needs a word, which is
+why `ea_disp_valid` had been gated to `ext_words == 1` and why memory-to-
+memory moves with a displacement at each end were declared out of scope.
+
+Extension words are numbered from 0 in instruction order: whatever precedes
+the EA fields (an immediate, a register-spec word), then the SOURCE's own
+words, then the DESTINATION's. The fill-in now derives the leading count by
+**subtraction from `uop.ext_words`**, which is already swept against
+`m68030_seq.sv`, rather than restating the per-family exceptions a second
+time and getting a different answer. It found one immediately: the static bit
+ops' immediate is ONE word whatever `instr[7:6]` says, and the old
+`imm_takes_ext` guard read those bits as a size and skipped two.
+
+Consequences:
+
+* All EA derivation moved to the END of the decode block, after the word
+  count exists -- including the index fields that had been assigned in eight
+  separate branches.
+* `ea_disp_valid` now means "every word this instruction needs is reachable"
+  (indices 0-2; `ext` carries two, `q3` the third), so the sweep compares
+  displacements and index fields for **every** multi-extension-word opcode
+  instead of only single-word ones. Still 0 mismatches. A fourth word is
+  genuinely unreachable, which is what rules out an absolute long at both
+  ends.
+
+### Indexed memory destinations are no longer out of scope
+
+That exclusion was structural, not effort: the uop carried one set of index
+fields. It now carries `dst_ea_idx_*` as well, and the register file has a
+**fourth read port**, because a move with `(d8,An,Xn)` at both ends needs
+four registers in the same cycle -- two bases, two indices. One more 16-to-1
+mux and one register, against a stall on an instruction that already costs
+several cycles, with ~74,000 spare flip-flops on the device. The destination's
+index is scaled in AG, where the adder already lives, and carried into EX as
+one value; the AG base interlock covers it the same way it covers the source's.
+
+An immediate source also frees the single EA slot, since an immediate needs
+no address, so `MOVE.l #imm,-(A0)` and `MOVE.b #imm,(d16,A0)` now execute
+with the destination in `ea_*` and `ea_slot_is_dst` telling the fill-in to
+read the destination's own offset.

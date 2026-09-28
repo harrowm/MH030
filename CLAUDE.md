@@ -1159,7 +1159,32 @@ measures 13.78 MHz (14.24 before the multiply-driven-array correctness fix,
 which cost ~3% and 1.1k LUTs and lands regardless), the new one measures
 nothing because there is nothing to measure.
 
-**Current state**: `make test` 39/39 (38 + the new decoder sweep), `make
+**MH030-P P1+ (integer ISA breadth, CLOSED)**: the pipelined core now passes the
+full 124-suite Tom Harte corpus at **`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`**
+-- MH030's own number, to the vector, with all 123 runnable suites at 100% and the
+2 failures being the documented ASL.b corpus data anomaly `rtl/` cannot pass
+either. This required a Verilator batch harness first (`make sim/harte_pvbatch`,
+driven by `run_harte_batch.py --sim sim/harte_pvbatch`; `sim/harte_p` stays the
+per-suite Icarus debugging tool with `+bustrace`/`+ccrtrace`) -- the Icarus runner
+took as long on one suite's first 1500 vectors as the whole corpus now takes.
+Harte compares architectural state only, so bus transaction ORDER (`buscmp.py`)
+and the 68020+-only multi-cycle families the corpus never covers remain unmeasured
+against the new core. The last gaps closed: three shapes of one bug -- a
+destination whose address register the source had already moved (`ADDA -(A3),A3`,
+`ADDA (A7)+,A7`, `CMPM (A7)+,(A7)+`, `MOVE (A1)+,-(A1)`), now one shared
+`ex_src_an_post` expression using the OPERAND-size step with the A7 byte rule;
+and position-aware extension-word extraction, since words are numbered from 0 in
+instruction order and each side must read its own (the leading count is derived
+by subtraction from the already-swept `uop.ext_words` rather than restating the
+per-family exceptions). That widened `ea_disp_valid` from "exactly one word" to
+"every word reachable" (indices 0-2; a fourth genuinely is not), so the decoder
+sweep now compares displacements for every multi-word opcode -- still 0
+mismatches. Indexed memory destinations went from structurally-out-of-scope to
+supported via a **fourth register-file read port** plus `dst_ea_idx_*` in the uop,
+since `(d8,An,Xn)` at both ends needs two bases and two indices at once. See
+`plan.md`'s own "MH030-P reaches the reference" section.
+
+**Current state**: `make test` 42/42, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't

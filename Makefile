@@ -1025,3 +1025,47 @@ depth:
 	    synth_lattice -family ecp5 -top wrap_depth; \
 	    write_json $(SIM)/depth.json' -l $(SIM)/depth_yosys.log > /dev/null
 	@python3 scripts/logic_depth.py $(SIM)/depth.json
+
+# ── Standalone core Fmax, both cores through the identical wrapper ───────────
+# The plan's P2 gate is "a real Fmax number for the new architecture", and the
+# new core cannot be dropped into the SoC -- its bus is abstract, not 68030
+# pins. So both cores are measured STANDALONE through the same
+# gen_fmax_wrapper.py harness that `make depth` already uses, which equalises
+# their wildly different port counts (see that script's header). The absolute
+# numbers are therefore not comparable to the ~13.8 MHz whole-SoC figure; the
+# rtl/-vs-rtlp/ DIFFERENCE is what this measures, and that is the number the
+# go/no-go rests on.
+#
+# SEED is fixed and explicit, never --randomize-seed: an earlier session
+# compared runs that differed only by placement seed and read the ~0.5 MHz
+# spread as an RTL effect. Sweep SEED across at least three values before
+# believing a difference smaller than ~2 MHz.
+NEXTPNR_OSS ?= $(HOME)/oss-cad-suite/bin/nextpnr-ecp5
+SEED        ?= 1
+
+
+.PHONY: fmax-p fmax-rtl
+fmax-p:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(DEPTH_SRC) > $(SIM)/fmaxp.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/fmaxp.v mh030p_top \
+	    wrap_fmax $(SIM)/fmaxp_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/fmaxp.v $(SIM)/fmaxp_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/fmaxp.json' -l $(SIM)/fmaxp_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxp.json \
+	    --seed $(SEED) --ignore-loops --timing-allow-fail \
+	    --report $(SIM)/fmaxp_report-$(SEED).json 2>&1 \
+	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF"
+fmax-rtl:
+	@mkdir -p $(SIM)
+	@sv2v -I rtl $(TOP_SRCS) > $(SIM)/fmaxr.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/fmaxr.v m68030_top \
+	    wrap_fmax $(SIM)/fmaxr_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/fmaxr.v $(SIM)/fmaxr_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/fmaxr.json' -l $(SIM)/fmaxr_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxr.json \
+	    --seed $(SEED) --ignore-loops --timing-allow-fail \
+	    --report $(SIM)/fmaxr_report-$(SEED).json 2>&1 \
+	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF"
