@@ -66,25 +66,31 @@ module mh030p_ifu (
     localparam QD = 8;
 
     reg [15:0] q [0:QD-1];
-    // CIRCULAR, not shifting. Retiring words used to assign all QD entries from
-    // a variable-distance shift -- every register carrying a 5-way mux driven by
-    // `drain`, which decode produces, so the whole array sat downstream of a
-    // decode cone every cycle. A head pointer retires words with a 3-bit add
-    // instead, leaving each entry with nothing on its D input but the returning
-    // fetch. QD is a power of two so the pointer wraps for free.
-    reg [2:0]  head;
     reg [3:0]  count;
+
+    // THE QUEUE SHIFTS, AND THAT IS DELIBERATE -- measured, not assumed.
+    // Retiring words assigns all QD entries from a variable-distance shift, so
+    // every entry carries a five-way mux driven by `drain`, which decode
+    // produces. That looks like an obvious thing to fix, and a head-pointer
+    // circular buffer was written and measured: the fetch unit's deepest
+    // endpoint fell 50 -> 32 levels and the design-wide population at or above
+    // 35 levels fell 679 -> 402, yet real Fmax fell from 22.93 MHz to 21.80
+    // (three fixed seeds each, non-overlapping ranges -- a real 1.13 MHz
+    // regression, not the ~0.5 MHz seed spread).
+    //
+    // The reason is worth keeping: the shift network terminates at FLIP-FLOPS,
+    // which have a whole clock to settle, whereas a head pointer puts a
+    // variable eight-way read mux on instr/ext/q3 -- directly in front of the
+    // decoder, the one consumer with no slack to spare. The change moved work
+    // from a path that had room onto the path that binds. The logic-depth proxy
+    // cannot see this, because it counts levels to each endpoint without
+    // knowing which endpoints have slack.
     reg [31:0] fetch_pc;   // next address to fetch
     reg [31:0] head_pc;    // address of q[0]
     reg        outstanding;
 
-    wire [2:0] i0 = head;
-    wire [2:0] i1 = head + 3'd1;
-    wire [2:0] i2 = head + 3'd2;
-    wire [2:0] i3 = head + 3'd3;
-
-    assign instr       = q[i0];
-    assign q3          = q[i3];
+    assign instr       = q[0];
+    assign q3          = q[3];
     assign words_avail = (count > 3'd7) ? 3'd7 : count[2:0];
     assign pc_out      = head_pc;
 
@@ -100,8 +106,8 @@ module mh030p_ifu (
     // ext_raw exists so that decode can be driven from something the mux does
     // not depend on. tb/uop_decode_equiv_tb.sv checks the property this relies
     // on -- ext_words identical for differing ext -- across all 65,536 opcodes.
-    assign ext     = (ext_words == 3'd1) ? {16'h0, q[i1]} : {q[i1], q[i2]};
-    assign ext_raw = {q[i1], q[i2]};
+    assign ext     = (ext_words == 3'd1) ? {16'h0, q[1]} : {q[1], q[2]};
+    assign ext_raw = {q[1], q[2]};
 
     // A fetch launched before a redirect must have its data discarded, or it
     // lands in the flushed queue as if it were on the new path. An epoch tag
@@ -120,19 +126,10 @@ module mh030p_ifu (
         else if (redirect) epoch <= ~epoch;
     end
 
-    // Where a returning fetch lands. The shifting version wrote at
-    // `count - drain`, an offset from the base AFTER the shift; in circular
-    // terms that is (head + drain) + (count - drain), so the drain cancels and
-    // the index is simply one past the last word currently held. count never
-    // exceeds 7, because a fetch is only launched when it is 5 or less, so the
-    // 3-bit truncation is exact rather than a wrap.
-    wire [2:0] wr_idx = head + count[2:0];
-
     integer i;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             count       <= 4'd0;
-            head        <= 3'd0;
             fetch_pc    <= 32'h0;
             head_pc     <= 32'h0;
             outstanding <= 1'b0;
@@ -145,10 +142,6 @@ module mh030p_ifu (
             // discarded below rather than pushed into the flushed queue --
             // the same in-flight-fetch hazard that cost rtl/ a real bug
             // (project_skiptx_branch_target_regwrite_bug.md).
-            // head is deliberately NOT reset. An empty queue reads and writes
-            // at head either way, so wherever it happens to point is a valid
-            // fresh start -- and leaving it alone keeps one less thing on the
-            // redirect path.
             count    <= 4'd0;
             fetch_pc <= redirect_pc;
             head_pc  <= redirect_pc;
@@ -163,9 +156,10 @@ module mh030p_ifu (
             // fetch unit permanently wedged -- which is exactly what happened:
             // execution stopped dead at the first taken branch.
         end else begin
-            // Retire consumed words: advance the pointer, touch no storage.
+            // Retire consumed words.
             if (drain != 3'd0) begin
-                head    <= head + drain;
+                for (i = 0; i < QD; i = i + 1)
+                    q[i] <= (i + drain < QD) ? q[i + drain] : 16'h0;
                 count   <= count - {1'b0, drain};
                 head_pc <= head_pc + {28'h0, drain, 1'b0};   // 2 bytes per word
             end
@@ -176,8 +170,8 @@ module mh030p_ifu (
                 outstanding <= 1'b0;
                 if_req      <= 1'b0;
                 if (req_epoch == epoch) begin
-                    q[wr_idx]            <= if_rdata[31:16];
-                    q[wr_idx + 3'd1]     <= if_rdata[15:0];
+                    q[count - {1'b0, drain}]     <= if_rdata[31:16];
+                    q[count - {1'b0, drain} + 1] <= if_rdata[15:0];
                     count    <= count - {1'b0, drain} + 4'd2;
                     fetch_pc <= fetch_pc + 32'd4;
                 end
