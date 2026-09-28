@@ -68,23 +68,31 @@ module mh030p_ifu (
     reg [15:0] q [0:QD-1];
     reg [3:0]  count;
 
-    // THE QUEUE SHIFTS, AND THAT IS DELIBERATE -- measured, not assumed.
+    // THE QUEUE SHIFTS, AND THAT IS DELIBERATE -- but on weaker evidence than
+    // this comment first claimed; see the correction at the end.
     // Retiring words assigns all QD entries from a variable-distance shift, so
     // every entry carries a five-way mux driven by `drain`, which decode
     // produces. That looks like an obvious thing to fix, and a head-pointer
     // circular buffer was written and measured: the fetch unit's deepest
     // endpoint fell 50 -> 32 levels and the design-wide population at or above
-    // 35 levels fell 679 -> 402, yet real Fmax fell from 22.93 MHz to 21.80
-    // (three fixed seeds each, non-overlapping ranges -- a real 1.13 MHz
-    // regression, not the ~0.5 MHz seed spread).
+    // 35 levels fell 679 -> 402, while Fmax came out at 21.80 MHz against a
+    // baseline then believed to be 22.93.
     //
-    // The reason is worth keeping: the shift network terminates at FLIP-FLOPS,
-    // which have a whole clock to settle, whereas a head pointer puts a
-    // variable eight-way read mux on instr/ext/q3 -- directly in front of the
-    // decoder, the one consumer with no slack to spare. The change moved work
-    // from a path that had room onto the path that binds. The logic-depth proxy
-    // cannot see this, because it counts levels to each endpoint without
-    // knowing which endpoints have slack.
+    // CORRECTION: that comparison does not hold. The baseline's own spread over
+    // nine placement seeds is 21.81-23.13 MHz, and seeds 1-3 (the three used
+    // here) are its three best -- so 21.80 is inside the baseline's range and
+    // the change is UNRESOLVED, not a measured regression. It stays reverted
+    // because it showed no benefit either and the existing code is simpler, not
+    // because it was shown to be worse.
+    //
+    // The structural argument for preferring the shift is still worth keeping,
+    // even though the measurement cannot confirm it: the shift network
+    // terminates at FLIP-FLOPS, which have a whole clock to settle, whereas a
+    // head pointer puts a variable eight-way read mux on instr/ext/q3 --
+    // directly in front of the decoder, the one consumer with no slack to
+    // spare. And the logic-depth proxy is not evidence either way, because it
+    // counts levels to each endpoint without knowing which endpoints have
+    // slack.
     reg [31:0] fetch_pc;   // next address to fetch
     reg [31:0] head_pc;    // address of q[0]
     reg        outstanding;
