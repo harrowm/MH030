@@ -1637,7 +1637,11 @@ module mh030p_core (
     // and still bind the clock even though nothing reads them.
     wire [31:0] dv_lo, dv_hi;
     wire dv_n, dv_z, dv_v, dv_c;
-    eu_mul_div u_md (
+    // MUL_ENABLE=0: this core multiplies in mh030p_mul below, and ties op[2]
+    // high here so only the divides are reachable -- but the multiply hardware
+    // reached the netlist anyway (4 unused MULT18X18D plus most of the module's
+    // combinational cells). The parameter defaults to 1, so rtl/ is untouched.
+    eu_mul_div #(.MUL_ENABLE(0)) u_md (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .div_start(md_div_start), .div_busy(md_div_busy),
         .src(ex_src), .dst(ex_dst),

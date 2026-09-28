@@ -15,7 +15,7 @@ The fix is to synthesise with `-noflatten` and count each module's OWN cells,
 which is what this script reports. Costs ~15 s and is the only attribution in
 this project that has been checked against a known ground truth.
 """
-import json, sys, collections
+import json, re, sys, collections
 
 COMB = {'LUT4', 'CCU2C', 'PFUMX', 'L6MUX21', 'MULT18X18D'}
 
@@ -23,7 +23,17 @@ def main(path):
     mods = json.load(open(path))['modules']
     rows = []
     for name, m in mods.items():
-        if name.startswith('$'):
+        # A PARAMETERISED module is named `$paramod...\base` (or
+        # `$paramod\base\PARAM=value`), so a plain startswith('$') filter drops
+        # it silently -- which made eu_mul_div disappear from this table
+        # entirely the moment it gained a parameter, and looked like its logic
+        # had been optimised away. Resolve those back to the base name instead.
+        if name.startswith('$paramod'):
+            mm = re.findall(r'\\([A-Za-z_][A-Za-z0-9_]*)', name)
+            if not mm:
+                continue
+            name = mm[0] + ' (param)'
+        elif name.startswith('$'):
             continue
         c = collections.Counter(x['type'] for x in m.get('cells', {}).values())
         comb = sum(v for k, v in c.items() if k in COMB)

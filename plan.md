@@ -4487,3 +4487,88 @@ a combinational divider, 5.8x; cache arrays to real BRAM, +37%) -- while every
 attempt at making correct logic locally shallower has been unmeasurable. Item 1
 alone removes 16% of the design's combinational logic, which is the largest
 single lever now visible.
+
+## Items 1-3 implemented and measured: area fell 17.9%, the clock fell 7.4%
+
+All three were implemented, fully verified, and measured with 9 seeds on both
+arms. **The batch is a clear, resolved regression and has been rolled back
+except for item 2.**
+
+| arm | n | mean | min | max | area (comb) |
+|---|---|---|---|---|---|
+| baseline | 9 | **22.54** | 21.81 | 23.13 | 30,083 |
+| items 1-3 | 9 | **20.87** | 19.99 | 21.42 | 24,693 (-17.9%) |
+| item 2 alone | 9 | 21.60 | 20.87 | 22.30 | 29,817 (-0.9%) |
+
+The items 1-3 ranges do **not overlap** the baseline's (21.42 vs 21.81), so
+unlike the five small hypotheses this one is genuinely resolved: removing 5,390
+combinational cells -- 17.9% of the design -- cost 1.67 MHz.
+
+Every functional gate stayed green throughout: `make test` 42/42, decoder
+equivalence sweep clean including the opcode-only `ext_words` check,
+`make cosim_p` 2/2, and the full 124-suite corpus bit-identical at
+`PASS 702142 FAIL 2 SKIP 281221`.
+
+### What each item actually did
+
+**1. Packed register file: 9,513 -> 4,697 comb (-51%), same 640 flip-flops.**
+Worked exactly as predicted on area. The mechanism is also now clear on timing:
+an indexed unpacked array makes yosys build 32 independent, shallow,
+locally-routable 16:1 mux trees, while one packed vector with part-selects makes
+it build a **512-bit-wide `$shiftx` barrel network** -- far fewer cells, but
+enormous first-stage fan-out and much worse routing in a design that is already
+72% routing-dominated. Cheaper and slower. **Rolled back.**
+
+**2. `eu_mul_div` multiply opted out (`MUL_ENABLE` parameter, default 1).**
+976 -> 710 comb, 137 -> 83 carry, and **4 MULT18X18D -> 0**. Smaller than the
+~700 comb this plan projected. **Kept** -- see the reasoning below.
+
+**3. Packed prefetch queue: `mh030p_ifu` 1,749 -> 1,441 comb.** Same mechanism
+as item 1, same verdict. **Rolled back.**
+
+### Why item 2 is kept against its own measurement
+
+Measured alone it is *also* ~0.9 MHz slower (mean 21.60, 7 of 9 seeds below
+baseline, paired difference significant). But item 2 **only deletes logic that
+the core cannot reach** -- `MUL_*` are ops 0-3 and `mh030p_core` ties `op[2]`
+high -- and deleting unreachable logic cannot lengthen a critical path. The drop
+is the placement lottery being re-rolled, not a consequence of the change.
+Keeping known-dead multiply hardware and 4 stranded DSPs in order to appease a
+noisy metric is the worse engineering call, so this one is kept on physical
+grounds with the measurement recorded honestly rather than hidden.
+
+`rtl/` is provably unaffected: the parameter defaults to 1, `m68030_eu`
+instantiates without it, and MULU/MULS/DIVU/DIVS all run 100% (19,344 vectors).
+
+### The methodological conclusion, which is the real result
+
+This is now **eight** RTL changes measured against this design, and the pattern
+is consistent: *any* netlist perturbation lands about 1 MHz lower, and that
+includes **two changes that only removed logic**. The variance is not the
+placement seed -- 9 seeds per arm pins that at ~1.4 MHz range -- it is
+**nextpnr's P&R outcome varying with the netlist itself**, which the seed axis
+cannot sample. Checked and eliminated as explanations: the measurement wrapper
+is not on the critical path (0 of 97 hops), `--freq` makes no difference, and
+cell-name attribution was already known to lie.
+
+So, plainly: **at 18.6% utilisation and 72% routing dominance, RTL-level Fmax
+optimisation of this core is not actionable through this flow.** Neither of the
+two proxies works -- logic depth is blind to slack, and cell count is now shown
+to be *anti*-correlated with the clock -- and the real measurement cannot
+attribute a change smaller than the netlist-variance floor.
+
+Two proxies dead and eight null-or-negative results is enough evidence to stop
+this line. What remains genuinely worth doing is the architectural work that is
+large enough to escape the floor -- more pipeline stages (plan items 4-6, in
+particular giving `eu_shifter` and `eu_bitfield` their own cycle and cutting the
+forwarding network) -- judged by *throughput* (Fmax / ticks-per-instruction) and
+not by chasing a metric whose floor is 1.4 MHz wide.
+
+### And the apples-to-apples baseline finally landed
+
+`make fmax-rtl` (the reference `m68030_top` standalone, identical wrapper, seed
+1) completed after hours in ABC9: **13.59 MHz**, against this core's 21.81-23.13.
+The pipelined core is roughly **65% faster than the reference at the same
+treatment**, a gap far outside the noise floor. That is the P2 go/no-go answer
+the plan asked for, and it is a clear yes on architecture even though the
+target band is 25-50 MHz and this core sits below it.

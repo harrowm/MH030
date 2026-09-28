@@ -51,7 +51,17 @@
 // in Icarus 13.  Constant bit-selects inside always_comb are the Icarus problem;
 // in assign statements they are fine.
 
-module eu_mul_div (
+// MUL_ENABLE lets a consumer that does its own multiplication opt out of this
+// module's multiplier entirely. It defaults to 1, so rtl/ is unaffected --
+// m68030_eu instantiates it without the parameter and gets exactly what it
+// always got. rtlp/ passes 0: that core ties op[2] high (MUL_* are ops 0-3, so
+// only the divides are reachable) and multiplies in mh030p_mul instead, yet the
+// multiply hardware here still reached its netlist -- 4 MULT18X18D plus most of
+// this module's combinational cells, all unreachable. Gating the four products
+// at their source lets the whole tree constant-fold away.
+module eu_mul_div #(
+    parameter MUL_ENABLE = 1
+) (
     input  logic        clk_4x,
     input  logic        rst_n,
     input  logic        div_start,  // 1-tick: operands valid, begin dividing
@@ -93,8 +103,8 @@ module eu_mul_div (
     // Word multiply results (32-bit; 16×16 product always fits)
     // -----------------------------------------------------------------------
     logic [31:0] muluw_lo, mulsw_lo;
-    assign muluw_lo = mw_u_src * mw_u_dst;
-    assign mulsw_lo = $signed(mw_s_src) * $signed(mw_s_dst);
+    assign muluw_lo = MUL_ENABLE ? (mw_u_src * mw_u_dst) : 32'h0;
+    assign mulsw_lo = MUL_ENABLE ? $signed(mw_s_src) * $signed(mw_s_dst) : 32'h0;
 
     // Precompute N flags (constant bit-select in assign: OK)
     logic muluw_n, mulsw_n;
@@ -105,8 +115,10 @@ module eu_mul_div (
     // Long multiply results (64-bit)
     // -----------------------------------------------------------------------
     logic [63:0] mulul_64, mulsl_64;
-    assign mulul_64 = {32'h0, src} * {32'h0, dst};
-    assign mulsl_64 = $signed({{32{src[31]}}, src}) * $signed({{32{dst[31]}}, dst});
+    assign mulul_64 = MUL_ENABLE ? ({32'h0, src} * {32'h0, dst}) : 64'h0;
+    assign mulsl_64 = MUL_ENABLE
+                      ? $signed({{32{src[31]}}, src}) * $signed({{32{dst[31]}}, dst})
+                      : 64'h0;
 
     // Split for always_comb (avoids wide-vector constant selects inside always_*)
     logic [31:0] mulul_lo_p, mulul_hi_p;
