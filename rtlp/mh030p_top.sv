@@ -44,7 +44,7 @@ module mh030p_top (
     wire        if_ack,  mem_ack;
 
     wire [15:0] if_instr, if_q3;
-    wire [31:0] if_ext, if_pc;
+    wire [31:0] if_ext, if_ext_raw, if_pc;
     wire [2:0]  if_avail;
     wire        redirect;
     wire [31:0] redirect_pc;
@@ -54,9 +54,16 @@ module mh030p_top (
     // extension words it needs: the fetch unit cannot know that, and the core
     // needs the words before it can decode. One shared decoder instance would
     // be tidier but would create a loop through the core's own decode.
+    //
+    // ext_raw, NOT ext. The fetch unit's `ext` is muxed BY ext_words (a single
+    // extension word is normalised into the low half), so feeding it here
+    // closes a combinational cycle through this decoder. It is a false cycle --
+    // ext_words is a function of the opcode alone -- but place-and-route
+    // unrolls it anyway and charges two passes through the decoder to one
+    // clock: 78% of the core's worst path, 151 of its 179 hops, before this.
     uop_t peek;
     mh030p_decode u_peek (
-        .instr(if_instr), .ext(if_ext), .q3(if_q3), .uop(peek)
+        .instr(if_instr), .ext(if_ext_raw), .q3(if_q3), .uop(peek)
     );
 
     // Issue only once the whole instruction is in the queue.
@@ -69,7 +76,7 @@ module mh030p_top (
         .if_req(if_req), .if_addr(if_addr),
         .if_rdata(if_rdata), .if_ack(if_ack),
         .redirect(redirect), .redirect_pc(redirect_pc),
-        .instr(if_instr), .ext(if_ext), .q3(if_q3),
+        .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
         .words_avail(if_avail), .pc_out(if_pc),
         .drain(drain), .ext_words(peek.ext_words)
     );

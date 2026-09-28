@@ -148,6 +148,8 @@ module uop_decode_equiv_tb;
 
     // ── Sweep ───────────────────────────────────────────────────────────────
     integer claimed, agreed, mismatches, old_only;
+    integer ext_alt_bad;
+    logic [2:0] ew_ref;
     integer gap_by_group [0:15];
     integer gap_sample_n  [0:15];
     reg [15:0] gap_sample [0:15][0:3];
@@ -301,6 +303,33 @@ module uop_decode_equiv_tb;
             $finish;
         end
 
+        // ── ext_words must be a function of the OPCODE alone ────────────────
+        // mh030p_top relies on this: the peek decoder that tells the fetch unit
+        // how many words to drain is fed ext_raw rather than the fetch unit's
+        // own ext, because ext is muxed BY ext_words and taking it there closes
+        // a combinational cycle (a false one, precisely because of this
+        // property -- but place-and-route unrolls it regardless, and it cost
+        // 78% of the core's worst path). If a future decode branch ever derives
+        // ext_words from an extension word, the top level would silently drain
+        // the wrong number. So check it here, where it is cheap: decode every
+        // opcode twice with unrelated ext/q3 and require the same count.
+        ext_alt_bad = 0;
+        for (i = 0; i < 65536; i = i + 1) begin
+            instr = i[15:0];
+            ext = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
+            ew_ref = uop.ext_words;
+            ext = 32'h5B5A_C380; q3w = 16'hA56E; #1;
+            if (uop.ext_words !== ew_ref) begin
+                if (ext_alt_bad < 10)
+                    $display("EXTWORDS-NOT-OPCODE-ONLY op=%04h %0d vs %0d",
+                             instr, ew_ref, uop.ext_words);
+                ext_alt_bad = ext_alt_bad + 1;
+            end
+        end
+        ext = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
+        $display("  ext_words opcode-only: %s (%0d opcodes differ)",
+                 (ext_alt_bad == 0) ? "yes" : "NO", ext_alt_bad);
+
         for (i = 0; i < 65536; i = i + 1) begin
             instr = i[15:0];
             #1;   // settle both combinational decoders
@@ -444,6 +473,11 @@ module uop_decode_equiv_tb;
                     $display("");
                 end
         $display("");
+        if (ext_alt_bad != 0) begin
+            $display("=== %0d opcode(s) derive ext_words from an extension word ===",
+                     ext_alt_bad);
+            $fatal(1);
+        end
         if (mismatches == 0) begin
             $display("=== 0 failure(s) ===");
             $display("ALL TESTS PASSED");

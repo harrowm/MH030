@@ -48,6 +48,10 @@ module mh030p_ifu (
     // To decode.
     output wire [15:0] instr,
     output wire [31:0] ext,
+    // The same two words WITHOUT the one-word normalisation, for whoever needs
+    // to decode the offered opcode before ext_words is known. See the note on
+    // ext below: taking the normalised `ext` there closes a combinational loop.
+    output wire [31:0] ext_raw,
     output wire [15:0] q3,
     output wire [2:0]  words_avail,
     output wire [31:0] pc_out,
@@ -73,7 +77,19 @@ module mh030p_ifu (
     assign pc_out      = head_pc;
 
     // See the header: one extension word arrives in the LOW half.
-    assign ext = (ext_words == 3'd1) ? {16'h0, q[1]} : {q[1], q[2]};
+    //
+    // NOTE THE DEPENDENCE ON ext_words, and what it means for anyone decoding
+    // the offered opcode to LEARN ext_words: taking this signal closes a
+    // combinational cycle -- decode -> ext_words -> this mux -> decode. It
+    // settles in simulation, because ext_words is a function of the opcode
+    // alone, so the cycle is false; but a false cycle is still a cycle to
+    // place-and-route, which unrolls it and charges two passes through the
+    // decoder to one clock. Measured at 78% of the whole core's worst path.
+    // ext_raw exists so that decode can be driven from something the mux does
+    // not depend on. tb/uop_decode_equiv_tb.sv checks the property this relies
+    // on -- ext_words identical for differing ext -- across all 65,536 opcodes.
+    assign ext     = (ext_words == 3'd1) ? {16'h0, q[1]} : {q[1], q[2]};
+    assign ext_raw = {q[1], q[2]};
 
     // A fetch launched before a redirect must have its data discarded, or it
     // lands in the flushed queue as if it were on the new path. An epoch tag
