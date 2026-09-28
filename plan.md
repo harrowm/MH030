@@ -4721,3 +4721,45 @@ always-evaluating blocks left, `eu_bcd` is only 117 cells and `eu_alu`'s 592
 genuinely must be single-cycle -- so **this line of attack is now exhausted**.
 The remaining candidates worth real effort are SoC integration (a real hardware
 number, and the 25-50 MHz target lives there) and a proper throughput benchmark.
+
+## Units: what the measured MHz figure actually is
+
+Worth stating plainly, because it is easy to read the wrong way round.
+
+**Every Fmax number in this document is `clk_4x`, the INTERNAL clock.** CLAUDE.md's
+design constraint is "run the Verilog design at 4x the external bus frequency
+(e.g. 100 MHz internal for 25 MHz bus)", and the net nextpnr reports on is
+literally `$glbnet$clk_4x`. So 29.16 MHz is 29.16 MHz *inside* the chip -- not a
+68030 pin clock with 116 MHz running underneath it.
+
+For `rtl/`, which is cycle-accurate, the division is real and meaningful: 6
+S-states per bus cycle at 2 `clk_4x` ticks each is 3 bus clocks, so
+
+    rtl/   clk_4x 13.59 MHz  ->  external bus 3.40 MHz
+                              ->  performs as a real 3.40 MHz 68030
+
+**For `rtlp/` the division does not apply at all.** That core has no S-states --
+its bus is abstract, one request and one ack -- so `clk_4x` is simply "the clock",
+and the name is inherited from `rtl/` rather than describing anything. Quoting
+29.16/4 for it would be meaningless.
+
+Which is why throughput is the only cross-core figure worth having:
+
+    same programs (grp0-7):  rtl/ 1185 ticks @ 13.59 MHz = 87.2 us
+                             rtlp/  356 ticks @ 29.16 MHz = 12.2 us
+                             wall-clock speedup 7.14x
+
+    => rtlp/ delivers the throughput of a real 68030 at ~24.3 MHz
+    => a cycle-accurate core would need clk_4x = 97 MHz to match it
+
+That last line is the whole case for the pivot in one number. 97 MHz `clk_4x` is
+essentially the original 100 MHz target that three sessions of bounded fixes could
+not approach -- the best `rtl/` ever measured in the SoC was 2.46 MHz, and 13.59
+standalone. `rtlp/` reaches equivalent performance by spending **3.33x fewer
+ticks** instead of chasing a 7x faster clock, which is exactly the
+protocol-exact-but-timing-free trade that was signed off.
+
+Caveats that ride along with the 24.3 MHz: it comes from 23-67-tick programs
+(prologue-heavy, no loops or real memory traffic), and both cores were measured
+standalone through the `gen_fmax_wrapper.py` harness rather than in the SoC. A
+real benchmark and SoC integration are what would firm it up.
