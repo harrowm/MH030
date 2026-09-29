@@ -480,12 +480,38 @@ module uop_decode_equiv_tb;
         // and q3 all the same -- so that whichever position either side reads as
         // "the EA's extension word", it sees the same value. That removes
         // positional ambiguity from the comparison, which is about the COUNT.
-        for (ffv = 0; ffv < 3; ffv = ffv + 1) begin
+        // Widened from 3 shapes to 8. The original three covered +0/+2/+4 words,
+        // which exercises the bd and od sizes but never an ASYMMETRIC pair (bd
+        // one size, od another) and never the base/index-suppress bits. A
+        // shallow re-implementation of this count has to get all of those right,
+        // so they are swept before the logic is touched rather than after.
+        //
+        // BUT NOTE WHICH ORACLE THIS PASS USES, because it is the wrong one for
+        // that job. It compares against the REFERENCE sequencer, and the
+        // reference is known wrong here -- which is why this pass is
+        // reporting-only (m68030_seq.sv's ext_count miscounts MOVE with an
+        // indexed EA at both ends in full format; this pass is what found it).
+        // Widening from 3 shapes to 8 took the disagreement count to 18,115,
+        // which says more about the reference than about this decoder.
+        //
+        // So a shallow ext_words decoder must be checked against THIS decoder's
+        // own ext_words, not against the reference: mh030p_decode is what passes
+        // Harte and the cosims, so it is the trustworthy oracle for a
+        // like-for-like replacement. These shapes are what that comparison
+        // should sweep.
+        for (ffv = 0; ffv < 8; ffv = ffv + 1) begin
             case (ffv)
-                // bit 8 set in each; bd size in [5:4], I/IS in [2:0].
+                // bit 8 full format; bit 7 BS; bit 6 IS;
+                // bits [5:4] bd size (01 null, 10 word, 11 long);
+                // bits [2:0] I/IS (000 = no memory indirect).
                 0: ffw = 16'h3110;   // null bd, no memory indirect -> +0 words
                 1: ffw = 16'h3122;   // word bd, word od            -> +2 words
-                default: ffw = 16'h3133;  // long bd, long od        -> +4 words
+                2: ffw = 16'h3133;   // long bd, long od            -> +4 words
+                3: ffw = 16'h3121;   // word bd, null od            -> +1 word
+                4: ffw = 16'h3130;   // long bd, no indirect        -> +2 words
+                5: ffw = 16'h3123;   // word bd, LONG od (asymmetric) -> +3
+                6: ffw = 16'h31A2;   // BS set,  word bd, word od   -> +2 words
+                default: ffw = 16'h3162;  // IS set, word bd, word od -> +2 words
             endcase
             ext = {ffw, ffw}; ext_rawv = {ffw, ffw}; q3w = ffw;
             for (i = 0; i < 65536; i = i + 1) begin

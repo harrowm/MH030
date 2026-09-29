@@ -5842,22 +5842,35 @@ This is the right Stage 1: a dedicated shallow `ext_words` decoder, with
 `mh030p_decode` keeping its own copy as the oracle. It is bounded, additive, and
 attacks the measured cost rather than the plumbing around it.
 
-**The net needs widening first, and that is a prerequisite, not an optional
-extra.** `tb/uop_decode_equiv_tb.sv` already compares `ext_words` against the
-reference `u_seq.ext_count` across all 65,536 opcodes, and already asserts the
-"must not depend on the normalised `ext`" property by varying `ext` -- but it
-holds **`ext_raw` fixed** at `32'hA4A5_3C7F`. Full-format extension words change
-the count (`ff_extra`/`ff_indirect`/`ff_bd_words` all read `rawword`), so a
-rewrite's full-format arithmetic would be unverified. Extend the sweep to vary
-`ext_raw` across the full-format shapes BEFORE touching the logic -- the existing
-`+probe`/`+gaps` diagnostics make that cheap, and six separate historical bugs in
-this exact arithmetic are documented in the decoder's own comments.
+**The net: better than first stated, but pointed at the wrong oracle.**
+A first pass over this claimed full-format counts were unverified. **That was
+wrong** -- `tb/uop_decode_equiv_tb.sv` already had a dedicated full-format pass
+driving three genuine full-format words (+0/+2/+4) across all 65,536 opcodes.
+Corrected here rather than left standing.
+
+What it did lack was asymmetric bd/od pairs and the base/index-suppress bits, so
+the pass is now widened from 3 shapes to 8 (adds word-bd/null-od, long-bd/no-
+indirect, word-bd/LONG-od, BS set, IS set). That took the reported disagreement
+count to 18,115 over 438,648 comparisons.
+
+**Those disagreements are not a bug list.** That pass is reporting-only because
+it compares against the REFERENCE sequencer, and the reference is known wrong
+here -- `m68030_seq.sv`'s `ext_count` miscounts MOVE with an indexed EA at both
+ends in full format, which this very pass found. So the number says more about
+the reference than about `mh030p_decode`.
+
+**Which settles the oracle question for the rewrite**: a shallow `ext_words`
+decoder must be checked against **`mh030p_decode`'s own `ext_words`**, not
+against the reference. `mh030p_decode` is what passes Harte and the cosims, so it
+is the trustworthy oracle for a like-for-like replacement, and the comparison is
+exact rather than advisory. The 8 shapes above are what that comparison should
+sweep.
 
 **Order of work for Stage 1:**
-1. Widen the sweep to vary `ext_raw` (full-format bd size, IS/BS, I/IS). Confirm
-   it still passes against the current decoder -- a new test that passes
-   immediately proves it is watching the right thing only if it also fails when
-   the arithmetic is perturbed, so check that too.
+1. DONE: sweep widened to 8 full-format shapes. Next, add a second
+   `mh030p_decode` instance wired to the shallow decoder's inputs and compare
+   `ext_words` exactly, across all 65,536 opcodes x all 8 shapes. Confirm the new
+   check fails when the arithmetic is perturbed, not just that it passes.
 2. Write the shallow `ext_words` decoder; iterate against `make fmax-extw`.
 3. Swap `u_peek` to it; 9-seed `fmax-pbiu-sweep` + `make bench` + full gate.
 4. Only then revisit the serial pass, which may no longer matter.
