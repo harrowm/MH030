@@ -5572,3 +5572,124 @@ with fetch alignment or the BIU.
 So "MH030-P reaches the reference" was never true. Closing that gap is its own
 piece of work and has not been started; what this session establishes is the real
 starting number and a harness that actually measures the core it names.
+
+## Measured baseline for the 100 MHz target (2026-09-28)
+
+`make fmax-pbiu` / `fmax-pbiu-sweep` are new (the A4 configuration had no Fmax
+target). Every number below is a real synth + P&R run.
+
+| configuration | Fmax | basis |
+|---|---|---|
+| A4: `mh030p_biu_top` (rtlp CPU + real BIU + both caches) | **24.71 MHz** | 9 seeds, 23.68-25.74, range 2.06 |
+| `m68030_biu` alone | **27.78 MHz** | 1 seed |
+| `mh030p_top` (rtlp, abstract bus, no BIU) | 29.16 MHz | 9 seeds, recorded earlier |
+| `m68030_top` (rtl/ reference) | 13.59 MHz | recorded earlier |
+| A4 at **speed grade 8** instead of 6 | **25.01 MHz** | 1 seed, vs 25.10 same seed at grade 6 |
+
+**Three findings that set the shape of the problem.**
+
+**1. The reused BIU is already the ceiling.** 27.78 MHz standalone, against the
+A4 configuration's 24.71 -- the whole design sits 11% below the BIU's own limit.
+`rtlp` measures 29.16 MHz without it. So the three blocks are all in one narrow
+band (25-29 MHz) and there is **no single bottleneck to remove**: improving the
+pipelined core alone cannot pass ~28 MHz, because plan A5's "Tier 2, reuse the
+BIU" decision caps it there. 100 MHz requires re-architecting `biu_cycle_gen`
+and siblings, which that decision explicitly put out of scope.
+
+**2. The device is not the limiter.** Speed grade 8 measured 25.01 MHz against
+grade 6's 25.10 on the same seed -- no improvement, and ULX3S ships grade 6
+anyway. There is no free 20% in the part. The entire 4x must come from RTL.
+
+**3. Logic depth alone already exceeds the 100 MHz budget.** The A4 worst path is
+42.23 ns over 85 hops, and it splits **74.4% routing (31.43 ns) / 24.3% logic
+(10.28 ns)**. 100 MHz is a 10 ns budget, so *even with zero routing delay* the
+present logic depth does not fit. 85 hops needs to become 10-15. Cutting depth
+also cuts routing superlinearly, because shorter chains let the placer keep logic
+local -- which is the real reason the routing share is so high.
+
+Supporting evidence on where the depth is: **LUT:FF is 5.17 : 1** (26,147 COMB /
+5,060 FF) where a well-pipelined core sits near 1.5:1. This is the same
+combinational-cone signature that justified the rewrite for `rtl/` (5.8:1) -- the
+new core has barely improved it. Utilisation is 31% LUT / **6% FF**, so ~78k
+flip-flops are spare: registers are not what this design is short of.
+
+**The worst path is an outlier, not yet a population.** nextpnr's three reported
+paths for the worst seed are 42.23 ns (23.68 MHz), 11.69 ns (85.53 MHz) and
+4.05 ns. The 3.6x gap between first and second says the binding path is one
+structure rather than a broad front -- but nextpnr reports only three paths, so
+this is **not** evidence that everything else is at 85 MHz, and the per-endpoint
+`delay` field cannot be summed into arrival times (that is the mistake behind the
+old, unreproducible "9,040 failing endpoints" figure). The honest method is
+iterative: cut the worst path, re-measure, see what binds next.
+
+Recurring ancestor names on that path are `ag_pc` and `mvm_ready`, and it crosses
+into `u_biu.u_icache` twice. Only the instance prefixes are trustworthy
+(`u_cpu.u_core`, `u_biu.u_icache`); the rest of each cell name is ABC-invented.
+The shape -- fetch address, a MOVEM-readiness term, and the I-cache, in one
+combinational chain -- points at the **issue decision** in `mh030p_cpu.sv`:
+`if_instr` -> `u_peek` decode -> `peek.ext_words` -> `have_all` -> `issue` ->
+`drain`, combined with `core_ready` from the core's stall logic and `redirect`
+coming back. That is structurally the same mistake as `rtl/`'s `preview_ok`: the
+per-cycle issue decision computed combinationally across a decoder, the queue and
+the stall network. To be confirmed by RTL trace before acting, not assumed.
+
+### Honest assessment of the 100 MHz target
+
+100 MHz on LFE5U-85F is, on this evidence, **not reachable for this design
+without changing the two scope decisions the MH030-P plan rests on** (reuse the
+BIU; keep `rtl/` frozen as the model). The arithmetic is unforgiving: 4.05x from
+24.71, with logic depth alone already at 10.28 ns of a 10 ns budget, no device
+headroom, and the reused BIU capping the whole thing at 27.78 MHz.
+
+My estimate, flagged as an estimate: Stages 1-2 below reach **30-40 MHz** with
+reasonable confidence; Stages 3-5 plausibly reach **45-65 MHz** for an effort
+comparable to Track 1-3; **100 MHz I would not commit to on ECP5 at all.** The
+things that would genuinely change that answer are a different FPGA family (ECP5
+is a 40nm 2014 part; a Nexus/CertusPro or Artix-7 would make 100 MHz far more
+attainable) or accepting substantially more cycles per instruction to buy clock.
+This estimate has been wrong in both directions before in this project -- the
+pivot predicted 3-5 MHz for bounded fixes and one bounded fix delivered 14.24 --
+so the staged gates below exist to replace it with measurements early.
+
+### The stages
+
+Each stage: implement, full mandatory gate, **9-seed** Fmax sweep (the noise floor
+is ~1.4-2 MHz, so a single seed decides nothing), record the number here.
+
+**Stage 1 -- the A4 issue-decision cone.** Confirm the worst path by RTL trace,
+then break it. Prime candidate: predecode `ext_words` when a word ENTERS the
+prefetch queue rather than at issue, storing 3 bits per entry, which removes a
+whole decoder pass from the issue path; and register the `if_ack`/`mem_ack`
+edge-detect products rather than feeding them combinationally into queue control.
+Cheapest, highest-information step. Expected ceiling afterwards: ~28 MHz, because
+the BIU binds. **Gate: does the next binding path move to the BIU?**
+
+**Stage 2 -- `biu_cycle_gen`'s own worst path.** 27.78 MHz standalone with a
+healthy 2.16:1 LUT:FF, so this is not a cone problem: it is a ~100-state FSM whose
+next-state and pin-output decode are wide and flat. Levers that do not touch
+protocol behaviour: one-hot state encoding, registered pin outputs (a pin driven
+from a register one tick later is still protocol-exact as long as the S-state
+sequence is preserved), and splitting the next-state decode by cycle type. **This
+requires unfreezing `rtl/` or forking the BIU into `rtlp/`** -- see the decision
+below.
+
+**Stage 3 -- the core's 5.17:1 cone ratio.** Systematic, and the largest piece.
+Split AG into address-mux then adder; split EX into operand-select then
+ALU/shifter/BCD/bitfield; give the CCR/flag network its own stage. Each split
+costs a cycle somewhere, so **the gate is Fmax/ticks, not Fmax** -- `make bench`
+must be run alongside every sweep, or this stage can make the machine slower while
+the clock number improves.
+
+**Stage 4 -- routing locality.** Only worth attempting after 1-3, because 74%
+routing is mostly a symptom of long chains. Then: hunt high-fan-out nets, consider
+floorplan constraints, and re-check whether ABC9 mapping helps or hurts.
+
+**Stage 5 -- re-decide the target.** With Stages 1-4 measured, either 100 MHz is
+in sight on ECP5 or it is not, and the choice is between accepting the measured
+number, spending cycles-per-instruction to buy clock, or changing device.
+
+**The decision that gates Stages 2 onward**: the MH030-P plan's A5 says the BIU is
+**Tier 2, reused**, and `rtl/` is frozen. 27.78 MHz says that decision and the
+100 MHz target are incompatible. Either the BIU gets re-architected (in `rtl/`, or
+forked into `rtlp/` so `rtl/` stays the golden model), or the target comes down.
+Not a call to make silently.

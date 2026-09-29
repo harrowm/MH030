@@ -1188,6 +1188,42 @@ fmax-p:
 	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail \
 	    --report $(SIM)/fmaxp_report-$(SEED).json 2>&1 \
 	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
+# The A4 configuration: rtlp's CPU plus rtl/'s real BIU and both caches. This is
+# the number that matters for hardware, because it is the only rtlp arm that can
+# actually drive a bus -- mh030p_top's 29.16 MHz is measured on a core with no
+# bus interface in it at all, so it is not comparable with fmax-rtl.
+#
+# --ignore-loops is NOT passed here for the same reason fmax-p omits it: a loop
+# should be a hard failure, not a slow mystery. If the BIU brings loops of its own
+# (fmax-rtl passes the flag), this will fail loudly and that is the useful outcome.
+.PHONY: fmax-pbiu
+fmax-pbiu:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(MH030P_BIU_SRCS) > $(SIM)/fmaxpb.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/fmaxpb.v mh030p_biu_top \
+	    wrap_fmax $(SIM)/fmaxpb_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/fmaxpb.v $(SIM)/fmaxpb_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/fmaxpb.json' -l $(SIM)/fmaxpb_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxpb.json \
+	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail \
+	    --report $(SIM)/fmaxpb_report-$(SEED).json 2>&1 \
+	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
+
+.PHONY: fmax-pbiu-sweep
+fmax-pbiu-sweep:
+	@rm -f $(SIM)/fmax_pbiu_sweep.txt
+	@for s in $$(seq 1 $(SEEDS)); do \
+	    v=$$($(MAKE) -s fmax-pbiu SEED=$$s 2>&1 \
+	         | grep -E "Max frequency" | tail -1 \
+	         | grep -oE "[0-9.]+ MHz" | head -1 | cut -d' ' -f1); \
+	    echo "seed $$s: $$v MHz"; echo "$$v" >> $(SIM)/fmax_pbiu_sweep.txt; \
+	done
+	@python3 -c "import sys; v=[float(x) for x in open('$(SIM)/fmax_pbiu_sweep.txt')]; \
+	    v.sort(); n=len(v); \
+	    print('n=%d  mean=%.2f  min=%.2f  max=%.2f  range=%.2f MHz' \
+	          % (n, sum(v)/n, v[0], v[-1], v[-1]-v[0]))"
+
 fmax-rtl:
 	@mkdir -p $(SIM)
 	@sv2v -I rtl $(TOP_SRCS) > $(SIM)/fmaxr.v
