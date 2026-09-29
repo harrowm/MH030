@@ -5693,3 +5693,57 @@ number, spending cycles-per-instruction to buy clock, or changing device.
 100 MHz target are incompatible. Either the BIU gets re-architected (in `rtl/`, or
 forked into `rtlp/` so `rtl/` stays the golden model), or the target comes down.
 Not a call to make silently.
+
+### Decisions taken (2026-09-28), and what they change
+
+1. **Fork the BIU into `rtlp/`.** `rtl/` stays frozen and keeps working as the
+   golden model and as the core mackerel-030f ships. BIU fixes will have to be
+   applied twice; nothing already verified is put at risk.
+2. **Raw throughput is the goal, not the clock number.** So the metric is
+   **`Fmax / ticks`**, and `make bench` runs beside every Fmax sweep. A stage that
+   buys clock by spending cycles has to win on the product or it does not land.
+
+**The tick budget on the real bus, measured** (`tests/bench2.hex`, caches on,
+8,603 ticks, new `BUDGET` line in `tb/mh030p_biu_tb.sv`):
+
+    issued=1421  stalled=4902  idle=2337  redirects=253  busbusy=3310
+
+That is **6.05 ticks per instruction**, against 4.66 on the abstract bus. EX is
+**stalled 57% of all ticks**, and 3,310 ticks (38.5%) have AS asserted -- so about
+two thirds of the stall is waiting for the bus.
+
+**231 transactions consume 3,310 ticks: 14.3 ticks each.** The protocol floor is
+12 (6 S-states x 2 ticks), so the BIU is already near its own limit. This reframes
+the programme, because it means **the bus protocol itself is now the largest single
+consumer of time**, and under a throughput goal with no real 25 MHz external bus
+it is buying nothing: every peripheral in the SoC is on `clk_4x` too, so 12 ticks
+to read a longword out of on-chip RAM is pure protocol overhead.
+
+**Revised stage order, highest expected `Fmax/ticks` first:**
+
+**Stage 1 -- the issue-decision cone (clock, no tick cost).** As above. Pure win
+either way, and independent of every other decision. Start here.
+
+**Stage 2 -- fork the BIU into `rtlp/`, then cut its FSM depth (clock, no tick
+cost).** 27.78 MHz standalone with a healthy 2.16:1 LUT:FF, so this is flat wide
+decode rather than cones: one-hot state, registered pin outputs, next-state decode
+split by cycle type. Lifts the ~28 MHz ceiling that currently binds everything.
+
+**Stage 2b -- synchronous-termination fast path (ticks, NEEDS A DECISION).**
+Potentially the biggest single item on the board: 3,310 bus ticks down to a few
+hundred would take bench2 from 8,603 to roughly 5,900 (1.46x) *and* compound with
+every clock gain. The 68030 already defines the mechanism -- STERM gives a
+synchronous 2-clock cycle instead of 3 -- and the forked BIU could additionally
+offer a genuinely short path for on-chip targets. **But this spends the one
+bus-fidelity decision the MH030-P plan signed off** ("protocol-exact, timing-free":
+per-cycle signal sequencing stays exactly as the manual specifies). Recommended,
+because the pins it is being exact for are not connected to anything that needs it,
+but not to be done silently.
+
+**Stage 3 -- the core's 5.17:1 cone ratio (clock, COSTS ticks).** AG and EX splits.
+Under a throughput goal this is a genuine trade and must be judged on `Fmax/ticks`
+with `make bench`, not on the sweep alone. Demoted below 2b for that reason.
+
+**Stage 4 -- routing locality.** Only after 1-3; 74% routing is mostly a symptom.
+
+**Stage 5 -- re-decide the target** against measurements rather than estimates.

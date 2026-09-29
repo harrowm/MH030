@@ -217,6 +217,26 @@ module mh030p_biu_tb;
                      dut.mem_wdata, dut.mem_siz);
     end
 
+    // ── Tick budget ────────────────────────────────────────────────────────
+    // Where the ticks actually go, on the REAL bus. tb/cosim_p_tb.sv reports the
+    // same breakdown for the abstract bus, and the two together say whether a
+    // throughput problem is the clock, the pipeline or the bus -- which is the
+    // question "measure the tick budget first" exists to answer.
+    integer n_issue, n_stall, n_idle, n_redir, n_busy;
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            n_issue <= 0; n_stall <= 0; n_idle <= 0; n_redir <= 0; n_busy <= 0;
+        end else if (!dut.u_cpu.u_core.stopped_r) begin
+            if (dut.u_cpu.u_core.stall_ex)            n_stall <= n_stall + 1;
+            if (!dut.u_cpu.u_core.ex_valid)           n_idle  <= n_idle  + 1;
+            if (dut.u_cpu.u_core.ex_valid
+                && !dut.u_cpu.u_core.stall_ex)        n_issue <= n_issue + 1;
+            if (dut.u_cpu.redirect)                   n_redir <= n_redir + 1;
+            // Ticks where a bus cycle is genuinely in progress (AS asserted).
+            if (!ext_as_n)                            n_busy  <= n_busy  + 1;
+        end
+    end
+
     // ── Cycle accounting ───────────────────────────────────────────────────
     integer cyc, exec_cyc;
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -266,6 +286,8 @@ module mh030p_biu_tb;
 
         $display("EXECCYCLES %0d", exec_cyc);
         $display("BUSTXN total=%0d fetch=%0d data=%0d", n_bus, n_fetch, n_data);
+        $display("BUDGET issued=%0d stalled=%0d idle=%0d redirects=%0d busbusy=%0d",
+                 n_issue, n_stall, n_idle, n_redir, n_busy);
         $display("CACR %08h", dut.cacr);
         check("STOP reached", stopped);
         if (check_d0) begin
