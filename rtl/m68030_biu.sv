@@ -399,6 +399,130 @@ module m68030_biu #(
     logic        dc_burst_req;
     logic [31:0] dc_burst_addr;
     logic [2:0]  dc_burst_fc;
+
+    // Burst-linefill wires (Phase 127 cache plan Step 8): biu_icache_if's
+    // own genuine SIZ=11 pin-level miss-fill request, muxed into the
+    // existing eu_burst_req/addr/fc port biu_cycle_gen already implements
+    // (CBREQ#/CBACK# handshake and all, tested since Phase 7 via
+    // tb/biu_tb.sv's own direct eu_burst_req cases -- until now nothing in
+    // the integrated chip ever drove it, since m68030_top.sv hardwires the
+    // external eu_burst_req input to 0). The external EU-facing port takes
+    // priority when both assert -- purely defensive, since m68030_top.sv
+    // still hardwires eu_burst_req to 0 unconditionally, so ic_burst_req is
+    // the only real requester of this port in the full chip; the collision
+    // this priority resolves cannot actually occur in any of this project's
+    // own test configurations (confirmed: tb/biu_tb.sv, the only place
+    // eu_burst_req is ever driven nonzero, instantiates m68030_biu directly
+    // and never drives ifu_req into a cache-enabled miss during its own
+    // eu_burst_req test cases).
+    //
+    // ic_burst_req's own entry is ADDITIONALLY gated on grant_ifu -- unlike
+    // the external eu_burst_req port (which, per biu_cycle_gen's own
+    // pre-existing design, bypasses biu_arbiter.sv entirely, checked above
+    // grant_eu/grant_ifu in its idle-priority chain), the I-cache's own
+    // burst request must go through NORMAL mmu>eu>ifu arbitration the same
+    // way the ordinary (non-burst) ifu_req path already correctly does.
+    // A first version omitted this gate, reasoning the external port's own
+    // "always above grant_eu" design was pre-existing and safe to reuse
+    // as-is -- wrong, and caught by direct tracing, not by inspection: an
+    // I-cache burst silently won the bus over a simultaneously-pending,
+    // genuinely higher-priority ordinary EU write (JSR's own return-address
+    // push) -- eu_seq.sv still saw mem_ack=1 (believing its write
+    // completed) but the write had actually been starved, and a
+    // two-instruction-later RTS read back stale data from the same stack
+    // address, corrupting the return address and hanging the CPU in an
+    // infinite JSR/RTS loop. u_arb's own ifu_req input is fed
+    // ic_cg_req|ic_burst_req (see its own instantiation below) so grant_ifu
+    // correctly reflects either downstream request path (u_arb is
+    // instantiated below -- this whole mux group was moved ahead of it so
+    // burst_owner_ifu_r can be referenced by u_cache's own port list).
+    // Phase 158 Stage 4c: dc_burst_req (biu_cache_if's own D-side burst
+    // request) joins this same mux as a third tier, between the external
+    // eu_burst_req port (highest) and ic_burst_req (lowest) -- matching
+    // this project's own documented EU>IFU arbiter priority (CLAUDE.md),
+    // since the D-cache is part of the EU's own data path. Gated on
+    // grant_eu, mirroring exactly why ic_burst_req is gated on grant_ifu
+    // above (a burst request must go through normal mmu>eu>ifu arbitration,
+    // not bypass it) -- u_arb's own eu_req input is fed sf_cyc_req|
+    // dc_burst_req (see its own instantiation below) so grant_eu correctly
+    // reflects either downstream request path.
+    // open-items backlog Stage 8 (plan.md): live S-bit-derived FC for
+    // instruction fetches (010 user / 110 supervisor program space --
+    // FC[1:0] is always "10" for program space, only FC[2]=S toggles).
+    // Replaces the 3 separate hardcoded 3'b110 sites this file and
+    // biu_cycle_gen.sv used to have for the ordinary ifu_req path, the
+    // I-cache's own cache-tag/MMU-translation FC, and the I-cache burst
+    // FC fallback.
+    wire [2:0]   ifu_fc_computed = {s_bit, 2'b10};
+
+    wire         cg_burst_req_mux  = eu_burst_req | (dc_burst_req && grant_eu) | (ic_burst_req && grant_ifu);
+    wire [31:0]  cg_burst_addr_mux = eu_burst_req ? eu_burst_addr :
+                                     (dc_burst_req && grant_eu) ? dc_burst_addr : ic_burst_addr;
+    wire [2:0]   cg_burst_fc_mux   = eu_burst_req ? eu_burst_fc :
+                                     (dc_burst_req && grant_eu) ? dc_burst_fc : ifu_fc_computed;
+
+    // -----------------------------------------------------------------------
+    // WHICH CACHE OWNS THE BURST CURRENTLY ON THE BUS -- latched at dispatch.
+    //
+    // The live grant CANNOT answer this, and the two ack lines below used to
+    // rely on it. biu_cycle_gen leaves ST_IDLE for ST_BURST_S0 on a clock edge,
+    // and on THAT edge bus_idle is still asserted while bus_lock's own is_burst
+    // term is not yet -- so biu_arbiter is free to re-arbitrate in the very
+    // cycle the burst launches. A burst dispatched for the IFU at ic_burst_addr
+    // then has grant_eu asserted one tick later, because the EU is essentially
+    // always requesting; the address biu_cycle_gen latched stays the I-cache's
+    // for all four beats, but by the time the acknowledgement lands the grant
+    // says EU, so dc_burst_ack fires and the D-CACHE takes the I-cache's line
+    // as its own fill. Observed directly: a D-cache fill for 0x1000 returned
+    // the instruction words at 0x30, and the wrong value propagated through a
+    // copy loop into the program's result.
+    //
+    // This is the same bug the grant-qualification below was added to fix, one
+    // level deeper. That fix was right that the request and ack sides must
+    // agree on the owner; its premise -- "the arbiter holds a grant for the
+    // whole bus cycle, and a burst is one bus cycle, so the grant still
+    // identifies the owner when the ack lands" -- is what is false. Latching
+    // the owner at dispatch is the same discipline biu_cycle_gen already
+    // applies to the burst ADDRESS, and for the same reason
+    // (feedback_live_address_during_held_grant.md).
+    //
+    // Latent until now because it needs a burst dispatched for one cache while
+    // the OTHER already has a burst request outstanding, which requires both
+    // CACR burst-enable bits set (IBE and DBE) and a dispatch pattern the
+    // reference core's zero-gap timing never produced. rtlp/mh030p_biu_top.sv
+    // (the A4 registered-dispatch contract) produces it readily.
+    //
+    // Tracked while the bus is IDLE with a burst pending, then frozen. The
+    // condition is deliberately bus_idle rather than a rising edge on
+    // cg_burst_req_mux: the losing cache keeps its request asserted while the
+    // winner's burst runs, so the mux can stay continuously high across two
+    // bursts belonging to DIFFERENT clients and an edge detector then never
+    // re-arms. Tried that first; it hung the benchmark outright, because the
+    // second burst's fill was delivered to the first burst's owner.
+    //
+    // biu_cycle_gen dispatches a burst out of ST_IDLE, so on its dispatch edge
+    // bus_idle is still asserted and this latch is still tracking. Whatever it
+    // holds at that instant was selected by the very same terms that chose the
+    // address and FC cycle_gen latches, so owner and transaction agree by
+    // construction. The moment the bus leaves idle the latch freezes and stays
+    // put for all four beats, however the grant moves underneath.
+    //
+    // cycle_gen's own idle chain checks eu_iack_req/eu_rst_req/eu_cas2_req ABOVE
+    // eu_burst_req, so this latch can update on a cycle that turns out to be an
+    // IACK rather than a burst. Harmless, and deliberately not guarded against:
+    // the latch is only ever READ when eu_burst_ack fires, the preempting cycle
+    // drives bus_idle low and freezes it, and when idle returns it tracks again
+    // and lands on the right selection at the burst's own dispatch edge.
+    logic        burst_owner_ifu_r;
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            burst_owner_ifu_r <= 1'b0;
+        else if (bus_idle && cg_burst_req_mux)
+            burst_owner_ifu_r <= !eu_burst_req && !(dc_burst_req && grant_eu)
+                                               && (ic_burst_req && grant_ifu);
+    end
+
     // cg_eu_burst_beat also needs early declaration -- both u_cache (below)
     // and u_icache (later) reference it in their own port connections.
     logic [1:0]  cg_eu_burst_beat;
@@ -797,9 +921,13 @@ module m68030_biu #(
         // caches for the first time (tests/bench2.s): IBE alone and DBE alone
         // both give correct answers, IBE+DBE together does not.
         //
-        // The arbiter holds a grant for the whole bus cycle, and a burst is one
-        // bus cycle, so the grant still identifies the owner when the ack lands.
-        .dc_burst_ack   (eu_burst_ack && grant_eu),
+        // QUALIFIED BY THE LATCHED OWNER, not the live grant. The comment here
+        // used to read "the arbiter holds a grant for the whole bus cycle, and a
+        // burst is one bus cycle, so the grant still identifies the owner when
+        // the ack lands" -- that premise is false, and it cost a real data
+        // corruption. See burst_owner_ifu_r's own declaration above for the
+        // mechanism and how it was observed.
+        .dc_burst_ack   (eu_burst_ack && !burst_owner_ifu_r),
         .dc_burst_berr  (eu_burst_berr),
         .cacr        (cacr),
         .caar        (caar),
@@ -835,64 +963,6 @@ module m68030_biu #(
     // keeps this byte-for-byte identical to the pre-existing direct wiring.
     // -----------------------------------------------------------------------
 
-    // Burst-linefill wires (Phase 127 cache plan Step 8): biu_icache_if's
-    // own genuine SIZ=11 pin-level miss-fill request, muxed into the
-    // existing eu_burst_req/addr/fc port biu_cycle_gen already implements
-    // (CBREQ#/CBACK# handshake and all, tested since Phase 7 via
-    // tb/biu_tb.sv's own direct eu_burst_req cases -- until now nothing in
-    // the integrated chip ever drove it, since m68030_top.sv hardwires the
-    // external eu_burst_req input to 0). The external EU-facing port takes
-    // priority when both assert -- purely defensive, since m68030_top.sv
-    // still hardwires eu_burst_req to 0 unconditionally, so ic_burst_req is
-    // the only real requester of this port in the full chip; the collision
-    // this priority resolves cannot actually occur in any of this project's
-    // own test configurations (confirmed: tb/biu_tb.sv, the only place
-    // eu_burst_req is ever driven nonzero, instantiates m68030_biu directly
-    // and never drives ifu_req into a cache-enabled miss during its own
-    // eu_burst_req test cases).
-    //
-    // ic_burst_req's own entry is ADDITIONALLY gated on grant_ifu -- unlike
-    // the external eu_burst_req port (which, per biu_cycle_gen's own
-    // pre-existing design, bypasses biu_arbiter.sv entirely, checked above
-    // grant_eu/grant_ifu in its idle-priority chain), the I-cache's own
-    // burst request must go through NORMAL mmu>eu>ifu arbitration the same
-    // way the ordinary (non-burst) ifu_req path already correctly does.
-    // A first version omitted this gate, reasoning the external port's own
-    // "always above grant_eu" design was pre-existing and safe to reuse
-    // as-is -- wrong, and caught by direct tracing, not by inspection: an
-    // I-cache burst silently won the bus over a simultaneously-pending,
-    // genuinely higher-priority ordinary EU write (JSR's own return-address
-    // push) -- eu_seq.sv still saw mem_ack=1 (believing its write
-    // completed) but the write had actually been starved, and a
-    // two-instruction-later RTS read back stale data from the same stack
-    // address, corrupting the return address and hanging the CPU in an
-    // infinite JSR/RTS loop. u_arb's own ifu_req input is fed
-    // ic_cg_req|ic_burst_req (see its own instantiation above) so grant_ifu
-    // correctly reflects either downstream request path.
-    // Phase 158 Stage 4c: dc_burst_req (biu_cache_if's own D-side burst
-    // request) joins this same mux as a third tier, between the external
-    // eu_burst_req port (highest) and ic_burst_req (lowest) -- matching
-    // this project's own documented EU>IFU arbiter priority (CLAUDE.md),
-    // since the D-cache is part of the EU's own data path. Gated on
-    // grant_eu, mirroring exactly why ic_burst_req is gated on grant_ifu
-    // above (a burst request must go through normal mmu>eu>ifu arbitration,
-    // not bypass it) -- u_arb's own eu_req input is fed sf_cyc_req|
-    // dc_burst_req (see its own instantiation above) so grant_eu correctly
-    // reflects either downstream request path.
-    // open-items backlog Stage 8 (plan.md): live S-bit-derived FC for
-    // instruction fetches (010 user / 110 supervisor program space --
-    // FC[1:0] is always "10" for program space, only FC[2]=S toggles).
-    // Replaces the 3 separate hardcoded 3'b110 sites this file and
-    // biu_cycle_gen.sv used to have for the ordinary ifu_req path, the
-    // I-cache's own cache-tag/MMU-translation FC, and the I-cache burst
-    // FC fallback.
-    wire [2:0]   ifu_fc_computed = {s_bit, 2'b10};
-
-    wire         cg_burst_req_mux  = eu_burst_req | (dc_burst_req && grant_eu) | (ic_burst_req && grant_ifu);
-    wire [31:0]  cg_burst_addr_mux = eu_burst_req ? eu_burst_addr :
-                                     (dc_burst_req && grant_eu) ? dc_burst_addr : ic_burst_addr;
-    wire [2:0]   cg_burst_fc_mux   = eu_burst_req ? eu_burst_fc :
-                                     (dc_burst_req && grant_eu) ? dc_burst_fc : ifu_fc_computed;
 
     biu_icache_if u_icache (
         .clk_4x         (clk_4x),
@@ -924,7 +994,9 @@ module m68030_biu #(
         .ic_burst_beat  (cg_eu_burst_beat),
         .ic_burst_beat_at_berr (cg_eu_burst_beat_at_berr),
         // Grant-qualified for the same reason; see dc_burst_ack above.
-        .ic_burst_ack   (eu_burst_ack && grant_ifu),
+        // Latched owner, not the live grant -- see burst_owner_ifu_r above and
+        // the matching note on dc_burst_ack.
+        .ic_burst_ack   (eu_burst_ack && burst_owner_ifu_r),
         .ic_burst_berr  (eu_burst_berr),
         .tc             (tc),
         .cdis_n         (cdis_s),

@@ -123,7 +123,7 @@ def gen_vblob(test):
 
 # ── Chunk runner ─────────────────────────────────────────────────────────────
 
-def run_chunk_verilator(tests, cycles, timeout_s):
+def run_chunk_verilator(tests, cycles, timeout_s, sim_bin=None):
     """Verilator-backend equivalent of run_chunk(): write one manifest + N
     blob files, run ONE sim/harte_vbatch process. Output format matches
     tb/harte_batch_tb.sv exactly, so split_batch_output()/parse_block() are
@@ -142,7 +142,8 @@ def run_chunk_verilator(tests, cycles, timeout_s):
 
         try:
             result = subprocess.run(
-                [str(VSIM_BIN), f'+manifest={manifest_path}', f'+cycles={cycles}'],
+                [str(sim_bin or VSIM_BIN), f'+manifest={manifest_path}',
+                 f'+cycles={cycles}'],
                 capture_output=True, text=True, timeout=timeout_s
             )
             out = result.stdout
@@ -159,7 +160,7 @@ def run_chunk_verilator(tests, cycles, timeout_s):
         shutil.rmtree(blobdir, ignore_errors=True)
 
 
-def run_chunk(tests, cycles, timeout_s):
+def run_chunk(tests, cycles, timeout_s, sim_bin=None):
     """Write one manifest + N hex files for this chunk, run ONE vvp process,
     return list of (test, regs, writes, status) in order."""
     hexdir = tempfile.mkdtemp(prefix='harte_batch_')
@@ -176,7 +177,7 @@ def run_chunk(tests, cycles, timeout_s):
 
         try:
             result = subprocess.run(
-                ['vvp', str(SIM_BIN), f'+manifest={manifest_path}',
+                ['vvp', str(sim_bin or SIM_BIN), f'+manifest={manifest_path}',
                  f'+cycles={cycles}', '+clearmem=0'],
                 capture_output=True, text=True, timeout=timeout_s
             )
@@ -223,6 +224,19 @@ def main():
     if args.sim:
         sim_bin = Path(args.sim)
         build_hint = f'make {args.sim}'
+        # --sim USED TO BE A SILENT NO-OP: run_chunk/run_chunk_verilator read the
+        # module-level SIM_BIN/VSIM_BIN directly and ignored this value, so
+        # `--sim sim/harte_pvbatch` measured the REFERENCE core while appearing to
+        # measure MH030-P. With the default icarus backend it also ran the
+        # reference ICARUS binary over the whole corpus -- the slow path CLAUDE.md
+        # warns about -- so two full sweeps were started and abandoned before this
+        # was spotted. The binary is now threaded through to the launcher, and a
+        # *vbatch* binary selects the Verilator launcher on its own name, since
+        # pairing a native executable with `vvp` cannot work.
+        if 'vbatch' in sim_bin.name and run_fn is not run_chunk_verilator:
+            run_fn = run_chunk_verilator
+            print(f"note: {sim_bin.name} is a Verilator binary -- using the "
+                  f"verilator launcher", file=sys.stderr)
 
     if not sim_bin.exists():
         print(f"ERROR: {sim_bin} not found — run: {build_hint}", file=sys.stderr)
@@ -258,7 +272,8 @@ def main():
 
         results = []
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futs = [pool.submit(run_fn, c, args.timeout_cycles, chunk_timeout)
+            futs = [pool.submit(run_fn, c, args.timeout_cycles, chunk_timeout,
+                                sim_bin)
                     for c in chunks]
             for fut in as_completed(futs):
                 results.extend(fut.result())

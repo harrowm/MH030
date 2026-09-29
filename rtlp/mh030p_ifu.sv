@@ -134,6 +134,37 @@ module mh030p_ifu (
         else if (redirect) epoch <= ~epoch;
     end
 
+    // FETCHES ARE LONGWORD-ALIGNED, and a branch to an odd-word target discards
+    // the leading word rather than asking the bus for an unaligned longword.
+    //
+    // This was a real bug, and the reason it survived is worth recording. Branch
+    // targets are only WORD-aligned on a 68k -- the fill loop in tests/bench1.s
+    // branches to 0x0E -- and this unit used to put that address straight on the
+    // bus as a 4-byte read. The abstract memory models answer that: they
+    // assemble the result byte by byte from the exact address, so a longword read
+    // at 0x0E genuinely returns the bytes at 0x0E..0x11 and the queue got
+    // word@0x0E and word@0x10, which is the convention this unit expects.
+    //
+    // NO REAL 68030 BUS CAN DO THAT. A 32-bit port returns the ALIGNED longword
+    // containing the address, so the same request yields the bytes at 0x0C..0x0F
+    // -- the queue receives word@0x0C first, one word too early, and every
+    // instruction after the branch decodes one word out of step. It presented as
+    // a wrong answer rather than a hang: the copy loop in tests/bench1.s ran past
+    // its bound for over a thousand iterations because the ADDQ that increments
+    // its counter had been shifted out of the stream.
+    //
+    // The fix is the reference's: rtl/m68030_ifu.sv fetches on aligned
+    // boundaries and carries a skip_first_r for exactly this case. Here the
+    // redirect rounds the target DOWN to a longword boundary and tags the
+    // resulting fetch, and a tagged fetch enqueues only its low word -- the one
+    // at the target -- so head_pc still names the instruction the branch went to.
+    // Every later fetch is aligned by construction, since it advances by 4.
+    //
+    // The tag travels with the REQUEST, not the redirect, for the same reason
+    // req_epoch does: the redirect and the launch are different cycles, and a
+    // second redirect can land in between.
+    reg skip_pend, req_skip;
+
     integer i;
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -143,6 +174,8 @@ module mh030p_ifu (
             outstanding <= 1'b0;
             if_req      <= 1'b0;
             if_addr     <= 32'h0;
+            skip_pend   <= 1'b0;
+            req_skip    <= 1'b0;
             for (i = 0; i < QD; i = i + 1) q[i] <= 16'h0;
         end else if (redirect) begin
             // Drop everything in flight. A fetch already on the bus still
@@ -151,8 +184,11 @@ module mh030p_ifu (
             // the same in-flight-fetch hazard that cost rtl/ a real bug
             // (project_skiptx_branch_target_regwrite_bug.md).
             count    <= 4'd0;
-            fetch_pc <= redirect_pc;
-            head_pc  <= redirect_pc;
+            // Round DOWN to the longword the target lives in; head_pc still
+            // names the target itself, so pc_out is unaffected.
+            fetch_pc  <= {redirect_pc[31:2], 2'b00};
+            head_pc   <= redirect_pc;
+            skip_pend <= redirect_pc[1];
             if (if_ack) begin
                 outstanding <= 1'b0;   // let an ack landing here retire
                 if_req      <= 1'b0;
@@ -178,9 +214,17 @@ module mh030p_ifu (
                 outstanding <= 1'b0;
                 if_req      <= 1'b0;
                 if (req_epoch == epoch) begin
-                    q[count - {1'b0, drain}]     <= if_rdata[31:16];
-                    q[count - {1'b0, drain} + 1] <= if_rdata[15:0];
-                    count    <= count - {1'b0, drain} + 4'd2;
+                    if (req_skip) begin
+                        // A tagged fetch: the target was the LOW word of this
+                        // longword, so the high word belongs to the instruction
+                        // before the branch and is dropped.
+                        q[count - {1'b0, drain}] <= if_rdata[15:0];
+                        count    <= count - {1'b0, drain} + 4'd1;
+                    end else begin
+                        q[count - {1'b0, drain}]     <= if_rdata[31:16];
+                        q[count - {1'b0, drain} + 1] <= if_rdata[15:0];
+                        count    <= count - {1'b0, drain} + 4'd2;
+                    end
                     fetch_pc <= fetch_pc + 32'd4;
                 end
             end else if (!outstanding && (count <= 4'd5)) begin
@@ -189,6 +233,9 @@ module mh030p_ifu (
                 if_req      <= 1'b1;
                 if_addr     <= fetch_pc;
                 req_epoch   <= epoch;
+                // Consume the skip: it applies to this one fetch only.
+                req_skip    <= skip_pend;
+                skip_pend   <= 1'b0;
             end
         end
     end

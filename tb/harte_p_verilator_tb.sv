@@ -117,7 +117,7 @@ module harte_p_verilator_tb (
     // on it keeps whatever the CCR held the cycle before.
     logic [7:0] ccr_before_stop;
     always_ff @(posedge clk_4x) begin
-        if (!dut.u_core.stopped_r) ccr_before_stop <= ccr_out;
+        if (!dut.u_cpu.u_core.stopped_r) ccr_before_stop <= ccr_out;
     end
 
     logic stop_seen;

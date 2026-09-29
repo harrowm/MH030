@@ -115,7 +115,7 @@ module cosim_p_tb;
     int k, nb;
 
     // Supervisor-vs-user and program-vs-data: the two bits FC is made of.
-    wire sup    = dut.u_core.sr_sys_r[5];
+    wire sup    = dut.u_cpu.u_core.sr_sys_r[5];
     wire is_ifu = (dut.u_arb.owner == 2'd2);
     wire [2:0] bus_fc = is_ifu ? (sup ? 3'b110 : 3'b010)
                                : (sup ? 3'b101 : 3'b001);
@@ -166,7 +166,7 @@ module cosim_p_tb;
     logic stop_fetched = 1'b0;
     always_ff @(posedge clk_4x) if (rst_n) cyc <= cyc + 1;
     always_ff @(posedge clk_4x)
-        if (rst_n && dut.u_core.stopped_r && (exec_cyc == 0)) exec_cyc <= cyc;
+        if (rst_n && dut.u_cpu.u_core.stopped_r && (exec_cyc == 0)) exec_cyc <= cyc;
     always_ff @(posedge clk_4x) begin
         if (bus_req && !bus_ack && bus_rw && is_ifu) begin
             if ((rdb(bus_addr[23:0]) == 8'h4E && rdb(bus_addr[23:0] + 24'd1) == 8'h72)
@@ -188,15 +188,15 @@ module cosim_p_tb;
     longint unsigned n_fetch = 0;    // of which were instruction fetches
     longint unsigned n_idle  = 0;    // EX had nothing at all -- front end starved
     always_ff @(posedge clk_4x) begin
-        if (rst_n && !dut.u_core.stopped_r) begin
-            if (dut.u_core.stall_ex)                     n_stall <= n_stall + 1;
-            if (dut.redirect)                            n_redir <= n_redir + 1;
+        if (rst_n && !dut.u_cpu.u_core.stopped_r) begin
+            if (dut.u_cpu.u_core.stall_ex)                     n_stall <= n_stall + 1;
+            if (dut.u_cpu.redirect)                            n_redir <= n_redir + 1;
             if (bus_req && !bus_ack) begin
                 n_bus <= n_bus + 1;
                 if (is_ifu) n_fetch <= n_fetch + 1;
             end
-            if (rst_n && !dut.u_core.ex_valid)           n_idle  <= n_idle  + 1;
-            if (dut.u_core.ex_valid && !dut.u_core.stall_ex)
+            if (rst_n && !dut.u_cpu.u_core.ex_valid)           n_idle  <= n_idle  + 1;
+            if (dut.u_cpu.u_core.ex_valid && !dut.u_cpu.u_core.stall_ex)
                                                          n_issue <= n_issue + 1;
         end
     end
@@ -242,7 +242,7 @@ module cosim_p_tb;
         check({grpname, " STOP reached"}, stopped);
         if (check_d0)
             check({grpname, " D0 correct"},
-                  dut.u_core.u_rf.regs[0] == exp_d0[31:0]);
+                  dut.u_cpu.u_core.u_rf.regs[0] == exp_d0[31:0]);
 
         if (fail_count == 0) $display("PASS  cosim_p_%s", grpname);
         else                 $display("FAIL  cosim_p_%s (%0d)", grpname, fail_count);

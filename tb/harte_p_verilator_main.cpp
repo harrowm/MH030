@@ -174,9 +174,9 @@ int main(int argc, char** argv) {
         // regs[0..7] are D0-D7 and regs[8..15] are A0-A7, one flat array --
         // there is no separate a7_current, because this core has no shadow
         // stack pointer yet.
-        auto&    rg  = r->harte_p_verilator_tb__DOT__dut__DOT__u_core__DOT__u_rf__DOT__regs;
+        auto&    rg  = r->harte_p_verilator_tb__DOT__dut__DOT__u_cpu__DOT__u_core__DOT__u_rf__DOT__regs;
         uint32_t pc  = r->harte_p_verilator_tb__DOT__dut__DOT__if_pc;
-        uint16_t sr  = (uint16_t)((r->harte_p_verilator_tb__DOT__dut__DOT__u_core__DOT__sr_sys_r << 8)
+        uint16_t sr  = (uint16_t)((r->harte_p_verilator_tb__DOT__dut__DOT__u_cpu__DOT__u_core__DOT__sr_sys_r << 8)
                      | r->harte_p_verilator_tb__DOT__ccr_before_stop);
 
         printf("REGSTATE D0=%08x D1=%08x D2=%08x D3=%08x D4=%08x D5=%08x D6=%08x D7=%08x "

@@ -5383,3 +5383,192 @@ bring the caches in *with* it, because that is when they stop being a nicety and
 become the thing that makes a faithful-bus `rtlp` viable at all (25,760 -> 4,800
 ticks of bus). Building a cache now tunes a configuration A4 is going to replace,
 and B's unfaithful fill behaviour would have to be undone anyway.
+
+## A4 implemented: rtlp on the real BIU, with the 68030's own caches
+
+Option **C then A** was taken. C needed no code -- the finding above already
+argued against building a cache for a bus that was about to be replaced -- so
+this is A: `rtlp`'s CPU driving `rtl/`'s own verified `m68030_biu`, real pins,
+real S-states, real DSACK, real bursts, and both genuine 256-byte caches under
+CACR.
+
+### What was built
+
+`rtlp/mh030p_cpu.sv` (new) holds the fetch unit, the core and the peek decoder --
+everything above the bus. It is shared by two tops that differ only in what sits
+underneath:
+
+| top | bus | used by |
+|---|---|---|
+| `mh030p_top` | `mh030p_arb`, abstract, one-tick ack | every pre-existing rtlp gate, unchanged |
+| `mh030p_biu_top` (new) | `m68030_biu`, real pins | `tb/mh030p_biu_tb.sv` (new) |
+
+`mh030p_top` keeps its exact behaviour -- this was deliberate, because that is
+the arm carrying the full Harte corpus, and it must not be put at risk to
+accommodate the new one. The core gained two inert outputs it had no reason to
+publish before (`sr_sys_o`, `cacr_o`); `cacr_o` is what makes the caches
+reachable, so software enables them here exactly as it does on `rtl/`.
+
+`tb/mh030p_biu_tb.sv` is a pin-level peripheral: it watches AS/DS, answers with
+DSACK, tracks burst beats, and holds CBACK asserted for the whole burst. Its
+memory model is taken from `tb/cosim_grp_tb.sv` rather than reinvented, so a tick
+count measured here is directly comparable with the reference's.
+
+### The A4 adaptation is four conversions, all real
+
+1. **Function code.** The core has no concept of address space; the BIU needs one
+   for its cache tags, the MMU and the FC pins. Derived from SR's S bit.
+2. **Write-data justification.** The core right-justifies (byte in `[7:0]`);
+   `biu_byte_lane_ctrl.sv` expects the opposite and says so in its header. Reads
+   need no conversion -- `merge_rdata()` already right-justifies.
+3. **The bus lock.** `mem_lock` maps to `eu_cas_hold`, not `eu_rmw`: `eu_rmw`
+   makes `biu_cycle_gen` run its combined 12-state RMW cycle, and this core
+   dispatches the read and the write as two ordinary transactions. `eu_cas_hold`
+   is exactly the signal Phase 241/242 added for that shape.
+4. **Ack width.** `biu_cycle_gen` holds its ack high for all four ticks of S7
+   (`rtl/m68030_ifu.sv:475` and `biu_sizing_fsm.sv:314` both say so, and both
+   guard themselves accordingly). This core's port is specified with a
+   single-tick ack. Converted in the adapter, not the core, for the same reason
+   as above.
+
+`eu_new_dispatch` is tied low -- the honest value. There is no preview mechanism
+to report, which is the whole point of A4.
+
+### Two real bugs found, neither in the new code
+
+**1. `rtlp` issued unaligned longword instruction fetches.** Branch targets are
+only word-aligned on a 68k, and `mh030p_ifu.sv` put the target straight on the
+bus as a 4-byte read. The abstract memory models answer that, because they
+assemble the result byte by byte from the exact address -- so a longword read at
+0x0E genuinely returned the bytes at 0x0E..0x11. **No real 68030 bus can do
+that**: a 32-bit port returns the aligned longword, so the queue received
+`word@0x0C` first, one word too early, and every instruction after a branch
+decoded one word out of step. It presented as a wrong answer, not a hang: the
+copy loop in `tests/bench1.s` ran past its bound for over a thousand iterations
+because the ADDQ incrementing its counter had been shifted out of the stream.
+Fixed the reference's way -- round the target down to a longword boundary and tag
+that fetch so it enqueues only its low word (`rtl/m68030_ifu.sv` carries a
+`skip_first_r` for exactly this).
+
+**2. `rtl/m68030_biu.sv` delivered a burst line to the wrong cache.** Signature:
+correct with either burst-enable bit alone, wrong with IBE+DBE together -- the
+same shape as the bug the previous session fixed by grant-qualifying
+`dc_burst_ack`/`ic_burst_ack`. That fix was right that the request and ack sides
+must agree on the owner. Its stated premise was not: *"the arbiter holds a grant
+for the whole bus cycle, and a burst is one bus cycle, so the grant still
+identifies the owner when the ack lands."*
+
+`biu_cycle_gen` leaves `ST_IDLE` for `ST_BURST_S0` on a clock edge, and on that
+edge `bus_idle` is still asserted while `bus_lock`'s own `is_burst` term is not
+yet -- so `biu_arbiter` is free to re-arbitrate in the very cycle the burst
+launches. Traced directly: at t=16885 the I-cache asserted `ic_burst_req` for
+0x30 and won the bus; one tick later `grant_eu` was asserted because the EU is
+essentially always requesting. The address `biu_cycle_gen` latched stayed the
+I-cache's for all four beats (`ext_a=0x30` throughout), but at the ack the live
+grant said EU, so `dc_burst_ack` fired and the D-cache took the I-cache's line as
+its own fill for 0x1000. The instruction words at 0x30 were then copied into the
+program's data and summed into its result.
+
+Fixed with `burst_owner_ifu_r`, latched while `bus_idle` is asserted with a burst
+pending and frozen thereafter -- the same discipline `biu_cycle_gen` already
+applies to the burst address, and for the same reason
+(`feedback_live_address_during_held_grant.md`). An edge detector on
+`cg_burst_req_mux` was tried first and is wrong: the losing cache keeps its
+request asserted while the winner's burst runs, so the mux can stay continuously
+high across two bursts belonging to different clients and the detector never
+re-arms. That version hung the benchmark outright.
+
+This is a genuine latent bug in frozen `rtl/`, surfaced -- as the plan said to
+expect and welcome -- by a configuration whose dispatch spacing differs.
+
+### Measured
+
+`make bench` now runs all four arms. Same program, same memory model, same
+`EXECCYCLES` definition (each core's own execution-stop register):
+
+| arm | bench1, caches off | bench2, caches on |
+|---|---|---|
+| `rtl/` reference | 23,665 | 8,929 |
+| `rtlp` on the real BIU (A4) | 24,294 | **8,603** |
+| `rtlp` on the abstract bus | 6,616 | n/a |
+
+**The Stage 4 prediction holds, and it is the headline.** On a faithful bus the
+pipelined core's advantage very nearly disappears: 6,616 ticks becomes 24,294,
+because a real bus access costs ~16 ticks against the abstract bus's ~3.8. The
+caches are what make it viable at all -- 2.82x, from 24,294 to 8,603 -- and with
+them `rtlp` lands 3.7% ahead of the reference rather than the 3.6x the abstract
+bus suggested. A4 bought fidelity, and the throughput claim was always the cheap
+bus talking.
+
+Bus transactions tell the same story from the other side: 1,737 with the caches
+off, 231 with them on, of which only 21 are instruction fetches.
+
+### Deliberately not done
+
+`eu_iack_req` (real IACK cycles), `eu_cas2_req`, EU-initiated bursts, MOVE16,
+`biu_multiop_fsm` for MOVEM/MOVEP, coprocessor and BKPT are all tied off, matching
+how `rtl/m68030_top.sv` ties off what it cannot drive. The core autovectors
+interrupts internally and sequences MOVEM/MOVEP from its own FSMs. Boot reads
+addresses 0 and 4 twice, because the BIU runs its own SSP/PC init sequence and so
+does the core; the BIU holds `eu_req` off until its own pair completes, so they
+never collide, and consuming `init_ssp`/`init_pc` instead would need a boot write
+port into the register file to save two bus cycles once. No Fmax measurement has
+been taken for `mh030p_biu_top` yet.
+
+### A recorded project fact does not survive gating: `--sim` was a no-op
+
+Spot-checking BCC (a branch suite -- the obvious place for a fetch-alignment fix
+to bite) gave **`PASS 3053 FAIL 28`, 99.1%** through `run_harte.py --sim
+sim/harte_p`, against CLAUDE.md's claim that MH030-P passes all 123 runnable
+suites at 100%. Chasing that turned up a **tooling bug, and the recorded number
+is the casualty.**
+
+`scripts/run_harte_batch.py` computed `sim_bin` from `--sim` and then never used
+it: `run_chunk()` and `run_chunk_verilator()` both read the module-level
+`SIM_BIN`/`VSIM_BIN` constants directly. So `--sim sim/harte_pvbatch` -- the
+recipe CLAUDE.md documents for MH030-P -- **measured the REFERENCE core while
+appearing to measure the pipelined one**, and with the default `--backend icarus`
+it ran the reference *Icarus* binary over the whole corpus, which is exactly the
+slow path CLAUDE.md warns about. Two full sweeps were started and abandoned in
+this session before that was spotted; a third "confirmation" that BCC was
+`3081/3081` was the reference core answering.
+
+Fixed: the binary is threaded through to both launchers, and a `*vbatch` name
+selects the Verilator launcher on its own, since pairing a native executable with
+`vvp` cannot work. With the fix the two harnesses **agree exactly** --
+`run_harte.py --sim sim/harte_p` and `run_harte_batch.py --sim sim/harte_pvbatch`
+both report `PASS 3053 FAIL 28` for BCC.
+
+**Consequences, stated plainly:**
+
+- MH030-P's recorded `PASS 702142 FAIL 2 SKIP 281221` is **not reproducible** and
+  should not be requoted. It was produced through the broken `--sim`, so it is
+  the reference core's number. The reference's own figure is unaffected -- it is
+  measured with `--backend verilator`, which was never broken, and it re-measured
+  bit-identical this session.
+- The 28 BCC failures are **pre-existing and not a regression** from the
+  fetch-alignment fix: stashing `rtlp/mh030p_ifu.sv` and rebuilding gave the
+  identical `PASS 3053 FAIL 28`.
+- Same family as the "9,040 failing endpoints" figure that turned out not to be
+  reproducible either.
+
+**MH030-P's real full-corpus number, measured both with and without this
+session's changes:**
+
+| arm | result |
+|---|---|
+| MH030-P, this session's changes | `PASS 621799  FAIL 80345  SKIP 281221  TIMEOUT 576` |
+| MH030-P, changes stashed (baseline) | `PASS 621799  FAIL 80345  SKIP 281221  TIMEOUT 600` |
+| `rtl/` reference (unaffected) | `PASS 702142  FAIL 2  SKIP 281221  TIMEOUT 0` |
+
+PASS and FAIL are **identical** with and without the changes, and TIMEOUT falls
+by 24, so everything in this session is neutral-to-slightly-better and the
+**80,345 failures are wholly pre-existing** -- roughly 11.4% of runnable vectors,
+against a recorded claim of 2. The sampled failures are memory-destination ALU
+forms (`ADD.w #,(d16,A7)`, `ADD.w #,(d8,A4,Xn)`) getting both CCR and the stored
+bytes wrong, which is a systematic gap rather than an edge case, and nothing to do
+with fetch alignment or the BIU.
+
+So "MH030-P reaches the reference" was never true. Closing that gap is its own
+piece of work and has not been started; what this session establishes is the real
+starting number and a harness that actually measures the core it names.

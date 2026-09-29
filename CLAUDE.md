@@ -1159,11 +1159,25 @@ measures 13.78 MHz (14.24 before the multiply-driven-array correctness fix,
 which cost ~3% and 1.1k LUTs and lands regardless), the new one measures
 nothing because there is nothing to measure.
 
-**MH030-P P1+ (integer ISA breadth, CLOSED)**: the pipelined core now passes the
-full 124-suite Tom Harte corpus at **`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`**
--- MH030's own number, to the vector, with all 123 runnable suites at 100% and the
-2 failures being the documented ASL.b corpus data anomaly `rtl/` cannot pass
-either. This required a Verilator batch harness first (`make sim/harte_pvbatch`,
+**MH030-P P1+ (integer ISA breadth) -- THE HEADLINE CLAIM HERE WAS WRONG, see the
+correction below**: this section used to state that the pipelined core passes the
+full 124-suite Tom Harte corpus at `PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` --
+"MH030's own number, to the vector, with all 123 runnable suites at 100%".
+**It does not, and that figure must not be requoted.**
+`scripts/run_harte_batch.py`'s own `--sim` flag was a silent no-op (it computed
+`sim_bin` and then both chunk launchers read the module-level `SIM_BIN`/`VSIM_BIN`
+constants instead), so the recipe documented right here measured the REFERENCE
+core while appearing to measure the pipelined one. Fixed, and re-measured with the
+fix: **MH030-P scores `PASS 621799 FAIL 80345 SKIP 281221 TIMEOUT 576`** -- about
+11.4% of runnable vectors failing, against a recorded claim of 2. Confirmed
+pre-existing, not a regression: the identical PASS/FAIL comes back with the whole
+of the A4 session's changes stashed. Sampled failures are memory-destination ALU
+forms (`ADD.w #,(d16,A7)`, `ADD.w #,(d8,A4,Xn)`) getting both CCR and the stored
+bytes wrong -- a systematic gap, not edge cases. `rtl/`'s own
+`PASS 702142 FAIL 2` is unaffected: it is measured with `--backend verilator`,
+which was never broken, and it re-measured bit-identical. Everything below in this
+paragraph about the harness and the bugs P1+ genuinely closed still stands; only
+the score does not. This required a Verilator batch harness first (`make sim/harte_pvbatch`,
 driven by `run_harte_batch.py --sim sim/harte_pvbatch`; `sim/harte_p` stays the
 per-suite Icarus debugging tool with `+bustrace`/`+ccrtrace`) -- the Icarus runner
 took as long on one suite's first 1500 vectors as the whole corpus now takes.
@@ -1279,8 +1293,90 @@ plan specifies caches as Tier 2 reuse of `biu_icache_if.sv` at P6. The measureme
 stands as the justification for doing P6 properly; `tests/bench1.s`, `make bench`
 and the tick-budget instrumentation remain.
 
-**Current state**: `make test` 43/43, `make
-cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50. Full 124-suite Tom Harte sweep: `PASS 702142 FAIL 2` (the documented
+**A4 implemented -- rtlp on the REAL BIU, with the 68030's own caches (a later
+session; plan.md's "A4 implemented" section has the full writeup)**: the Stage 4
+choice was **C then A**. `rtlp/mh030p_cpu.sv` (new) holds everything above the bus
+-- fetch unit, core, peek decoder -- and is shared by two tops that differ only in
+what sits underneath: `mh030p_top` (abstract one-tick bus, behaviour UNCHANGED, and
+still the arm carrying the full Harte corpus) and **`mh030p_biu_top` (new)**, which
+drives `rtl/`'s own verified `m68030_biu` -- real pins, real S-states, real DSACK,
+real bursts, both genuine 256-byte caches under CACR (the core's own `cacr_o`, so
+software enables them exactly as on `rtl/`). New pin-level testbench
+`tb/mh030p_biu_tb.sv`, reusing `tb/cosim_grp_tb.sv`'s memory model verbatim so tick
+counts are comparable. **The A4 adaptation is four real conversions and nothing
+else**: FC synthesised from SR's S bit (the core has no address-space concept);
+write data re-justified TOP-ward because `biu_byte_lane_ctrl.sv` expects byte in
+`[31:24]` while the core produces `[7:0]` (reads need no conversion --
+`merge_rdata()` already right-justifies); `mem_lock` -> `eu_cas_hold` NOT `eu_rmw`
+(the latter runs cycle_gen's combined 12-state RMW, and this core dispatches read
+and write as two ordinary transactions); and **ack-width conversion**, because
+`biu_cycle_gen` holds its ack high for all four ticks of S7 while this core's port
+is specified single-tick -- done in the adapter, never the core.
+`eu_new_dispatch` is tied low, which is the honest value.
+
+**Two real bugs found by that first real-bus run, neither in the new code.**
+(1) **`rtlp` was issuing UNALIGNED longword instruction fetches** -- 68k branch
+targets are only word-aligned and `mh030p_ifu.sv` put the target straight on the
+bus as a 4-byte read. The abstract memory models answer that (they assemble bytes
+from the exact address), a real 32-bit port cannot, so after a branch the queue got
+`word@target-2` first and every instruction decoded one word out of step. It showed
+as a WRONG ANSWER, not a hang. Fixed the reference's way (round down to a longword
+boundary, tag that fetch, enqueue only its low word -- `rtl/m68030_ifu.sv` has
+carried a `skip_first_r` for exactly this). See
+`feedback_abstract_bus_hides_alignment`. (2) **`rtl/m68030_biu.sv` delivered a
+burst line to the WRONG cache** -- `dc_burst_ack`/`ic_burst_ack` qualified on the
+LIVE grant, whose own comment asserted "the arbiter holds a grant for the whole bus
+cycle... so the grant still identifies the owner when the ack lands." False:
+`biu_cycle_gen` leaves `ST_IDLE` on a clock edge where `bus_idle` is still asserted
+and `bus_lock`'s `is_burst` term is not yet, so `biu_arbiter` re-arbitrates in the
+very cycle the burst launches. Traced directly: an I-cache burst for `0x30` had
+`grant_eu` asserted one tick later, so the D-CACHE took the I-cache's line as its
+own fill for `0x1000` and instruction words were summed into the program's result.
+Signature: correct with IBE or DBE alone, wrong with both -- the same shape as the
+shared-burst-ack bug the previous session fixed, one level deeper. Fixed with
+`burst_owner_ifu_r`, latched while `bus_idle` with a burst pending and frozen
+thereafter (an edge detector on `cg_burst_req_mux` was tried first and is WRONG --
+the losing cache holds its request through the winner's burst, so the mux stays
+continuously high across two different clients' bursts and the detector never
+re-arms; it hung the benchmark). See `feedback_grant_moves_during_bus_cycle`.
+A genuine latent bug in frozen `rtl/`, surfaced -- as the plan said to expect --
+by a configuration whose dispatch spacing differs.
+
+**MEASURED, and this is the headline.** `make bench` now runs all four arms on the
+same program, same memory model, same `EXECCYCLES` definition:
+
+| arm | bench1, caches off | bench2, caches on |
+|---|---|---|
+| `rtl/` reference | 23,665 | 8,929 |
+| `rtlp` on the real BIU (A4) | 24,294 | **8,603** |
+| `rtlp` on the abstract bus | 6,616 | n/a |
+
+**On a faithful bus the pipelined core's throughput advantage very nearly
+disappears**: 6,616 ticks becomes 24,294, because a real bus access costs ~16 ticks
+against the abstract bus's ~3.8. The caches are what make it viable at all (2.82x,
+24,294 -> 8,603), and with them `rtlp` lands 3.7% ahead of the reference rather than
+the 3.6x the abstract bus suggested. **A4 bought fidelity; the old throughput claim
+was the cheap bus talking.** Bus transactions: 1,737 caches-off vs 231 on, of which
+only 21 are instruction fetches. Deliberately tied off (matching how
+`m68030_top.sv` ties off what IT cannot drive): real IACK cycles, CAS2,
+EU-initiated bursts, MOVE16, `biu_multiop_fsm` for MOVEM/MOVEP, coprocessor, BKPT.
+Boot reads addresses 0 and 4 twice (the BIU runs its own SSP/PC init and so does the
+core; they cannot collide because the BIU holds `eu_req` off until its own pair
+completes). **No Fmax measurement for `mh030p_biu_top` yet.**
+
+**A recorded project fact did not survive this session's gating**:
+`scripts/run_harte_batch.py --sim` was a silent no-op, so MH030-P's recorded
+`PASS 702142 FAIL 2` was the REFERENCE core's number. Fixed; MH030-P's real score
+is `PASS 621799 FAIL 80345 SKIP 281221 TIMEOUT 576`, confirmed pre-existing by a
+stashed-changes baseline. See the P1+ correction above and `plan.md`'s own
+"`--sim` was a no-op" section. **When measuring MH030-P, always pass BOTH
+`--sim sim/harte_pvbatch` AND confirm the Verilator launcher is selected** (the
+fixed script now does this automatically for any `*vbatch` binary and prints a
+note when it overrides the backend).
+
+**Current state**: `make test` 43/43, `make lint-drivers` clean, `make
+cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50, `make bench`
+all four arms passing (two `rtl/` + two `rtlp` A4, see the table above). Full 124-suite Tom Harte sweep **for `rtl/`**: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
 cover any 68020+-only family, coprocessor conditionals included, so this count is unaffected

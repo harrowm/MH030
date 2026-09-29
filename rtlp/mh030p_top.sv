@@ -2,11 +2,16 @@
 `include "mh030p_uop.svh"
 
 // =============================================================================
-// MH030-P top: fetch unit + core.
+// MH030-P top, abstract-bus configuration: CPU + a single-tick bus arbiter.
 //
-// This is the first configuration that runs a program rather than a
-// testbench-fed instruction sequence, which is what makes a branch TARGET
-// verifiable end to end -- until now only the squash could be checked.
+// This is the configuration every existing rtlp testbench and gate drives, and
+// its behaviour is unchanged. A transaction completes whenever the memory model
+// asserts bus_ack, with no S-states and no DSACK -- deliberately, because the
+// pipeline was built and measured against it.
+//
+// The CPU itself now lives in mh030p_cpu.sv, shared with mh030p_biu_top.sv
+// (the A4 configuration, which puts the real 68030 BIU underneath instead).
+// Everything above the bus is identical between the two.
 //
 // Instruction fetch and data share ONE external bus, arbitrated by
 // mh030p_arb.sv with data winning over fetch, as rtl/biu_arbiter.sv does.
@@ -42,57 +47,20 @@ module mh030p_top (
     wire [1:0]  mem_siz;
     wire [31:0] if_rdata, mem_rdata;
     wire        if_ack,  mem_ack;
+    wire [31:0] if_pc;
 
-    wire [15:0] if_instr, if_q3;
-    wire [31:0] if_ext, if_ext_raw, if_pc;
-    wire [2:0]  if_avail;
-    wire        redirect;
-    wire [31:0] redirect_pc;
-    wire        core_ready;
-
-    // Decode the offered opcode once, here, purely to learn how many
-    // extension words it needs: the fetch unit cannot know that, and the core
-    // needs the words before it can decode. One shared decoder instance would
-    // be tidier but would create a loop through the core's own decode.
-    //
-    // ext_raw, NOT ext. The fetch unit's `ext` is muxed BY ext_words (a single
-    // extension word is normalised into the low half), so feeding it here
-    // closes a combinational cycle through this decoder. It is a false cycle --
-    // ext_words is a function of the opcode alone -- but place-and-route
-    // unrolls it anyway and charges two passes through the decoder to one
-    // clock: 78% of the core's worst path, 151 of its 179 hops, before this.
-    uop_t peek;
-    mh030p_decode u_peek (
-        .instr(if_instr), .ext(if_ext_raw), .ext_raw(if_ext_raw),
-        .q3(if_q3), .uop(peek)
-    );
-
-    // Issue only once the whole instruction is in the queue.
-    wire have_all = (if_avail >= (3'd1 + peek.ext_words));
-    wire issue    = have_all && core_ready;
-    wire [2:0] drain = issue ? (3'd1 + peek.ext_words) : 3'd0;
-
-    mh030p_ifu u_ifu (
+    mh030p_cpu u_cpu (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .if_req(if_req), .if_addr(if_addr),
         .if_rdata(if_rdata), .if_ack(if_ack),
-        .redirect(redirect), .redirect_pc(redirect_pc),
-        .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
-        .words_avail(if_avail), .pc_out(if_pc),
-        .drain(drain), .ext_words(peek.ext_words)
-    );
-
-    mh030p_core u_core (
-        .clk_4x(clk_4x), .rst_n(rst_n),
-        .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
-        .ipl(ipl),
-        .instr_valid(have_all), .instr_ready(core_ready),
-        .pc_in(if_pc), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),
         .mem_rdata(mem_rdata), .mem_ack(mem_ack), .mem_lock(mem_lock),
+        .ipl(ipl),
+        .sr_sys(), .cacr(),
         .wb_wr_en(wb_wr_en), .wb_wr_sel(wb_wr_sel),
-        .wb_wr_data(wb_wr_data), .ccr_out(ccr_out), .stopped(stopped)
+        .wb_wr_data(wb_wr_data), .stopped(stopped), .ccr_out(ccr_out),
+        .if_pc(if_pc)
     );
 
     mh030p_arb u_arb (

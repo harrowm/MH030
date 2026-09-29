@@ -157,9 +157,9 @@ module mh030p_top_tb;
         repeat (120) @(negedge clk_4x);
 
         // If the branch target were wrong, D0/D1 would hold 0x7F/0x7E.
-        chk("D0 = 1+2 (skipped)", dut.u_core.u_rf.regs[0], 32'd3);
-        chk("D1 = 2 (skipped)",   dut.u_core.u_rf.regs[1], 32'd2);
-        chk("D2 = 4 (at target)", dut.u_core.u_rf.regs[2], 32'd4);
+        chk("D0 = 1+2 (skipped)", dut.u_cpu.u_core.u_rf.regs[0], 32'd3);
+        chk("D1 = 2 (skipped)",   dut.u_cpu.u_core.u_rf.regs[1], 32'd2);
+        chk("D2 = 4 (at target)", dut.u_cpu.u_core.u_rf.regs[2], 32'd4);
 
         // ── DBcc loop and Scc ──────────────────────────────────────────────
         // A DBcc loop is the real test of the redirect path: it takes the
@@ -193,9 +193,9 @@ module mh030p_top_tb;
         repeat (200) @(negedge clk_4x);
 
         // D3 counts 3,2,1,0 then -1 terminates: body runs 4 times.
-        chk("DBF loop count",  dut.u_core.u_rf.regs[4], 32'd4);
-        chk("DBF terminates",  dut.u_core.u_rf.regs[3], 32'h0000_FFFF);
-        chk("ST sets byte",    dut.u_core.u_rf.regs[5][7:0] | 32'h0, 32'h0000_00FF);
+        chk("DBF loop count",  dut.u_cpu.u_core.u_rf.regs[4], 32'd4);
+        chk("DBF terminates",  dut.u_cpu.u_core.u_rf.regs[3], 32'h0000_FFFF);
+        chk("ST sets byte",    dut.u_cpu.u_core.u_rf.regs[5][7:0] | 32'h0, 32'h0000_00FF);
 
         // ── BSR / RTS: call and return through the stack ────────────────────
         //  0: MOVEQ #0x40,D7        set up a stack pointer value
@@ -233,9 +233,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (250) @(negedge clk_4x);
 
-        chk("BSR reached routine", dut.u_core.u_rf.regs[2], 32'd7);
-        chk("RTS returned",        dut.u_core.u_rf.regs[1], 32'd2);
-        chk("stack restored",      dut.u_core.u_rf.regs[15], 32'h0000_0040);
+        chk("BSR reached routine", dut.u_cpu.u_core.u_rf.regs[2], 32'd7);
+        chk("RTS returned",        dut.u_cpu.u_core.u_rf.regs[1], 32'd2);
+        chk("stack restored",      dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0040);
 
         // ── TRAP #0: frame pushed, vector fetched, handler entered ──────────
         // TRAP #n takes vector 32+n, whose address is 4*(32+n) = 0x80 for #0.
@@ -265,9 +265,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (250) @(negedge clk_4x);
 
-        chk("TRAP entered handler", dut.u_core.u_rf.regs[3], 32'd9);
-        chk("TRAP skipped inline",  dut.u_core.u_rf.regs[0], 32'd0);
-        chk("TRAP pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("TRAP entered handler", dut.u_cpu.u_core.u_rf.regs[3], 32'd9);
+        chk("TRAP skipped inline",  dut.u_cpu.u_core.u_rf.regs[0], 32'd0);
+        chk("TRAP pushed frame",    dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0058);
         // Format $0: the SR alone at SP+0, the PC at SP+2.
         chk("frame holds PC",       rd32(32'h5A), 32'h0000_000E);
         chk("frame holds SR",       {16'h0, prog[32'h58 >> 1]}, 32'h0000_2700);
@@ -302,9 +302,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (200) @(negedge clk_4x);
 
-        chk("LEA absolute",     dut.u_core.u_rf.regs[9],  32'h0000_0024);
-        chk("LEA (d16,An)",     dut.u_core.u_rf.regs[10], 32'h0000_002A);
-        chk("PEA moved SP",     dut.u_core.u_rf.regs[15], 32'h0000_004C);
+        chk("LEA absolute",     dut.u_cpu.u_core.u_rf.regs[9],  32'h0000_0024);
+        chk("LEA (d16,An)",     dut.u_cpu.u_core.u_rf.regs[10], 32'h0000_002A);
+        chk("PEA moved SP",     dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_004C);
         chk("PEA pushed EA",    rd32(32'h4C),             32'h0000_0030);
 
         // ── JMP / JSR: a redirect to a computed address ──────────────────────
@@ -339,11 +339,11 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (250) @(negedge clk_4x);
 
-        chk("JSR reached target", dut.u_core.u_rf.regs[4],  32'd7);
-        chk("JSR RTS returned",   dut.u_core.u_rf.regs[3],  32'd5);
-        chk("JMP reached target", dut.u_core.u_rf.regs[5],  32'd6);
-        chk("JMP skipped inline", dut.u_core.u_rf.regs[0],  32'd0);
-        chk("JSR SP restored",    dut.u_core.u_rf.regs[15], 32'h0000_0050);
+        chk("JSR reached target", dut.u_cpu.u_core.u_rf.regs[4],  32'd7);
+        chk("JSR RTS returned",   dut.u_cpu.u_core.u_rf.regs[3],  32'd5);
+        chk("JMP reached target", dut.u_cpu.u_core.u_rf.regs[5],  32'd6);
+        chk("JMP skipped inline", dut.u_cpu.u_core.u_rf.regs[0],  32'd0);
+        chk("JSR SP restored",    dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0050);
 
         // ── TRAP then RTE: a full round trip through a stack frame ──────────
         // The CCR is deliberately non-zero when the trap is taken and is
@@ -383,9 +383,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (300) @(negedge clk_4x);
 
-        chk("RTE handler ran",   dut.u_core.u_rf.regs[3],  32'd9);
-        chk("RTE returned",      dut.u_core.u_rf.regs[9],  32'hFFFF_FFFF);
-        chk("RTE popped frame",  dut.u_core.u_rf.regs[15], 32'h0000_0060);
+        chk("RTE handler ran",   dut.u_cpu.u_core.u_rf.regs[3],  32'd9);
+        chk("RTE returned",      dut.u_cpu.u_core.u_rf.regs[9],  32'hFFFF_FFFF);
+        chk("RTE popped frame",  dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0060);
         // N was set before the trap and cleared by the handler; the pop must
         // put it back.
         chk("RTE restored CCR",  {24'h0, ccr_out},         32'h0000_0008);
@@ -430,9 +430,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (200) @(negedge clk_4x);
 
-        chk("BEQ saw its own CMP",  dut.u_core.u_rf.regs[2], 32'd0);
-        chk("ADD wrapped to zero",  dut.u_core.u_rf.regs[0], 32'd0);
-        chk("ADDX saw forwarded X", dut.u_core.u_rf.regs[4], 32'd1);
+        chk("BEQ saw its own CMP",  dut.u_cpu.u_core.u_rf.regs[2], 32'd0);
+        chk("ADD wrapped to zero",  dut.u_cpu.u_core.u_rf.regs[0], 32'd0);
+        chk("ADDX saw forwarded X", dut.u_cpu.u_core.u_rf.regs[4], 32'd1);
 
         // ── EXG: two commits from one instruction ───────────────────────────
         // The first genuine need for a second register-file write port. The
@@ -466,10 +466,10 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (200) @(negedge clk_4x);
 
-        chk("EXG Dx,Dy port 1",  dut.u_core.u_rf.regs[0],  32'd3);
-        chk("EXG Dx,Dy port 2",  dut.u_core.u_rf.regs[1],  32'd5);
-        chk("EXG Dx,Ay port 2",  dut.u_core.u_rf.regs[11], 32'd9);
-        chk("EXG port 2 fwd",    dut.u_core.u_rf.regs[13], 32'd9);
+        chk("EXG Dx,Dy port 1",  dut.u_cpu.u_core.u_rf.regs[0],  32'd3);
+        chk("EXG Dx,Dy port 2",  dut.u_cpu.u_core.u_rf.regs[1],  32'd5);
+        chk("EXG Dx,Ay port 2",  dut.u_cpu.u_core.u_rf.regs[11], 32'd9);
+        chk("EXG port 2 fwd",    dut.u_cpu.u_core.u_rf.regs[13], 32'd9);
 
         // ── LINK / UNLK: a stack frame built and torn down ───────────────────
         //  0: MOVEQ #0x60,D7 ; 2: MOVEA.L D7,A7     A7 = 0x60
@@ -500,9 +500,9 @@ module mh030p_top_tb;
         repeat (250) @(negedge clk_4x);
 
         chk("LINK pushed old An",  rd32(32'h5C),             32'h0000_0011);
-        chk("UNLK restored An",    dut.u_core.u_rf.regs[10], 32'h0000_0011);
-        chk("UNLK restored SP",    dut.u_core.u_rf.regs[15], 32'h0000_0060);
-        chk("LINK ran the body",   dut.u_core.u_rf.regs[1],  32'd7);
+        chk("UNLK restored An",    dut.u_cpu.u_core.u_rf.regs[10], 32'h0000_0011);
+        chk("UNLK restored SP",    dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0060);
+        chk("LINK ran the body",   dut.u_cpu.u_core.u_rf.regs[1],  32'd7);
 
         // ── MOVE to/from SR, CCR and USP ────────────────────────────────────
         //  0: MOVEQ #-1,D0     CCR = 0x08 (N)
@@ -540,11 +540,11 @@ module mh030p_top_tb;
         repeat (400) @(negedge clk_4x);
 
         // Reset leaves S set and the mask at 7, and the MOVEQ above set N.
-        chk("MOVE SR,Dn",   dut.u_core.u_rf.regs[1] & 32'h0000_FFFF, 32'h2708);
-        chk("MOVE CCR,Dn",  dut.u_core.u_rf.regs[2] & 32'h0000_FFFF, 32'h0008);
+        chk("MOVE SR,Dn",   dut.u_cpu.u_core.u_rf.regs[1] & 32'h0000_FFFF, 32'h2708);
+        chk("MOVE CCR,Dn",  dut.u_cpu.u_core.u_rf.regs[2] & 32'h0000_FFFF, 32'h0008);
         chk("MOVE Dn,CCR",  {24'h0, ccr_out},                  32'h0000_0008);
-        chk("MOVE An,USP",  dut.u_core.usp_r,                  32'h0000_0020);
-        chk("MOVE USP,An",  dut.u_core.u_rf.regs[10],          32'h0000_0020);
+        chk("MOVE An,USP",  dut.u_cpu.u_core.usp_r,                  32'h0000_0020);
+        chk("MOVE USP,An",  dut.u_cpu.u_core.u_rf.regs[10],          32'h0000_0020);
 
         // ── PC-relative effective addresses ─────────────────────────────────
         // The base is the address of the instruction's own EXTENSION WORD --
@@ -572,8 +572,8 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (250) @(negedge clk_4x);
 
-        chk("(d16,PC)",      dut.u_core.u_rf.regs[1], 32'hDEAD_BEEF);
-        chk("(d8,PC,Xn.L)",  dut.u_core.u_rf.regs[3], 32'hCAFE_BABE);
+        chk("(d16,PC)",      dut.u_cpu.u_core.u_rf.regs[1], 32'hDEAD_BEEF);
+        chk("(d8,PC,Xn.L)",  dut.u_cpu.u_core.u_rf.regs[3], 32'hCAFE_BABE);
 
         // ── TRAPV: taken and not taken ───────────────────────────────────────
         // The same opcode twice, with V clear then set, so "the trap fired"
@@ -613,10 +613,10 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("TRAPV not taken on V=0", dut.u_core.u_rf.regs[1],  32'd5);
-        chk("TRAPV taken on V=1",     dut.u_core.u_rf.regs[4],  32'd6);
-        chk("TRAPV skipped inline",   dut.u_core.u_rf.regs[3],  32'd0);
-        chk("TRAPV pushed frame",     dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("TRAPV not taken on V=0", dut.u_cpu.u_core.u_rf.regs[1],  32'd5);
+        chk("TRAPV taken on V=1",     dut.u_cpu.u_core.u_rf.regs[4],  32'd6);
+        chk("TRAPV skipped inline",   dut.u_cpu.u_core.u_rf.regs[3],  32'd0);
+        chk("TRAPV pushed frame",     dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0058);
 
         // ── Divide by zero: vector 5, from an instruction that is not a trap ─
         // The divider reports its zero divisor when it FINISHES, so this also
@@ -649,10 +649,10 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (400) @(negedge clk_4x);
 
-        chk("DIV0 entered handler", dut.u_core.u_rf.regs[3],  32'd4);
-        chk("DIV0 skipped inline",  dut.u_core.u_rf.regs[2],  32'd0);
-        chk("DIV0 left D0 alone",   dut.u_core.u_rf.regs[0],  32'd10);
-        chk("DIV0 pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("DIV0 entered handler", dut.u_cpu.u_core.u_rf.regs[3],  32'd4);
+        chk("DIV0 skipped inline",  dut.u_cpu.u_core.u_rf.regs[2],  32'd0);
+        chk("DIV0 left D0 alone",   dut.u_cpu.u_core.u_rf.regs[0],  32'd10);
+        chk("DIV0 pushed frame",    dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0058);
         chk("DIV0 frame vector",    {16'h0, prog[32'h5E >> 1]}, 32'h0000_0014);
 
         // ── Interrupts ───────────────────────────────────────────────────────
@@ -698,12 +698,12 @@ module mh030p_top_tb;
         ipl = 3'b000;                        // the handler has taken it
         repeat (200) @(negedge clk_4x);
 
-        chk("INT entered handler", dut.u_core.u_rf.regs[3],  32'd9);
-        chk("INT pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("INT entered handler", dut.u_cpu.u_core.u_rf.regs[3],  32'd9);
+        chk("INT pushed frame",    dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0058);
         // The frame's return PC is the INTERRUPTED instruction, not the one
         // after it: nothing of it ran, so an RTE has to re-execute it.
         chk("INT frame return PC", rd32(32'h5A), 32'h0000_0010);
-        chk("INT raised the mask", {29'h0, dut.u_core.sr_sys_r[2:0]}, 32'd5);
+        chk("INT raised the mask", {29'h0, dut.u_cpu.u_core.sr_sys_r[2:0]}, 32'd5);
 
         // ── Level 7 with the mask already at 7 ───────────────────────────────
         // A plain level>mask comparison can NEVER fire here, since 7 > 7 is
@@ -738,8 +738,8 @@ module mh030p_top_tb;
         ipl = 3'b000;
         repeat (200) @(negedge clk_4x);
 
-        chk("NMI at mask 7",       dut.u_core.u_rf.regs[4],  32'd8);
-        chk("NMI pushed frame",    dut.u_core.u_rf.regs[15], 32'h0000_0058);
+        chk("NMI at mask 7",       dut.u_cpu.u_core.u_rf.regs[4],  32'd8);
+        chk("NMI pushed frame",    dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0058);
 
         // ── Interrupt with no request: nothing happens ───────────────────────
         // The mask is lowered to 0 and IPL held at 0 for the whole run, so a
@@ -771,9 +771,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (250) @(negedge clk_4x);
 
-        chk("no spurious INT",  dut.u_core.u_rf.regs[4],  32'd0);
-        chk("program ran",      dut.u_core.u_rf.regs[5],  32'd6);
-        chk("SP untouched",     dut.u_core.u_rf.regs[15], 32'h0000_0060);
+        chk("no spurious INT",  dut.u_cpu.u_core.u_rf.regs[4],  32'd0);
+        chk("program ran",      dut.u_cpu.u_core.u_rf.regs[5],  32'd6);
+        chk("SP untouched",     dut.u_cpu.u_core.u_rf.regs[15], 32'h0000_0060);
 
         // ── CHK: not taken, taken above, taken below ─────────────────────────
         // All three outcomes, because CHK traps on TWO independent conditions
@@ -813,9 +813,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("CHK in bounds passed", dut.u_core.u_rf.regs[2], 32'd3);
-        chk("CHK above bound trap", dut.u_core.u_rf.regs[5], 32'd7);
-        chk("CHK skipped inline",   dut.u_core.u_rf.regs[4], 32'd0);
+        chk("CHK in bounds passed", dut.u_cpu.u_core.u_rf.regs[2], 32'd3);
+        chk("CHK above bound trap", dut.u_cpu.u_core.u_rf.regs[5], 32'd7);
+        chk("CHK skipped inline",   dut.u_cpu.u_core.u_rf.regs[4], 32'd0);
         chk("CHK frame vector",     {16'h0, prog[32'h5E >> 1]}, 32'h0000_0018);
 
         // Below-bound is the other trap condition and a DIFFERENT comparison:
@@ -846,8 +846,8 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("CHK below zero trap", dut.u_core.u_rf.regs[14], 32'hFFFF_FFFF);
-        chk("CHK below skipped",   dut.u_core.u_rf.regs[4], 32'd0);
+        chk("CHK below zero trap", dut.u_cpu.u_core.u_rf.regs[14], 32'hFFFF_FFFF);
+        chk("CHK below skipped",   dut.u_cpu.u_core.u_rf.regs[4], 32'd0);
         // N is the below-bound result when CHK traps.
         chk("CHK set N on below",  {28'h0, ccr_out[3]}, 32'h0000_0001);
 
@@ -884,9 +884,9 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("TRAPF not taken",   dut.u_core.u_rf.regs[1], 32'd2);
-        chk("Line-A trapped",    dut.u_core.u_rf.regs[3], 32'd5);
-        chk("Line-A skipped",    dut.u_core.u_rf.regs[2], 32'd0);
+        chk("TRAPF not taken",   dut.u_cpu.u_core.u_rf.regs[1], 32'd2);
+        chk("Line-A trapped",    dut.u_cpu.u_core.u_rf.regs[3], 32'd5);
+        chk("Line-A skipped",    dut.u_cpu.u_core.u_rf.regs[2], 32'd0);
         // The stacked PC is the A-line opcode's own address, byte 8.
         chk("Line-A stacked PC", rd32(32'h5A), 32'h0000_0010);
 
@@ -916,8 +916,8 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("TRAPcc taken on VS", dut.u_core.u_rf.regs[4], 32'd6);
-        chk("TRAPcc skipped",     dut.u_core.u_rf.regs[2], 32'd0);
+        chk("TRAPcc taken on VS", dut.u_cpu.u_core.u_rf.regs[4], 32'd6);
+        chk("TRAPcc skipped",     dut.u_cpu.u_core.u_rf.regs[2], 32'd0);
 
         // ── TAS: read-modify-write on a byte, flags from the ORIGINAL ────────
         // Two runs: one where the byte starts clear (Z set, bit 7 set by us)
@@ -1046,11 +1046,11 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("BFEXTU zero-extends", dut.u_core.u_rf.regs[1], 32'h0000_00F0);
-        chk("BFEXTS sign-extends", dut.u_core.u_rf.regs[2], 32'hFFFF_FFF0);
-        chk("BFFFO finds bit 0",   dut.u_core.u_rf.regs[5], 32'd0);
-        chk("BFINS places field",  dut.u_core.u_rf.regs[4], 32'h000F_0000);
-        chk("BFCLR clears field",  dut.u_core.u_rf.regs[0], 32'h00F0_F0F0);
+        chk("BFEXTU zero-extends", dut.u_cpu.u_core.u_rf.regs[1], 32'h0000_00F0);
+        chk("BFEXTS sign-extends", dut.u_cpu.u_core.u_rf.regs[2], 32'hFFFF_FFF0);
+        chk("BFFFO finds bit 0",   dut.u_cpu.u_core.u_rf.regs[5], 32'd0);
+        chk("BFINS places field",  dut.u_cpu.u_core.u_rf.regs[4], 32'h000F_0000);
+        chk("BFCLR clears field",  dut.u_cpu.u_core.u_rf.regs[0], 32'h00F0_F0F0);
         // BFCLR ran last; its field was 0xF (width 4), whose top bit is set.
         chk("BF flags N from field", {28'h0, ccr_out[3]}, 32'h0000_0001);
         chk("BF flags Z clear",      {28'h0, ccr_out[2]}, 32'h0000_0000);
@@ -1073,7 +1073,7 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (250) @(negedge clk_4x);
 
-        chk("BFTST left D0",   dut.u_core.u_rf.regs[0], 32'h00F0_F0F0);
+        chk("BFTST left D0",   dut.u_cpu.u_core.u_rf.regs[0], 32'h00F0_F0F0);
         chk("BFTST Z on zero", {28'h0, ccr_out[2]},     32'h0000_0001);
 
         // ── MOVEC and a movable vector base ──────────────────────────────────
@@ -1127,11 +1127,11 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (450) @(negedge clk_4x);
 
-        chk("MOVEC read back VBR",  dut.u_core.u_rf.regs[1], 32'h0000_0100);
-        chk("MOVEC read back CACR", dut.u_core.u_rf.regs[3], 32'h0000_002A);
-        chk("VBR moved the vector", dut.u_core.u_rf.regs[5], 32'd9);
-        chk("old base NOT used",    dut.u_core.u_rf.regs[6], 32'd0);
-        chk("TRAP skipped inline",  dut.u_core.u_rf.regs[4], 32'd0);
+        chk("MOVEC read back VBR",  dut.u_cpu.u_core.u_rf.regs[1], 32'h0000_0100);
+        chk("MOVEC read back CACR", dut.u_cpu.u_core.u_rf.regs[3], 32'h0000_002A);
+        chk("VBR moved the vector", dut.u_cpu.u_core.u_rf.regs[5], 32'd9);
+        chk("old base NOT used",    dut.u_cpu.u_core.u_rf.regs[6], 32'd0);
+        chk("TRAP skipped inline",  dut.u_cpu.u_core.u_rf.regs[4], 32'd0);
 
         // ── MOVEP: bytes at a stride of two ──────────────────────────────────
         // The instruction exists to reach an 8-bit peripheral wired to half of
@@ -1196,7 +1196,7 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (300) @(negedge clk_4x);
 
-        chk("MOVEP.W into Dn", dut.u_core.u_rf.regs[2], 32'hAAAA_7788);
+        chk("MOVEP.W into Dn", dut.u_cpu.u_core.u_rf.regs[2], 32'hAAAA_7788);
 
         // ── CAS: match, mismatch, and the lock ───────────────────────────────
         // Match: memory takes Du, Dc is left alone, Z set.
@@ -1227,7 +1227,7 @@ module mh030p_top_tb;
         repeat (350) @(negedge clk_4x);
 
         chk("CAS match wrote Du",  rd32(32'h40),             32'hAABB_CCDD);
-        chk("CAS match kept Dc",   dut.u_core.u_rf.regs[1],  32'h1122_3344);
+        chk("CAS match kept Dc",   dut.u_cpu.u_core.u_rf.regs[1],  32'h1122_3344);
         chk("CAS match set Z",     {28'h0, ccr_out[2]},      32'h0000_0001);
         chk("CAS held the bus",    {31'h0, lock_violation},  32'h0000_0000);
 
@@ -1256,7 +1256,7 @@ module mh030p_top_tb;
         repeat (350) @(negedge clk_4x);
 
         chk("CAS miss kept memory", rd32(32'h40),            32'h1122_3344);
-        chk("CAS miss loaded Dc",   dut.u_core.u_rf.regs[1], 32'h1122_3344);
+        chk("CAS miss loaded Dc",   dut.u_cpu.u_core.u_rf.regs[1], 32'h1122_3344);
         chk("CAS miss cleared Z",   {28'h0, ccr_out[2]},     32'h0000_0000);
         chk("CAS miss held bus",    {31'h0, lock_violation}, 32'h0000_0000);
 
@@ -1392,8 +1392,8 @@ module mh030p_top_tb;
         rst_n = 1'b1;
         repeat (350) @(negedge clk_4x);
 
-        chk("CHK2 trapped",        dut.u_core.u_rf.regs[14], 32'h0000_0040);
-        chk("CHK2 skipped inline", dut.u_core.u_rf.regs[3],  32'd0);
+        chk("CHK2 trapped",        dut.u_cpu.u_core.u_rf.regs[14], 32'h0000_0040);
+        chk("CHK2 skipped inline", dut.u_cpu.u_core.u_rf.regs[3],  32'd0);
 
         $display("");
         if (fails == 0) begin

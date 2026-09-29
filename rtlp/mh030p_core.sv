@@ -90,6 +90,13 @@ module mh030p_core (
     input  wire [31:0] mem_rdata,
     input  wire        mem_ack,
 
+    // Control state a real BIU needs. The upper half of SR carries the S bit,
+    // from which the function code for every access is derived, and CACR holds
+    // the cache enables. Both are ordinary registers below; these ports only
+    // publish them, and the abstract-bus configuration leaves them open.
+    output wire [7:0]  sr_sys_o,
+    output wire [31:0] cacr_o,
+
     // Architectural state, exposed for the testbench.
     output wire        wb_wr_en,
     output wire [3:0]  wb_wr_sel,
@@ -435,11 +442,19 @@ module mh030p_core (
     // VBR is the one that matters here: the exception vector base was hardcoded
     // to 0 because there was no register to hold it, so every handler had to
     // live in the bottom 1KB. CACR and CAAR are plain registers with nothing
-    // behind them -- this core has no caches -- and SFC/DFC likewise, since
-    // MOVES is not executable yet. Readback is real in every case, which is
-    // what software actually checks.
+    // behind them in the abstract-bus configuration -- which has no caches --
+    // and SFC/DFC likewise, since MOVES is not executable yet. Readback is real
+    // in every case, which is what software actually checks.
+    //
+    // CACR stopped being inert once the core was given a real BIU: cacr_o below
+    // is what mh030p_biu_top.sv feeds to the genuine 68030 caches, so a MOVEC
+    // to it now enables and freezes real hardware rather than being written and
+    // read back.
     reg [31:0] vbr_r, cacr_r, caar_r;
     reg [2:0]  sfc_r, dfc_r;
+
+    assign cacr_o   = cacr_r;
+    assign sr_sys_o = sr_sys_r;
 
     wire ex_rmw = ex_valid && ex_uop.reads_mem && ex_uop.writes_mem;
     // A write-only ALU operation on memory -- CLR. Its flags are not claimed at

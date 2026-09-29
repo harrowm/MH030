@@ -98,14 +98,14 @@ $(SIM)/mh030p_mul: rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/eu_mul_div.sv \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
 # MH030-P: fetch unit + core running a program out of memory.
-$(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+$(SIM)/mh030p_top: rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                    rtlp/mh030p_core.sv \
                    rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
                    rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
                    rtlp/mh030p_uop.svh rtl/opcode_fields.sv rtl/eu_alu.sv \
                    rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
                    rtl/eu_bcd.sv tb/mh030p_top_tb.sv | $(SIM)
-	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv \
 	    rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
 	    rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
@@ -127,13 +127,13 @@ $(SIM)/bf_equiv: rtlp/mh030p_bitfield.sv rtl/eu_bitfield.sv tb/bf_equiv_tb.sv \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
-$(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+$(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                 rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
                 rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtlp/mh030p_uop.svh \
                 rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
                 rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
                 rtl/eu_bitfield.sv tb/cosim_p_tb.sv | $(SIM)
-	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
 	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/opcode_fields.sv \
 	    rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
@@ -141,13 +141,13 @@ $(SIM)/cosim_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 	    || { echo "ERROR: $@ compile failed"; exit 1; }; } \
 	    | grep -Ev "sorry:|warning:|^$$" ; exit $${PIPESTATUS[0]}
 
-$(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+$(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
                 rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
                 rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtlp/mh030p_uop.svh \
                 rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
                 rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
                 rtl/eu_bitfield.sv tb/harte_p_tb.sv | $(SIM)
-	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv \
 	    rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
 	    rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/opcode_fields.sv \
 	    rtl/eu_alu.sv rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \
@@ -157,6 +157,27 @@ $(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
 
 # MH030-P: new-core decoder vs the reference decoder, all 65536 opcodes.
 # Needs -I rtlp for mh030p_uop.svh, so it cannot use the plain $(IVCOMP).
+# MH030-P on the REAL BIU (plan A4). rtlp's CPU plus rtl/'s own verified BIU
+# and both genuine 68030 caches, driven through real pins by a pin-level
+# peripheral. This is the configuration that measures what the A4 contract
+# actually costs, so it needs BIU_SRCS as well as the rtlp sources -- but NOT
+# m68030_seq/eu/exc/mmu, since the pipelined core replaces all four.
+MH030P_BIU_SRCS := rtlp/mh030p_biu_top.sv rtlp/mh030p_cpu.sv \
+                   rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv \
+                   rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
+                   rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
+                   rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
+                   rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
+                   rtl/eu_bitfield.sv \
+                   rtl/m68030_biu.sv $(BIU_SRCS)
+
+$(SIM)/mh030p_biu: $(MH030P_BIU_SRCS) rtlp/mh030p_uop.svh \
+                   tb/mh030p_biu_tb.sv | $(SIM)
+	@{ $(IV) $(IVFLAGS) -I rtlp -o $@ tb/mh030p_biu_tb.sv \
+	    $(MH030P_BIU_SRCS) 2>&1 \
+	  || { echo "ERROR: $@ compile failed"; exit 1; }; } \
+	  | grep -v "^$$" || true
+
 $(SIM)/uop_equiv: rtlp/mh030p_decode.sv rtlp/mh030p_uop.svh \
                   rtl/opcode_fields.sv rtl/eu_seq.sv rtl/eu_seq_decode.svh \
                   rtl/eu_seq_execute.svh rtl/eu_seq_preview.svh \
@@ -353,7 +374,7 @@ sim/harte_vbatch: $(VOBJ_HARTE)/Vharte_verilator_tb | $(SIM)
 # The Icarus runner (sim/harte_p) stays the per-suite debugging tool; this is
 # the only practical way to sweep the full corpus against the new core, for
 # exactly the reason the rtl/ Verilator backend exists.
-RTLP_SRCS := rtlp/mh030p_top.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
+RTLP_SRCS := rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv rtlp/mh030p_ifu.sv \
              rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
              rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv \
              rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
@@ -547,7 +568,7 @@ $(foreach t,$(PCOSIM_TARGETS),$(eval $(call PCOSIM_RULE,$(t))))
 # on the same event (their own execution-stop register) and cosim_p also reports
 # where the ticks went.
 .PHONY: bench
-bench: $(SIM)/cosim_grp $(SIM)/cosim_p tests/bench1.hex tests/bench2.hex
+bench: $(SIM)/cosim_grp $(SIM)/cosim_p $(SIM)/mh030p_biu tests/bench1.hex tests/bench2.hex
 	@echo "-- rtl/ (cycle-accurate)"
 	@$(VVP) $(SIM)/cosim_grp +hexfile=tests/bench1.hex +grp=bench1 \
 	    +cycles=400000 +settle=40000 2>&1 | grep -E "^EXECCYCLES|^PASS|^FAIL"
@@ -560,6 +581,16 @@ bench: $(SIM)/cosim_grp $(SIM)/cosim_p tests/bench1.hex tests/bench2.hex
 	@echo "-- rtlp/ (pipelined, no caches)"
 	@$(VVP) $(SIM)/cosim_p +hexfile=tests/bench1.hex +grp=bench1 \
 	    +expected_d0=000007E0 2>&1 | grep -E "^EXECCYCLES|^BUDGET|^PASS|^FAIL"
+	@echo "-- rtlp/ on the REAL BIU (plan A4), caches OFF"
+	@$(VVP) $(SIM)/mh030p_biu +hexfile=tests/bench1.hex \
+	    +cycles=120000 +expected_d0=000007E0 2>&1 \
+	    | grep -E "^EXECCYCLES|^BUSTXN|D0 correct|^FAIL"
+	@echo "-- rtlp/ on the REAL BIU (plan A4), the 68030's OWN caches (CACR=\$$1111)"
+	@echo "   also the regression for the latched-burst-owner fix: the two caches"
+	@echo "   qualified their burst ack on the LIVE grant, which moves mid-burst."
+	@$(VVP) $(SIM)/mh030p_biu +hexfile=tests/bench2.hex \
+	    +cycles=120000 +expected_d0=000007E0 2>&1 \
+	    | grep -E "^EXECCYCLES|^BUSTXN|D0 correct|^FAIL"
 
 .PHONY: cosim_p
 cosim_p: $(patsubst %,buscmp-p-%,$(PCOSIM_TARGETS))
@@ -1088,7 +1119,7 @@ help:
 # A real Fmax measurement cannot resolve a change worth less than ~2 MHz (its
 # seed-to-seed spread is ~0.5 MHz), so this reads the synthesised netlist
 # instead. See scripts/logic_depth.py's header for the calibration.
-DEPTH_SRC := rtl/opcode_fields.sv rtlp/mh030p_top.sv rtlp/mh030p_arb.sv \
+DEPTH_SRC := rtl/opcode_fields.sv rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv \
              rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv rtlp/mh030p_regfile.sv \
              rtlp/mh030p_decode.sv rtlp/mh030p_mul.sv rtlp/mh030p_shift.sv rtl/eu_alu.sv \
              rtl/eu_shifter.sv rtl/eu_mul_div.sv rtl/eu_bitops.sv \

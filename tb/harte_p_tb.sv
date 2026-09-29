@@ -160,27 +160,27 @@ module harte_p_tb;
     always_ff @(posedge clk_4x) begin
         // Sampled in EX, not WB: wb_upd_ccr belongs to the PREVIOUS instruction,
         // so printing it beside ex_uop mixes two stages.
-        if (ccrtrace && rst_n && dut.u_core.ex_valid && !dut.u_core.stall_ex)
+        if (ccrtrace && rst_n && dut.u_cpu.u_core.ex_valid && !dut.u_cpu.u_core.stall_ex)
             $display("EX cls=%0d aluop=%0d siz=%0d src=%08h dst=%08h res=%08h commit=%08h wr=%b r=%0d ccr_r=%02h",
-                     dut.u_core.ex_uop.uclass, dut.u_core.ex_uop.alu_op,
-                     dut.u_core.ex_uop.siz, dut.u_core.ex_src, dut.u_core.ex_dst,
-                     dut.u_core.ex_result, dut.u_core.ex_commit,
-                     dut.u_core.ex_uop.writes_reg, dut.u_core.ex_uop.dst_reg,
-                     dut.u_core.ccr_r);
+                     dut.u_cpu.u_core.ex_uop.uclass, dut.u_cpu.u_core.ex_uop.alu_op,
+                     dut.u_cpu.u_core.ex_uop.siz, dut.u_cpu.u_core.ex_src, dut.u_cpu.u_core.ex_dst,
+                     dut.u_cpu.u_core.ex_result, dut.u_cpu.u_core.ex_commit,
+                     dut.u_cpu.u_core.ex_uop.writes_reg, dut.u_cpu.u_core.ex_uop.dst_reg,
+                     dut.u_cpu.u_core.ccr_r);
     end
 
     logic [7:0] ccr_shadow = 8'hFF;
     always_ff @(posedge clk_4x) begin
         if (ccrtrace && rst_n && (ccr_out !== ccr_shadow)) begin
             $display("ccr %02h -> %02h  t=%0t stopped=%b", ccr_shadow, ccr_out,
-                     $time, dut.u_core.stopped_r);
+                     $time, dut.u_cpu.u_core.stopped_r);
             ccr_shadow <= ccr_out;
         end else if (rst_n) ccr_shadow <= ccr_out;
     end
 
     logic [7:0] ccr_before_stop;
     always_ff @(posedge clk_4x) begin
-        if (!dut.u_core.stopped_r) ccr_before_stop <= ccr_out;
+        if (!dut.u_cpu.u_core.stopped_r) ccr_before_stop <= ccr_out;
     end
 
     initial begin
@@ -205,17 +205,17 @@ module harte_p_tb;
 
         if (ccrtrace)
             $display("DBG ccr_before_stop=%02h ccr_out=%02h sr_sys=%02h stopped=%b",
-                     ccr_before_stop, ccr_out, dut.u_core.sr_sys_r, dut.u_core.stopped_r);
+                     ccr_before_stop, ccr_out, dut.u_cpu.u_core.sr_sys_r, dut.u_cpu.u_core.stopped_r);
         $display("REGSTATE D0=%h D1=%h D2=%h D3=%h D4=%h D5=%h D6=%h D7=%h A0=%h A1=%h A2=%h A3=%h A4=%h A5=%h A6=%h A7=%h SR=%h PC=%h",
-            dut.u_core.u_rf.regs[0],  dut.u_core.u_rf.regs[1],
-            dut.u_core.u_rf.regs[2],  dut.u_core.u_rf.regs[3],
-            dut.u_core.u_rf.regs[4],  dut.u_core.u_rf.regs[5],
-            dut.u_core.u_rf.regs[6],  dut.u_core.u_rf.regs[7],
-            dut.u_core.u_rf.regs[8],  dut.u_core.u_rf.regs[9],
-            dut.u_core.u_rf.regs[10], dut.u_core.u_rf.regs[11],
-            dut.u_core.u_rf.regs[12], dut.u_core.u_rf.regs[13],
-            dut.u_core.u_rf.regs[14], dut.u_core.u_rf.regs[15],
-            {dut.u_core.sr_sys_r, ccr_before_stop}, dut.if_pc);
+            dut.u_cpu.u_core.u_rf.regs[0],  dut.u_cpu.u_core.u_rf.regs[1],
+            dut.u_cpu.u_core.u_rf.regs[2],  dut.u_cpu.u_core.u_rf.regs[3],
+            dut.u_cpu.u_core.u_rf.regs[4],  dut.u_cpu.u_core.u_rf.regs[5],
+            dut.u_cpu.u_core.u_rf.regs[6],  dut.u_cpu.u_core.u_rf.regs[7],
+            dut.u_cpu.u_core.u_rf.regs[8],  dut.u_cpu.u_core.u_rf.regs[9],
+            dut.u_cpu.u_core.u_rf.regs[10], dut.u_cpu.u_core.u_rf.regs[11],
+            dut.u_cpu.u_core.u_rf.regs[12], dut.u_cpu.u_core.u_rf.regs[13],
+            dut.u_cpu.u_core.u_rf.regs[14], dut.u_cpu.u_core.u_rf.regs[15],
+            {dut.u_cpu.u_core.sr_sys_r, ccr_before_stop}, dut.if_pc);
 
         if (!stopped) $display("TIMEOUT");
         else          $display("OK");
