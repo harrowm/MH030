@@ -5806,3 +5806,58 @@ That is a real refactor of the most intricate file in `rtlp/`, with
 `tb/uop_decode_equiv_tb.sv` (all 65,536 opcodes, already comparing displacements)
 and the Harte corpus as the net. It is the right Stage 1, but it is not the cheap
 one this plan assumed.
+
+### Stage 1, the measurement that changes the target: `ext_words` costs 24 ns
+
+The `-noflatten` attribution left one doubt worth settling before refactoring
+anything: Yosys cannot prune a module's unused outputs in that mode, and
+`u_peek`'s only used output is `ext_words`, so its 50 attributed levels might
+have been an artifact. New `tb/extw_probe.sv` + **`make fmax-extw`** settles it by
+measuring that cone alone -- registers in, registers out, every other decoder
+output pruned:
+
+    seed 1: 41.70 MHz      seed 2: 45.37 MHz
+
+**About 22-24 ns, for a 3-bit output that is a pure function of 16 opcode bits
+plus a couple of extension bits.** The depth is real, not an artifact, and it
+reframes Stage 1 completely:
+
+* Fixing the serial pass alone is **not sufficient**. Even with the peek decoder
+  taken off the critical path entirely, `ext_words` still has to be computed
+  before the fetch unit can normalise `ext`, so this cone caps the whole design
+  near **41-45 MHz** however the plumbing is rearranged. That is below the
+  45-65 MHz that Stages 1-3 were estimated to reach, so it binds first.
+* It is also the reason the serial pass is expensive in the first place: two
+  passes hurt because each one is deep.
+
+**Why it is deep, and what the fix is.** `uop.ext_words` is assigned at the END
+of the main `always_comb`, from `uop.uclass`, `uop.subop` and the decoded EA
+mode/size -- so the whole classification chain is in its cone, and it terminates
+in a ~25-arm serial `? :` priority chain. A direct implementation would not need
+any of that: group select from `instr[15:12]`, per-group counts computed in
+parallel from the opcode's own bit-fields, one mux. That is plausibly 6-8 levels
+against the present ~50.
+
+This is the right Stage 1: a dedicated shallow `ext_words` decoder, with
+`mh030p_decode` keeping its own copy as the oracle. It is bounded, additive, and
+attacks the measured cost rather than the plumbing around it.
+
+**The net needs widening first, and that is a prerequisite, not an optional
+extra.** `tb/uop_decode_equiv_tb.sv` already compares `ext_words` against the
+reference `u_seq.ext_count` across all 65,536 opcodes, and already asserts the
+"must not depend on the normalised `ext`" property by varying `ext` -- but it
+holds **`ext_raw` fixed** at `32'hA4A5_3C7F`. Full-format extension words change
+the count (`ff_extra`/`ff_indirect`/`ff_bd_words` all read `rawword`), so a
+rewrite's full-format arithmetic would be unverified. Extend the sweep to vary
+`ext_raw` across the full-format shapes BEFORE touching the logic -- the existing
+`+probe`/`+gaps` diagnostics make that cheap, and six separate historical bugs in
+this exact arithmetic are documented in the decoder's own comments.
+
+**Order of work for Stage 1:**
+1. Widen the sweep to vary `ext_raw` (full-format bd size, IS/BS, I/IS). Confirm
+   it still passes against the current decoder -- a new test that passes
+   immediately proves it is watching the right thing only if it also fails when
+   the arithmetic is perturbed, so check that too.
+2. Write the shallow `ext_words` decoder; iterate against `make fmax-extw`.
+3. Swap `u_peek` to it; 9-seed `fmax-pbiu-sweep` + `make bench` + full gate.
+4. Only then revisit the serial pass, which may no longer matter.
