@@ -5747,3 +5747,62 @@ with `make bench`, not on the sweep alone. Demoted below 2b for that reason.
 **Stage 4 -- routing locality.** Only after 1-3; 74% routing is mostly a symptom.
 
 **Stage 5 -- re-decide the target** against measurements rather than estimates.
+
+### Stage 1 investigation: the real structure, and two hypotheses killed
+
+**Attribution first, because the flattened netlist cannot give it.** nextpnr's
+worst path for the A4 config names `ag_pc` and `mvm_ready`, but those are
+ABC-invented ancestor names and only the instance prefix is trustworthy. A
+`-noflatten` synthesis gives real hierarchical names, and its path reads:
+
+       0.52 ns    1 hop   u_cpu.u_ifu          (source register)
+      23.49 ns   50 hops  u_cpu.u_peek         <- the peek decoder
+       1.87 ns    4 hops  u_cpu.u_ifu          (the `ext` mux)
+      18.68 ns   50 hops  u_cpu.u_core.u_dec   <- the core's decoder
+       3.62 ns    4 hops  u_cpu.u_core
+       6.90 ns   16 hops  u_cpu.u_core.u_rf    (read-port select)
+
+**Two decoders in series in one clock**, joined by `mh030p_ifu.sv:117`:
+
+    assign ext = (ext_words == 3'd1) ? {16'h0, q[1]} : {q[1], q[2]};
+
+`ext_words` comes from `u_peek`; `ext` feeds `u_core.u_dec`. So the chain is
+q[0] -> peek decode -> ext mux -> full decode -> regfile select. `ext_raw` was
+added to stop `u_peek` depending on that mux (a genuine false loop), and it does
+-- but it never addressed the core decoder's own dependence on the peek decoder's
+output, which is the serial pass.
+
+**Caveat on the 50/50 split, stated because it changes what to fix**: with
+`-noflatten` Yosys cannot prune a module's unused outputs, and `u_peek`'s only
+used output is `ext_words`. In the real flattened netlist the rest of that
+decoder is pruned, so 23.49 ns almost certainly overstates the peek leg. The
+*structure* is real either way; the depth attribution between the two legs is not
+trustworthy from this run.
+
+**Hypothesis 1 -- registering `ext_words` to cut the peek leg: INCONCLUSIVE.**
+A throwaway probe measured 20.63 / 27.52 MHz on seeds 1-2 against a baseline of
+25.10 / 25.30 on the same seeds -- worse on one, better on the other. That is the
+documented netlist-variance floor, not a result, and three seeds cannot resolve
+it. Reverted without concluding either way.
+
+**Hypothesis 2 -- `xword(i,tot)` is identically `rawword(i)`: DISPROVED.**
+It looked like a clean win: replace the normalised-`ext` reads with raw positional
+reads and the dependency disappears for free. The 65,536-opcode sweep returned
+**8,688 failures** immediately. The reason is in the function's own comment:
+`tot` is the RAW-FIELD SUM (`ea_words_total`) while `ext` is normalised by the
+DECODED `uop.ext_words`, and "several families report a count their own low six
+bits do not imply". `xword` is a deliberate composition of the two, not a
+positional accessor. Reverted; sweep clean again.
+
+**What Stage 1 actually requires.** Not a patch. To remove the serial pass the
+core's decoder must normalise `ext` itself from `ext_raw`, which means hoisting
+the `ext_words` computation ahead of the main `always_comb` -- and that
+computation currently depends on `uop.uclass`, `uop.subop` and the EA mode/size
+that the same block produces. Done properly it pays twice: `u_peek` can then be
+deleted outright, since the only reason two full decoders exist is that a shared
+one would close the loop this normalisation creates. Two decoders become one.
+
+That is a real refactor of the most intricate file in `rtlp/`, with
+`tb/uop_decode_equiv_tb.sv` (all 65,536 opcodes, already comparing displacements)
+and the Harte corpus as the net. It is the right Stage 1, but it is not the cheap
+one this plan assumed.
