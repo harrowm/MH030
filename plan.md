@@ -5874,3 +5874,50 @@ sweep.
 2. Write the shallow `ext_words` decoder; iterate against `make fmax-extw`.
 3. Swap `u_peek` to it; 9-seed `fmax-pbiu-sweep` + `make bench` + full gate.
 4. Only then revisit the serial pass, which may no longer matter.
+
+### Profiling the 24 ns: it is diffuse, and the chain is not the culprit
+
+`make fmax-extw` makes the cone cheap to dissect. Driving the probe's output from
+successively smaller pieces of the computation (seed 1 throughout):
+
+| what the probe outputs | Fmax | delay |
+|---|---|---|
+| `uop.uclass` alone | 137.80 MHz | 7.3 ns |
+| `src_ea_words` alone | 85.65 MHz | 11.7 ns |
+| `imm_words` alone | 70.92 MHz | 14.1 ns |
+| `ea_words_total` (src+dst+imm) | 66.07 MHz | 15.1 ns |
+| a balanced `case (uop.uclass)` (throwaway, wrong values, right shape) | 49.43 MHz | 20.2 ns |
+| **`uop.ext_words` as it stands** | **41.70 MHz** | **24.0 ns** |
+
+**Three things follow, and two of them kill earlier plans in this file.**
+
+**1. The ~25-arm priority chain is NOT the cost.** Replacing it with a balanced
+one-hot `case` over `uop.uclass` -- the restructuring this file proposed, and the
+one the decoder's own comment records as "measured slower ... UNRESOLVED" -- is
+worth about **4 ns of the 17 ns gap**, taking 41.70 to 49.43. Now measured in
+isolation rather than through full-design noise, so the codebase's open question
+is answered: a case helps a little, and is nowhere near sufficient. Do not spend
+Stage 1 on it.
+
+**2. Classification is cheap; the word ARITHMETIC is not.** `uclass` costs 7.3 ns,
+but `src_ea_words` alone already costs 11.7 and `imm_words` alone 14.1 -- and
+`imm_words` is textually two muxes (`ea_is_imm ? (long?2:1) : (imm_takes_ext?2:0)`).
+Its depth is therefore entirely in its PREDICATES, which are produced by the same
+decode chain. The cost is spread across `ea_words()`'s per-mode counting
+(including the full-format `ff_extra`/`ff_bd_words` reads), the immediate sizing,
+the three-way sum, and finally the class select -- each layer adding a few ns.
+
+**3. So `ext_words` cannot be fixed by restructuring; it has to be REPLACED.**
+Getting 24 ns down to single digits means a genuinely independent minimal decoder
+that computes the word count straight from opcode bit-fields in parallel, sharing
+nothing with the main decode chain. That is the "dedicated shallow decoder" idea,
+and it is now the only version of Stage 1 the measurements support.
+
+**And the payoff has to be stated honestly before anyone starts it.** Even a
+perfect `ext_words` at 100+ MHz leaves the BIU at 27.78 MHz and the A4
+configuration's other paths where they are, so this unlocks roughly **25 -> 30-35
+MHz**, not more. It is worth doing -- it is a real 24 ns structure on the critical
+path, and every later stage is blocked behind it -- but it is one step of several,
+and the diffuse profile above is the same "everything contributes a bit" shape the
+whole-design measurements showed. That shape is what a 4x target is really up
+against.
