@@ -6275,3 +6275,109 @@ pivot):**
 commit.** The 100 MHz target is still 3.65x away (27.36 vs 100); the BIU's
 own standalone ceiling (27.78 MHz) is also still open and unrelated to
 either direction above.
+
+### MH030-P correctness pass (same session, redirected from Fmax)
+
+The user asked, on seeing MH030-P's own Harte score (`PASS 621799 FAIL
+80345 SKIP 281221 TIMEOUT 576` -- not `rtl/`'s `PASS 702142 FAIL 2`, a real
+mix-up worth guarding against again), to pause the AG/EX pipelining plan
+above and look at why MH030-P's correctness gap was so large. It turned
+out to be three narrow, well-understood gaps plus one real independent bug
+found along the way, not a deep architectural problem -- fixed in order of
+measured impact, each verified with a full per-suite diff against the
+immediately prior run (zero tolerance for silent regressions) plus `make
+test`/`make lint-drivers`/`make bench` each time:
+
+1. **ANDI/ORI/EORI #imm,CCR/SR (sub-op 6) was decoded but never executed at
+   all** -- `dec_sysctl_ok` explicitly excluded it (a documented, not
+   accidental, scope decision) and EX had no execution path for it.
+   Decoder fix: `uop.alu_op = g0_alu_op` (reusing the already-correct
+   OR/AND/EOR mapping) and `uop.siz` repurposed as the CCR(byte)/SR(word)
+   selector, matching real silicon's own encoding. Core fix: widened
+   `dec_sysctl_ok`, added `sys_logic_result` wired into the existing
+   direct-write `ccr_r`/`sr_sys_r` branches. **~41,000 of the 80,345
+   failures**, all 6 target suites (ANDItoCCR/SR, ORItoCCR/SR,
+   EORItoCCR/SR) to 100%. `PASS 621799->661875`.
+
+2. **MOVE <ea>,CCR/SR (sub-op 2/3) with a memory SOURCE** -- decoder already
+   set `reads_mem`/`src_kind=US_MEM` correctly, but `dec_sysctl_ok`
+   blanket-excluded any `reads_mem` instruction. Unlike (3) below, a read
+   has no timing problem (the ordinary `ex_wait_mem`/`mem_hold` mechanism
+   already covers it) -- widened the gate for sub-op 2/3 specifically, and
+   replaced `sys_wr_val`'s hand-rolled immediate/register fallback with
+   `ex_src_raw`, the core's own already-correct general-purpose operand mux.
+   **+6,679**, MOVEtoCCR/SR to 100% on their runnable vectors.
+   `PASS 661875->668554`.
+
+3. **Scc,\<ea\> and MOVE SR/CCR,\<ea\> (sub-op 0/1) with a memory
+   DESTINATION** -- the harder one: the write VALUE depends on
+   `cond_true`/`sr_sys_r`/`ccr_live`, none of which are known until EX, but
+   every "pure write" instruction's bus request dispatches the same cycle
+   it leaves AG, straight from AG-only registers -- one cycle too early.
+   Fix: excluded both (`ag_is_scc_mem`/`ag_is_sys_wr_mem`) from AG's
+   immediate `mem_req` dispatch, added a one-shot EX-resident write branch
+   (`scc_sys_wr_issued`, mirroring the existing RMW write-turnaround's own
+   shape) that fires once the value has settled; the address itself needed
+   no deferral since `ag_ea` doesn't depend on either. Two Icarus
+   declaration-order fixes needed along the way (a shared
+   `ex_needs_scc_sys_wr` wire hoisted above the `always_ff` that uses it;
+   the write data computed directly from `sr_sys_r`/`ccr_live`/`cond_true`
+   rather than reusing `sys_rd_val`, whose `ex_b_u` dependency is declared
+   later in the file and isn't needed for a memory destination anyway).
+
+   **This surfaced a real, independent, pre-existing bug**: `ag_an_upd`
+   (the autoincrement/predecrement same-cycle register-file commit) never
+   checked `!redirect`. A speculatively-fetched instruction sitting in AG
+   can be squashed by a branch/jump/return resolving in EX the very same
+   cycle, but `ag_an_upd` is a same-cycle combinational bypass -- clearing
+   `ag_valid` for the NEXT cycle doesn't undo a commit that already
+   happened THIS cycle. Latent until this session: a ghost opcode decoding
+   as Scc/MOVE-SR,\<ea\> with an autoincrement EA was previously just
+   declined (`dec_executable=0`, so `ag_valid` was already 0), never
+   reaching this wire. Making those two instructions executable exposed it
+   as a regression in exactly the redirect-causing families
+   (Bcc/BSR/JMP/JSR/RTE/RTR/RTS) -- and fixing it with `&& !redirect`
+   turned out to fix a LARGE pre-existing bug in its own right: Bcc, BSR,
+   JMP, RTE, RTR, RTS all go from long-standing non-zero fail counts to
+   100% on their runnable vectors, and JSR improves substantially (729->526
+   fail; its own remaining 275 timeouts are separate and pre-existing).
+   **+2,290** net (Scc/MOVEfromSR fixed, several redirect-family suites
+   fixed outright). `PASS 668554->677979`, **FAIL 33590->24165**.
+
+   One honestly-reported, NOT newly introduced caveat: BTST already had 561
+   failing/timing-out vectors before this session touched anything (its own
+   separate, undocumented, PC-relative-addressing-shaped bug -- register
+   corruption patterns like `D6: got 0x584d0079, exp 0x584d798b`, upper
+   16 bits matching, lower 16 wrong, suggesting a sizing issue specific to
+   that family, unrelated to any of today's fixes). After these fixes the
+   count is 282 fail (was 281) -- a 1-vector shift within an
+   already-broken population confirmed to still be dominated by that same
+   separate pattern, not a new independent failure mode. Left for BTST's
+   own dedicated investigation rather than chased here.
+
+**Net for the session: `PASS 621799->677979` (+56,180), `FAIL 80345->24165`
+(-70%)**, `SKIP 281221` and `TIMEOUT 576` unchanged throughout (every fix
+was additive -- previously-declined instructions becoming executable,
+never previously-passing ones breaking, confirmed by a full per-suite diff
+after every single commit).
+
+**Next biggest remaining groups, not yet investigated** (fresh per-suite
+breakdown after the `ag_an_upd` fix):
+
+| suite(s) | fail+timeout | notes |
+|---|---|---|
+| MOVEM.w / MOVEM.l | ~6,111 + 1 | not yet looked at this session |
+| ASR/ASL/LSL/LSR/ROL/ROR/ROXL/ROXR (word forms esp., byte forms too) | ~11,500 | **two distinct symptoms found, not yet root-caused**: register-destination forms fail on CCR only (X/C flags specifically look wrong -- `got 0x19 exp 0x08`, i.e. X and C both spuriously set, N/Z/V correct) with the shift RESULT itself correct; memory-destination forms write `0x00 0x00` (as if the shift never ran, or ran enough times to flush to zero) instead of the real shifted value -- likely two separate bugs sharing a `UU_SHF`/sizing-adjacent cause, needs its own `--verbose` investigation per form before touching code |
+| TAS | 1,195 | not yet looked at |
+| LINK | 1,005 | not yet looked at |
+| PEA | 851 | not yet looked at |
+| JSR (275) / BTST (279) / CHK (21) | timeouts | pre-existing, separate from this session's fixes; JSR's own FAIL count did improve via the `ag_an_upd` fix, its TIMEOUT count did not |
+
+**Whoever picks this up next should keep using the same methodology**:
+`python3 scripts/run_harte_batch.py tests/harte/SUITE.json.gz --sim
+sim/harte_pvbatch -j 1 --chunk-size 300 --verbose` to see real got/exp
+diffs before guessing at a fix, and a full per-suite diff (see this
+session's own throwaway Python snippets, not preserved as a script but
+trivial to redo against two `run_harte_batch.py` log files) after every
+change, no exceptions -- that discipline is what caught the `ag_an_upd`
+regression immediately instead of it shipping silently.

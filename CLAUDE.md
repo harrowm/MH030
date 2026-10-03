@@ -1428,6 +1428,41 @@ follow-on session. The BIU's own standalone 27.78 MHz ceiling and the
 100 MHz target (now 3.65x away) are both still open. See `plan.md`'s own
 "Stage 1 part 2 + swap-in" section for the full writeup.
 
+**MH030-P correctness pass (same session, the Fmax work above paused for
+it)**: on seeing MH030-P's own real Harte score (`PASS 621799 FAIL 80345`
+-- distinct from `rtl/`'s `PASS 702142 FAIL 2`, a mix-up worth guarding
+against), the user asked to investigate instead of continuing the Fmax
+programme. Three gaps, each found via `run_harte_batch.py --verbose`
+against the biggest remaining per-suite fail counts, fixed in order of
+impact: ANDI/ORI/EORI #imm,CCR/SR (sub-op 6) was decoded but never executed
+(`dec_sysctl_ok` explicitly excluded it) -- fixed by reusing the existing
+`g0_alu_op` mapping and repurposing `uop.siz` as the CCR/SR selector,
+closing ~41,000 failures outright; MOVE \<ea\>,CCR/SR with a memory SOURCE
+was blocked by the same gate despite the decoder already handling it
+correctly, fixed by widening the gate and reusing `ex_src_raw`'s own
+general operand mux (+6,679); Scc,\<ea\> and MOVE SR/CCR,\<ea\> with a
+memory DESTINATION needed a genuine new mechanism -- their write value
+depends on EX-stage state, but a "pure write" dispatches from AG a cycle
+early -- fixed with a deferred one-shot EX-resident write branch mirroring
+the existing RMW write-turnaround shape. That third fix **surfaced a real,
+independent, pre-existing bug**: `ag_an_upd` (the autoincrement same-cycle
+register commit) never checked `!redirect`, so a squashed speculative
+fetch could still commit its own side effect -- latent until newly-
+executable ghost opcodes exposed it, and fixing it with `&& !redirect`
+turned out to fix Bcc/BSR/JMP/RTE/RTR/RTS outright (all to 100% on their
+runnable vectors) plus substantially improve JSR. **Net: `PASS
+621799->677979` (+56,180), `FAIL 80345->24165` (-70%)**, `SKIP`/`TIMEOUT`
+unchanged throughout, confirmed via a full per-suite diff after every
+single commit (one honestly-reported exception: BTST shifted by 1 vector
+within its own already-561-failing, separate, pre-existing bug population
+-- not chased, not hidden). Full gate clean after each fix: `make test`
+43/43, `make lint-drivers`, `make bench` unchanged. Biggest remaining
+groups, not yet investigated: the shift/rotate family (~11,500, two
+distinct symptoms -- register CCR/X-flag errors and memory-form writes of
+all-zero, likely two separate bugs) and MOVEM (~6,111). See `plan.md`'s own
+"MH030-P correctness pass" section for the full writeup and the next-steps
+table.
+
 **A recorded project fact did not survive this session's gating**:
 `scripts/run_harte_batch.py --sim` was a silent no-op, so MH030-P's recorded
 `PASS 702142 FAIL 2` was the REFERENCE core's number. Fixed; MH030-P's real score
