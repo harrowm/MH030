@@ -400,7 +400,24 @@ module uop_decode_equiv_tb;
                     // semantics -- dec_is_trap/dec_trap_num are correct in
                     // both. The new decoder uses one consistent size rather
                     // than reproducing the artifact.
-                    if ((uop.uclass != UC_TRAP) && (uop.siz !== old_siz))
+                    //
+                    // ANDI/ORI/EORI #imm,CCR/SR (sub-op 6) is excluded too,
+                    // for a different reason: the reference reports a fixed
+                    // UZ_LONG here because its own execution path never
+                    // threads the CCR-vs-SR distinction through the generic
+                    // decode-level siz field at all (it was never executed
+                    // there either -- same gap this decoder just closed,
+                    // found via a near-total Harte failure on
+                    // ANDItoCCR/EORItoCCR/etc., see plan.md). This decoder
+                    // deliberately reports UZ_BYTE/UZ_WORD instead, matching
+                    // real silicon's own size-field-as-CCR/SR-selector
+                    // encoding (0x023C byte=CCR, 0x027C word=SR) --
+                    // mh030p_core.sv's execution of this instruction needs
+                    // that distinction and this is the natural place to
+                    // carry it.
+                    if ((uop.uclass != UC_TRAP)
+                        && !((uop.uclass == UC_SYSCTL) && (uop.subop == 4'd6))
+                        && (uop.siz !== old_siz))
                         report(instr, "siz", {30'h0, uop.siz}, {30'h0, old_siz});
                     else if (uop.unit !== old_unit)
                         report(instr, "unit", {29'h0, uop.unit}, {29'h0, old_unit});

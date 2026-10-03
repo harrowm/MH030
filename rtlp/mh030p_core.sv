@@ -174,11 +174,12 @@ module mh030p_core (
     wire dec_is_bf = (dec_uop.uclass == UC_BITFIELD);
     wire dec_bf_ok = dec_is_bf && !dec_uop.reads_mem && !dec_uop.writes_mem
                   && !dec_uop.imm[11] && !dec_uop.imm[5];
-    // Only the register and immediate forms of the system-control moves are in
-    // scope here; memory destinations, and the AND/OR/EOR-to-SR forms at
-    // sub-op 6, are not.
+    // The register and immediate forms of the system-control moves (sub-op
+    // 0-3, 4-5 for MOVE USP) and the AND/OR/EOR-to-CCR/SR immediate forms
+    // (sub-op 6) are in scope; memory destinations are not (none of these
+    // instructions have one).
     wire dec_sysctl_ok = (dec_uop.uclass == UC_SYSCTL)
-                      && (dec_uop.subop <= 4'd5)
+                      && (dec_uop.subop <= 4'd6)
                       && !dec_uop.reads_mem && !dec_uop.writes_mem;
     wire dec_ea_class_ok = dec_is_ea_class && dec_ea_ok
                         && (dec_uop.ea_mode != UEA_AN_POST)
@@ -1975,6 +1976,16 @@ module mh030p_core (
     // immediate.
     wire [15:0] sys_wr_val = (ex_uop.src_kind == US_IMM) ? ex_uop.imm[15:0]
                                                          : ex_a_u[15:0];
+    // ANDI/ORI/EORI #imm,CCR/SR (sub-op 6): a genuine logical op against the
+    // CURRENT system byte + CCR, not a replacement -- the immediate's own
+    // upper byte is architecturally meaningless for the CCR-only (byte) form
+    // and is simply never applied, gated below by ex_uop.siz.
+    wire [15:0] sys_logic_cur    = {sr_sys_r, ccr_live};
+    wire [15:0] sys_logic_result = (ex_uop.alu_op == UA_AND)
+                                    ? (sys_logic_cur & ex_uop.imm[15:0])
+                                  : (ex_uop.alu_op == UA_EOR)
+                                    ? (sys_logic_cur ^ ex_uop.imm[15:0])
+                                    : (sys_logic_cur | ex_uop.imm[15:0]);
     wire ex_is_scc    = ex_valid && (ex_uop.uclass == UC_SCC);
     wire ex_is_dbcc   = ex_valid && (ex_uop.uclass == UC_DBCC);
 
@@ -2088,8 +2099,9 @@ module mh030p_core (
                                        || ex_is_cmp2 || ex_is_alu_mem_wr)
                                    && !ex_is_branch
                        && !exc_discards
-                       && !(ex_is_sys && (ex_uop.subop >= 4'd2)
-                                      && (ex_uop.subop <= 4'd3));
+                       && !(ex_is_sys && (((ex_uop.subop >= 4'd2)
+                                           && (ex_uop.subop <= 4'd3))
+                                          || (ex_uop.subop == 4'd6)));
             wb_ccr     <= {3'b000,
                            ex_uop.x_unchanged ? ccr_live[4] : ex_x,
                            ex_n, ex_z, ex_v, ex_c};
@@ -2112,6 +2124,8 @@ module mh030p_core (
         else if (ex_is_sys && (ex_uop.subop >= 4'd2) && (ex_uop.subop <= 4'd3)
                  && !stall_ex)
                                ccr_r <= sys_wr_val[7:0];
+        else if (ex_is_sys && (ex_uop.subop == 4'd6) && !stall_ex)
+                               ccr_r <= sys_logic_result[7:0];
         else if (ex_is_stop && !stall_ex)
                                ccr_r <= ex_uop.imm[7:0];
         else if (wb_upd_ccr)   ccr_r <= wb_ccr;
@@ -2126,6 +2140,13 @@ module mh030p_core (
                                               sr_sys_r <= rte_sr[15:8];
         else if (ex_is_sys && (ex_uop.subop == 4'd3) && !stall_ex)
                                               sr_sys_r <= sys_wr_val[15:8];
+        // The CCR-only (byte) form of sub-op 6 must not touch the system
+        // byte at all -- gated on siz, which the decoder sets from the same
+        // size field real silicon uses to distinguish CCR (byte) from SR
+        // (word) for this instruction.
+        else if (ex_is_sys && (ex_uop.subop == 4'd6)
+                 && (ex_uop.siz == UZ_WORD) && !stall_ex)
+                                              sr_sys_r <= sys_logic_result[15:8];
         else if (ex_is_stop && !stall_ex)     sr_sys_r <= ex_uop.imm[15:8];
         // An interrupt also raises the mask to its own level, so it cannot
         // immediately re-interrupt its own handler. M survives; T does not.

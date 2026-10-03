@@ -875,13 +875,24 @@ module mh030p_decode (
         // ── ORI/ANDI/SUBI/ADDI/EORI/CMPI #imm,Dn ────────────────────────────
         4'h0: begin
             if (g0_is_ccr_sr) begin
-                // ORI/ANDI/EORI #imm,CCR (ss=00) and #imm,SR (ss=01).
+                // ORI/ANDI/EORI #imm,CCR (ss=00) and #imm,SR (ss=01). The
+                // size field doubles as the CCR/SR selector on real silicon
+                // (0x023C byte=CCR, 0x027C word=SR), so it is carried
+                // through as UZ_BYTE/UZ_WORD instead of a fixed UZ_LONG --
+                // mh030p_core.sv's execute-side fix for this instruction
+                // (previously decoded but never executed at all; see
+                // dec_sysctl_ok there) needs it to tell a CCR-only write
+                // from one that also touches the system byte.
                 uop.uclass      = UC_SYSCTL;
                 uop.unit        = UU_MOVE;
-                uop.siz         = UZ_LONG;
+                uop.siz         = (f_ss == 2'b00) ? UZ_BYTE : UZ_WORD;
                 uop.src_kind    = US_IMM;
                 uop.imm         = ext;
                 uop.dst_kind    = US_SR;
+                // g0_is_ccr_sr's own guard already restricts f_dn to
+                // {000,001,101} (OR/AND/EOR), the same encoding g0_alu_op
+                // already maps -- reused directly rather than re-deriving it.
+                uop.alu_op      = g0_alu_op;
                 // 6, not one of the MOVE sub-ops: these AND/OR/EOR into the
                 // status register rather than replacing it, and would
                 // otherwise alias onto "MOVE SR,<ea>" at sub-op 0.
