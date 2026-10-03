@@ -6116,15 +6116,86 @@ production path). Full Harte sweep for MH030-P (`make sim/harte_pvbatch`
 FAIL 80345 SKIP 281221 TIMEOUT 576`, bit-identical to the recorded
 baseline. Full mandatory gate clean.
 
-**Next steps, in order**: (1) DONE -- Harte re-run confirmed bit-identical;
-(2) implement the full-format addendum on top of
-`ext_words_fast()`, using the identical technique (raw wires only, verified
-immediately against the equivalence testbench's existing 8-shape
-full-format sweep, not the reference); (3) only once both legs are exact,
-swap `u_peek` (`rtlp/mh030p_cpu.sv`) to call the new decoder's
-`ext_words_fast_o` instead of `uop.ext_words`, and re-run the full gate
-(`make test`, `cosim_grp`, `cosim_memind`, `dat-synth`, Harte for BOTH
-cores) plus the 9-seed `fmax-pbiu-sweep` and `make bench` to get the
-design-wide number -- expect something well short of the cone's own 2.46x,
-since the BIU (27.78 MHz measured standalone) and `u_seq`'s other paths are
-separate, still-unaddressed ceilings on the A4 configuration specifically.
+### Stage 1 part 2 + swap-in (same session, continued)
+
+**Full-format addendum: DONE, 0 mismatches.** `ea_mode_eff_fast()` /
+`dst_ea_mode_eff_fast()` + a plain `always_comb` computing
+`ext_words_fast_full_o` (brief leg plus the full-format extra words), all
+from raw wires. A first version returned `ea_mode_w` unconditionally for
+every non-MOVE group, which is wrong for families whose low 6 bits are not
+an EA field at all (Bcc's displacement, MOVEQ's immediate, the shift
+REGISTER form's count-source/op-select bits, `sys_is_misc`'s own fixed
+`instr[5:3]==110` which reads as `AN_IDX`, and MOVEC's fixed
+`instr[15:1]` pattern -- `0x4E7B`'s own `f_reg` reads as `PC_IDX`). The
+equivalence sweep caught this immediately and precisely: 24,381 mismatches
+concentrated in exactly those groups. Fixed by making every group's gate
+explicit about whether it genuinely constrains the EA field. A second,
+unrelated issue was a real Yosys limitation, not an RTL bug: a function
+calling another automatic function two levels deep
+(`ext_words_fast_full()` calling `ext_words_fast()` and
+`ea_mode_eff_fast()`) made Yosys's `proc` pass fail with "Non-constant
+expression in constant function" even though neither function has any
+non-synthesizable content on its own. Fixed by flattening into a plain
+`always_comb` that reuses the already-computed `ext_words_fast_o` signal
+instead of calling `ext_words_fast()` a second time, keeping only
+single-level function calls. **0 mismatches across all 65,536 opcodes x the
+existing 8 full-format shapes**, checked for every opcode including
+`UC_UNIMPL` ones.
+
+**Measured: 1.19x on the complete cone, smaller than the brief leg's own
+2.46x.** New `tb/extw_fast_full_probe.sv` + `make fmax-extw-fast-full`:
+~49-50 MHz / ~20 ns across 3 seeds, vs the real `ext_words`' ~42 MHz /
+24 ns. Smaller than the brief-only win because the full-format addendum is
+genuinely serial after the brief count (confirmed last session) -- it has
+to know where the extension word is before it can read it.
+
+**Swapped into production**: `rtlp/mh030p_cpu.sv`'s `u_peek` now reads
+`ext_words_fast_full_o` instead of `peek.ext_words` for both `have_all`'s
+`if_avail` comparison and `drain`'s `mh030p_ifu` input, in place of the old
+`peek.ext_words`/`peek` struct field, which is now otherwise completely
+unread by this module (`peek`'s own full classification decode becomes
+dead logic for synthesis to prune, which is the whole point -- the
+expensive classification cone is no longer on this path at all). Full gate
+clean: `make test` 43/43, `make lint-drivers` clean, `make bench`'s all
+four arms reproduce their EXACT previously-recorded tick counts (zero
+behavioural change), full Harte sweep for MH030-P CONFIRMED bit-identical
+to baseline (`PASS 621799 FAIL 80345 SKIP 281221 TIMEOUT 576`).
+
+**Design-wide A4 Fmax measurement: CONFIRMED, a real win.**
+`make fmax-pbiu-sweep SEEDS=9`: **27.36 MHz mean (range 25.15-28.77)**,
+every one of the 9 seeds individually above the prior baseline's own mean
+(`24.71 MHz`, range 23.68-25.74) -- **+2.65 MHz / +10.7%**, clearly outside
+the documented noise floor for this exact sweep
+([[feedback_fmax_noise_floor]]: ~1-2 MHz at 9 seeds, and the explicit
+warning that 8 prior RTL changes all measured ~1 MHz DOWN including two
+that only deleted logic). A 3-seed first look (26.93 MHz) undersold it
+slightly by catching two of the sweep's weaker seeds; the full 9-seed run
+is the number to keep. This is now the largest confirmed Fmax win in the
+100 MHz programme after the divider (5.8x) and the D/I-cache BRAM mapping
+(+37%) -- comparable in relative size to the sequential shifter (+35%).
+
+**Stage 1 is CLOSED.** Summary for whoever picks this up next: `ext_words`
+was rewritten from scratch as `ext_words_fast_o`/`ext_words_fast_full_o` in
+`rtlp/mh030p_decode.sv`, computed directly from raw opcode-bit wires rather
+than from the ~1000-line classifier's own output fields, verified bit-exact
+against the real decoder across all 65,536 opcodes and 8 full-format
+shapes, swapped into `mh030p_cpu.sv`'s `u_peek` in place of
+`peek.ext_words` (which is now dead code there, pruned by synthesis), and
+measured at 27.36 MHz design-wide (A4 configuration) against a 24.71 MHz
+baseline. Full mandatory gate clean throughout: `make test` 43/43,
+`make lint-drivers` clean, `make bench` reproduces every arm's exact
+tick count, full Harte sweep for MH030-P bit-identical to baseline
+(`PASS 621799 FAIL 80345 SKIP 281221 TIMEOUT 576`).
+
+`cosim_grp` (8/8), `cosim_memind` (33/33) and `dat-synth` (50/50) all
+confirmed clean too, as expected since `rtl/` (what those exercise) was
+never touched this session -- Stage 1 is fully, completely closed.
+
+The 100 MHz target is still 3.65x away (27.36 vs 100); the BIU alone measures
+27.78 MHz standalone (a separate, still-unaddressed ceiling this session
+did not touch), and `u_seq`'s other paths remain 43.6% of design-wide
+routing per the earlier P0 measurement. The next bounded-fix candidate,
+per this session's own earlier profiling, is whatever currently dominates
+`u_seq`'s remaining cost now that `ext_words` is off the critical path --
+not yet re-profiled after this change, which should be the first step of
+any follow-on session rather than guessing at the next target.

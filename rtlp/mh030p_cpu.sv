@@ -81,16 +81,25 @@ module mh030p_cpu (
     // ext_words is a function of the opcode alone -- but place-and-route
     // unrolls it anyway and charges two passes through the decoder to one
     // clock: 78% of the core's worst path, 151 of its 179 hops, before this.
+    // ext_words itself comes from u_peek's own ext_words_fast_full_o, NOT
+    // peek.ext_words -- the shallow, from-scratch replacement (plan.md's
+    // "Stage 1" ext_words work), verified bit-exact against peek.ext_words
+    // across all 65,536 opcodes and the 8 full-format shapes
+    // (tb/uop_decode_equiv_tb.sv) before this swap. It reaches the same raw
+    // opcode-bit wires the classifier reaches, in parallel with it, instead
+    // of reading uop.ext_words -- an output of the whole classification --
+    // which is what made this decoder pass the dominant cone on this path.
     uop_t peek;
+    wire [2:0] peek_ext_words;
     mh030p_decode u_peek (
         .instr(if_instr), .ext(if_ext_raw), .ext_raw(if_ext_raw),
-        .q3(if_q3), .uop(peek)
+        .q3(if_q3), .uop(peek), .ext_words_fast_full_o(peek_ext_words)
     );
 
     // Issue only once the whole instruction is in the queue.
-    wire have_all = (if_avail >= (3'd1 + peek.ext_words));
+    wire have_all = (if_avail >= (3'd1 + peek_ext_words));
     wire issue    = have_all && core_ready;
-    wire [2:0] drain = issue ? (3'd1 + peek.ext_words) : 3'd0;
+    wire [2:0] drain = issue ? (3'd1 + peek_ext_words) : 3'd0;
 
     mh030p_ifu u_ifu (
         .clk_4x(clk_4x), .rst_n(rst_n),
@@ -99,7 +108,7 @@ module mh030p_cpu (
         .redirect(redirect), .redirect_pc(redirect_pc),
         .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
         .words_avail(if_avail), .pc_out(if_pc),
-        .drain(drain), .ext_words(peek.ext_words)
+        .drain(drain), .ext_words(peek_ext_words)
     );
 
     mh030p_core u_core (

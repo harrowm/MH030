@@ -1386,10 +1386,47 @@ into `rtlp/` rather than touch frozen `rtl/`; optimize for **Fmax/ticks**
 the FPGA target -- which is why a synchronous-termination fast path (cutting the
 measured 14.3 ticks/bus-access, protocol floor 12) is now a higher-priority
 candidate than further clock work, pending sign-off since it spends the
-"protocol-exact" bus-fidelity decision. **`plan.md`'s own "Session checkpoint"
-subsection (end of file) is the authoritative pickup point** -- it names the
-exact next measurement (isolating the full-format addendum's own depth, not yet
-profiled) before writing the shallow decoder.
+"protocol-exact" bus-fidelity decision.
+
+**Stage 1 (ext_words rewrite) CLOSED, a later session, real measured win**:
+`ext_words` was rewritten from scratch as `ext_words_fast_o`/
+`ext_words_fast_full_o` in `rtlp/mh030p_decode.sv` -- computed directly from
+raw opcode-bit wires (the same ones the ~1000-line classifier reaches, in
+parallel with it) rather than from that classifier's own output fields
+(`uop.uclass`/`subop`/`siz`/etc.), which is what had forced the old
+`ext_words` to wait for the whole classification to finish first. Verified
+bit-exact against the real decoder across all 65,536 opcodes and the
+existing 8 full-format shapes (`tb/uop_decode_equiv_tb.sv`) before being
+swapped into `mh030p_cpu.sv`'s `u_peek` in place of `peek.ext_words` (now
+dead code there, pruned by synthesis -- the whole duplicate classification
+decode in that instance goes with it). Two real bugs found and fixed while
+writing it, neither an ext_words logic error: the "ea_mode is NONE for an
+unaccepted/illegal opcode" rule needed to be explicit per instruction
+family rather than inferred (Bcc/MOVEQ/shift-register/`sys_is_misc`/MOVEC
+all have raw low bits that are NOT an EA field at all and can coincidentally
+read as `AN_IDX`/`PC_IDX` -- the sweep caught 24,381 mismatches
+concentrated exactly there on the first attempt); and a genuine Yosys
+limitation, not an RTL bug, where a function calling another automatic
+function two levels deep failed `proc` with "Non-constant expression in
+constant function" even though neither function has any non-synthesizable
+content alone -- fixed by flattening to single-level calls. **Measured:
+the cone alone goes from ~42 MHz/24 ns to ~100-107 MHz/~9.5 ns (brief leg,
+2.46x) and ~49-50 MHz/~20 ns (complete, with the full-format addendum,
+1.19x -- smaller because that addendum is genuinely serial after the brief
+count). Design-wide (`make fmax-pbiu-sweep SEEDS=9`): 24.71 -> 27.36 MHz
+(range 25.15-28.77, every seed above the old mean) -- a real +10.7% win,
+confirmed clearly outside this sweep's own documented ~1-2 MHz noise floor
+[[feedback_fmax_noise_floor]].** Full mandatory gate clean: `make test`
+43/43, `make lint-drivers` clean, `make bench`'s all four arms reproduce
+their exact previously-recorded tick counts, full Harte sweep for MH030-P
+bit-identical to baseline (`PASS 621799 FAIL 80345 SKIP 281221
+TIMEOUT 576`), `cosim_grp`/`cosim_memind`/`dat-synth` all clean (`rtl/`
+untouched by this stage). **Not yet done**: `u_seq`'s remaining cost has
+not been re-profiled now that `ext_words` is off the critical path -- that
+profiling, not a guess at the next target, is the right first step of any
+follow-on session. The BIU's own standalone 27.78 MHz ceiling and the
+100 MHz target (now 3.65x away) are both still open. See `plan.md`'s own
+"Stage 1 part 2 + swap-in" section for the full writeup.
 
 **A recorded project fact did not survive this session's gating**:
 `scripts/run_harte_batch.py --sim` was a silent no-op, so MH030-P's recorded
