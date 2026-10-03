@@ -6191,11 +6191,87 @@ tick count, full Harte sweep for MH030-P bit-identical to baseline
 confirmed clean too, as expected since `rtl/` (what those exercise) was
 never touched this session -- Stage 1 is fully, completely closed.
 
-The 100 MHz target is still 3.65x away (27.36 vs 100); the BIU alone measures
-27.78 MHz standalone (a separate, still-unaddressed ceiling this session
-did not touch), and `u_seq`'s other paths remain 43.6% of design-wide
-routing per the earlier P0 measurement. The next bounded-fix candidate,
-per this session's own earlier profiling, is whatever currently dominates
-`u_seq`'s remaining cost now that `ext_words` is off the critical path --
-not yet re-profiled after this change, which should be the first step of
-any follow-on session rather than guessing at the next target.
+### Post-Stage-1 re-profiling: diffuse, no single dominator (same session, continued)
+
+Re-ran the worst-path attribution the way every prior bounded fix in this
+programme did it BEFORE touching any code: `make fmax-pbiu-sweep`'s own
+9 `--report` JSONs (already on disk from the SEEDS=9 run above) analysed
+with `scripts/measure_fmax.py analyze`, one per seed, checking which module
+dominates each seed's own worst register-to-register path.
+
+**`ext_words`/`u_peek` does not appear in ANY of the 9 seeds' worst paths.**
+Stage 1 genuinely removed it from the critical path, not just from its own
+isolated cone measurement.
+
+**What dominates instead, across the 9 seeds:**
+
+| seed | dominant module | share |
+|---|---|---|
+| 1 | `u_cpu.u_core` | 76.9% |
+| 2 | `u_cpu.u_core` | 76.5% |
+| 3 | `u_cpu.u_core` | 85.4% |
+| 4 | `u_cpu.u_core` | 73.7% |
+| 5 | `u_cpu.u_core` | 88.7% |
+| 6 | `u_biu.u_cache` | 70.4% |
+| 7 | `u_cpu.u_core` | 94.5% |
+| 8 | `u_cpu.u_core` | 81.6% |
+| 9 | `u_cpu.u_core` | 89.0% |
+
+8 of 9 seeds: `mh030p_core.sv`'s own `u_core` dominates, with a smaller
+detour through `u_biu.u_cache`/`u_biu.u_icache`'s data array in most of
+those. 1 of 9 (seed 6): `u_biu.u_cache`'s own control logic dominates
+instead, with `u_core` not appearing at all. This alternation between two
+close-in-magnitude contributors, varying by P&R seed, is the same
+"diffuse, no single dominator" shape this programme has seen once before
+(the P0-era measurement: `u_seq` 26.0%/`u_cache` 22.7%/`u_md` 21.0%/
+`u_icache.data_i` 18.0%) -- expected, since removing the single biggest
+piece (`ext_words`) naturally brings the next-biggest contenders closer
+together rather than leaving one clear new dominant item.
+
+**Seed 7's full path (the cleanest: 2 module transitions, 94.5% `u_core`)
+was traced to specific RTL, not just a module name.** The path's FIRST
+register name (`ag_pc_...`) is reliable per this project's own naming rule
+(ABC9 names a merged cell after its nearest traceable ancestor, and the
+whole 59-hop chain carries that single name forward with no other register
+appearing until the very end) -- `ag_pc` is a real register,
+`rtlp/mh030p_core.sv:340`, the AG pipeline stage's own copy of the PC. The
+path's LAST cell is `u_biu.u_cache.addr_r`, the D-cache's registered address
+input. In between: `ag_pc2 = ag_pc + 2` (`:993`), a mux selecting
+`ea_base` between zero/`ag_pc2`/`ag_b` depending on EA mode (`:1091-1095`),
+`ag_ea = ea_base + ag_uop.ea_disp + ea_adj_idx` (`:1128`, ALREADY reduced
+from 4 serial adds to 2 per that line's own comment), and a further mux
+selecting `mem_addr` between `ag_c-4` (push/link)/`ag_b` (unlk)/`ag_ea`
+(everything else) (`:1191-1193`). This is a genuine, already-partially-
+optimized, single-cycle "compute the effective address and issue the bus
+request" chain -- not an always-evaluating block with an unused result the
+way the divider/shifter/cache-array wins were. [[feedback_sequentialise_always_evaluating_blocks]]'s
+own lesson (local restructuring and area cuts fail; only removing/
+sequentialising a genuinely avoidable always-evaluating block works) argues
+against a speculative micro-optimisation attempt here without first
+isolating this exact chain the way `tb/extw_probe.sv` isolated `ext_words`
+-- that isolation has NOT been done yet for this chain.
+
+**Two real directions from here, genuinely different in scope, and this is
+a decision point like the ones this programme has hit before (Stage 2b's
+synchronous-termination fast path, the original rewrite-vs-bounded-fixes
+pivot):**
+
+1. **Bounded, lower-risk**: build a dedicated isolated probe for the
+   `ag_pc -> ag_ea -> mem_addr` chain (mirroring `tb/extw_probe.sv`'s
+   technique) to get a real ns number for this cone alone, and separately
+   investigate `u_biu.u_cache`'s own control-logic depth (seed 6's finding)
+   the same way Phase A investigated `data_d`'s BRAM mapping. Either could
+   plausibly yield another Phase-A-shaped win, but neither is confirmed
+   fixable yet -- this is investigation, not a known lever.
+2. **Bigger, higher-risk**: genuine pipelining of the AG/EX stage (splitting
+   effective-address computation from bus-request issue across two cycles),
+   which is the shape of fix that would structurally remove this chain
+   rather than shrink it, but is explicitly the kind of change this
+   programme has repeatedly deferred pending user sign-off (same category
+   as Stage 2b and the original P1+ pipelining questions), because it
+   changes the core's own cycle-timing behaviour, not just its gate count.
+
+**Not started this session; no RTL changed since the Stage 1 swap-in
+commit.** The 100 MHz target is still 3.65x away (27.36 vs 100); the BIU's
+own standalone ceiling (27.78 MHz) is also still open and unrelated to
+either direction above.

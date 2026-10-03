@@ -1258,6 +1258,37 @@ fmax-pbiu:
 	    --report $(SIM)/fmaxpb_report-$(SEED).json 2>&1 \
 	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
 
+# -noflatten variant of fmax-pbiu, for TRUSTWORTHY per-module critical-path
+# attribution (plain fmax-pbiu flattens, so a merged cell's name can carry an
+# unrelated module's hierarchy -- see scripts/measure_fmax.py's own header).
+# Area-only noflatten already exists as `area-p`, but that targets
+# mh030p_top (the abstract-bus core); this is the A4 (real BIU) equivalent,
+# with full timing, not just cell counts.
+#
+# CAVEAT, found using this for real (plan.md's post-Stage-1 re-profiling
+# session): -noflatten is a GENUINELY DIFFERENT netlist, not just relabelled
+# -- cross-module dead-code elimination is weaker, so a module whose outputs
+# are mostly unused (e.g. u_peek once only ext_words_fast_full_o is read)
+# can show up with far more of its own logic still present here than in the
+# real (flattened) build, and the achieved Fmax itself differs from the
+# flattened run at the same seed. Use this for confirming what a SPECIFIC
+# already-suspected cell really belongs to, not for deciding which path is
+# critical -- for that, trust fmax-pbiu's own (flattened) worst path and
+# cross-check module consistency across several seeds instead.
+.PHONY: fmax-pbiu-noflat
+fmax-pbiu-noflat:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(MH030P_BIU_SRCS) > $(SIM)/fmaxpbnf.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/fmaxpbnf.v mh030p_biu_top \
+	    wrap_fmax $(SIM)/fmaxpbnf_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/fmaxpbnf.v $(SIM)/fmaxpbnf_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax -noflatten; \
+	    write_json $(SIM)/fmaxpbnf.json' -l $(SIM)/fmaxpbnf_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxpbnf.json \
+	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail \
+	    --report $(SIM)/fmaxpbnf_report-$(SEED).json 2>&1 \
+	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
+
 .PHONY: fmax-pbiu-sweep
 fmax-pbiu-sweep:
 	@rm -f $(SIM)/fmax_pbiu_sweep.txt
