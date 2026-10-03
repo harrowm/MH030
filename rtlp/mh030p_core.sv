@@ -280,9 +280,15 @@ module mh030p_core (
                            // destination check below; it needs its EA instead.
                            || ((dec_uop.uclass == UC_RETURN) && dec_ea_ok)
                            || (dec_uop.uclass == UC_TRAP)
-                           // TAS only; CAS and CAS2 need a bus lock.
+                           // TAS only; CAS and CAS2 need a bus lock. TAS
+                           // alone also has a register-direct form (no EA at
+                           // all, dec_ea_ok is false for it) -- CAS always
+                           // needs real memory.
                            || ((dec_uop.uclass == UC_ATOMIC)
-                               && (dec_uop.subop <= 4'd1) && dec_ea_ok)
+                               && ((dec_uop.subop == 4'd0)
+                                   ? (dec_ea_ok
+                                      || (dec_uop.dst_kind == US_DREG))
+                                   : ((dec_uop.subop == 4'd1) && dec_ea_ok)))
                            || dec_bf_ok
                            // Reads memory and commits nothing at all: TST, CMP
                            // against a memory source, BTST on memory. The
@@ -1650,8 +1656,22 @@ module mh030p_core (
 
     // ── TAS ─────────────────────────────────────────────────────────────────
     // mem_hold is right-justified for reads, so the byte is in [7:0].
-    wire [7:0]  tas_orig = mem_hold[7:0];
-    wire [31:0] tas_res  = {24'h0, tas_orig | 8'h80};
+    // Register-direct TAS never reads memory at all -- mem_hold would be
+    // whatever an unrelated earlier instruction's own access left there.
+    // The value lives on the B port instead, the same place every other
+    // register-destination-with-no-real-EA instruction (e.g. the plain
+    // register ALU forms) reads its operand from, since ag_b_sel falls back
+    // to ag_uop.dst_reg whenever ag_mem is false.
+    wire [7:0]  tas_orig = (ex_uop.dst_kind == US_DREG) ? ex_b_u[7:0]
+                                                         : mem_hold[7:0];
+    // For the register form, Dn's own upper 24 bits must survive (same as
+    // any other byte-sized register destination) -- ex_dst already resolves
+    // to ex_b_u for TAS Dn (its reads_mem is 0, so ex_dst's own fallback
+    // picks the same B-port value tas_orig above does), so reusing it here
+    // is free. For the memory form, only the low byte of tas_res is ever
+    // used (mem_wdata's own byte write), so the upper bits are harmless
+    // regardless of what ex_dst happens to hold there.
+    wire [31:0] tas_res  = {ex_dst[31:8], tas_orig | 8'h80};
 
     // ── STOP ────────────────────────────────────────────────────────────────
     // Loads the SR from its operand and then halts until an interrupt. The

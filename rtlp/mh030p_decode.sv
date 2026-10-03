@@ -370,6 +370,14 @@ module mh030p_decode (
     wire g4_is_nbcd  = (g4_op == 4'h8) && (g4_b76 == 2'b00);
     wire g4_is_pea   = (g4_op == 4'h8) && (g4_b76 == 2'b01) && ea_is_control;
     wire g4_is_tas   = (g4_op == 4'hA) && (g4_b76 == 2'b11) && ea_is_alt_mem;
+    // TAS Dn (register-direct): same g4_op/b76 as the memory form, but mode
+    // 000 reads as src_is_dn, not a real EA, so ea_is_alt_mem is false for it
+    // and the memory-form guard above never matches it. f_ss_valid is ALSO
+    // false here (f_ss == g4_b76 == 11), so it doesn't fall into the generic
+    // Dn-destination ALU fallback either -- previously decoded as nothing at
+    // all (UC_UNIMPL), confirmed via a Harte vector ("TAS D0") where the
+    // register came back completely untouched.
+    wire g4_is_tas_dn = (g4_op == 4'hA) && (g4_b76 == 2'b11) && src_is_dn;
     // MOVEM shares 0x48xx/0x4Cxx with EXT/SWAP; bit 7 set plus a non-Dn EA
     // is what separates them (EXT/SWAP are mode 000, which MOVEM cannot use).
     wire g4_movem_to_mem = (g4_op == 4'h8);
@@ -1278,6 +1286,15 @@ module mh030p_decode (
                 uop.ea_reg      = rn_src_an;
                 uop.reads_mem   = 1'b1;
                 uop.writes_mem  = 1'b1;
+            end else if (g4_is_tas_dn) begin
+                uop.uclass      = UC_ATOMIC;
+                uop.subop       = 4'd0;         // TAS
+                uop.unit        = UU_MOVE;
+                uop.siz         = UZ_BYTE;
+                uop.dst_kind    = US_DREG;
+                uop.dst_reg     = rn_src_dn;
+                uop.writes_reg  = 1'b1;
+                uop.updates_ccr = 1'b1;
             end else if (g4_is_pea) begin
                 uop.uclass      = UC_LEA;
                 uop.unit        = UU_NONE;
