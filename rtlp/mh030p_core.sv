@@ -2305,7 +2305,24 @@ module mh030p_core (
             mvm_ready <= 1'b0;
         end else if (!mvm_run) begin
             mvm_run   <= 1'b1;           // latch the starting address
-            mvm_addr  <= ex_b;
+            // ex_b (the raw base register) is only the right seed for
+            // register-indirect modes. For every other mode MOVEM accepts
+            // ((d16,An), (d8,An,Xn), (xxx).W/L, (d16,PC)) the real starting
+            // address is ex_ea, the already-computed effective address --
+            // using ex_b there silently dropped the displacement/absolute
+            // address/index entirely, reading or writing at the base
+            // register's own raw value instead. The one exception is -(An)
+            // (AN_PRE): ex_ea there is ALREADY one step pre-decremented (the
+            // EA adder's own ea_adj term), and the dispatch logic below
+            // applies that same decrement again at issue time, so seeding
+            // from ex_ea there would double it -- ex_b is the correct seed
+            // for AN_PRE specifically. AN_POST needs no such carve-out:
+            // ex_ea and ex_b are identical for that mode (no displacement,
+            // no predecrement adjustment), so using ex_ea there is a no-op
+            // change. Confirmed against real Harte vectors: every (d16,An)/
+            // (xxx).W/L/(d16,PC)/(d8,An,Xn) MOVEM form was reading or
+            // writing at the wrong address before this fix.
+            mvm_addr  <= (ex_uop.ea_mode == UEA_AN_PRE) ? ex_b : ex_ea;
             mvm_ready <= 1'b0;
         end else if (!mvm_ready) begin
             mvm_ready <= 1'b1;           // C-port read has landed
@@ -2597,20 +2614,45 @@ module mh030p_core (
     // The supervisor stack pointer, straight from address 0.
     wire rst_commit_sp = (rst_state == RS_SSP) && rst_issued && mem_ack;
     // MOVEM memory-to-register commits one register per acknowledged read,
-    // straight from the sequencer rather than through WB.
+    // straight from the sequencer rather than through WB. Excludes the base
+    // (An)+ pointer register itself: real silicon discards the value READ
+    // for that register when it is also named in the mask, since the
+    // register's own final value comes from the address stepping instead
+    // (mvm_base_commit below) -- confirmed against a real Harte vector
+    // ("MOVEM.w (A7)+,#" with A7 in its own mask) where the loaded value was
+    // being written over the correctly-stepped address. -(An) (predecrement,
+    // write-direction only) never reaches this port at all, so it needs no
+    // equivalent exclusion here.
     wire mvm_reg_wr = ex_is_movem && ex_uop.reads_mem && mvm_run
-                   && mvm_bit && mem_ack;
+                   && mvm_bit && mem_ack
+                   && !((ex_uop.ea_mode == UEA_AN_POST)
+                        && (mvm_reg == ex_uop.ea_reg));
+    // The (An)+/-(An) pointer register's own final address, committed once
+    // when the whole sequence completes. This was missing entirely: nothing
+    // ever wrote mvm_addr back to the register file, so EVERY MOVEM using
+    // either auto-stepping mode left its own base register completely
+    // unchanged unless the register also happened to be in the mask (where
+    // it got the wrong value, fixed by the mvm_reg_wr exclusion above).
+    // Confirmed against real Harte vectors in both directions: "(A7)+,#"
+    // (read) and "#,-(A0)" (write) both expect the base register stepped by
+    // exactly (set-bit-count * operand size), which only this commit
+    // produces.
+    wire mvm_base_commit = ex_is_movem && mvm_run && mvm_done
+                        && ((ex_uop.ea_mode == UEA_AN_POST)
+                         || (ex_uop.ea_mode == UEA_AN_PRE));
     assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd || exc_commit_sp
-                      || mvm_reg_wr || rst_commit_sp;
-    assign wb_wr_sel  = rst_commit_sp ? 4'd15
-                      : mvm_reg_wr    ? mvm_reg
-                      : exc_commit_sp ? 4'd15
-                      : ag_an_upd     ? ag_uop.ea_reg : wb_reg;
-    assign wb_wr_data = rst_commit_sp ? mem_rdata
-                      : mvm_reg_wr    ? (ex_uop.xfer_long ? mem_rdata
+                      || mvm_reg_wr || mvm_base_commit || rst_commit_sp;
+    assign wb_wr_sel  = rst_commit_sp   ? 4'd15
+                      : mvm_reg_wr      ? mvm_reg
+                      : mvm_base_commit ? ex_uop.ea_reg
+                      : exc_commit_sp   ? 4'd15
+                      : ag_an_upd       ? ag_uop.ea_reg : wb_reg;
+    assign wb_wr_data = rst_commit_sp   ? mem_rdata
+                      : mvm_reg_wr      ? (ex_uop.xfer_long ? mem_rdata
                                          : {{16{mem_rdata[15]}}, mem_rdata[15:0]})
-                      : exc_commit_sp ? exc_sp
-                      : ag_an_upd     ? ag_an_val     : wb_data;
+                      : mvm_base_commit ? mvm_addr
+                      : exc_commit_sp   ? exc_sp
+                      : ag_an_upd       ? ag_an_val     : wb_data;
     // Held from the read's dispatch until the write is acknowledged. A CAS
     // mismatch retires early, and rmw_done going high drops this with it.
     assign mem_lock   = ex_rmw && !rmw_done;
