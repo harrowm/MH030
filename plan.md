@@ -5922,51 +5922,97 @@ and the diffuse profile above is the same "everything contributes a bit" shape t
 whole-design measurements showed. That shape is what a 4x target is really up
 against.
 
-### Session checkpoint (2026-10-02, stopped for a planned reboot -- pick up here)
+### Full-format addendum profiled (2026-10-02, resumed session)
 
-**Working tree is clean, everything committed and pushed through `2326733`.** No
-RTL changes are pending; the three commits above (`b43624e`, `36a80f5`,
-`2326733`) are the complete, verified state. `make fmax-extw` and
-`tb/extw_probe.sv` are permanent and already committed.
+The checkpoint's own queued measurement is done: isolate `ew_lead` / `ff_extra`
+with the same drive-from-smaller-pieces technique already used for `uclass`/
+`ea_words_total`/`imm_words`, by temporarily overriding `uop.ext_words` at the
+very end of `mh030p_decode.sv`'s `always_comb` (after line 1780, the real last
+writer) with each successively larger sub-expression, `make fmax-extw`, then
+`git checkout --` to revert -- no RTL change is committed from this, it is a
+read-only measurement using the existing permanent probe. Confirmed the
+**reported figure is nextpnr's first "Info:" line**, not the later "Warning:"
+line (a second, noisier number from the same run) -- reverting and re-running
+reproduced the documented `41.70 MHz` baseline on the Info line exactly, so the
+convention from the earlier table carries over cleanly. (The seed/run-to-run
+noise on this tiny cone is real, roughly +-3 MHz -- single-seed numbers below,
+not swept.)
 
-**What was happening when the session stopped**: reading
-`rtlp/mh030p_decode.sv:1700-1790` (no edits made) to scope the shallow `ext_words`
-decoder that the profiling above says is the only viable Stage 1. Specifically,
-working out which of the following the replacement has to reproduce, and in what
-order:
+| probe driven from | Fmax (Info line) | delay |
+|---|---|---|
+| `ew_lead` alone | 86.78 MHz | 11.53 ns |
+| `ff_extra(ew_srcw)` (adds the source rawword mux + ff_extra) | 60.98 MHz | 16.40 ns |
+| `ff_extra(ew_dstw)` (adds `ew_dst_at`'s add + dest rawword mux + ff_extra) | 54.84 MHz | 18.23 ns |
+| `uop.ext_words` as it stands (both terms summed, real code) | 41.70 MHz | 24.0 ns |
 
-1. **The brief-format count** (`ea_words_total` / the big per-`uclass` chain) --
-   this is the part already profiled (7.3-24 ns across its sub-pieces above).
-2. **The full-format addendum**, read starting at line ~1735 (`ew_lead` /
-   `ew_srcw` / `src_ff` / `ff_extra`), which was NOT yet included in the fmax-extw
-   profiling above -- the 24 ns figure is brief-format only (the probe's `ext_raw`
-   input is driven but the full-format arms were not isolated the way `uclass`/
-   `ea_words_total`/`imm_words` were). **This is a real gap in the profile, not
-   just an unfinished nice-to-have**: the full-format path is textually smaller
-   but reads `rawword()` at an offset computed FROM the brief count
-   (`ew_lead = ext_words - src_ea_words - dst_ea_words`), so it is serially AFTER
-   the brief computation, not parallel to it, and its own depth is unmeasured.
-   Before writing a replacement, isolate this leg with the same
-   drive-from-smaller-pieces technique `fmax-extw` already supports (feed the
-   probe's `extw_o` from `ew_lead`, then from `ff_extra(ew_srcw)`, then from the
-   sum) so the replacement's target depth is a real number, not a guess.
+**Three findings, one of them a real surprise:**
 
-**Immediate next step on restart**: finish that measurement (should take under
-10 minutes with the existing probe infrastructure -- mirror how `src_ea_words`/
-`imm_words`/`ea_words_total` were isolated earlier in this same section of
-plan.md, one `rtlp/mh030p_decode.sv` edit + `make fmax-extw` + revert each time).
-Then write the shallow decoder knowing the real brief+full depth split, rather
-than optimizing only the leg that happened to be profiled first.
+1. **The full-format addendum is genuinely serial, confirming the checkpoint's
+   suspicion**: it adds 24.0 - 11.53 = **12.47 ns on top of `ew_lead`**, split
+   roughly 4.9 ns (source rawword mux + `ff_extra`), 1.8 ns (dest offset add +
+   rawword mux + `ff_extra`), and 5.75 ns for the final two-term merge back into
+   `uop.ext_words` (a 3-way add: `ew_lead` + both `ff_extra` results). A shallow
+   replacement cannot make this leg parallel with the brief count the way
+   `uclass`/`src_ea_words`/`imm_words` are parallel with each other --
+   `ew_srcw`/`ew_dstw` are selected BY the leading offset, so reading them has to
+   wait for it, on real silicon as much as in this RTL.
 
-**Do not re-derive what is already established above**: `uclass` is cheap
-(7.3 ns) and not the problem; a balanced `case` over `uclass` is a ~4 ns win and
-not sufficient; the EA-mode and immediate-sizing ARITHMETIC is where the cost
-concentrates; the shallow decoder must be checked against `mh030p_decode`'s own
-`ext_words` (not the reference `m68030_seq.sv`, which is a known-wrong oracle for
-full-format counts); and the realistic payoff of a perfect `ext_words` is
+2. **`ew_lead` is cheaper than the raw brief-chain pieces it's built from, and
+   that is a real optimization opportunity, not noise.** `ew_lead = ext_words -
+   src_ea_words - dst_ea_words` has to depend on the full ~25-arm brief
+   priority chain (which alone measured 15.1 ns as `ea_words_total`, 14.1 ns as
+   `imm_words`) PLUS a subtract-and-compare on top -- it should cost MORE than
+   either, not less. Measuring 11.53 ns instead means Yosys/ABC9's boolean
+   optimizer is algebraically cancelling most of the brief chain's complexity
+   out of this particular subtraction (plausible: for most `uclass` arms,
+   `ext_words` IS `src_ea_words + dst_ea_words + (something small)`, so the
+   subtraction collapses toward that small remainder rather than needing the
+   whole classification result). **This means a hand-written shallow `ew_lead`
+   might already beat what a naive port of the formula would predict** -- worth
+   confirming by writing it directly (not as a subtraction) and comparing, not
+   assuming a 15 ns floor inherited from `ea_words_total`.
+
+3. **The realistic target for a full shallow replacement is therefore
+   two-part, not one number**: a brief leg that the earlier table already
+   suggests can reach somewhere under 15 ns (finding 2 above suggests possibly
+   less), plus a full-format addendum that is structurally serial after it and
+   measures 12.47 ns in the current encoding -- so even a perfect brief leg
+   still leaves the full-format addendum's own 3 serial steps (offset select,
+   two rawword+ff_extra lookups, final merge) to shrink separately. Total
+   realistic floor is closer to **15-18 ns (55-65 MHz)** than to the
+   single-digit-ns ideal the checkpoint floated, unless the final merge
+   (finding 1's 5.75 ns) can be restructured to run in parallel with the dest
+   lookup rather than after it (dest's own `ff_extra` doesn't need the source
+   term, only `ew_dst_at` does -- the source and dest `ff_extra` results could
+   plausibly be summed independently and added to `ew_lead` in one 3-input
+   adder instead of two serial 2-input adds; untried).
+
+**Next step (not started): write the shallow decoder.** Order-of-work item 1
+from the prior session (add a second `mh030p_decode` instance to
+`tb/uop_decode_equiv_tb.sv`, wired to the shallow decoder's inputs, comparing
+`ext_words` exactly across all 65,536 opcodes x the existing 8 full-format
+shapes) still has to happen BEFORE or alongside writing the decoder, since it's
+the correctness oracle -- the depth numbers above say what to beat, not that
+it's safe to skip verification. Suggested order: (a) write the shallow brief
+leg first (parallel per-group word counts from `instr[15:12]` and friends, no
+subtraction-from-the-old-chain), wire it into the equivalence testbench
+immediately and get it to 0 mismatches on brief-format opcodes before touching
+full-format; (b) add the full-format addendum on top, verified against the
+existing 8-shape sweep; (c) only once both are exact, swap `u_peek` to the new
+decoder and re-run `make fmax-extw` + the 9-seed `fmax-pbiu-sweep` + `make
+bench` + full gate (`make test`, `cosim_grp`, `cosim_memind`, `dat-synth`,
+Harte).
+
+**Do not re-derive what is already established**: `uclass` is cheap (7.3 ns);
+a balanced `case` over `uclass` is a ~4 ns win and not sufficient; the EA-mode
+and immediate-sizing ARITHMETIC is where the brief leg's cost concentrates;
+the full-format addendum is a separate, serial 12.47 ns on top (new, this
+session); the shallow decoder must be checked against `mh030p_decode`'s own
+`ext_words` (not the reference `m68030_seq.sv`, a known-wrong oracle for
+full-format counts); and the realistic payoff of fixing `ext_words` alone is
 ~25 -> 30-35 MHz, not more, because the BIU (27.78 MHz) and the rest of the A4
-critical path are separate, still-unaddressed ceilings (Stage 2 / Stage 2b in the
-"Decisions taken" section above).
+critical path are separate, still-unaddressed ceilings (Stage 2 / Stage 2b in
+the "Decisions taken" section above).
 
 **Also still open from "Decisions taken"**: the synchronous-termination fast path
 (Stage 2b) needs the user's sign-off before implementation, since it spends the
