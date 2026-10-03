@@ -176,20 +176,22 @@ module mh030p_core (
                   && !dec_uop.imm[11] && !dec_uop.imm[5];
     // The register and immediate forms of the system-control moves (sub-op
     // 0-3, 4-5 for MOVE USP) and the AND/OR/EOR-to-CCR/SR immediate forms
-    // (sub-op 6) are in scope. A memory SOURCE is also in scope for sub-op
-    // 2/3 (MOVE <ea>,CCR / MOVE <ea>,SR): the value just needs the ordinary
+    // (sub-op 6) are in scope. A memory SOURCE is in scope for sub-op 2/3
+    // (MOVE <ea>,CCR / MOVE <ea>,SR): the value just needs the ordinary
     // reads_mem wait (ex_wait_mem already covers it) and lands in mem_hold
     // like any other memory operand -- see sys_wr_val below. A memory
-    // DESTINATION (sub-op 0/1, MOVE SR/CCR,<ea>) is NOT yet in scope: unlike
+    // DESTINATION is in scope too, for sub-op 0/1 (MOVE SR/CCR,<ea>): unlike
     // a read, the write value there depends on sr_sys_r/ccr_live, which
-    // aren't known until EX, but a "pure write" instruction's bus request is
-    // dispatched from AG a cycle earlier than that -- the same gap Scc,<ea>
-    // has for the same reason (see plan.md's MH030-P correctness pass).
+    // aren't known until EX, so it gets a deferred one-shot write issued
+    // from EX instead of AG's own immediate dispatch (ag_is_sys_wr_mem,
+    // scc_sys_wr_issued) -- the same shape Scc,<ea> needed for the same
+    // reason.
     wire dec_sysctl_ok = (dec_uop.uclass == UC_SYSCTL)
                       && (dec_uop.subop <= 4'd6)
                       && (!dec_uop.reads_mem || (dec_uop.subop == 4'd2)
                                              || (dec_uop.subop == 4'd3))
-                      && !dec_uop.writes_mem;
+                      && (!dec_uop.writes_mem || (dec_uop.subop == 4'd0)
+                                              || (dec_uop.subop == 4'd1));
     wire dec_ea_class_ok = dec_is_ea_class && dec_ea_ok
                         && (dec_uop.ea_mode != UEA_AN_POST)
                         && (dec_uop.ea_mode != UEA_AN_PRE)
@@ -266,7 +268,13 @@ module mh030p_core (
                         || (dec_uop.uclass == UC_MOVEP)
                         || (dec_uop.uclass == UC_MOVEM))
                        && ((dec_uop.uclass == UC_BRANCH)
-                           || ((dec_uop.uclass == UC_SCC)  && !dec_uop.writes_mem)
+                           // Scc Dn is register-direct, no EA at all. Scc,<ea>
+                           // already requires ea_is_alt_mem in its own decode
+                           // guard, so dec_ea_ok is guaranteed true whenever
+                           // writes_mem is set here -- the memory write's
+                           // VALUE is deferred to EX (ag_is_scc_mem,
+                           // scc_sys_wr_issued), but decode accepts it now.
+                           || (dec_uop.uclass == UC_SCC)
                            || (dec_uop.uclass == UC_DBCC)
                            // RTS commits to no register, so it would fail the
                            // destination check below; it needs its EA instead.
@@ -343,6 +351,15 @@ module mh030p_core (
     // ── Stage registers ─────────────────────────────────────────────────────
     uop_t ag_uop, ex_uop;
     reg   ag_valid, ex_valid;
+    // Declared this early, ahead of ex_is_scc/ex_is_sys further down, because
+    // the AG->EX always_ff's own deferred-write branch (and the
+    // scc_sys_wr_issued tracker beside rmw_wr_issued) need it and Icarus
+    // requires declaration before use within an always_ff, unlike a plain
+    // continuous assign.
+    wire ex_needs_scc_sys_wr = ex_valid
+                            && (((ex_uop.uclass == UC_SCC) && ex_uop.writes_mem)
+                             || ((ex_uop.uclass == UC_SYSCTL) && ex_uop.writes_mem
+                                                              && (ex_uop.subop <= 4'd1)));
     // Declared here because the stall below uses mem_got; assigned further
     // down beside the bus request.
     reg        mem_got;
@@ -367,6 +384,16 @@ module mh030p_core (
                       && (ag_uop.subop != 4'd2) && (ag_uop.subop != 4'd3);
     wire ag_is_movem = (ag_uop.uclass == UC_MOVEM);
     wire ag_is_movep = (ag_uop.uclass == UC_MOVEP);
+    // Scc,<ea> and MOVE SR/CCR,<ea> (sub-op 0/1): a "pure write" whose VALUE
+    // depends on cond_true/sr_sys_r/ccr_live, none of which are known until
+    // EX -- but every other pure write dispatches its bus request the same
+    // cycle it leaves AG, straight from AG-only registers. These two are
+    // excluded from that immediate dispatch (see mem_req below) and instead
+    // get a dedicated one-shot write issued from EX once their value has
+    // settled, the same shape an RMW's own write-turnaround already uses.
+    wire ag_is_scc_mem    = (ag_uop.uclass == UC_SCC) && ag_uop.writes_mem;
+    wire ag_is_sys_wr_mem = (ag_uop.uclass == UC_SYSCTL) && ag_uop.writes_mem
+                         && (ag_uop.subop <= 4'd1);
     // LEA/PEA/JMP/JSR need the EA base on the B port exactly as a memory
     // operand does, even though LEA and JMP issue no bus cycle at all.
     wire ag_ea_class = (ag_uop.uclass == UC_LEA) || (ag_uop.uclass == UC_JMP);
@@ -501,6 +528,10 @@ module mh030p_core (
     reg [1:0]  bcdm_ph;
     reg [31:0] bcdm_src;
     reg  rmw_wr_issued, rmw_done;
+    // One-shot: Scc,<ea> and MOVE SR/CCR,<ea>'s own deferred write (see
+    // ag_is_scc_mem/ag_is_sys_wr_mem above) must dispatch exactly once, the
+    // cycle after the instruction lands in EX, same shape as rmw_wr_issued.
+    reg  scc_sys_wr_issued;
     // Declared here so the ONE always_ff that drives the memory port can use
     // it; assigned below once the ALU result exists. Splitting the port
     // across two blocks would give it two drivers -- the exact fault that had
@@ -1145,10 +1176,22 @@ module mh030p_core (
     // 6 rather than by one operand size -- both are committed from EX instead,
     // because AG's step is derived from the operand size and cannot express
     // either. Leaving the AG update in as well would apply BOTH.
+    // !redirect: without this, an instruction sitting in AG that is ABOUT TO
+    // BE SQUASHED this exact cycle (a branch/jump/return resolving in EX right
+    // now) could still commit its own autoincrement/predecrement side effect,
+    // since this is a same-cycle combinational commit (via wb_wr_en below),
+    // not something redirect's own ag_valid-clearing can undo after the fact.
+    // Latent since this wire was written; only became externally visible once
+    // Scc,<ea> and MOVE SR/CCR,<ea> became executable (this session), because
+    // a speculatively-fetched GHOST opcode decoding as one of those with an
+    // autoincrement EA was, before that, simply declined (dec_executable=0,
+    // so ag_valid was already 0 for it) rather than reaching this wire at
+    // all -- found via a real Harte regression in exactly the instruction
+    // families that cause a redirect (Bcc/BSR/JMP/JSR/RTE/RTR/RTS).
     wire ag_an_upd = ag_valid && ag_mem && !ag_trap_no_ea && !ag_is_movem
                   && !ag_is_movep
                   && !ag_is_push && !ag_is_rte && !ag_ea_class
-                  && !stall_ex && !stall_ag
+                  && !stall_ex && !stall_ag && !redirect
                   && ((ag_uop.ea_mode == UEA_AN_POST)
                    || (ag_uop.ea_mode == UEA_AN_PRE));
     wire [31:0] ag_an_val = (ag_uop.ea_mode == UEA_AN_POST) ? (ag_b + ea_step)
@@ -1194,7 +1237,8 @@ module mh030p_core (
             // out with addr=0 before A3 had been written.
             mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
                                  && !stall_ag && !ag_trap_no_ea && !ag_is_movem
-                                 && !ag_is_movep;
+                                 && !ag_is_movep
+                                 && !ag_is_scc_mem && !ag_is_sys_wr_mem;
             // A push goes to -(A7); everything else to the computed EA.
             // LINK pushes the old frame pointer below A7; UNLK pops from
             // wherever An points. Neither address comes from the EA adder.
@@ -1228,6 +1272,25 @@ module mh030p_core (
                       : ((ag_uop.uclass == UC_ALU) && (ag_uop.alu_op == UA_CLR))
                         ? 32'h0
                       : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
+        end else if (ex_needs_scc_sys_wr && !scc_sys_wr_issued) begin
+            // The deferred write ag_is_scc_mem/ag_is_sys_wr_mem held back:
+            // cond_true and sr_sys_r/ccr_live both need the CCR/system byte
+            // as EX sees it, which AG's own immediate dispatch cannot wait
+            // for. The address was already computed correctly in AG (it
+            // does not depend on either), so only the write itself is
+            // deferred. This is sys_rd_val's own low 16 bits in all but
+            // name -- computed directly rather than through that wire
+            // because sys_rd_val's own ex_b_u dependency (the upper half it
+            // preserves for a REGISTER destination) is declared later in the
+            // file than this always_ff, and a memory destination never needs
+            // that half anyway.
+            mem_req   <= 1'b1;
+            mem_rw    <= 1'b0;
+            mem_siz   <= ex_uop.siz;
+            mem_addr  <= ex_ea;
+            mem_wdata <= (ex_uop.uclass == UC_SCC) ? {24'h0, {8{cond_true}}}
+                       : (ex_uop.subop == 4'd0) ? {16'h0, sr_sys_r, ccr_live}
+                                                 : {24'h0, ccr_live};
         end else if (ex_is_movem && !mvm_done) begin
             // Issue a transfer for each set mask bit; skip the clear ones
             // without touching the bus. Predecrement writes BEFORE stepping,
@@ -2403,6 +2466,12 @@ module mh030p_core (
                 if (cas_skip_wr) rmw_done <= 1'b1;
             end else if (rmw_wr_issued && mem_ack) rmw_done  <= 1'b1;
         end
+    end
+
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)          scc_sys_wr_issued <= 1'b0;
+        else if (!stall_ex)  scc_sys_wr_issued <= 1'b0;   // instruction leaving EX
+        else if (ex_needs_scc_sys_wr) scc_sys_wr_issued <= 1'b1;
     end
 
     // EXG swaps, LINK sets An and A7, UNLK restores An and A7. The register
