@@ -1272,7 +1272,15 @@ module mh030p_core (
             mem_wdata<= (ag_is_bsr || ag_is_jsr)
                         ? (ag_pc2 + {27'h0, ag_uop.ext_words, 1'b0})
                       : ag_is_push ? ag_ea
-                      : ag_is_link ? ag_b
+                      // LINK pushes the OLD An value -- except LINK A7 itself,
+                      // where the real chip pushes the stack pointer AFTER its
+                      // own decrement (ag_c-4, the same value going to
+                      // mem_addr/the new SP), not the pre-decrement value that
+                      // ag_b would otherwise forward. (68k PRM: "If the
+                      // register is also the stack pointer, the value saved is
+                      // the SP after it has been decremented.")
+                      : ag_is_link ? ((ag_uop.dst_reg == 4'd15) ? (ag_c - 32'd4)
+                                                                : ag_b)
                       // CLR writes zero. A pure write takes its data from AG,
                       // which would otherwise send whatever the A port held.
                       : ((ag_uop.uclass == UC_ALU) && (ag_uop.alu_op == UA_CLR))
