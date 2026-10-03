@@ -154,6 +154,7 @@ module uop_decode_equiv_tb;
     // ── Sweep ───────────────────────────────────────────────────────────────
     integer claimed, agreed, mismatches, old_only;
     integer ext_alt_bad;
+    integer ew_fast_bad;
     integer ffv;
     integer ff_checked = 0;
     integer ff_bad = 0;
@@ -346,6 +347,32 @@ module uop_decode_equiv_tb;
         ext = 32'hA4A5_3C7F; #1;
         $display("  ext_words independent of normalised ext: %s (%0d differ)",
                  (ext_alt_bad == 0) ? "yes" : "NO", ext_alt_bad);
+
+        // ── Shallow ext_words_fast vs the real (brief-format) ext_words ─────
+        // Oracle is u_new's OWN uop.ext_words, not the reference (see
+        // plan.md's "Full-format addendum profiled" session: the reference's
+        // own full-format counting is known wrong, so it cannot validate a
+        // replacement). Run with ext held at the fixed BRIEF-format pattern
+        // already set above (bit 8 of the first word clear), so the real
+        // ext_words' full-format addendum is always 0 and the two values are
+        // directly comparable -- ext_words_fast does not model full format at
+        // all yet (Stage 1, part 2, not started this session). Checked for
+        // EVERY opcode, not just claimed ones: the real decoder computes
+        // ext_words even for UC_UNIMPL so the fetch unit can drain correctly,
+        // and ext_words_fast must match that, not just the claimed subset.
+        ew_fast_bad = 0;
+        for (i = 0; i < 65536; i = i + 1) begin
+            instr = i[15:0];
+            #1;
+            if (u_new.ext_words_fast_o !== uop.ext_words) begin
+                if (ew_fast_bad < 20)
+                    $display("EXTWORDS-FAST-MISMATCH op=%04h fast=%0d real=%0d",
+                             instr, u_new.ext_words_fast_o, uop.ext_words);
+                ew_fast_bad = ew_fast_bad + 1;
+            end
+        end
+        $display("  ext_words_fast (brief-format) vs real: %s (%0d differ)",
+                 (ew_fast_bad == 0) ? "yes" : "NO", ew_fast_bad);
 
         for (i = 0; i < 65536; i = i + 1) begin
             instr = i[15:0];

@@ -6018,3 +6018,113 @@ the "Decisions taken" section above).
 (Stage 2b) needs the user's sign-off before implementation, since it spends the
 "protocol-exact, timing-free" bus-fidelity decision -- flagged there, not yet
 raised again since.
+
+### Stage 1 shallow brief-format decoder: WRITTEN, 0 mismatches, 2.46x on the cone (same session, continued)
+
+Wrote `ext_words_fast()`, a new function in `rtlp/mh030p_decode.sv`, implementing
+the order from the previous section: the brief-format leg first, verified
+immediately, full-format addendum deliberately NOT started yet (see below).
+
+**What it is.** A direct transcription of the real decoder's per-group
+if-elseif priority chain (same order, same guard wires -- `g0_is_ccr_sr`,
+`g4_is_movem`, `g5_is_trapcc`, `g_is_bf`, etc. -- all already existing,
+already-cheap, raw-opcode-bit wires computed well before the huge
+classification `always_comb`), but computing a word count directly at each
+branch instead of building a `uop_t`. It reads NO `uop.*` field anywhere --
+that is the entire point, since the measured 24 ns cost is `uop.subop`/
+`uop.siz`/`uop.opnd_word`/etc. being outputs of the ~1000-line classifier, and
+avoiding them removes the forced serialisation after that classifier rather
+than restructuring it. For every branch that is genuinely accepted (a real
+instruction), the value is `ea_words_total` (also already cheap, a
+raw-wire sum); accepted branches with a documented ext_words-chain special
+case (MOVEP, STOP, LINK, CAS/CAS2, MOVEC, MOVEM, BITFIELD, CHK, TRAPcc,
+DBcc, Bcc, SYSCTL's USP forms, the ALU/MULDIV immediate-size rules) keep
+that exact special-cased value, derived by hand from the real chain
+(`plan.md`'s own working notes, not reproduced here, walked every one of the
+~45 branch sites in `rtlp/mh030p_decode.sv` to confirm which raw predicate
+guards it and whether `ea_words_total` or a flat constant is correct there --
+see the file's own inline comments on `ext_words_fast()` for the summary).
+The fallback for "nothing in this group's if-elseif chain matched" (an
+unclassified/illegal opcode, left at `UC_UNIMPL` with `ea_mode`/
+`dst_ea_mode` at their `uop_clear()` default of `NONE`) is `imm_words +
+dst_ea_words` -- deliberately excluding `src_ea_words`, mirroring the real
+decoder's own "NONE/NONE catch-all" exactly, for the same reason: an
+illegal opcode's raw mode/reg bits can coincidentally read as a real
+address (confirmed this matters for `RESET`/`NOP`/`RTD`, whose shared
+`sys_is_misc` raw mode field reads as `AN_IDX`, 1 word, even though none of
+them have a real EA).
+
+**Correctness: exact, immediately.** Exposed via a new module output,
+`ext_words_fast_o` (named-port instantiations elsewhere are unaffected by
+adding a port). Added a dedicated sweep to `tb/uop_decode_equiv_tb.sv` --
+all 65,536 opcodes, held at the fixed brief-format `ext` pattern the main
+sweep already uses (bit 8 clear, so the real `ext_words`'s full-format
+addendum is always 0 and directly comparable) -- comparing
+`ext_words_fast_o` against `uop.ext_words` for EVERY opcode, not just
+claimed ones (the real decoder computes `ext_words` for `UC_UNIMPL` too, so
+the fetch unit can drain correctly, and the shallow version has to match
+that). First real run: **0 mismatches across all 65,536 opcodes**, on the
+first attempt after fixing one Icarus-specific bug (below) -- the by-hand
+branch-by-branch derivation held up completely under exhaustive sweep,
+which is the strongest confirmation this project's own methodology
+produces.
+
+**One real toolchain bug found and fixed, not an RTL bug.** The first sweep
+run reported `ext_words_fast_o` as `X` for literally every opcode. Root
+cause, confirmed via a minimal standalone repro
+(`sub` module, `function automatic` with no arguments reading a module port
+directly, driven out via `assign y = f();`): Icarus mis-tracks sensitivity
+for a continuous `assign` built from an automatic function that reads
+enclosing-scope signals rather than its own arguments -- the repro's `y`
+held its FIRST computed value forever and never re-evaluated when the
+input changed (worse than stale: in the real file it read as pure X,
+likely because the function's locals never get escaped the right side of
+the implicit process entirely). Fixed by driving the port from
+`always_comb ext_words_fast_o = ext_words_fast();` instead of `assign` --
+confirmed correct in the same minimal repro (second version, `always_comb`
+updates on every input change) before touching the real file. New
+feedback memory worth keeping: an automatic SystemVerilog function with
+implicit (non-parameter) reads of enclosing module signals needs
+`always_comb`, not `assign`, to get correct Icarus sensitivity.
+
+**Measured Fmax: 2.46x on the cone, now past 100 MHz for this cone alone.**
+New `tb/extw_fast_probe.sv` + `make fmax-extw-fast` (identical wrapper shape
+to the existing `tb/extw_probe.sv` / `make fmax-extw`, for a direct
+before/after comparison on the same methodology). Three seeds:
+
+| probe | seed 1 | seed 2 | seed 3 |
+|---|---|---|---|
+| real `ext_words` (baseline) | 41.91 MHz | -- | -- |
+| `ext_words_fast_o` (new)    | 102.67 MHz | 107.19 MHz | 100.31 MHz |
+
+~24.0 ns -> ~9.5 ns. This is well past the "15-18 ns / 55-65 MHz" floor the
+previous session's profiling projected -- that projection was for the FULL
+cone including the full-format addendum's own serial 12.47 ns; this number
+is BRIEF-FORMAT ONLY (the addendum is not implemented in the shallow
+version yet, see below), so the two numbers are not yet directly
+comparable to each other, only each to its own predecessor.
+
+**NOT swapped into `u_peek` or anywhere else production uses it.** This is
+still deliberately scaffolding: `ext_words_fast_o` is read only by the new
+equivalence-sweep check and the new fmax probe. Full mandatory gate run to
+confirm the new port + function are inert everywhere else: `make test`
+(43/43), `make lint-drivers` (clean), `make bench` (all four arms
+reproduce their exact previously-recorded tick counts -- 23665/8929 for
+`rtl/`, 24294/8603 for A4 -- confirming zero behavioural change to any
+production path). Full Harte sweep for MH030-P (`make sim/harte_pvbatch`
++ `run_harte_batch.py --sim sim/harte_pvbatch`) CONFIRMED: `PASS 621799
+FAIL 80345 SKIP 281221 TIMEOUT 576`, bit-identical to the recorded
+baseline. Full mandatory gate clean.
+
+**Next steps, in order**: (1) DONE -- Harte re-run confirmed bit-identical;
+(2) implement the full-format addendum on top of
+`ext_words_fast()`, using the identical technique (raw wires only, verified
+immediately against the equivalence testbench's existing 8-shape
+full-format sweep, not the reference); (3) only once both legs are exact,
+swap `u_peek` (`rtlp/mh030p_cpu.sv`) to call the new decoder's
+`ext_words_fast_o` instead of `uop.ext_words`, and re-run the full gate
+(`make test`, `cosim_grp`, `cosim_memind`, `dat-synth`, Harte for BOTH
+cores) plus the 9-seed `fmax-pbiu-sweep` and `make bench` to get the
+design-wide number -- expect something well short of the cone's own 2.46x,
+since the BIU (27.78 MHz measured standalone) and `u_seq`'s other paths are
+separate, still-unaddressed ceilings on the A4 configuration specifically.

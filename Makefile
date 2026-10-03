@@ -1204,6 +1204,22 @@ fmax-extw:
 	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
 	    | grep -E "Max frequency"
 
+# Fmax of the Stage 1 shallow ext_words_fast_o cone -- same wrapper shape as
+# fmax-extw, for a direct before/after comparison. See tb/extw_fast_probe.sv.
+.PHONY: fmax-extw-fast
+fmax-extw-fast:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl rtlp/mh030p_decode.sv rtl/opcode_fields.sv \
+	    tb/extw_fast_probe.sv > $(SIM)/extwf.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/extwf.v extw_fast_probe \
+	    wrap_fmax $(SIM)/extwf_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/extwf.v $(SIM)/extwf_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/extwf.json' -l $(SIM)/extwf_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/extwf.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
 # The A4 configuration: rtlp's CPU plus rtl/'s real BIU and both caches. This is
 # the number that matters for hardware, because it is the only rtlp arm that can
 # actually drive a bus -- mh030p_top's 29.16 MHz is measured on a core with no

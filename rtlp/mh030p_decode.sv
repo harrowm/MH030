@@ -36,7 +36,14 @@ module mh030p_decode (
     // of a combinational loop (see the note on `ext` in mh030p_ifu.sv).
     input  wire [31:0] ext_raw,
     input  wire [15:0] q3,       // third extension word
-    output uop_t       uop
+    output uop_t       uop,
+    // Stage 1 scaffold only (plan.md "Full-format addendum profiled" /
+    // "write the shallow decoder" session): the independent brief-format
+    // ext_words, computed straight from raw opcode-bit wires rather than
+    // from uop.*. Not read by mh030p_cpu.sv or mh030p_ifu.sv -- wired only
+    // into tb/uop_decode_equiv_tb.sv (correctness oracle) and a dedicated
+    // fmax probe (depth measurement) until it is verified and swapped in.
+    output logic [2:0] ext_words_fast_o
 );
 
     // ── Positional extension-word access, normalisation-free ────────────────
@@ -464,6 +471,211 @@ module mh030p_decode (
                               (e_mem_optype == 2'b01) ? (e_left ? 4'h2 : 4'h3) :
                               (e_mem_optype == 2'b10) ? (e_left ? 4'h6 : 4'h7) :
                                                         (e_left ? 4'h4 : 4'h5);
+
+    // ── Shallow ext_words (Stage 1, measurement/equivalence scaffold) ────────
+    // A from-scratch BRIEF-format word count, computed directly from the raw
+    // per-group predicate wires above -- NEVER from uop.uclass/subop/siz/etc.
+    // -- so its synthesis cone does not depend on the whole classification
+    // decode below. See plan.md's "Full-format addendum profiled" session:
+    // the measured 41.70 MHz / 24 ns ext_words cone is deep because the real
+    // chain reads uop.* fields that are themselves outputs of the ~1000-line
+    // case(f_group) classifier; this function reaches the same raw wires that
+    // classifier reaches, in parallel with it, not serially after it.
+    //
+    // Mirrors the real decoder's if-elseif PRIORITY ORDER exactly, branch for
+    // branch, because getting the ORDER wrong (not just the individual
+    // conditions) changes the answer whenever two branches' guards overlap --
+    // this is not a re-derivation, it is the same decisions, read from the
+    // same wires, without round-tripping through uop.* first.
+    //
+    // The fallback for "nothing in this group's chain matched" (an
+    // unclassified/illegal opcode, which stays UC_UNIMPL with ea_mode and
+    // dst_ea_mode at their uop_clear() default of NONE) is deliberately
+    // `imm_words + dst_ea_words`, NOT the full `ea_words_total` -- excluding
+    // src_ea_words is what keeps an illegal opcode's own raw mode/reg bits
+    // from being miscounted as a real address when nothing actually claims
+    // them as one (see the real decoder's own "NONE/NONE" comment above the
+    // equivalent check). Every ACCEPTED (classified) branch below uses the
+    // full `ea_words_total` instead, verified case by case while writing this
+    // that doing so agrees with the real decoder's own per-branch formula --
+    // in every case checked, a branch that leaves ea_mode at its default NONE
+    // also has a raw ea_mode_w of NONE (so src_ea_words is 0 and the two
+    // formulas coincide), EXCEPT the explicit special cases called out below
+    // (MOVEP, STOP, LINK, SYSCTL's USP forms, MOVEC) which are long-standing,
+    // independently-verified special cases in the real chain already and are
+    // reproduced here as the same flat constants.
+    function automatic logic [2:0] ext_words_fast();
+        logic [2:0] v;
+        logic move_ok1, move_ok2;
+        begin
+            case (f_group)
+            // ── group 0 ──────────────────────────────────────────────────
+            4'h0: begin
+                if (g0_is_ccr_sr)
+                    v = ea_words(ea_mode_w) + (ea_is_imm ? 3'd1 : 3'd0);
+                else if (g0_is_movep)
+                    v = 3'd1;
+                else if (g0_is_cmp2)
+                    v = 3'd1 + ea_words(ea_mode_w);
+                else if (g0_is_cas)
+                    v = ea_is_imm ? 3'd2 : (3'd1 + ea_words(ea_mode_w));
+                else if (g0_is_moves)
+                    v = 3'd1 + ea_words(ea_mode_w);
+                else if (g0_is_dynbit && ea_is_alt_mem)
+                    v = ea_words(ea_mode_w);
+                else if (g0_is_statbit && ea_is_alt_mem)
+                    v = 3'd1 + ea_words(ea_mode_w);
+                else if ((g0_is_dynbit || g0_is_statbit) && src_is_dn)
+                    v = (g0_is_statbit ? 3'd1 : 3'd0) + ea_words(ea_mode_w);
+                else if (g0_is_alu_imm && ea_is_alt_mem && f_ss_valid)
+                    v = ((f_siz == UZ_LONG) ? 3'd2 : 3'd1) + ea_words(ea_mode_w);
+                else if (g0_is_alu_imm && src_is_dn && f_ss_valid)
+                    v = (f_siz == UZ_LONG) ? 3'd2 : 3'd1;
+                else
+                    v = imm_words + dst_ea_words;
+            end
+            // ── MOVE / MOVEA ─────────────────────────────────────────────
+            4'h1, 4'h2, 4'h3: begin
+                move_ok1 = (ea_src_ok || ea_dst_is_mem)
+                        && !((f_movesz == 2'b01) && (src_is_an || dst_is_an))
+                        && (ea_src_ok || src_is_dn || src_is_an)
+                        && (ea_dst_is_mem || dst_is_dn || dst_is_an);
+                move_ok2 = (src_is_dn || src_is_an) && (dst_is_dn || dst_is_an)
+                        && !((f_movesz == 2'b01) && (src_is_an || dst_is_an));
+                v = (move_ok1 || move_ok2) ? ea_words_total
+                                            : (imm_words + dst_ea_words);
+            end
+            // ── NEG/NEGX/NOT/CLR/TST/EXT/SWAP/TAS/NBCD/CHK/MOVEM/... ─────
+            4'h4: begin
+                if (ea_is_alt_mem && f_ss_valid
+                    && (g4_is_neg || g4_is_not || g4_is_clr
+                     || g4_is_tst || g4_is_negx))
+                    v = ea_words_total;
+                else if (g4_is_chk)
+                    v = ea_is_imm ? ((g4_b76 == 2'b00) ? 3'd2 : 3'd1)
+                                  : ea_words(ea_mode_w);
+                else if (g4_is_sr_move && (ea_is_alt_mem || src_is_dn
+                                           || (!g4_sr_to_ea && ea_src_ok)))
+                    v = ea_words(ea_mode_w) + (ea_is_imm ? 3'd1 : 3'd0);
+                else if (g4_is_nbcd)
+                    v = (src_is_dn || ea_is_alt_mem) ? ea_words_total
+                                                      : (imm_words + dst_ea_words);
+                else if (g4_is_tas)
+                    v = ea_words_total;
+                else if (g4_is_pea)
+                    v = ea_words_total;
+                else if (g4_is_lea)
+                    v = ea_words_total;
+                else if (g4_is_movem)
+                    v = 3'd1 + ea_words(ea_mode_w);
+                else if (g4_is_jsr || g4_is_jmp)
+                    v = ea_words_total;
+                else if (sys_is_trap)
+                    v = 3'd0;
+                else if (sys_is_link || sys_is_unlk)
+                    v = sys_is_link ? 3'd1 : 3'd0;
+                else if (sys_is_usp || sys_is_uspr)
+                    v = 3'd0;
+                else if (g4_is_movec)
+                    v = 3'd1;
+                else if (sys_is_misc)
+                    // RESET/NOP/RTD/RETURN/TRAPV all 0; STOP (sys_lo==2) is
+                    // the one with a real operand word.
+                    v = (sys_lo == 4'h2) ? 3'd1 : 3'd0;
+                else if (g4_is_swap)
+                    v = 3'd0;
+                else if (g4_is_ext)
+                    v = 3'd0;
+                else if (src_is_dn && f_ss_valid
+                         && (g4_is_neg || g4_is_not || g4_is_clr
+                          || g4_is_tst || g4_is_negx))
+                    v = 3'd0;
+                else
+                    v = imm_words + dst_ea_words;
+            end
+            // ── ADDQ/SUBQ/Scc/DBcc/TRAPcc ────────────────────────────────
+            4'h5: begin
+                if (g5_is_trapcc)
+                    v = (f_reg == 3'b010) ? 3'd1 : (f_reg == 3'b011) ? 3'd2 : 3'd0;
+                else if (g5_is_scc)
+                    v = 3'd0;
+                else if (g5_is_cc && ea_is_alt_mem)
+                    v = ea_words_total;
+                else if (g5_is_dbcc)
+                    v = 3'd1;
+                else if (ea_is_alt_mem && f_ss_valid)
+                    v = ea_words_total;
+                else if (src_is_an && (f_siz != UZ_BYTE))
+                    v = 3'd0;
+                else if (src_is_dn && f_ss_valid)
+                    v = 3'd0;
+                else
+                    v = imm_words + dst_ea_words;
+            end
+            // ── F-line ────────────────────────────────────────────────────
+            4'hF: v = ((instr[11:9] == 3'b000) || (instr[11:9] == 3'b001))
+                      ? 3'd1 : 3'd0;
+            // ── A-line ────────────────────────────────────────────────────
+            4'hA: v = 3'd0;
+            // ── Bcc/BRA/BSR ───────────────────────────────────────────────
+            4'h6: v = (instr[7:0] == 8'h00) ? 3'd1 :
+                      (instr[7:0] == 8'hFF) ? 3'd2 : 3'd0;
+            // ── MOVEQ ─────────────────────────────────────────────────────
+            4'h7: v = !instr[8] ? 3'd0 : (imm_words + dst_ea_words);
+            // ── OR/SUB/CMP+EOR/AND/ADD, register-direct ──────────────────
+            4'h8, 4'h9, 4'hB, 4'hC, 4'hD: begin
+                if (g_is_bcd_reg)
+                    v = ea_words_total;
+                else if (g_is_x_reg)
+                    v = ea_words_total;
+                else if (g_is_bcd_mem || g_is_x_mem)
+                    v = ea_words_total;
+                else if (g_is_exg)
+                    v = ea_words_total;
+                else if (g_is_muldiv && (src_is_dn || ea_src_ok))
+                    v = ea_is_imm ? 3'd1 : ea_words_total;
+                else if (g_is_xxxa && (ea_src_ok || src_is_dn || src_is_an))
+                    v = ea_is_imm ? (g_xxxa_word ? 3'd1 : 3'd2) : ea_words_total;
+                else if (g_is_cmpm)
+                    v = ea_words_total;
+                else if (f_dir && ea_is_alt_mem && f_ss_valid)
+                    v = ea_words_total;
+                else if ((ea_src_ok || alu_an_src_ok) && !f_dir && f_ss_valid)
+                    v = ea_is_imm ? ((f_siz == UZ_LONG) ? 3'd2 : 3'd1)
+                                  : ea_words_total;
+                else if (src_is_dn && f_ss_valid && ((f_group == 4'hB) || !f_dir))
+                    v = ea_words_total;
+                else
+                    v = imm_words + dst_ea_words;
+            end
+            // ── Shifts/rotates, register form, and bit-fields ────────────
+            4'hE: begin
+                if (g_is_bf && (src_is_dn || (ea_mode_w == UEA_AN_IND)
+                                          || (ea_mode_w == UEA_AN_D16)
+                                          || (ea_mode_w == UEA_ABS_W)
+                                          || (ea_mode_w == UEA_PC_D16)))
+                    v = 3'd1 + ea_words(ea_mode_w);
+                else if (ea_is_alt_mem && (f_ss == 2'b11) && e_mem_legal)
+                    v = ea_words(ea_mode_w);
+                else if (f_ss_valid)
+                    v = 3'd0;
+                else
+                    v = imm_words + dst_ea_words;
+            end
+            default: v = imm_words + dst_ea_words;
+            endcase
+            ext_words_fast = v;
+        end
+    endfunction
+
+    // A plain `assign` here mis-tracks sensitivity in Icarus: ext_words_fast()
+    // reads module-scope wires directly rather than through its own
+    // (zero) argument list, and an `assign`-driven function call does not
+    // reliably re-evaluate when those wires change (confirmed via a minimal
+    // repro: `assign y = f()` held its first value forever while `always_comb
+    // y = f()` updated correctly). always_comb's own sensitivity analysis
+    // does not have this gap.
+    always_comb ext_words_fast_o = ext_words_fast();
 
     // ── Decode ──────────────────────────────────────────────────────────────
     // Scratch for the central EA fill-in at the end of the decode block.
