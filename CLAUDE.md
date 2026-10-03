@@ -1362,7 +1362,34 @@ only 21 are instruction fetches. Deliberately tied off (matching how
 EU-initiated bursts, MOVE16, `biu_multiop_fsm` for MOVEM/MOVEP, coprocessor, BKPT.
 Boot reads addresses 0 and 4 twice (the BIU runs its own SSP/PC init and so does the
 core; they cannot collide because the BIU holds `eu_req` off until its own pair
-completes). **No Fmax measurement for `mh030p_biu_top` yet.**
+completes).
+
+**100 MHz programme, opened the following session (plan.md has the full
+numbers and the live checkpoint -- this is a condensed pointer, not a
+substitute)**: `mh030p_biu_top` measures **24.71 MHz** (9-seed sweep,
+23.68-25.74), inside the 25-50 MHz band but 4.05x short of 100. Three ceilings,
+all separately measured and all currently binding: the reused `m68030_biu`
+alone measures 27.78 MHz (so the A4 design cannot exceed that without touching
+the BIU); the device is not the limiter (speed grade 8 measured no better than
+grade 6, which is what ULX3S ships); and the core's own `ext_words` decode cone
+(`mh030p_cpu.sv`'s `u_peek`, feeding the IFU's `ext` mux, feeding the main
+`u_dec` -- two full decoder passes per clock) costs 24 ns alone, measured via
+new permanent tool **`make fmax-extw`** / `tb/extw_probe.sv`, which isolates one
+cone from the rest of the design in ~30s instead of a 5-minute full sweep.
+Profiling that 24 ns (drive the probe from successively smaller sub-expressions)
+found the ~25-arm priority chain is NOT the cost (a balanced `case` recovers only
+~4 ns); the cost is diffuse across the EA-mode and immediate-sizing ARITHMETIC,
+so `ext_words` needs a genuinely independent shallow decoder, not a
+restructuring of the existing one. User decisions already taken: fork the BIU
+into `rtlp/` rather than touch frozen `rtl/`; optimize for **Fmax/ticks**
+(raw throughput), not Fmax alone, since there is no real 25 MHz external bus in
+the FPGA target -- which is why a synchronous-termination fast path (cutting the
+measured 14.3 ticks/bus-access, protocol floor 12) is now a higher-priority
+candidate than further clock work, pending sign-off since it spends the
+"protocol-exact" bus-fidelity decision. **`plan.md`'s own "Session checkpoint"
+subsection (end of file) is the authoritative pickup point** -- it names the
+exact next measurement (isolating the full-format addendum's own depth, not yet
+profiled) before writing the shallow decoder.
 
 **A recorded project fact did not survive this session's gating**:
 `scripts/run_harte_batch.py --sim` was a silent no-op, so MH030-P's recorded
@@ -1376,7 +1403,9 @@ note when it overrides the backend).
 
 **Current state**: `make test` 43/43, `make lint-drivers` clean, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50, `make bench`
-all four arms passing (two `rtl/` + two `rtlp` A4, see the table above). Full 124-suite Tom Harte sweep **for `rtl/`**: `PASS 702142 FAIL 2` (the documented
+all four arms passing (two `rtl/` + two `rtlp` A4, see the table above),
+`make fmax-pbiu-sweep` 24.71 MHz (9 seeds), `make fmax-extw` 41.70 MHz (one cone,
+see the 100 MHz programme note below -- the 100 MHz target is open, not closed). Full 124-suite Tom Harte sweep **for `rtl/`**: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't
 cover any 68020+-only family, coprocessor conditionals included, so this count is unaffected

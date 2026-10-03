@@ -5921,3 +5921,54 @@ path, and every later stage is blocked behind it -- but it is one step of severa
 and the diffuse profile above is the same "everything contributes a bit" shape the
 whole-design measurements showed. That shape is what a 4x target is really up
 against.
+
+### Session checkpoint (2026-10-02, stopped for a planned reboot -- pick up here)
+
+**Working tree is clean, everything committed and pushed through `2326733`.** No
+RTL changes are pending; the three commits above (`b43624e`, `36a80f5`,
+`2326733`) are the complete, verified state. `make fmax-extw` and
+`tb/extw_probe.sv` are permanent and already committed.
+
+**What was happening when the session stopped**: reading
+`rtlp/mh030p_decode.sv:1700-1790` (no edits made) to scope the shallow `ext_words`
+decoder that the profiling above says is the only viable Stage 1. Specifically,
+working out which of the following the replacement has to reproduce, and in what
+order:
+
+1. **The brief-format count** (`ea_words_total` / the big per-`uclass` chain) --
+   this is the part already profiled (7.3-24 ns across its sub-pieces above).
+2. **The full-format addendum**, read starting at line ~1735 (`ew_lead` /
+   `ew_srcw` / `src_ff` / `ff_extra`), which was NOT yet included in the fmax-extw
+   profiling above -- the 24 ns figure is brief-format only (the probe's `ext_raw`
+   input is driven but the full-format arms were not isolated the way `uclass`/
+   `ea_words_total`/`imm_words` were). **This is a real gap in the profile, not
+   just an unfinished nice-to-have**: the full-format path is textually smaller
+   but reads `rawword()` at an offset computed FROM the brief count
+   (`ew_lead = ext_words - src_ea_words - dst_ea_words`), so it is serially AFTER
+   the brief computation, not parallel to it, and its own depth is unmeasured.
+   Before writing a replacement, isolate this leg with the same
+   drive-from-smaller-pieces technique `fmax-extw` already supports (feed the
+   probe's `extw_o` from `ew_lead`, then from `ff_extra(ew_srcw)`, then from the
+   sum) so the replacement's target depth is a real number, not a guess.
+
+**Immediate next step on restart**: finish that measurement (should take under
+10 minutes with the existing probe infrastructure -- mirror how `src_ea_words`/
+`imm_words`/`ea_words_total` were isolated earlier in this same section of
+plan.md, one `rtlp/mh030p_decode.sv` edit + `make fmax-extw` + revert each time).
+Then write the shallow decoder knowing the real brief+full depth split, rather
+than optimizing only the leg that happened to be profiled first.
+
+**Do not re-derive what is already established above**: `uclass` is cheap
+(7.3 ns) and not the problem; a balanced `case` over `uclass` is a ~4 ns win and
+not sufficient; the EA-mode and immediate-sizing ARITHMETIC is where the cost
+concentrates; the shallow decoder must be checked against `mh030p_decode`'s own
+`ext_words` (not the reference `m68030_seq.sv`, which is a known-wrong oracle for
+full-format counts); and the realistic payoff of a perfect `ext_words` is
+~25 -> 30-35 MHz, not more, because the BIU (27.78 MHz) and the rest of the A4
+critical path are separate, still-unaddressed ceilings (Stage 2 / Stage 2b in the
+"Decisions taken" section above).
+
+**Also still open from "Decisions taken"**: the synchronous-termination fast path
+(Stage 2b) needs the user's sign-off before implementation, since it spends the
+"protocol-exact, timing-free" bus-fidelity decision -- flagged there, not yet
+raised again since.
