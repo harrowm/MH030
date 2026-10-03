@@ -146,8 +146,14 @@ module mh030p_core (
     wire dec_is_ea_class = (dec_uop.uclass == UC_LEA)
                         || (dec_uop.uclass == UC_JMP);
     wire dec_is_push     = dec_is_ea_class && dec_uop.writes_mem;  // PEA / JSR
-    // (An)+ and -(An) are illegal for all four, and a push needs the C port
-    // for A7 so it cannot also index with it.
+    // (An)+ and -(An) are illegal for all four. A push's own EA needs the C
+    // port for its index register (same as any other indexed EA) while ALSO
+    // needing A7 for -(A7) -- the two conflicted on the one port, so an
+    // indexed push used to be scoped out entirely. Fixed below by routing a
+    // push's own index register through the otherwise-unused A port instead
+    // (dec_is_push never needs A for anything else -- its write DATA is the
+    // EA itself, not a register), leaving C free for A7 as before. See
+    // dec_a_idx_sel / ag_xn_src.
     // LINK/UNLK build and tear down a stack frame; the address register they
     // name is on the DESTINATION field, not the EA field, so they are excluded
     // from the EA-base selection even though both touch memory.
@@ -194,8 +200,12 @@ module mh030p_core (
                                               || (dec_uop.subop == 4'd1));
     wire dec_ea_class_ok = dec_is_ea_class && dec_ea_ok
                         && (dec_uop.ea_mode != UEA_AN_POST)
-                        && (dec_uop.ea_mode != UEA_AN_PRE)
-                        && !(dec_is_push && (dec_uop.ea_mode == UEA_AN_IDX));
+                        && (dec_uop.ea_mode != UEA_AN_PRE);
+    // A push's own indexed EA (AN_IDX or PC_IDX): the index register's value
+    // is read through the A port instead of C, which a push always reserves
+    // for A7. Must mirror ag_idx_via_a below.
+    wire dec_push_idx = dec_is_push && ((dec_uop.ea_mode == UEA_AN_IDX)
+                                      || (dec_uop.ea_mode == UEA_PC_IDX));
     // Read-modify-write: one EA, read then write, two bus cycles. This is the
     // first instruction shape that needs more than one pass through EX.
     wire dec_rmw     = dec_uop.writes_mem && dec_uop.reads_mem
@@ -436,9 +446,13 @@ module mh030p_core (
     wire [3:0] ag_d_sel = ag_uop.dst_ea_idx_reg;
     wire ag_mem_operand = ag_uop.reads_mem && !ag_uop.writes_mem
                        && (ag_uop.dst_kind == US_MEM);
+    // Must mirror dec_push_idx exactly, same reason as every other _sel mirror.
+    wire ag_push_idx = ag_is_push && ((ag_uop.ea_mode == UEA_AN_IDX)
+                                    || (ag_uop.ea_mode == UEA_PC_IDX));
     wire [3:0] ag_a_sel = ag_is_cas ? ag_uop.dst_reg
                         : ag_is_movep ? ag_uop.imm[3:0]
                         : ag_is_bf ? ag_uop.imm[15:12]
+                        : ag_push_idx ? ag_uop.ea_idx_reg
                         : (ag_uop.dst_ea_mode != UEA_NONE) ? ag_uop.dst_ea_reg
                         : ag_mem_operand ? ag_uop.src_reg
                         : (ag_uop.reads_mem && !ag_uop.writes_mem)
@@ -1001,6 +1015,7 @@ module mh030p_core (
         .rd_a_sel (dec_is_cas ? dec_uop.dst_reg
                    : dec_is_movep ? dec_uop.imm[3:0]
                    : dec_is_bf ? dec_uop.imm[15:12]
+                   : dec_push_idx ? dec_uop.ea_idx_reg
                    : (dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
                    : dec_mem_operand ? dec_uop.src_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
@@ -1151,8 +1166,12 @@ module mh030p_core (
     // Index term: Xn as a word (sign-extended) or a longword, scaled by
     // 1/2/4/8. Only the brief format is handled here; the full format with a
     // base displacement and memory indirection is a later phase.
-    wire [31:0] ag_xn   = ag_uop.ea_idx_long ? ag_c
-                                             : {{16{ag_c[15]}}, ag_c[15:0]};
+    // A push's own index register was read through A, not C (ag_push_idx) --
+    // C is reserved for A7 on a push, the same conflict dec_push_idx exists
+    // to resolve.
+    wire [31:0] ag_xn_src = ag_push_idx ? ag_a : ag_c;
+    wire [31:0] ag_xn   = ag_uop.ea_idx_long ? ag_xn_src
+                                             : {{16{ag_xn_src[15]}}, ag_xn_src[15:0]};
     // ea_is is INDEX SUPPRESS, the other half of the same idea.
     wire [31:0] ag_idx  = (((ag_uop.ea_mode == UEA_AN_IDX)
                          || (ag_uop.ea_mode == UEA_PC_IDX)) && !ag_uop.ea_is)
