@@ -176,11 +176,20 @@ module mh030p_core (
                   && !dec_uop.imm[11] && !dec_uop.imm[5];
     // The register and immediate forms of the system-control moves (sub-op
     // 0-3, 4-5 for MOVE USP) and the AND/OR/EOR-to-CCR/SR immediate forms
-    // (sub-op 6) are in scope; memory destinations are not (none of these
-    // instructions have one).
+    // (sub-op 6) are in scope. A memory SOURCE is also in scope for sub-op
+    // 2/3 (MOVE <ea>,CCR / MOVE <ea>,SR): the value just needs the ordinary
+    // reads_mem wait (ex_wait_mem already covers it) and lands in mem_hold
+    // like any other memory operand -- see sys_wr_val below. A memory
+    // DESTINATION (sub-op 0/1, MOVE SR/CCR,<ea>) is NOT yet in scope: unlike
+    // a read, the write value there depends on sr_sys_r/ccr_live, which
+    // aren't known until EX, but a "pure write" instruction's bus request is
+    // dispatched from AG a cycle earlier than that -- the same gap Scc,<ea>
+    // has for the same reason (see plan.md's MH030-P correctness pass).
     wire dec_sysctl_ok = (dec_uop.uclass == UC_SYSCTL)
                       && (dec_uop.subop <= 4'd6)
-                      && !dec_uop.reads_mem && !dec_uop.writes_mem;
+                      && (!dec_uop.reads_mem || (dec_uop.subop == 4'd2)
+                                             || (dec_uop.subop == 4'd3))
+                      && !dec_uop.writes_mem;
     wire dec_ea_class_ok = dec_is_ea_class && dec_ea_ok
                         && (dec_uop.ea_mode != UEA_AN_POST)
                         && (dec_uop.ea_mode != UEA_AN_PRE)
@@ -1972,10 +1981,14 @@ module mh030p_core (
     wire [31:0] sys_rd_val = (ex_uop.subop == 4'd0)
                              ? {ex_b_u[31:16], sr_sys_r, ccr_live}
                              : {ex_b_u[31:16], 8'h00,    ccr_live};
-    // The value going INTO the status register, from a data register or an
-    // immediate.
-    wire [15:0] sys_wr_val = (ex_uop.src_kind == US_IMM) ? ex_uop.imm[15:0]
-                                                         : ex_a_u[15:0];
+    // The value going INTO the status register, from a data register, an
+    // immediate, or memory (MOVE <ea>,CCR / MOVE <ea>,SR with a memory
+    // source). Reuses ex_src_raw's own already-correct general-purpose
+    // operand mux (reads_mem ? mem_hold : imm ? imm : register) rather than
+    // re-deriving the same fallback a second time -- none of ex_src_raw's
+    // own special cases (BCD mem-to-mem, RMW, TST/BTST-on-memory) apply to
+    // UC_SYSCTL, so it reduces to exactly that fallback here.
+    wire [15:0] sys_wr_val = ex_src_raw[15:0];
     // ANDI/ORI/EORI #imm,CCR/SR (sub-op 6): a genuine logical op against the
     // CURRENT system byte + CCR, not a replacement -- the immediate's own
     // upper byte is architecturally meaningless for the CCR-only (byte) form
