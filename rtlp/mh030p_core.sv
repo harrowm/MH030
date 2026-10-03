@@ -1380,7 +1380,17 @@ module mh030p_core (
                 end
             end
         end else if (ex_rmw && mem_got && !rmw_wr_issued && !cas_skip_wr
-                     && !ex_m2m_2rd) begin
+                     && !ex_m2m_2rd
+                     // A memory-form shift/rotate is an RMW too (read,
+                     // shift, write back), but the shift itself is
+                     // SEQUENTIAL (mh030p_shift.sv, up to 63 ticks) -- mem_got
+                     // only means the READ landed, not that the shift has
+                     // produced a result yet. Without this, the write-
+                     // turnaround fired the same cycle the shift started,
+                     // writing back whatever shf_result (still the shifter's
+                     // stale/reset value) happened to hold -- which is how
+                     // every memory-form shift ended up writing all-zero.
+                     && (!ex_is_shf || (shf_started && !shf_busy))) begin
             // Read captured: turn the same address around as a write of the
             // ALU result. The address is already in mem_addr, so only the
             // direction and data change.
@@ -2459,7 +2469,17 @@ module mh030p_core (
             rmw_wr_issued <= 1'b0;          // instruction leaving EX
             rmw_done      <= 1'b0;
         end else if (ex_rmw) begin
-            if (mem_got && !rmw_wr_issued) begin
+            // Mirrors the main dispatch branch's own shift-aware gate above:
+            // this latch and that branch's "has the write actually gone out"
+            // condition must agree, or this one can flip to "issued" before
+            // the write is really sent (a memory-form shift needs its
+            // SEQUENTIAL mh030p_shift.sv to finish first) -- permanently
+            // blocking the real dispatch, since it also checks
+            // !rmw_wr_issued, with no write ever landing and stall_ex never
+            // clearing. Found as a real hang immediately after the dispatch
+            // branch's own shf_busy fix landed.
+            if (mem_got && !rmw_wr_issued
+                && (!ex_is_shf || (shf_started && !shf_busy))) begin
                 rmw_wr_issued <= 1'b1;
                 // A CAS mismatch never issues the write, so it must retire the
                 // sequence here or the stall would never clear.

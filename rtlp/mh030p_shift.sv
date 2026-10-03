@@ -71,6 +71,7 @@ module mh030p_shift (
 
     reg [31:0] val;
     reg [5:0]  rem;
+    reg [5:0]  count_r;
     reg [3:0]  op_r;
     reg [1:0]  siz_r;
     reg        x_r, c_r, v_r;
@@ -83,6 +84,28 @@ module mh030p_shift (
                        : (siz_r == 2'b10) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
     wire [31:0] msb_r  = (siz_r == 2'b01) ? 32'h0000_0080
                        : (siz_r == 2'b10) ? 32'h0000_8000 : 32'h8000_0000;
+    wire [5:0]  size_bits_r = (siz_r == 2'b01) ? 6'd8
+                            : (siz_r == 2'b10) ? 6'd16 : 6'd32;
+    // ASR's own real-silicon quirk (confirmed against rtl/eu_shifter.sv's
+    // own over_shift term): once the count exceeds the operand width, C/X
+    // are defined to be 0 UNCONDITIONALLY, not "whatever the last bit
+    // shifted out happens to be". For ASL/LSL/LSR this falls out naturally
+    // here (the value genuinely converges to all-zero once every real bit
+    // has shifted out, so the next lsb_bit/msb_bit is 0 anyway) -- the
+    // header comment's own claim is right for those three. It is NOT right
+    // for ASR on a NEGATIVE operand: arithmetic-shifting a negative value
+    // past its own width converges to all-ONES (sign-extended), not zero,
+    // so this unit kept reporting C=X=1 forever past size_bits instead of
+    // the required 0. Found via a real Harte regression (ASR.w/.b, "D0,D7"
+    // register-count forms with a large count and a negative operand).
+    // rem, counting DOWN from count_r to 0, is on step (count_r-rem+1) at
+    // the top of a running cycle; the override applies once that step
+    // number exceeds size_bits_r, i.e. once rem <= count_r - size_bits_r
+    // (guarded so the subtraction can't underflow when count_r <=
+    // size_bits_r, the ordinary in-range case where no override ever
+    // applies).
+    wire asr_over_shift = (op_r == SHF_ASR) && (count_r > size_bits_r)
+                       && (rem <= (count_r - size_bits_r));
 
     wire msb_bit = (val & msb_r)  != 32'h0;
     wire lsb_bit = (val & 32'h1)  != 32'h0;
@@ -115,6 +138,7 @@ module mh030p_shift (
         if (!rst_n) begin
             val     <= 32'h0;
             rem     <= 6'd0;
+            count_r <= 6'd0;
             op_r    <= 4'h0;
             siz_r   <= 2'b00;
             x_r     <= 1'b0;
@@ -131,6 +155,7 @@ module mh030p_shift (
             val     <= operand & ((siz == 2'b01) ? 32'h0000_00FF
                                : (siz == 2'b10) ? 32'h0000_FFFF : 32'hFFFF_FFFF);
             rem     <= count;
+            count_r <= count;
             op_r    <= op;
             siz_r   <= siz;
             x_r     <= x_in;
@@ -144,7 +169,9 @@ module mh030p_shift (
                 SHF_ASL:  begin val <= step_asl;  c_r <= msb_bit; x_r <= msb_bit;
                                 if (asl_v_step) v_r <= 1'b1; end
                 SHF_LSL:  begin val <= step_lsl;  c_r <= msb_bit; x_r <= msb_bit; end
-                SHF_ASR:  begin val <= step_asr;  c_r <= lsb_bit; x_r <= lsb_bit; end
+                SHF_ASR:  begin val <= step_asr;
+                                c_r <= asr_over_shift ? 1'b0 : lsb_bit;
+                                x_r <= asr_over_shift ? 1'b0 : lsb_bit; end
                 SHF_LSR:  begin val <= step_lsr;  c_r <= lsb_bit; x_r <= lsb_bit; end
                 // ROL and ROR do not touch X.
                 SHF_ROL:  begin val <= step_rol;  c_r <= msb_bit; end
