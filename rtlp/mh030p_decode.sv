@@ -43,7 +43,11 @@ module mh030p_decode (
     // from uop.*. Not read by mh030p_cpu.sv or mh030p_ifu.sv -- wired only
     // into tb/uop_decode_equiv_tb.sv (correctness oracle) and a dedicated
     // fmax probe (depth measurement) until it is verified and swapped in.
-    output logic [2:0] ext_words_fast_o
+    output logic [2:0] ext_words_fast_o,
+    // Stage 1, part 2: the brief leg above plus the full-format addendum,
+    // i.e. the complete independent replacement for uop.ext_words. Same
+    // scaffold status as ext_words_fast_o.
+    output logic [2:0] ext_words_fast_full_o
 );
 
     // ── Positional extension-word access, normalisation-free ────────────────
@@ -676,6 +680,175 @@ module mh030p_decode (
     // y = f()` updated correctly). always_comb's own sensitivity analysis
     // does not have this gap.
     always_comb ext_words_fast_o = ext_words_fast();
+
+    // ── Shallow full-format addendum (Stage 1, part 2) ───────────────────────
+    // Same idea as ext_words_fast() above, extended to the full-format extra
+    // words: computed from raw wires only, never from uop.ea_mode/
+    // uop.dst_ea_mode, so it stays parallel with the classifier instead of
+    // serial after it.
+    //
+    // The real decoder's src_ff/dst_ff check (further below, in the real
+    // decode block) tests uop.ea_mode/uop.dst_ea_mode -- the EFFECTIVE,
+    // possibly-overridden EA mode -- not the raw ea_mode_w/ea_dst_mode_w.
+    // These two are equal for essentially every family (confirmed case by
+    // case while writing ext_words_fast() above: every branch that uses a
+    // real EA sets uop.ea_mode = ea_mode_w directly). The one family where
+    // they genuinely diverge is MOVE: when the source needs no address of
+    // its own (register or immediate), the EA slot holds the DESTINATION's
+    // raw field instead (`ea_slot_is_dst` in the real decode block), and a
+    // genuine memory-to-memory MOVE additionally has a real
+    // uop.dst_ea_mode = ea_dst_mode_w, which no other family ever sets to
+    // anything but NONE/AN_PRE/AN_POST -- none of which are AN_IDX or
+    // PC_IDX, the only two modes src_ff/dst_ff ever test for, so returning
+    // NONE for every other family's dst_ea_mode_eff is exact, not an
+    // approximation.
+    // A first version of this function returned `ea_mode_w` for every
+    // non-MOVE group unconditionally, reasoning that every family using a
+    // real EA sets uop.ea_mode = ea_mode_w while every family that does NOT
+    // happens to have ea_mode_w read as NONE anyway. That second half is
+    // true only when the family's own guard actually CONSTRAINS instr[5:3]
+    // to a register-direct encoding (e.g. src_is_dn appears in the guard
+    // itself) -- it does not hold for a family whose low bits are not an EA
+    // field AT ALL (Bcc's displacement, MOVEQ's immediate, the shift
+    // REGISTER form's count-source/op-select bits, sys_is_misc's own fixed
+    // instr[5:3]==110, MOVEC's fixed instr[15:1]), where instr[5:3] can
+    // still coincidentally read as AN_IDX (110) or, for MOVEC specifically,
+    // f_reg can read as PC_IDX -- confirmed by the equivalence sweep
+    // (tb/uop_decode_equiv_tb.sv's ext_words_fast_full check), which found
+    // 24,381 mismatches concentrated exactly in groups 6/7/A/F (thousands
+    // each) plus part of 4 and E, the first version's blind spot. Each
+    // branch below is therefore explicit about whether its own guard
+    // genuinely constrains the EA field or merely happens to read something
+    // -- it is not "ea_mode_w unless proven otherwise".
+    function automatic logic [3:0] ea_mode_eff_fast();
+        logic move_ok1_e, move_ok2_e, move_accepted;
+        begin
+            case (f_group)
+            4'h0: begin
+                if ((g0_is_dynbit && ea_is_alt_mem) || (g0_is_statbit && ea_is_alt_mem)
+                    || g0_is_cmp2 || g0_is_cas || g0_is_moves
+                    || (g0_is_alu_imm && ea_is_alt_mem && f_ss_valid))
+                    ea_mode_eff_fast = ea_mode_w;
+                else
+                    ea_mode_eff_fast = UEA_NONE;
+            end
+            4'h1, 4'h2, 4'h3: begin
+                move_ok1_e = (ea_src_ok || ea_dst_is_mem)
+                          && !((f_movesz == 2'b01) && (src_is_an || dst_is_an))
+                          && (ea_src_ok || src_is_dn || src_is_an)
+                          && (ea_dst_is_mem || dst_is_dn || dst_is_an);
+                move_ok2_e = (src_is_dn || src_is_an) && (dst_is_dn || dst_is_an)
+                          && !((f_movesz == 2'b01) && (src_is_an || dst_is_an));
+                move_accepted = move_ok1_e || move_ok2_e;
+                if (!move_accepted)
+                    ea_mode_eff_fast = UEA_NONE;
+                else if (move_ok1_e && ea_dst_is_mem && (!ea_src_ok || ea_is_imm))
+                    ea_mode_eff_fast = ea_dst_mode_w;
+                else if (move_ok1_e)
+                    ea_mode_eff_fast = ea_mode_w;
+                else
+                    ea_mode_eff_fast = UEA_NONE;   // move_ok2: register-only
+            end
+            4'h4: begin
+                // g4_is_movec and sys_is_misc are both checked EXPLICITLY
+                // (not folded into the "else NONE") because their own
+                // instr[5:3]/f_reg happen to read as AN_IDX (sys_is_misc,
+                // by construction: instr[5:3]==110) or PC_IDX (MOVEC Rn,Rc,
+                // 0x4E7B: f_reg reads 011 from the fixed 0x4E7A/B pattern)
+                // -- real values, not noise, that must not be mistaken for
+                // a genuine indexed EA this family does not have.
+                if ((ea_is_alt_mem && f_ss_valid
+                     && (g4_is_neg || g4_is_not || g4_is_clr
+                      || g4_is_tst || g4_is_negx))
+                    || g4_is_chk
+                    || (g4_is_sr_move && (ea_is_alt_mem || src_is_dn
+                                          || (!g4_sr_to_ea && ea_src_ok)))
+                    || (g4_is_nbcd && ea_is_alt_mem)
+                    || g4_is_tas || g4_is_pea || g4_is_lea || g4_is_movem
+                    || g4_is_jsr || g4_is_jmp)
+                    ea_mode_eff_fast = ea_mode_w;
+                else
+                    ea_mode_eff_fast = UEA_NONE;
+            end
+            4'h5: begin
+                if ((g5_is_cc && ea_is_alt_mem) || (ea_is_alt_mem && f_ss_valid))
+                    ea_mode_eff_fast = ea_mode_w;
+                else
+                    ea_mode_eff_fast = UEA_NONE;
+            end
+            // Bcc/MOVEQ/F-line/A-line: instr[5:0] is not an EA field for any
+            // of these (displacement, immediate, CpID+primitive, or nothing
+            // at all) -- always NONE, regardless of what it decodes to.
+            4'h6, 4'h7, 4'hF, 4'hA: ea_mode_eff_fast = UEA_NONE;
+            4'h8, 4'h9, 4'hB, 4'hC, 4'hD: begin
+                if ((g_is_muldiv && (src_is_dn || ea_src_ok))
+                    || (g_is_xxxa && (ea_src_ok || src_is_dn || src_is_an))
+                    || (f_dir && ea_is_alt_mem && f_ss_valid)
+                    || (ea_src_ok && !f_dir && f_ss_valid))
+                    ea_mode_eff_fast = ea_mode_w;
+                else
+                    ea_mode_eff_fast = UEA_NONE;
+            end
+            4'hE: begin
+                // The shift REGISTER form's own guard (f_ss_valid alone,
+                // after excluding bit-field and memory-shift) does not
+                // constrain instr[5:3] at all -- those bits are the
+                // count-source and operation select there, not an EA field.
+                if (g_is_bf && (src_is_dn || (ea_mode_w == UEA_AN_IND)
+                                          || (ea_mode_w == UEA_AN_D16)
+                                          || (ea_mode_w == UEA_ABS_W)
+                                          || (ea_mode_w == UEA_PC_D16)))
+                    ea_mode_eff_fast = ea_mode_w;
+                else if (ea_is_alt_mem && (f_ss == 2'b11) && e_mem_legal)
+                    ea_mode_eff_fast = ea_mode_w;
+                else
+                    ea_mode_eff_fast = UEA_NONE;
+            end
+            default: ea_mode_eff_fast = UEA_NONE;
+            endcase
+        end
+    endfunction
+
+    function automatic logic [3:0] dst_ea_mode_eff_fast();
+        begin
+            dst_ea_mode_eff_fast =
+                (((f_group == 4'h1) || (f_group == 4'h2) || (f_group == 4'h3))
+                 && ea_dst_is_mem && ea_src_ok && !ea_is_imm)
+                ? ea_dst_mode_w : UEA_NONE;
+        end
+    endfunction
+
+    // A function-calling-function version of this (ext_words_fast_full()
+    // calling ext_words_fast() and ea_mode_eff_fast()) made Yosys's `proc`
+    // pass fail with "Non-constant expression in constant function" --
+    // apparently a real limitation on two levels of automatic-function
+    // nesting, not anything to do with these functions' own content (each
+    // one synthesizes fine alone, as ext_words_fast_o already proved).
+    // Rewritten as a plain always_comb reusing ext_words_fast_o (already
+    // computed above) instead of calling ext_words_fast() a second time,
+    // with only single-level calls to ea_mode_eff_fast()/
+    // dst_ea_mode_eff_fast()/rawword()/ff_extra() -- the same calling shape
+    // the real decode block below already uses without issue.
+    logic [2:0] fff_lead, fff_srct, fff_dstat;
+    logic [15:0] fff_srcw, fff_dstw;
+    logic        fff_sff, fff_dff;
+    logic [3:0]  fff_eam, fff_deam;
+    always_comb begin
+        fff_eam   = ea_mode_eff_fast();
+        fff_deam  = dst_ea_mode_eff_fast();
+        fff_lead  = (ext_words_fast_o > (src_ea_words + dst_ea_words))
+                    ? (ext_words_fast_o - src_ea_words - dst_ea_words) : 3'd0;
+        fff_srcw  = rawword(fff_lead);
+        fff_sff   = ((fff_eam == UEA_AN_IDX) || (fff_eam == UEA_PC_IDX))
+                    && fff_srcw[8];
+        fff_srct  = src_ea_words + (fff_sff ? ff_extra(fff_srcw) : 3'd0);
+        fff_dstat = fff_lead + fff_srct;
+        fff_dstw  = rawword(fff_dstat);
+        fff_dff   = (fff_deam == UEA_AN_IDX) && fff_dstw[8];
+        ext_words_fast_full_o = ext_words_fast_o
+                               + (fff_sff ? ff_extra(fff_srcw) : 3'd0)
+                               + (fff_dff ? ff_extra(fff_dstw) : 3'd0);
+    end
 
     // ── Decode ──────────────────────────────────────────────────────────────
     // Scratch for the central EA fill-in at the end of the decode block.

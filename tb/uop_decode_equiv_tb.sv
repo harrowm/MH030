@@ -159,6 +159,8 @@ module uop_decode_equiv_tb;
     integer ff_checked = 0;
     integer ff_bad = 0;
     integer ff_grp [0:15];
+    integer ew_full_bad;
+    integer ew_full_grp [0:15];
     logic [15:0] ffw;
     logic [2:0] ew_ref;
     integer gap_by_group [0:15];
@@ -213,6 +215,8 @@ module uop_decode_equiv_tb;
         // every real miscount. 0xA4A5 differs only in that bit and is still
         // asymmetric against the low half.
         for (ffv = 0; ffv < 16; ffv = ffv + 1) ff_grp[ffv] = 0;
+        for (ffv = 0; ffv < 16; ffv = ffv + 1) ew_full_grp[ffv] = 0;
+        ew_full_bad = 0;
         ext = 32'hA4A5_3C7F;
         ext_rawv = 32'hA4A5_3C7F;
         q3w = 16'h5A91;
@@ -554,6 +558,19 @@ module uop_decode_equiv_tb;
                         ff_grp[i[15:12]] = ff_grp[i[15:12]] + 1;
                     end
                 end
+                // ext_words_fast_full_o vs the REAL (correct) oracle here --
+                // u_new's own uop.ext_words, not old_ext_words -- checked for
+                // EVERY opcode including UC_UNIMPL, same rigor as the brief
+                // pass above. This is the real correctness gate for the
+                // full-format addendum; the pass above (against old_ext_words)
+                // is reporting-only and uses a known-wrong oracle.
+                if (u_new.ext_words_fast_full_o !== uop.ext_words) begin
+                    if (ew_full_bad < 20)
+                        $display("EXTWORDS-FAST-FULL-MISMATCH op=%04h ffv=%0d fast=%0d real=%0d",
+                                 instr, ffv, u_new.ext_words_fast_full_o, uop.ext_words);
+                    ew_full_bad = ew_full_bad + 1;
+                    ew_full_grp[i[15:12]] = ew_full_grp[i[15:12]] + 1;
+                end
             end
         end
         ext = 32'hA4A5_3C7F; ext_rawv = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
@@ -562,6 +579,12 @@ module uop_decode_equiv_tb;
         $write("    disagreements by opcode group:");
         for (ffv = 0; ffv < 16; ffv = ffv + 1)
             if (ff_grp[ffv] != 0) $write("  %1h:%0d", ffv[3:0], ff_grp[ffv]);
+        $display("");
+        $display("  ext_words_fast_full (all opcodes, 8 shapes) vs real: %s (%0d differ)",
+                 (ew_full_bad == 0) ? "yes" : "NO", ew_full_bad);
+        $write("    disagreements by opcode group:");
+        for (ffv = 0; ffv < 16; ffv = ffv + 1)
+            if (ew_full_grp[ffv] != 0) $write("  %1h:%0d", ffv[3:0], ew_full_grp[ffv]);
         $display("");
         // REPORTING ONLY, deliberately. The reference is NOT trustworthy here:
         // for MOVE with an indexed EA at BOTH ends it counts 2 words in brief
