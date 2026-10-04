@@ -1344,6 +1344,17 @@ module mh030p_decode (
                 uop.src_kind    = src_is_dn ? US_DREG :
                                   ea_is_imm  ? US_IMM  : US_MEM;
                 uop.src_reg     = rn_src_dn;
+                // CHK #imm,Dn's own bound was never populated at all --
+                // src_kind correctly says US_IMM but nothing ever wrote
+                // uop.imm, so the bound was always 0. Safe to take `ext`
+                // directly (no position-aware extraction needed, unlike the
+                // ALU-immediate/MOVE-immediate fixes elsewhere this session):
+                // CHK's own EA field encodes the immediate itself when
+                // ea_is_imm, so there is no OTHER real EA concurrently
+                // consuming extension words to collide with, the same
+                // reasoning that already applies to the ADDA/SUBA/CMPA
+                // immediate form a few lines below.
+                uop.imm         = ext;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
                 uop.reads_mem   = !ea_is_imm && !src_is_dn;
