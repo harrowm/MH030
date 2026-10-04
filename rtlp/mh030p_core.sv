@@ -387,6 +387,43 @@ module mh030p_core (
                             && (((ex_uop.uclass == UC_SCC) && ex_uop.writes_mem)
                              || ((ex_uop.uclass == UC_SYSCTL) && ex_uop.writes_mem
                                                               && (ex_uop.subop <= 4'd1)));
+
+    // ── AG/EX EA-adder split (~/.claude/plans/golden-puzzling-music.md) ─────
+    // EX-side mirrors of the AG-side uclass/subop flags the dispatch branch
+    // below needs, declared this early for the same reason
+    // ex_needs_scc_sys_wr is: the AG->EX always_ff needs them and Icarus
+    // requires declaration before use within an always_ff, unlike a plain
+    // continuous assign. "_e" suffix throughout, matching this file's own
+    // established convention for an EX-side twin of an AG-side wire.
+    wire ex_ea_class_e      = (ex_uop.uclass == UC_LEA) || (ex_uop.uclass == UC_JMP);
+    wire ex_is_push_e       = ex_ea_class_e && ex_uop.writes_mem;
+    wire ex_is_jsr_e        = (ex_uop.uclass == UC_JMP) && ex_uop.writes_mem;
+    wire ex_is_link_e       = (ex_uop.uclass == UC_LINK) && (ex_uop.subop == 4'd0);
+    wire ex_is_unlk_e       = (ex_uop.uclass == UC_LINK) && (ex_uop.subop == 4'd1);
+    wire ex_is_bsr_e        = (ex_uop.uclass == UC_BRANCH) && (ex_uop.cond == 4'h1);
+    wire ex_trap_no_ea_e    = (ex_uop.uclass == UC_TRAP)
+                           && (ex_uop.subop != 4'd2) && (ex_uop.subop != 4'd3);
+    wire ex_is_scc_mem_e    = (ex_uop.uclass == UC_SCC) && ex_uop.writes_mem;
+    wire ex_is_sys_wr_mem_e = (ex_uop.uclass == UC_SYSCTL) && ex_uop.writes_mem
+                           && (ex_uop.subop <= 4'd1);
+    wire [1:0] ex_opnd_siz_e = ex_uop.opnd_word ? UZ_WORD : ex_uop.siz;
+
+    // One-shot gate, structurally identical to the trap_decided precedent
+    // below: the EA adder and the mem_addr/mem-field dispatch mux run ONE
+    // CYCLE AFTER the plain AG->EX transfer rather than in the same cycle,
+    // reading ex_b/ex_sp/ex_a/ex_pc2 -- already fully forwarded and
+    // interlock-protected by the time they land, since the transfer that
+    // writes them is unconditional -- instead of a live register read.
+    // ex_is_movem/ex_is_movep genuinely need this too (their own FSMs seed
+    // from ex_ea: mvm_addr/mvp_addr), confirmed by reading their own `!*_run`
+    // branches directly -- the plan that first proposed this split predates
+    // this session's MOVEM fix and assumed otherwise; both fall out of the
+    // generic reads_mem||writes_mem term below with no special-casing needed.
+    reg        ea_done;
+    wire       ex_needs_ea = ex_valid
+                          && (ex_uop.reads_mem || ex_uop.writes_mem || ex_ea_class_e)
+                          && !ex_trap_no_ea_e;
+    wire       ex_wait_ea  = ex_needs_ea && !ea_done;
     // Declared here because the stall below uses mem_got; assigned further
     // down beside the bus request.
     reg        mem_got;
@@ -966,8 +1003,13 @@ module mh030p_core (
 
     // Everything an instruction waits for that is NOT an exception decision:
     // its own operands, its own multi-cycle sequence. All cheap flags.
+    // ex_wait_ea is NOT redundant with ex_wait_mem here: LEA/JMP need an EA
+    // but issue no bus cycle at all (reads_mem/writes_mem both 0), so
+    // ex_wait_mem's own formula never covers them -- without this term,
+    // `redirect`'s own `!stall_ex && ex_is_jmp` fired one cycle early, using
+    // ex_ea before the new EA-dispatch branch had computed it.
     wire ex_other_stall = ex_wait_mem || ex_wait_div || ex_wait_mul || ex_wait_shf
-                       || ex_wait_rte || ex_wait_cmp2
+                       || ex_wait_rte || ex_wait_cmp2 || ex_wait_ea
                        || (ex_is_movem && !mvm_done)
                        || (ex_is_movep && !mvp_done);
 
@@ -989,12 +1031,24 @@ module mh030p_core (
     // and to raise the mask. Needs stall_ex, so it sits after it.
     wire int_dispatched = exc_isint_r && exc_taken && !stall_ex;
 
+    // Third write port's connections, pre-declared here (plain wires, driven
+    // by a continuous assign near ag_an_upd's own declaration) rather than
+    // wired directly to ag_an_upd/ag_an_val at point of use below -- Icarus
+    // requires a wire's declaration to precede any reference to it, and
+    // ag_an_upd/ag_an_val are declared much later in AG's own EA-computation
+    // block. Mirrors how wb_wr_en/wb_wr_sel/wb_wr_data (used below, assigned
+    // near the bottom of the file) already solve the identical problem.
+    wire        wr3_en;
+    wire [3:0]  wr3_sel;
+    wire [31:0] wr3_data;
+
     // A7 as of right now, including a commit landing this very cycle. Same
     // shape as the register file's own write-first bypass, and needed for the
     // same reason: the exception sequence reads A7 in the cycle its
     // predecessor's write to A7 is still in flight.
     wire [31:0] sp_live = (wb_wr_en && (wb_wr_sel == 4'd15)) ? wb_wr_data
                         : (wb2_en   && (wb2_sel   == 4'd15)) ? wb2_data
+                        : (wr3_en   && (wr3_sel   == 4'd15)) ? wr3_data
                                                              : sp_shadow;
     // The frame base, held for the whole sequence: an older commit to A7 can
     // land during the stall, and the frame must not move under it.
@@ -1004,6 +1058,7 @@ module mh030p_core (
         if (!rst_n)                                   sp_shadow <= 32'h0;
         else if (wb_wr_en && (wb_wr_sel == 4'd15))    sp_shadow <= wb_wr_data;
         else if (wb2_en   && (wb2_sel   == 4'd15))    sp_shadow <= wb2_data;
+        else if (wr3_en   && (wr3_sel   == 4'd15))    sp_shadow <= wr3_data;
     end
 
     // ── Register file: address in ID, data in AG ────────────────────────────
@@ -1062,7 +1117,14 @@ module mh030p_core (
         .wr_data  (wb_wr_data),
         .wr2_en   (wb2_en),
         .wr2_sel  (wb2_sel),
-        .wr2_data (wb2_data)
+        .wr2_data (wb2_data),
+        // Third port, dedicated to ag_an_upd -- see mh030p_regfile.sv's own
+        // header for why it must not share a port with anything else. Driven
+        // via wr3_en/wr3_sel/wr3_data, assigned further down (see their own
+        // declaration above for why).
+        .wr3_en   (wr3_en),
+        .wr3_sel  (wr3_sel),
+        .wr3_data (wr3_data)
     );
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
@@ -1258,8 +1320,9 @@ module mh030p_core (
     // !redirect: without this, an instruction sitting in AG that is ABOUT TO
     // BE SQUASHED this exact cycle (a branch/jump/return resolving in EX right
     // now) could still commit its own autoincrement/predecrement side effect,
-    // since this is a same-cycle combinational commit (via wb_wr_en below),
-    // not something redirect's own ag_valid-clearing can undo after the fact.
+    // since this is a same-cycle combinational commit (via its own dedicated
+    // write port below), not something redirect's own ag_valid-clearing can
+    // undo after the fact.
     // Latent since this wire was written; only became externally visible once
     // Scc,<ea> and MOVE SR/CCR,<ea> became executable (this session), because
     // a speculatively-fetched GHOST opcode decoding as one of those with an
@@ -1274,15 +1337,61 @@ module mh030p_core (
                   && ((ag_uop.ea_mode == UEA_AN_POST)
                    || (ag_uop.ea_mode == UEA_AN_PRE));
 
+    // Drives the third write port's wires, pre-declared earlier (see their
+    // own declaration for why this can't be inline at the u_rf instantiation).
+    assign wr3_en   = ag_an_upd;
+    assign wr3_sel  = ag_uop.ea_reg;
+    assign wr3_data = ag_an_val;
+
     // ── AG -> EX, plus the registered bus request ───────────────────────────
     reg [31:0] ex_a, ex_b;
     // The computed effective address, carried forward. LEA commits it as a
-    // result, JMP/JSR redirect to it, PEA pushes it.
+    // result, JMP/JSR redirect to it, PEA pushes it. UNLIKE ex_a/ex_b/ex_sp,
+    // this is no longer an unconditional pass-through of the AG stage's own
+    // ag_ea -- it is written exactly once, by the EA-dispatch branch below,
+    // one cycle after the plain transfer (ex_wait_ea/ea_done), and then held
+    // stable for every later consumer in this file.
     reg [31:0] ex_ea;
     // The C port, carried forward. For a push it holds A7.
     reg [31:0] ex_sp;
     // The destination's scaled index term (memory-to-memory, indexed dst).
     reg [31:0] ex_didx;
+    // Plain pass-through of ag_pc2, needed one cycle later by the EA-dispatch
+    // branch's own PC-relative arm (ag_pc2 itself is already a stage-early
+    // retimed register, same precedent this mirrors one stage further).
+    reg [31:0] ex_pc2;
+
+    // ── EX-side EA adder, verbatim mirror of the AG-side ea_base/ag_ea chain
+    // above, reading ex_b/ex_sp/ex_a/ex_pc2/ex_uop (already fully forwarded,
+    // one cycle on) instead of ag_b/ag_c/ag_a/ag_pc2/ag_uop. See
+    // ~/.claude/plans/golden-puzzling-music.md.
+    wire ex_pc_rel_e = (ex_uop.ea_mode == UEA_PC_D16) || (ex_uop.ea_mode == UEA_PC_IDX);
+    wire [31:0] ex_pc_lead_e =
+        (((ex_uop.uclass == UC_BITOP) && (ex_uop.subop == 4'd1))
+         || (ex_uop.uclass == UC_MOVEM)) ? 32'd2 : 32'd0;
+    wire [31:0] ex_ea_base_e = ((ex_uop.ea_mode == UEA_ABS_W)
+                             || (ex_uop.ea_mode == UEA_ABS_L)) ? 32'h0
+                             : ex_uop.ea_bs                    ? 32'h0
+                             : ex_pc_rel_e                     ? (ex_pc2 + ex_pc_lead_e)
+                                                               : ex_b;
+    wire [31:0] ex_step_e = (ex_opnd_siz_e == UZ_BYTE)
+                            ? ((ex_uop.ea_reg == 4'd15) ? 32'd2 : 32'd1)
+                          : (ex_opnd_siz_e == UZ_WORD) ? 32'd2 : 32'd4;
+    wire [31:0] ex_adj_e = (ex_uop.ea_mode == UEA_AN_PRE) ? (32'h0 - ex_step_e) : 32'h0;
+    // ex_sp is ex_b's own sibling: whatever ag_c held at dispatch, forwarded
+    // the same unconditional way -- A7 for a push, Xn otherwise. ex_push_idx_e
+    // mirrors ag_push_idx: a push's own index register was read through the A
+    // port instead, since C is reserved for A7 on a push.
+    wire ex_push_idx_e = ex_is_push_e && ((ex_uop.ea_mode == UEA_AN_IDX)
+                                        || (ex_uop.ea_mode == UEA_PC_IDX));
+    wire [31:0] ex_xn_src_e = ex_push_idx_e ? ex_a : ex_sp;
+    wire [31:0] ex_xn_e = ex_uop.ea_idx_long ? ex_xn_src_e
+                                             : {{16{ex_xn_src_e[15]}}, ex_xn_src_e[15:0]};
+    wire [31:0] ex_idx_e = (((ex_uop.ea_mode == UEA_AN_IDX)
+                          || (ex_uop.ea_mode == UEA_PC_IDX)) && !ex_uop.ea_is)
+                         ? (ex_xn_e << ex_uop.ea_idx_scale) : 32'h0;
+    wire [31:0] ex_adj_idx_e = (ex_uop.ea_mode == UEA_AN_PRE) ? ex_adj_e : ex_idx_e;
+    wire [31:0] ex_ea_comb = ex_ea_base_e + ex_uop.ea_disp + ex_adj_idx_e;
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -1293,6 +1402,8 @@ module mh030p_core (
             ex_ea    <= 32'h0;
             ex_sp    <= 32'h0;
             ex_didx  <= 32'h0;
+            ex_pc2   <= 32'h0;
+            ea_done  <= 1'b0;
             mem_req  <= 1'b0;
             mem_addr <= 32'h0;
             mem_rw   <= 1'b1;
@@ -1301,38 +1412,55 @@ module mh030p_core (
         end else if (!stall_ex) begin
             ex_valid <= ag_valid && !stall_ag && !redirect;
             ex_pc    <= ag_pc;
+            ex_pc2   <= ag_pc2;
             ex_uop   <= ag_uop;
             ex_a     <= ag_a;
             ex_didx  <= ag_didx;
             ex_b     <= ag_b;
-            ex_ea    <= ag_ea;
             ex_sp    <= ag_c;
-            // Gated by !stall_ag as well as ex_valid: while AG is held for
-            // the address-base interlock its EA is still computed from the
-            // stale base, so issuing the request there sends a wrong address.
-            // That is exactly what happened -- the first memory access went
-            // out with addr=0 before A3 had been written.
-            mem_req  <= ag_valid && (ag_uop.reads_mem || ag_uop.writes_mem)
-                                 && !stall_ag && !ag_trap_no_ea && !ag_is_movem
-                                 && !ag_is_movep
-                                 && !ag_is_scc_mem && !ag_is_sys_wr_mem;
+            // ex_ea is NOT written here any more -- see its own declaration
+            // comment. ea_done resets so the new instruction's EA-dispatch
+            // branch below runs exactly once, next cycle.
+            ea_done  <= 1'b0;
+            // No bus request yet: the address isn't computed until the
+            // EA-dispatch branch below runs, one cycle after this transfer.
+            mem_req  <= 1'b0;
+        end else if (ex_wait_ea) begin
+            // The EA adder and the mem_addr/mem-field dispatch mux, split
+            // into their own cycle -- see ~/.claude/plans/golden-puzzling-
+            // music.md. ex_b/ex_sp/ex_a/ex_pc2 are exactly the values
+            // ag_b/ag_c/ag_a/ag_pc2 already carried into THIS cycle via the
+            // unconditional transfer above; nothing here re-derives them
+            // from a live register read, so the existing forwarding network
+            // and ag_base_busy interlock (both still pinned to AG's own
+            // cycle, untouched) already guarantee they are correct by the
+            // time they land.
+            ea_done  <= 1'b1;
+            ex_ea    <= ex_ea_comb;
+            // Mirrors the old top branch's own mem_req exactly, one cycle
+            // later and reading the EX-side flags: !stall_ag no longer
+            // applies (that interlock already resolved, back in AG, before
+            // this instruction could reach EX at all).
+            mem_req  <= (ex_uop.reads_mem || ex_uop.writes_mem)
+                     && !ex_trap_no_ea_e && !ex_is_movem && !ex_is_movep
+                     && !ex_is_scc_mem_e && !ex_is_sys_wr_mem_e;
             // A push goes to -(A7); everything else to the computed EA.
             // LINK pushes the old frame pointer below A7; UNLK pops from
             // wherever An points. Neither address comes from the EA adder.
-            mem_addr <= (ag_is_push || ag_is_link) ? (ag_c - 32'd4)
-                      : ag_is_unlk                 ? ag_b
-                                                   : ag_ea;
+            mem_addr <= (ex_is_push_e || ex_is_link_e) ? (ex_sp - 32'd4)
+                      : ex_is_unlk_e                   ? ex_b
+                                                       : ex_ea_comb;
             // Read if the instruction reads, regardless of whether it also
             // writes: an RMW's FIRST bus cycle is the read, and the write is
             // turned around later from EX. Deriving this from writes_mem made
             // every RMW start with a write.
-            mem_rw   <= ag_uop.reads_mem;
+            mem_rw   <= ex_uop.reads_mem;
             // The bus access follows the OPERAND size, not the write size. They
             // differ for MOVEA.W, ADDA.W, SUBA.W, CMPA.W and the word MUL/DIV,
             // all of which write 32 bits from a 16-bit operand. A return that
             // pops a status word reads a WORD too; the PC that follows is a
             // separate longword, issued from EX.
-            mem_siz  <= ag_is_rte ? UZ_WORD : ag_opnd_siz;
+            mem_siz  <= ex_is_rte ? UZ_WORD : ex_opnd_siz_e;
             // A pure write's data is the source operand, which AG already
             // has: the A port for a register source, or the immediate.
             // BSR stores the RETURN ADDRESS, not a register: the address of
@@ -1340,23 +1468,23 @@ module mh030p_core (
             // own extension words.
             // JSR pushes the same return address BSR does. PEA pushes the
             // effective address itself, which is the whole point of it.
-            mem_wdata<= (ag_is_bsr || ag_is_jsr)
-                        ? (ag_pc2 + {27'h0, ag_uop.ext_words, 1'b0})
-                      : ag_is_push ? ag_ea
+            mem_wdata<= (ex_is_bsr_e || ex_is_jsr_e)
+                        ? (ex_pc2 + {27'h0, ex_uop.ext_words, 1'b0})
+                      : ex_is_push_e ? ex_ea_comb
                       // LINK pushes the OLD An value -- except LINK A7 itself,
                       // where the real chip pushes the stack pointer AFTER its
-                      // own decrement (ag_c-4, the same value going to
+                      // own decrement (ex_sp-4, the same value going to
                       // mem_addr/the new SP), not the pre-decrement value that
-                      // ag_b would otherwise forward. (68k PRM: "If the
+                      // ex_b would otherwise forward. (68k PRM: "If the
                       // register is also the stack pointer, the value saved is
                       // the SP after it has been decremented.")
-                      : ag_is_link ? ((ag_uop.dst_reg == 4'd15) ? (ag_c - 32'd4)
-                                                                : ag_b)
+                      : ex_is_link_e ? ((ex_uop.dst_reg == 4'd15) ? (ex_sp - 32'd4)
+                                                                  : ex_b)
                       // CLR writes zero. A pure write takes its data from AG,
                       // which would otherwise send whatever the A port held.
-                      : ((ag_uop.uclass == UC_ALU) && (ag_uop.alu_op == UA_CLR))
+                      : ((ex_uop.uclass == UC_ALU) && (ex_uop.alu_op == UA_CLR))
                         ? 32'h0
-                      : (ag_uop.src_kind == US_IMM) ? ag_uop.imm : ag_a;
+                      : (ex_uop.src_kind == US_IMM) ? ex_uop.imm : ex_a;
         end else if (ex_needs_scc_sys_wr && !scc_sys_wr_issued) begin
             // The deferred write ag_is_scc_mem/ag_is_sys_wr_mem held back:
             // cond_true and sr_sys_r/ccr_live both need the CCR/system byte
@@ -2384,7 +2512,13 @@ module mh030p_core (
             mvp_idx  <= 3'd0;
             mvp_run  <= 1'b0;
             mvp_done <= 1'b0;
-        end else if (!mvp_run) begin
+        // ea_done: this FSM seeds mvp_addr from ex_ea, which the AG/EX
+        // EA-adder split (~/.claude/plans/golden-puzzling-music.md) no
+        // longer computes in the same cycle ex_is_movep first goes true --
+        // without this, MOVEP seeded from whatever ex_ea held from the
+        // PREVIOUS instruction. Simply not matching any branch for the one
+        // ea_done=0 cycle is correct: everything here just holds.
+        end else if (!mvp_run && ea_done) begin
             mvp_run  <= 1'b1;
             mvp_addr <= ex_ea;
             mvp_sh   <= mvp_sh_init;
@@ -2409,7 +2543,11 @@ module mh030p_core (
             mvm_run   <= 1'b0;
             mvm_done  <= 1'b0;
             mvm_ready <= 1'b0;
-        end else if (!mvm_run) begin
+        // ea_done: see MOVEP's own identical note just above -- this FSM
+        // seeds mvm_addr from ex_ea too (for every mode but AN_PRE), which
+        // is not valid until the AG/EX EA-adder split's own dispatch branch
+        // has run.
+        end else if (!mvm_run && ea_done) begin
             mvm_run   <= 1'b1;           // latch the starting address
             // ex_b (the raw base register) is only the right seed for
             // register-indirect modes. For every other mode MOVEM accepts
@@ -2614,7 +2752,14 @@ module mh030p_core (
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n)          scc_sys_wr_issued <= 1'b0;
         else if (!stall_ex)  scc_sys_wr_issued <= 1'b0;   // instruction leaving EX
-        else if (ex_needs_scc_sys_wr) scc_sys_wr_issued <= 1'b1;
+        // ea_done: ex_needs_scc_sys_wr goes true as soon as ex_valid does,
+        // one cycle BEFORE the AG/EX EA-adder split's own dispatch branch
+        // computes ex_ea now -- without this, this tracker set the "already
+        // issued" flag during that one ex_wait_ea cycle, so the real
+        // dispatch branch's own `!scc_sys_wr_issued` guard (right below)
+        // was already false by the time ex_ea was actually ready, and the
+        // deferred write never issued at all.
+        else if (ex_needs_scc_sys_wr && ea_done) scc_sys_wr_issued <= 1'b1;
     end
 
     // EXG swaps, LINK sets An and A7, UNLK restores An and A7. The register
@@ -2746,19 +2891,23 @@ module mh030p_core (
     wire mvm_base_commit = ex_is_movem && mvm_run && mvm_done
                         && ((ex_uop.ea_mode == UEA_AN_POST)
                          || (ex_uop.ea_mode == UEA_AN_PRE));
-    assign wb_wr_en   = (wb_valid && wb_writes) || ag_an_upd || exc_commit_sp
+    // ag_an_upd no longer competes here -- it has its own dedicated port
+    // (wr3, see the u_rf instantiation and mh030p_regfile.sv's own header)
+    // precisely because it is a DIFFERENT, AG-stage instruction's own commit
+    // and was silently discarding whichever of these arms lost the mux.
+    assign wb_wr_en   = (wb_valid && wb_writes) || exc_commit_sp
                       || mvm_reg_wr || mvm_base_commit || rst_commit_sp;
     assign wb_wr_sel  = rst_commit_sp   ? 4'd15
                       : mvm_reg_wr      ? mvm_reg
                       : mvm_base_commit ? ex_uop.ea_reg
                       : exc_commit_sp   ? 4'd15
-                      : ag_an_upd       ? ag_uop.ea_reg : wb_reg;
+                                        : wb_reg;
     assign wb_wr_data = rst_commit_sp   ? mem_rdata
                       : mvm_reg_wr      ? (ex_uop.xfer_long ? mem_rdata
                                          : {{16{mem_rdata[15]}}, mem_rdata[15:0]})
                       : mvm_base_commit ? mvm_addr
                       : exc_commit_sp   ? exc_sp
-                      : ag_an_upd       ? ag_an_val     : wb_data;
+                                        : wb_data;
     // Held from the read's dispatch until the write is acknowledged. A CAS
     // mismatch retires early, and rmw_done going high drops this with it.
     assign mem_lock   = ex_rmw && !rmw_done;

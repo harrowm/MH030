@@ -198,7 +198,10 @@ module mh030p_core_tb;
         issue(16'hDA93);                  // ADD.L  (A3),D5  -> D5 = 16 + ram[0x40]
         issue(16'h2C1B);                  // MOVE.L (A3)+,D6 -> D6 = ram[0x40], A3 += 4
 
-        bubble(8);
+        // +2 over the pre-split count: the AG/EX EA-adder split
+        // (~/.claude/plans/golden-puzzling-music.md) adds one cycle before
+        // a memory-referencing instruction's own mem_req first dispatches.
+        bubble(10);
         chk("D4 = (A3)",       dut.u_rf.regs[4],  32'hDEAD_0001);
         chk("D5 = 16+(A3)",    dut.u_rf.regs[5],  32'hDEAD_0011);
         chk("D6 = (A3)+",      dut.u_rf.regs[6],  32'hDEAD_0001);
@@ -211,7 +214,7 @@ module mh030p_core_tb;
         issue(16'h2687);                  // MOVE.L D7,(A3)   -> ram[A3] = 0x2A
         issue(16'h26C7);                  // MOVE.L D7,(A3)+  -> ram[A3] then A3 += 4
 
-        bubble(10);
+        bubble(12);  // +2, same reason as above
         chk("mem wr (A3)",     ram[32'h44 >> 2],  32'h0000_002A);
         chk("A3 after wr inc", dut.u_rf.regs[11], 32'h0000_0048);
 
@@ -281,7 +284,7 @@ module mh030p_core_tb;
         issue(16'h2643);                  // MOVEA.L D3,A3  -> A3 = 0x80
         issue(MOVEQ(0, 8'h05));
         issue(16'hD193);                  // ADD.L D0,(A3)  -> mem = 0x10 + 5
-        bubble(14);
+        bubble(16);
         chk("RMW ADD.L D0,(A3)", ram[32'h20 >> 2], 32'h0000_0015);
 
         ram[32'h24 >> 2] = 32'h0000_00FF;
@@ -289,7 +292,7 @@ module mh030p_core_tb;
         issue(16'h2643);                  // A3 = 0x84
         issue(MOVEQ(1, 8'h0F));
         issue(16'hC393);                  // AND.L D1,(A3) -> mem = 0xFF & 0x0F
-        bubble(14);
+        bubble(16);
         chk("RMW AND.L D1,(A3)", ram[32'h24 >> 2], 32'h0000_000F);
 
 
@@ -303,7 +306,7 @@ module mh030p_core_tb;
         issue(16'h2643);                  // A3 = 0x20
         issue(MOVEQ(4, 8'h10));           // D4 = 0x10 (index)
         issue(16'h2A33, 32'h0000_4804);   // MOVE.L (4,A3,D4.L),D5
-        bubble(14);
+        bubble(16);
         chk("indexed (4,A3,D4.L)", dut.u_rf.regs[5], 32'hC0FF_EE00);
 
         // ── Memory-to-memory MOVE: two different addresses ─────────────────
@@ -315,7 +318,7 @@ module mh030p_core_tb;
         issue(MOVEQ(4, 8'h38));
         issue(16'h2844);                  // MOVEA.L D4,A4 -> A4 = 0x38 (dest)
         issue(16'h2893);                  // MOVE.L (A3),(A4)
-        bubble(16);
+        bubble(18);
         chk("mem->mem MOVE.L",  ram[32'h38 >> 2], 32'hBEEF_1234);
         chk("mem->mem src kept", ram[32'h30 >> 2], 32'hBEEF_1234);
 
@@ -364,13 +367,13 @@ module mh030p_core_tb;
         issue(MOVEQ(1, 8'h22));
         issue(MOVEQ(2, 8'h33));
         issue(16'h48D3, 32'h0000_0007);   // MOVEM.L D0-D2,(A3)
-        bubble(30);
+        bubble(32);
         chk("MOVEM store D0",  ram[32'h50 >> 2], 32'h0000_0011);
         chk("MOVEM store D1",  ram[32'h54 >> 2], 32'h0000_0022);
         chk("MOVEM store D2",  ram[32'h58 >> 2], 32'h0000_0033);
 
         issue(16'h4CD3, 32'h0000_0070);   // MOVEM.L (A3),D4-D6
-        bubble(30);
+        bubble(32);
         chk("MOVEM load D4",   dut.u_rf.regs[4], 32'h0000_0011);
         chk("MOVEM load D5",   dut.u_rf.regs[5], 32'h0000_0022);
         chk("MOVEM load D6",   dut.u_rf.regs[6], 32'h0000_0033);

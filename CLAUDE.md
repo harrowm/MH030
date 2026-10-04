@@ -1471,12 +1471,54 @@ stashed-changes baseline. See the P1+ correction above and `plan.md`'s own
 "`--sim` was a no-op" section. **When measuring MH030-P, always pass BOTH
 `--sim sim/harte_pvbatch` AND confirm the Verilator launcher is selected** (the
 fixed script now does this automatically for any `*vbatch` binary and prints a
-note when it overrides the backend).
+note when it overrides the backend). **Note**: later sessions closed the
+MH030-P correctness pass in full (CHK #imm,Dn, MOVE immediate-source word
+extraction, mem2mem index self-hazard, MOVEM PC-relative/zero-mask, a 4th
+extension word) -- MH030-P's real score is now `PASS 702142 FAIL 2 SKIP
+281221 TIMEOUT 0`, bit-identical to `rtl/`'s own number; see `plan.md`'s
+"MH030-P reaches the reference" section and the AG/EX split entry below
+(re-confirmed bit-identical again after that change).
+
+**AG/EX EA-adder split (a later session, `~/.claude/plans/golden-puzzling-music.md`,
+IMPLEMENTED AND MEASURED)**: moved the EA adder and `mem_addr`/mem-dispatch
+logic out of AG's single cycle into a new one-shot-gated cycle in EX
+(`ex_pc2`/`ea_done`/`ex_wait_ea`), reusing registers the AG->EX transfer
+already carries (`ex_b`/`ex_sp`/`ex_a`) rather than promoting the
+forwarding network to 3 levels. Found and fixed a real, independent,
+pre-existing bug along the way (confirmed pre-existing via a baseline
+stash, not introduced by this change): `rtlp/mh030p_regfile.sv`'s single
+first write port multiplexed `ag_an_upd` (AG's own same-cycle autoincrement
+commit) against the ordinary WB commit/MOVEM/exception commits by simple
+priority, silently dropping whichever lost -- real whenever a retiring
+register-only instruction is immediately followed by a post/pre-
+incrementing memory instruction (`moveq #0,d1` then a mem2mem MOVE in
+`tests/bench1.s`'s own copy loop), which hung `make bench`'s
+`cosim_p_bench1` arm outright. Fixed with a genuine, dedicated third write
+port. Full gate clean: `make test` 43/43, `make lint-drivers` clean, full
+Harte sweep bit-identical (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`),
+`make bench` all four arms passing (`rtl/` unchanged 23665/8929; `rtlp`
+abstract-bus 6617, was 6616; A4 caches-off 24294, UNCHANGED -- this
+workload is bus-latency-bound so the new 1-cycle front-end latency is
+fully absorbed; A4 caches-on 8751, was 8603). **Fmax: `make
+fmax-pbiu-sweep SEEDS=9` measured 27.25 MHz mean (range 25.10-29.33)
+against the 27.36 MHz baseline -- flat, inside the documented noise floor.
+But re-profiling all 9 seeds shows a real structural win the mean hides:
+`u_cpu.u_core` (this exact chain) no longer dominates ANY of the 9 seeds'
+worst paths** (previously 8 of 9, up to 94.5%) -- **every seed's worst
+path now attributes entirely to the reused `rtl/` BIU's cache interface
+(`u_biu.u_cache`/`data_d`/`u_icache.data_i`), never tuned for `rtlp/`'s own
+Fmax target. That is the next candidate, pending its own isolated probe**
+(mirroring `tb/extw_probe.sv`'s technique) -- not yet built. 100 MHz target
+now 3.67x away. See `plan.md`'s own "AG/EX EA-adder split" section for the
+full writeup including the Phase 0 probe measurements and the exact
+root-cause trace of the write-port bug.
 
 **Current state**: `make test` 43/43, `make lint-drivers` clean, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50, `make bench`
 all four arms passing (two `rtl/` + two `rtlp` A4, see the table above),
-`make fmax-pbiu-sweep` 24.71 MHz (9 seeds), `make fmax-extw` 41.70 MHz (one cone,
+`make fmax-pbiu-sweep` 27.25 MHz (9 seeds, flat vs 27.36 but a confirmed
+structural shift off `u_core` -- see the AG/EX split entry above), `make
+fmax-extw` 41.70 MHz (one cone,
 see the 100 MHz programme note below -- the 100 MHz target is open, not closed). Full 124-suite Tom Harte sweep **for `rtl/`**: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
 split has shifted slightly across later phases as harness gaps closed; the corpus doesn't

@@ -6513,3 +6513,149 @@ pass. The Fmax/100MHz programme is unaffected and remains paused exactly
 where the pivot session left it** -- see
 `project_mh030_pipelined_rewrite_planning.md`'s own "Session checkpoint"
 pointer if that work resumes.
+
+### AG/EX EA-adder split (a later session, resuming the Fmax programme from
+the checkpoint above, `~/.claude/plans/golden-puzzling-music.md`, IMPLEMENTED
+AND MEASURED)
+
+Executed the plan the prior section's own decision point proposed as
+direction 1 (bounded) plus the structural half of direction 2, via the
+surgical cut the plan itself designed: rather than a true new AG1/AG2
+pipeline-register pair (which would have needed promoting the
+`ag_base_busy` interlock to look two stages ahead -- the plan's own
+identified highest-risk spot), the EA adder (`ea_base`/`ag_ea`) and the
+`mem_addr`/`mem_req`/`mem_rw`/`mem_siz`/`mem_wdata` dispatch logic moved
+OUT of AG's single cycle and INTO a new, one-shot-gated cycle inside EX,
+reading `ex_b`/`ex_sp`/`ex_a`/the new `ex_pc2` pass-through register --
+registers the existing AG->EX transfer already carries unconditionally, so
+the hazard-sensitive forwarding network and its interlock never moved and
+never needed to become 3-level.
+
+**Phase 0 (measurement-only, zero RTL change) confirmed the plan's own
+"real, open risk" did not block proceeding**: three isolated probes
+(`tb/ag_ea_probe_full.sv`/`_pcrel.sv`/`_fwd.sv`, `make fmax-ag-ea-full`/
+`-pcrel`/`-fwd`) measured the full existing EA cone at 46.88 MHz, the
+PC-relative-only sub-case (no forwarding mux in that path at all) at
+300.03 MHz, and the forwarding-plus-indexed sub-case separately -- (b)
+being nowhere near (a)'s ceiling meant the cut was worth making.
+
+**Phase 1 simplified the plan's own design in one place**: the plan
+proposed excluding MOVEM/MOVEP from the new `ex_needs_ea` gate (reasoning
+they build their own address differently and shouldn't wait on a generic
+EA phase). Direct code inspection before writing any RTL found this
+reasoning stale -- both the MOVEM and MOVEP standalone sequencer FSMs read
+`ex_ea` directly in their own seed branches, with NO existing `ea_done`-
+equivalent gating at all, so the exclusion was dropped and both FSMs
+instead got `&& ea_done` added to their own `!mvm_run`/`!mvp_run` seed
+conditions -- caught by inspection, before it could become a second
+build's worth of a failing-test surprise. A third, same-shape bug was
+found the same way in `scc_sys_wr_issued` (the Phase-280-session tracker
+for Scc/MOVE-SR-CCR's own deferred memory-destination write): its own set
+condition fired on `ex_needs_scc_sys_wr` alone, one cycle before `ea_done`,
+causing the real dispatch branch's `!scc_sys_wr_issued` guard to already be
+false once `ex_ea` was actually ready -- this one WAS caught by the
+mandatory full Harte sweep (2 regressed suites, MOVEfromSR/Scc, diffed
+against baseline) rather than by inspection, fixed with the same
+`&& ea_done` qualifier.
+
+**A fourth, genuinely independent, pre-existing bug was found via `make
+bench`'s `cosim_p_bench1` arm -- the one gate in this whole programme that
+actually executes a real multi-instruction program rather than one
+instruction in isolation, and the only reason this was ever caught.**
+`tests/bench1.s`'s fill-to-copy loop boundary (`moveq #0,d1` immediately
+followed by a post-incrementing memory instruction) hung indefinitely.
+Root cause, confirmed by first reproducing it against the UNMODIFIED
+baseline (`git stash`, confirming the identical hang pre-existed this
+session's own change entirely -- not a regression this split introduced):
+`rtlp/mh030p_core.sv`'s single first write port (`wb_wr_en`/`wb_wr_sel`/
+`wb_wr_data`) was a priority MUX across FIVE different sources --
+`ag_an_upd` (AG's own same-cycle autoincrement bypass), the ordinary
+`wb_valid&&wb_writes` commit, `mvm_reg_wr`, `mvm_base_commit`, and
+`exc_commit_sp`/`rst_commit_sp` -- on the stated assumption (the comment
+at the mux's own original site) that "nothing in this phase's subset both
+updates An and commits an ALU result in the same cycle." That assumption
+covered a single instruction doing both; it never accounted for TWO
+DIFFERENT, adjacent instructions each needing the port on the same cycle
+-- `ag_an_upd` is the AG-stage instruction entering/advancing, the other
+arms are the EX-stage instruction one stage further along retiring -- which
+is routine, not exceptional, whenever a retiring register-only instruction
+(MOVEQ) is immediately followed by a post/pre-incrementing memory
+instruction (the mem2mem MOVE in `bench1.s`'s own copy loop). Whichever arm
+the mux picked silently discarded every other arm's write that cycle:
+MOVEQ's own `D1=0` commit lost the regfile ARRAY write (though the 2-level
+forwarding network, which bypasses the array entirely, still carried the
+correct value to the immediately-following instruction -- masking the bug
+for one more instruction before the loop's SECOND iteration read the
+STALE, pre-loop array value once forwarding aged out, which is why the
+failure looked like a loop that never terminates rather than one wrong
+value). **Fixed with a genuine third write port**
+(`wr3_en`/`wr3_sel`/`wr3_data` in `rtlp/mh030p_regfile.sv`), dedicated
+exclusively to `ag_an_upd`, mirroring the existing second port's own
+precedent (and its own stated willingness to spend a port + one more
+register against this project's ~74,000 spare flip-flops rather than cost
+a stall). A genuine same-register collision between this port and ports
+1/2 remains structurally impossible: `ag_base_busy` already interlocks AG
+against both other ports' targets whenever AG needs a register `ag_an_upd`
+would also write, so priority among the three ports on a real collision is
+moot by construction. `sp_live`/`sp_shadow` (A7's own write-first bypass,
+outside the regfile) needed the identical third clause added. Hit the same
+Icarus forward-reference-before-declaration quirk this project has hit
+before (`ag_an_upd`/`ag_an_val` are declared ~250 lines after the u_rf
+instantiation and `sp_live`) -- solved the same way as the existing
+`wb_wr_en`/`wb_wr_sel`/`wb_wr_data` precedent: pre-declare plain
+`wr3_en`/`wr3_sel`/`wr3_data` wires early, connect those, drive them via a
+continuous `assign` placed near `ag_an_upd`'s own declaration.
+
+**`tb/mh030p_core_tb.sv`** needed 6 `bubble(N)` call sites bumped by +2
+cycles each -- the new one-cycle EA-dispatch latency on the LAST
+memory-referencing instruction before each fixed-delay `chk()` block,
+confirmed via a real regression (not guessed) before being accepted.
+
+**Full gate, all clean**: `make test` 43/43, `make lint-drivers` clean,
+full 124-suite Harte sweep bit-identical to baseline (`PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0`, confirmed via the real re-run, not assumed), `make
+bench` all four arms passing: `rtl/` 23665/8929 (untouched, as expected --
+this session touched only `rtlp/`), `rtlp` abstract-bus 6617 (was 6616,
++1 -- NOT +1-per-memory-op as a naive reading of the plan's own Phase 1
+step 6 note might suggest; most of bench1's existing memory-wait stalls
+already absorb the new 1-cycle EA latency, so it surfaces only where
+zero-gap back-to-back dispatch previously fully hid it), A4 caches-off
+24294 (UNCHANGED from baseline -- this workload is bus-latency-bound, ~16
+ticks/access, so the 1-cycle front-end shift is completely absorbed and
+never reaches the critical path, resolving a prior session's own
+"suspicious, not yet investigated" note about this exact number), A4
+caches-on 8751 (was 8603, +148 -- with caches on, far fewer, mostly
+back-to-back accesses, so the added latency is far less hidden and shows
+up directly, as expected).
+
+**Fmax re-measurement: a real structural win, but NOT a measurable mean
+improvement -- report both halves honestly.** `make fmax-pbiu-sweep
+SEEDS=9`: **27.25 MHz mean (range 25.10-29.33)** against the 27.36 MHz
+baseline (range 25.15-28.77) -- effectively flat, well inside
+[[feedback_fmax_noise_floor]]'s own documented ~1-2 MHz noise floor for
+this exact sweep. Re-profiling all 9 `--report` JSONs with
+`scripts/measure_fmax.py analyze`, however, shows a real, consistent
+structural change the mean number alone hides: **`u_cpu.u_core` (the
+exact chain this split targeted) no longer appears as the dominant module
+in ANY of the 9 seeds** -- a reversal of the prior measurement (8 of 9
+seeds dominated by `u_core`, up to 94.5%). Every seed's worst path is now
+attributed entirely to `u_dut.u_biu.u_cache`/`u_biu.u_cache.data_d`/
+`u_biu.u_icache.data_i` -- the REUSED `rtl/` BIU's cache interface,
+carried into the A4 configuration unmodified and never tuned for `rtlp/`'s
+own aggressive Fmax target. This is the textbook shape this programme has
+seen before (`ext_words`'s own Stage 1 win did not move the mean by its
+full isolated-cone amount either, because P&R noise and the next-biggest
+contender both move at once) -- the split did exactly what it was
+designed to do, structurally, and the reason it didn't show up as a mean
+win is that the NEXT bottleneck (the cache interface) was already close
+enough in magnitude to take over immediately, not that the fix was
+ineffective. **The 100 MHz target is now 3.67x away (27.25 vs 100). Next
+candidate, following this programme's own established pattern (isolate
+the cone before optimizing,
+[[feedback_isolate_cone_before_optimizing]]): a dedicated probe around
+`biu_cache_if.sv`'s own D-cache control/address path, the same technique
+Phase A used for `data_d`'s BRAM mapping and this session used for the EA
+adder -- not yet built.** No RTL change should follow from this finding
+without that isolation step, per this programme's own repeated lesson
+that local restructuring without first isolating the cone has a poor hit
+rate ([[feedback_sequentialise_always_evaluating_blocks]]).

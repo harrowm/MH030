@@ -80,7 +80,27 @@ module mh030p_regfile (
     // register the popped value -- port 1 -- is the architectural result.
     input  wire        wr2_en,
     input  wire [3:0]  wr2_sel,
-    input  wire [31:0] wr2_data
+    input  wire [31:0] wr2_data,
+    // THIRD write port, dedicated exclusively to AG's own same-cycle
+    // autoincrement/predecrement bypass (mh030p_core.sv's ag_an_upd). It used
+    // to share port 1 via a priority mux against the ordinary WB commit,
+    // MOVEM's register/base commits, the exception frame-pointer commit and
+    // the reset SSP commit -- all of which are DIFFERENT instructions one or
+    // more stages further along than the AG instruction ag_an_upd belongs to,
+    // so two of them being valid on the same cycle, targeting two DIFFERENT
+    // registers, is routine rather than exceptional. Sharing one port meant
+    // whichever arm the mux picked silently discarded every other arm's own
+    // write that cycle -- found via a real `make bench` hang (`moveq #0,d1`
+    // immediately followed by a post-incrementing MOVE: the MOVE's own A-
+    // register step on this port raced MOVEQ's own D1=0 commit on port 1 and
+    // won every time, leaving D1 stale). Giving ag_an_upd an exclusive port
+    // removes it from every one of those races at once. A genuine same-
+    // register collision between this port and ports 1/2 remains impossible
+    // by construction: ag_base_busy already interlocks AG against both other
+    // ports' targets whenever AG needs a register ag_an_upd would also write.
+    input  wire        wr3_en,
+    input  wire [3:0]  wr3_sel,
+    input  wire [31:0] wr3_data
 );
 
     reg [31:0] regs [0:15];
@@ -90,6 +110,7 @@ module mh030p_regfile (
         if (!rst_n) begin
             for (i = 0; i < 16; i = i + 1) regs[i] <= 32'h0;
         end else begin
+            if (wr3_en) regs[wr3_sel] <= wr3_data;
             if (wr2_en) regs[wr2_sel] <= wr2_data;
             if (wr_en)  regs[wr_sel]  <= wr_data;   // port 1 wins; see above
         end
@@ -104,6 +125,10 @@ module mh030p_regfile (
     wire hit2_b = wr2_en && (wr2_sel == rd_b_sel);
     wire hit2_c = wr2_en && (wr2_sel == rd_c_sel);
     wire hit2_d = wr2_en && (wr2_sel == rd_d_sel);
+    wire hit3_a = wr3_en && (wr3_sel == rd_a_sel);
+    wire hit3_b = wr3_en && (wr3_sel == rd_b_sel);
+    wire hit3_c = wr3_en && (wr3_sel == rd_c_sel);
+    wire hit3_d = wr3_en && (wr3_sel == rd_d_sel);
 
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
@@ -114,14 +139,14 @@ module mh030p_regfile (
         end else begin
             if (rd_en) begin
                 rd_a_data <= hit_a ? wr_data
-                           : hit2_a ? wr2_data : regs[rd_a_sel];
+                           : hit2_a ? wr2_data : hit3_a ? wr3_data : regs[rd_a_sel];
                 rd_b_data <= hit_b ? wr_data
-                           : hit2_b ? wr2_data : regs[rd_b_sel];
+                           : hit2_b ? wr2_data : hit3_b ? wr3_data : regs[rd_b_sel];
                 rd_d_data <= hit_d ? wr_data
-                           : hit2_d ? wr2_data : regs[rd_d_sel];
+                           : hit2_d ? wr2_data : hit3_d ? wr3_data : regs[rd_d_sel];
             end
             if (rd_c_en) rd_c_data <= hit_c ? wr_data
-                                    : hit2_c ? wr2_data : regs[rd_c_sel];
+                                    : hit2_c ? wr2_data : hit3_c ? wr3_data : regs[rd_c_sel];
         end
     end
 

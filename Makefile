@@ -1236,6 +1236,48 @@ fmax-extw-fast-full:
 	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
 	    | grep -E "Max frequency"
 
+# Phase 0 of ~/.claude/plans/golden-puzzling-music.md: the AG-stage
+# EA-adder-and-mem_addr-dispatch cone, isolated the same way fmax-extw
+# isolates ext_words. Three variants -- see each probe's own header.
+.PHONY: fmax-ag-ea-full
+fmax-ag-ea-full:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl tb/ag_ea_probe_full.sv > $(SIM)/ageaf.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/ageaf.v ag_ea_probe_full \
+	    wrap_fmax $(SIM)/ageaf_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/ageaf.v $(SIM)/ageaf_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/ageaf.json' -l $(SIM)/ageaf_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/ageaf.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
+.PHONY: fmax-ag-ea-pcrel
+fmax-ag-ea-pcrel:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl tb/ag_ea_probe_pcrel.sv > $(SIM)/ageap.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/ageap.v ag_ea_probe_pcrel \
+	    wrap_fmax $(SIM)/ageap_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/ageap.v $(SIM)/ageap_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/ageap.json' -l $(SIM)/ageap_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/ageap.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
+.PHONY: fmax-ag-ea-fwd
+fmax-ag-ea-fwd:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl tb/ag_ea_probe_fwd.sv > $(SIM)/ageaw.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/ageaw.v ag_ea_probe_fwd \
+	    wrap_fmax $(SIM)/ageaw_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/ageaw.v $(SIM)/ageaw_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/ageaw.json' -l $(SIM)/ageaw_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/ageaw.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
 # The A4 configuration: rtlp's CPU plus rtl/'s real BIU and both caches. This is
 # the number that matters for hardware, because it is the only rtlp arm that can
 # actually drive a bus -- mh030p_top's 29.16 MHz is measured on a core with no
