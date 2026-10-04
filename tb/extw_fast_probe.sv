@@ -23,7 +23,7 @@ module extw_fast_probe (
     uop_t u;
     wire [2:0] fast_w;
     mh030p_decode u_d (.instr(instr_r), .ext(extraw_r), .ext_raw(extraw_r),
-                       .q3(q3_r), .uop(u), .ext_words_fast_o(fast_w));
+                       .q3(q3_r), .q4(16'h0), .uop(u), .ext_words_fast_o(fast_w));
 
     always_ff @(posedge clk_4x or negedge rst_n)
         if (!rst_n) extw_o <= 3'd0; else extw_o <= fast_w;

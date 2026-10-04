@@ -63,7 +63,7 @@ module mh030p_cpu (
     output wire [31:0] if_pc
 );
 
-    wire [15:0] if_instr, if_q3;
+    wire [15:0] if_instr, if_q3, if_q4;
     wire [31:0] if_ext, if_ext_raw;
     wire [2:0]  if_avail;
     wire        redirect;
@@ -93,7 +93,7 @@ module mh030p_cpu (
     wire [2:0] peek_ext_words;
     mh030p_decode u_peek (
         .instr(if_instr), .ext(if_ext_raw), .ext_raw(if_ext_raw),
-        .q3(if_q3), .uop(peek), .ext_words_fast_full_o(peek_ext_words)
+        .q3(if_q3), .q4(if_q4), .uop(peek), .ext_words_fast_full_o(peek_ext_words)
     );
 
     // Issue only once the whole instruction is in the queue.
@@ -107,6 +107,7 @@ module mh030p_cpu (
         .if_rdata(if_rdata), .if_ack(if_ack),
         .redirect(redirect), .redirect_pc(redirect_pc),
         .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
+        .q4(if_q4),
         .words_avail(if_avail), .pc_out(if_pc),
         .drain(drain), .ext_words(peek_ext_words)
     );
@@ -114,6 +115,7 @@ module mh030p_cpu (
     mh030p_core u_core (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
+        .q4(if_q4),
         .ipl(ipl),
         .instr_valid(have_all), .instr_ready(core_ready),
         .pc_in(if_pc), .redirect(redirect), .redirect_pc(redirect_pc),

@@ -33,6 +33,10 @@ module uop_decode_equiv_tb;
     uop_t        uop;
 
     logic [15:0] q3w;
+    // Fourth extension word (q4), asymmetric against q3w/ext for the same
+    // reason the header comment above q3w gives: so a position mix-up at
+    // index 3 cannot accidentally compare equal.
+    logic [15:0] q4w;
     // ext_raw is driven independently of ext so the two properties below can be
     // separated: the DISPLACEMENT fields depend on `ext`'s normalised layout,
     // while ext_words must depend only on instr/ext_raw/q3.
@@ -42,6 +46,7 @@ module uop_decode_equiv_tb;
         .ext    (ext),
         .ext_raw(ext_rawv),
         .q3     (q3w),
+        .q4     (q4w),
         .uop    (uop)
     );
 
@@ -220,6 +225,7 @@ module uop_decode_equiv_tb;
         ext = 32'hA4A5_3C7F;
         ext_rawv = 32'hA4A5_3C7F;
         q3w = 16'h5A91;
+        q4w = 16'h6B82;
         rst_n = 1'b0;
         repeat (2) @(posedge clk_4x);
         rst_n = 1'b1;
@@ -590,7 +596,7 @@ module uop_decode_equiv_tb;
                 end
             end
         end
-        ext = 32'hA4A5_3C7F; ext_rawv = 32'hA4A5_3C7F; q3w = 16'h5A91; #1;
+        ext = 32'hA4A5_3C7F; ext_rawv = 32'hA4A5_3C7F; q3w = 16'h5A91; q4w = 16'h6B82; #1;
         $display("  full-format ext_words: %0d checked, %0d disagreement(s)",
                  ff_checked, ff_bad);
         $write("    disagreements by opcode group:");

@@ -32,7 +32,7 @@ module extw_probe (
 
     uop_t u;
     mh030p_decode u_d (.instr(instr_r), .ext(extraw_r), .ext_raw(extraw_r),
-                       .q3(q3_r), .uop(u));
+                       .q3(q3_r), .q4(16'h0), .uop(u));
 
     always_ff @(posedge clk_4x or negedge rst_n)
         if (!rst_n) extw_o <= 3'd0; else extw_o <= u.ext_words;

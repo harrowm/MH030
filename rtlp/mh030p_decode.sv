@@ -36,6 +36,10 @@ module mh030p_decode (
     // of a combinational loop (see the note on `ext` in mh030p_ifu.sv).
     input  wire [31:0] ext_raw,
     input  wire [15:0] q3,       // third extension word
+    // Fourth extension word -- reachable only by a long immediate (2 words)
+    // feeding an absolute-long EA (2 more words), the one documented 4-word
+    // shape this decoder used to decline outright.
+    input  wire [15:0] q4,
     output uop_t       uop,
     // Stage 1 scaffold only (plan.md "Full-format addendum profiled" /
     // "write the shallow decoder" session): the independent brief-format
@@ -57,7 +61,8 @@ module mh030p_decode (
         case (i)
             3'd0:    rawword = ext_raw[31:16];
             3'd1:    rawword = ext_raw[15:0];
-            default: rawword = q3;
+            3'd2:    rawword = q3;
+            default: rawword = q4;
         endcase
     endfunction
 
@@ -307,8 +312,8 @@ module mh030p_decode (
     // Extension words are numbered from 0 in instruction order, and each side
     // of the instruction reads the one at its own offset: whatever an
     // immediate consumes comes first, then the SOURCE's own words, then the
-    // DESTINATION's. Only indices 0-2 are reachable (ext carries two words,
-    // q3 the third), which is what ea_disp_valid reports on.
+    // DESTINATION's. Indices 0-3 are reachable (ext carries two words, q3 the
+    // third, q4 the fourth), which is what ea_disp_valid reports on.
     //
     // This replaces a narrower imm_takes_ext special case that could only
     // shift the SOURCE past a long immediate. It could not express a
@@ -323,7 +328,8 @@ module mh030p_decode (
         case (i)
             3'd0:    xword = (tot <= 3'd1) ? ext[15:0] : ext[31:16];
             3'd1:    xword = ext[15:0];
-            default: xword = q3;
+            3'd2:    xword = q3;
+            default: xword = q4;
         endcase
     endfunction
 
@@ -2333,8 +2339,8 @@ module mh030p_decode (
         // the ext_words chain above, which is swept, instead of restating the
         // per-family exceptions a second time and getting a different answer.
         //
-        // Only indices 0-2 are reachable (ext carries two words, q3 the
-        // third), which is what ea_disp_valid reports on.
+        // Indices 0-3 are reachable (ext carries two words, q3 the third, q4
+        // the fourth), which is what ea_disp_valid reports on.
         ew_tot  = uop.ext_words;
         sxw     = xword(ea_slot_is_dst ? ew_dst_at : ew_lead, ew_tot);
         dxw     = xword(ew_dst_at, ew_tot);
@@ -2400,10 +2406,14 @@ module mh030p_decode (
             uop.dst_ea_idx_scale = dxw[10:9];
         end
 
-        // Every displacement word sits at index 0, 1 or 2, so all three are
-        // reachable. A fourth is not, which rules out an absolute long at
-        // BOTH ends and a long immediate feeding an absolute long.
-        uop.ea_disp_valid = (ew_tot <= 3'd3);
+        // Every displacement word sits at index 0-3, all four now reachable
+        // via q4 -- a long immediate (2 words) feeding an absolute-long EA
+        // (2 more) was the one real shape that needed it, and is implemented
+        // now (the g0_is_alu_imm branch above + this fill-in's own ABS_L
+        // arm). A fifth genuinely is not reachable (an absolute long at BOTH
+        // ends of a memory-to-memory move, or a long immediate feeding one),
+        // which is what ea_disp_valid still exists to report.
+        uop.ea_disp_valid = (ew_tot <= 3'd4);
     end
 
 endmodule

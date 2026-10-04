@@ -57,6 +57,7 @@ module mh030p_core (
     // read them from `ext`.
     input  wire [31:0] ext_raw,
     input  wire [15:0] q3,
+    input  wire [15:0] q4,
     input  wire        instr_valid,
     output wire        instr_ready,   // core can accept an instruction this cycle
 
@@ -111,6 +112,7 @@ module mh030p_core (
         .instr (instr),
         .ext   (ext),
         .q3    (q3),
+        .q4    (q4),
         .uop   (dec_uop)
     );
 

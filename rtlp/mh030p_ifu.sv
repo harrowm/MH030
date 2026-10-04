@@ -53,6 +53,10 @@ module mh030p_ifu (
     // ext below: taking the normalised `ext` there closes a combinational loop.
     output wire [31:0] ext_raw,
     output wire [15:0] q3,
+    // Fourth extension word, for the one combination that genuinely needs it:
+    // a long immediate (2 words) feeding an absolute-long EA (2 more words) --
+    // see mh030p_decode.sv's own xword()/rawword() for the consumer.
+    output wire [15:0] q4,
     output wire [2:0]  words_avail,
     output wire [31:0] pc_out,
 
@@ -99,6 +103,7 @@ module mh030p_ifu (
 
     assign instr       = q[0];
     assign q3          = q[3];
+    assign q4          = q[4];
     assign words_avail = (count > 3'd7) ? 3'd7 : count[2:0];
     assign pc_out      = head_pc;
 

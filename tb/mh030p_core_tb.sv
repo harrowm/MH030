@@ -30,6 +30,7 @@ module mh030p_core_tb;
     // half. A two-word `ext` already matches the raw layout.
     wire [31:0] ext_raw = (ext[31:16] == 16'h0) ? {ext[15:0], 16'h0} : ext;
     logic [15:0] q3    = 16'h0;
+    logic [15:0] q4    = 16'h0;
     logic        instr_valid = 1'b0;
     wire         instr_ready;
     wire         wb_wr_en;
@@ -63,7 +64,7 @@ module mh030p_core_tb;
 
     mh030p_core dut (
         .clk_4x(clk_4x), .rst_n(rst_n),
-        .instr(instr), .ext(ext), .ext_raw(ext_raw), .q3(q3),
+        .instr(instr), .ext(ext), .ext_raw(ext_raw), .q3(q3), .q4(q4),
         .instr_valid(instr_valid), .instr_ready(instr_ready),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .pc_in(pc_in), .redirect(redirect), .redirect_pc(redirect_pc),
