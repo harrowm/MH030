@@ -1,0 +1,412 @@
+# MH030-P architecture and Fmax opportunities
+
+This document exists because the Fmax/100MHz programme (see `plan.md`'s own
+dated sections and `CLAUDE.md`'s "100 MHz programme" paragraph) had started
+re-deriving things a prior session already measured, and one stale claim
+(`eu_bitfield` as an untried candidate) nearly got re-attempted after it had
+already been built, measured, and found not to pay off. This is the
+consolidated, current-as-of-2026-10-04 picture: what `rtlp/` actually is,
+what has been measured, what worked, what didn't, and what's honestly left
+to try. It does not replace `plan.md`'s own session-by-session history —
+that remains the record of *how* each number was reached — but it is where
+to start before proposing a new Fmax change, so the next session spends its
+time on something genuinely unexplored.
+
+## 1. What `rtlp/` is, and why it exists
+
+`rtl/` is a cycle-accurate MC68030 model: pin-exact, verified against the
+real manual over ~280 phases, and it works — but its one combinational
+decode/execute cone cannot be pipelined without a rewrite, and it measures
+~13.6-14.2 MHz on a real ECP5-85K. `rtlp/` is a parallel, from-scratch
+pipelined core built to answer one question: what Fmax does a genuinely
+staged design reach, with `rtl/` kept frozen and green as the golden
+reference. Four scope decisions were made before any RTL was written (all
+still binding, see `project_mh030_pipelined_rewrite_planning.md`):
+
+1. **Bus fidelity: protocol-exact, timing-free.** Every pin, every S-state,
+   every stagger stays exactly as the manual specifies; the *spacing
+   between* bus cycles may differ. This is the one signed-off divergence.
+2. **A parallel core**, not an in-place rewrite — `rtl/` stays the oracle.
+3. **Target 25-50 MHz `clk_4x`**, not 100 MHz. (The 100 MHz figure came
+   later, as a separate, more aggressive stretch goal — see §6.)
+4. **Integer core first**, MMU/caches staged in later.
+
+Two configurations share everything above the bus:
+
+| top module | what's underneath | measured role |
+|---|---|---|
+| `mh030p_top` | `mh030p_arb` — a single-tick abstract bus | what every rtlp-only gate/testbench drives; the pipeline was built and tuned against this |
+| `mh030p_biu_top` | `rtl/m68030_biu` — the real, verified BIU, real pins, real S-states, DSACK, bursts, both genuine 68030 caches | "plan A4" — the configuration that actually matters for a real FPGA build |
+
+Both instantiate the identical `mh030p_cpu` (fetch unit + core + the peek
+decoder, see §3) — nothing above the bus differs between them.
+
+## 2. Module hierarchy
+
+```
+mh030p_top (abstract bus)  /  mh030p_biu_top (A4, real BIU)
+└── mh030p_cpu
+    ├── mh030p_decode  (u_peek)   -- ext_words only, see §3.2
+    ├── mh030p_ifu     (u_ifu)    -- 8-word prefetch queue, redirect/epoch handling
+    └── mh030p_core    (u_core)
+        ├── mh030p_decode (u_dec) -- the real decoder, ID stage
+        ├── mh030p_regfile (u_rf) -- 4 read ports, 3 write ports, §4
+        ├── eu_alu        -- reused from rtl/ verbatim, combinational
+        ├── mh030p_shift  -- SEQUENTIAL (rewritten from rtl/eu_shifter.sv)
+        ├── eu_mul_div    -- reused from rtl/ (MUL_ENABLE=0 here)
+        ├── mh030p_mul    -- this core's own multiplier (uses the DSPs)
+        ├── eu_bitfield   -- reused from rtl/ verbatim, combinational
+        ├── eu_bitops, eu_bcd -- reused from rtl/ verbatim
+        └── (standalone sequencer FSMs: MOVEM, MOVEP, CAS/RMW, exceptions,
+             RTE/RTR, the AG/EX EA-adder dispatch branch — all inside
+             mh030p_core's own always_ff blocks, not separate modules)
+mh030p_arb       -- abstract-bus-only arbiter (fetch vs data, data wins)
+```
+
+`mh030p_bitfield.sv` exists in the tree and is **not instantiated anywhere**
+— it's a finished, proven-equivalent (50,688-vector sweep) sequential
+bit-field unit that was measured and found not to pay off. See §5.3.
+
+## 3. Pipeline: four stages, each a real register boundary
+
+```
+ID    decode (combinational) -> registered uop; regfile addresses issued
+AG    register data arrives (the read was a clock boundary, not a cone);
+      the effective address is computed on its own adder; a memory
+      request is issued FROM REGISTERS
+EX    memory data has arrived (or the stage stalls until it has);
+      forwarding mux; ALU/shifter/mul/div; result registered
+WB    commit to the register file and the CCR
+```
+
+This is the entire point of the rewrite, contrasted directly with `rtl/`:
+register reads are **registered**, not combinational; decode output is
+**registered**, not fed straight into execute (`rtl/eu_seq_decode.svh` is
+one ~6,200-line `always_comb` driving EX in the same tick); and there is no
+zero-gap/`preview_ok` dispatch mechanism, so no 17-way ack-dependent mux
+sitting in the middle of the longest path.
+
+### 3.1 The AG/EX split (2026-10-04, `~/.claude/plans/golden-puzzling-music.md`)
+
+Originally AG did three things in one cycle: the forwarding mux, the EA
+adder, and the `mem_addr`/mem-field dispatch mux. The EA adder and dispatch
+mux were moved into a new, one-shot-gated EX cycle (`ea_done`/`ex_wait_ea`),
+reading `ex_b`/`ex_sp`/`ex_a`/`ex_pc2` — registers the AG→EX transfer
+already carries unconditionally, so the forwarding network stayed 2-level
+rather than needing to grow a third level. This closed a real,
+independently-discovered bug along the way: the register file's single
+first write port was multiplexing `ag_an_upd` (AG's same-cycle
+autoincrement commit) against the ordinary WB/MOVEM/exception commits by
+priority, silently dropping whichever lost — real whenever a retiring
+register-only instruction (`moveq #0,d1`) was immediately followed by a
+post/pre-incrementing memory instruction. Fixed with a genuine, dedicated
+third write port (see §4). Full writeup: `plan.md`'s "AG/EX EA-adder split"
+section.
+
+### 3.2 The two-decoder problem — the single biggest structural finding in this file
+
+`mh030p_cpu.sv` instantiates **two** full `mh030p_decode` instances:
+
+- `u_peek`, fed the raw opcode the instant it's offered, whose only
+  consumed output is `ext_words_fast_full_o` — how many extension words
+  this opcode needs, which the fetch unit must know before it can tell
+  `u_core`'s own decoder (`u_dec`) how many words are even available.
+- `u_core.u_dec`, the real ID-stage decoder, fed `ext` — which is itself a
+  mux *driven by* `u_peek`'s own output (`ext_words == 1 ? low-half : both
+  halves`, `mh030p_ifu.sv`).
+
+So the chain is **q[0] → peek decode → ext mux → full decode → regfile
+select**, two decoder passes in one clock. `ext_raw` (the un-normalised
+words) exists so `u_peek` itself doesn't depend on the mux it drives — that
+would be a genuine combinational loop — but it never addressed `u_dec`'s
+own dependence on `u_peek`'s output, which is the real serial pass.
+
+**This was investigated in full once already** (plan.md's "Stage 1
+investigation" section, predates the current session). An isolated probe
+(`tb/extw_probe.sv`, `make fmax-extw`) proved the depth is real, not a
+`-noflatten`-DCE artifact (driving the probe from progressively smaller
+sub-expressions found the cost is diffuse across EA-mode/immediate-sizing
+*arithmetic*, not the ~25-arm priority chain everyone assumed — a balanced
+`case` recovers only ~4 ns of the ~24 ns). The investigation's own
+conclusion was blunt about scope:
+
+> What Stage 1 actually requires is not a patch. To remove the serial pass
+> the core's decoder must normalise `ext` itself from `ext_raw`... Done
+> properly it pays twice: `u_peek` can then be deleted outright... That is
+> a real refactor of the most intricate file in `rtlp/`... it is the right
+> Stage 1, but it is not the cheap one this plan assumed.
+
+So the session that followed (the one actually called "Stage 1" in
+`CLAUDE.md`) deliberately did the **cheaper** half instead: rewrite
+`ext_words_fast_full_o` as an independent shallow decoder, straight from
+raw opcode-bit wires, bit-exact-verified against the real decoder across
+all 65,536 opcodes. That shipped (+10.7% design-wide, 24.71→27.36 MHz) and
+was explicitly scoped as *not* the full fix — "even a perfect `ext_words`
+at 100+ MHz... unlocks roughly 25 → 30-35 MHz, not more."
+
+**Both decoders still exist today, unmerged.** A `-noflatten` cross-check
+this session (2026-10-04, after the AG/EX split) found `u_peek` is *still*
+the single largest attributed cost in the A4 configuration's worst path
+(~19 ns, ~45% of the total, consistent across 2 independent seeds) — not a
+new regression, just the same already-quantified residual the Stage 1
+session knowingly left in place. **The merge — one decoder, with `ext`
+normalised internally from `ext_raw` and `ext_words` hoisted ahead of the
+main classification — remains the correct, already-scoped, not-yet-built
+fix for this specific structural cost.** See §6.1.
+
+## 4. Register file (`mh030p_regfile.sv`)
+
+16×32, registered reads (the structural reason this core needs a
+forwarding network at all — `rtl/eu_regfile.sv` reads combinationally,
+which is the ~3600-hop chain this whole rewrite exists to avoid). Four
+read ports (A/B/C/D — C and D exist specifically because an indexed EA at
+both ends of a memory-to-memory MOVE needs base+index on each side at
+once), write-first bypass (a read issued the same cycle as a write to the
+same register sees the new value — needed because the read-to-use distance
+is long enough that a 2-cycle-forwarding network alone would miss it for
+an instruction 3 behind its producer).
+
+**Three write ports**, not two, as of 2026-10-04:
+- **Port 1** (`wr_en`/`wr_sel`/`wr_data`): the ordinary WB commit, plus
+  MOVEM's register/base commits and the exception/reset frame-pointer
+  commits, muxed by priority. These remain mutually exclusive by
+  construction (verified, not assumed — see `plan.md`).
+- **Port 2** (`wr2_en`/`wr2_sel`/`wr2_data`): EXG/LINK/UNLK's own dual
+  commit, and a memory-to-memory MOVE's destination-side autoincrement.
+  Port 1 wins a same-register conflict (UNLK A7 sets A7 then pops into it;
+  the pop is architecturally the result).
+- **Port 3** (`wr3_en`/`wr3_sel`/`wr3_data`, new): `ag_an_upd` alone — AG's
+  own same-cycle address-register autoincrement/predecrement, now
+  structurally unable to collide with anything else, since `ag_base_busy`
+  already interlocks AG against both other ports' targets whenever AG
+  needs a register `ag_an_upd` would also write.
+
+Forwarding is **two levels** (`wb_*` = one instruction back, `wbp_*` = two
+back), each level checked against both write ports' targets, following
+directly from the registered-read design (worked out from first
+principles in the module's own header: an instruction one behind its
+producer sees the producer's commit from the *current* cycle's `wb_*`; an
+instruction two behind needs the *previous* cycle's commit, since by the
+time it reaches EX the current `wb_*` has already moved on).
+
+## 5. Functional units: reuse vs. rebuild
+
+The project's one proven Fmax lever — confirmed across every real win —
+is **removing a large, always-evaluating combinational block from the
+timing graph**, not restructuring one in place. Three units got this
+treatment; two others were reused verbatim because the lever didn't pay
+for them.
+
+### 5.1 Sequential shifter (`mh030p_shift.sv`) — adopted
+
+`rtl/eu_shifter.sv` is combinational, ~14 variable-distance barrel
+shifters, 2,084 cells, re-evaluating every cycle regardless of whether the
+current instruction is a shift. The replacement steps one bit per tick
+with a single fixed 1-bit shifter, 220 cells, almost no new state.
+**21.60 → 29.16 MHz.** The single largest proven win in this programme.
+
+### 5.2 Sequential divider (inside `eu_mul_div`, `MUL_ENABLE=0` here)
+
+Same shape, applied earlier (standalone-core era): one 32-bit
+compare+subtract per tick, 32 ticks, replacing four independent
+combinational dividers. **2.46 → 14.24 MHz (5.8x)**, the largest single
+win in the whole project's history (predates the AG/EX/WB 4-stage design).
+Multiply stays combinational, in its own module (`mh030p_mul.sv`), using
+the ECP5 DSPs — `MUL_ENABLE=0` on the reused `eu_mul_div` instance prunes
+its own combinational multiply arms so this core doesn't build multiply
+hardware twice.
+
+### 5.3 Sequential bit-field unit (`mh030p_bitfield.sv`) — **built, measured, NOT adopted**
+
+The obvious next candidate of the same shape: `eu_bitfield` is
+combinational, 1,459 cells, with five variable-distance shifters and a
+32-deep find-first-one priority chain with a 32-bit subtract per level.
+A sequential replacement was built, proven bit-exact (50,688-vector sweep,
+`tb/bf_equiv_tb.sv`, permanently in `make test`), and measured:
+
+| arm | mean (9 seeds) | min | max | bitfield comb cells |
+|---|---|---|---|---|
+| combinational `eu_bitfield` (current) | **29.16** | 28.39 | 30.14 | 1,459 |
+| `mh030p_bitfield` (not instantiated) | 28.29 | 27.26 | 29.38 | 845 (+324 FF) |
+
+Overlapping ranges, 7 of 9 seeds lower, mean 0.87 MHz down —
+**unresolved, leaning negative**. The reason it failed where the shifter
+succeeded is the transferable lesson: the shifter went 2,084→220 cells
+with almost no new state; this one goes 1,459→845 **and adds 324 flip-flops**
+(nine 32-bit registers) while still leaving a combinational output mux
+computing `~pmask`/`^pmask`/`|pmask`/the FFO arithmetic, now fed from those
+registers. Removing a variable shifter only wins if the depth isn't spent
+again on the way out. **Do not re-attempt this without a version that
+keeps materially less state** — that's the module's own documented
+condition for revisiting it, not a vague "try harder."
+
+### 5.4 `eu_alu`, `eu_bitops`, `eu_bcd` — reused verbatim, correctly
+
+592, ~0 (folded into bitops path), and 117 combinational cells
+respectively. Too small to matter, and `eu_alu` in particular "genuinely
+must be single-cycle" (plan.md's own phrasing) — there's no always-
+evaluating waste to remove.
+
+### 5.5 Register-file / prefetch-queue area packing — tried, reverted, not a speed lever
+
+A separate effort (write-first bypass redundancy removal on ports C/D,
+serialising EXG/LINK/UNLK through one write port, a head-pointer circular
+buffer for the prefetch queue instead of the current shift network) cut
+**17.9% of the design's combinational cells** — and measured **1.67 MHz
+slower**. Confirms cell count is not just a poor Fmax proxy here but an
+*anti-correlated* one. Deliberately not adopted; recorded as "the right
+change at the wrong time" — worth doing eventually for area headroom (an
+FPU/MMU/caches campaign), never attempt it again as a speed fix.
+
+The prefetch queue's own shift-vs-head-pointer question (`mh030p_ifu.sv`'s
+own header) was investigated on its own terms too and left **unresolved**
+in the same direction: a head-pointer version measured 21.80 MHz against a
+baseline whose own 9-seed spread is 21.81-23.13 MHz — inside the noise
+floor, not a measured regression, reverted because it showed no benefit
+either, not because it was shown worse.
+
+## 6. Current measured state (2026-10-04)
+
+**Methodology note, binding for anything in this section and beyond**:
+`fmax-pbiu-sweep` (flattened synthesis, 9 seeds) is the tracked metric.
+ABC9 can and does attribute a merged cell to a totally unrelated module's
+hierarchy (confirmed twice now: `mh030p_mul`'s DSPs named
+`u_ifu.req_epoch_*`; and, this session, a flattened-sweep "worst path"
+claim that named `biu_cache_if.sv` registers that direct source inspection
+showed aren't even on that data path). **A flattened sweep's per-module
+attribution — single-cell or the coarser "module walk" percentage style —
+must be cross-checked with at least one `-noflatten` seed before it is
+used to justify a new conclusion.** `-noflatten` itself is not perfectly
+trustworthy either (weaker cross-module dead-code elimination can inflate
+a mostly-unused module's own apparent weight — true of `u_peek`, see §3.2
+— though in that specific case an independent isolated-probe measurement
+already confirmed the depth is real, not inflated). See
+`feedback_flattened_attribution_needs_noflatten_crosscheck.md`.
+
+### 6.1 Fmax
+
+- **A4 (`mh030p_biu_top`), flattened, tracked sweep**: **27.25 MHz mean**
+  (9 seeds, range 25.10-29.33), effectively flat against the prior 27.36
+  MHz baseline (Stage 1's own win) — inside the documented ~1-2 MHz noise
+  floor for this sweep.
+- **A4, `-noflatten` (2 seeds, cross-check only, not the tracked metric)**:
+  ~23.4 MHz both seeds, worst path consistently `u_ifu → u_peek → u_ifu →
+  u_core.u_dec → u_core → u_core.u_rf` — i.e. §3.2's two-decoder chain,
+  still present, still dominant, matching Stage 1's own already-published
+  ~20-24 ns isolated cost for this exact cone.
+- **Abstract-bus `mh030p_top`** (no real BIU, no caches — the config the
+  pipeline itself was tuned against): 29.16 MHz with the sequential
+  shifter; this is a different, smaller design than A4 and not directly
+  comparable to the numbers above.
+- **The originally-approved target band (25-50 MHz) is already met** by
+  the tracked A4 number. **The 100 MHz figure is a separate, later,
+  more aggressive ask that has not been met and currently has no proven
+  path to it** — see §7.
+
+### 6.2 Area (real, `-noflatten`, A4 configuration — `make area-pbiu`)
+
+Per-module-*definition* combinational cell counts (not per-instance: a
+module instantiated twice, like `mh030p_decode`, is counted once here —
+double it for `mh030p_decode`'s true live cost, since both `u_peek` and
+`u_core.u_dec` are real, simultaneously-present instances):
+
+| module | comb cells | % | FF |
+|---|---|---|---|
+| `mh030p_core` | 9,632 | 19.6% | 1,507 |
+| `mh030p_regfile` | 8,753 | 17.8% | 640 |
+| `biu_mmu_if` (reused rtl/) | 6,893 | 14.0% | 2,591 |
+| `biu_cache_if` (reused rtl/) | 5,733 | 11.6% | 948 |
+| `biu_icache_if` (reused rtl/) | 4,010 | 8.1% | 819 |
+| `mh030p_decode` (×2 live instances) | 3,430 each | 7.0% each | 0 |
+| `biu_cycle_gen` (reused rtl/) | 2,595 | 5.3% | 515 |
+| `mh030p_ifu` | 2,188 | 4.4% | 231 |
+| `eu_bitfield` (reused rtl/) | 1,459 | 3.0% | 0 |
+| `biu_sizing_fsm` (reused rtl/) | 965 | 2.0% | 140 |
+| `eu_mul_div` (reused rtl/, `MUL_ENABLE=0`) | 710 | 1.4% | 173 |
+| `eu_alu` (reused rtl/) | 592 | 1.2% | 0 |
+| `mh030p_mul` | 310 | 0.6% | 167 |
+| `mh030p_shift` | 206 | 0.4% | 54 |
+| `eu_bcd` (reused rtl/) | 117 | 0.2% | 0 |
+
+Two things worth noting that aren't a call to action:
+
+- **`mh030p_regfile` is nearly as large as the entire rest of the pipelined
+  core.** This is *not* a fresh lever — §5.5 already tried shrinking it
+  (packing the write-first bypass, serialising the second write port) and
+  measured it Fmax-*negative*. Its size comes from four read ports each
+  carrying a 16-way array select plus a 3-level write-port bypass check,
+  not from waste.
+- **The reused BIU interfaces (`biu_mmu_if`+`biu_cache_if`+`biu_icache_if`)
+  are 33.7% of A4's own area combined**, larger than `mh030p_core` and
+  `mh030p_regfile` together. They are explicitly out of bounds for a
+  bounded Fmax fix under scope decision 1 (§1) — touching them means
+  revisiting "the BIU is reused, not rewritten," a materially bigger
+  decision, not a quick win. See §7.
+
+## 7. Opportunities, honestly ranked
+
+**(A) Already done, if the real goal is the originally-approved target.**
+27.25 MHz sits inside the 25-50 MHz band from scope decision 3. If that
+was the actual bar, this is a stopping point, not a gap.
+
+**(B) The proven "remove a combinational block" lever is exhausted for
+`rtlp/`'s own code.** Divider ✓, shifter ✓, cache BRAM ✓ (shared with
+`rtl/`, already landed), `ext_words`' own arithmetic ✓ (partially, see C).
+Bit-field ✗ (tried, measured negative, don't redo without a lower-state
+design). ALU/BCD/bitops: too small to matter, ALU must stay single-cycle.
+**There is no known, unexplored instance of this lever left to pull.**
+
+**(C) The real, already-scoped, not-yet-attempted structural fix: merge
+`u_peek` and `u_core.u_dec` into one decoder.** §3.2 traces this in full.
+A prior session already worked out exactly what it requires (hoist
+`ext_words` computation ahead of the main classification, normalise `ext`
+from `ext_raw` internally, delete the now-redundant `u_peek` instance
+entirely) and explicitly deferred it as "a real refactor of the most
+intricate file in `rtlp/`... not the cheap one this plan assumed." Nothing
+has changed that assessment — it's still the correct fix, still unbuilt,
+still comparable in scope/risk to the AG/EX split (which took a full
+session). The honest expected payoff, per the same prior investigation,
+is bounded: "even a perfect `ext_words`... unlocks roughly 25 → 30-35 MHz,
+not more" — i.e. this alone does not reach 100 MHz either, but it's the
+only concretely-scoped lever left that hasn't been pulled. Any attempt
+MUST start with `tb/uop_decode_equiv_tb.sv` (already compares `ext_words`
+against `mh030p_decode`'s own output, the correct oracle per the prior
+investigation — *not* the reference decoder, which has its own known
+`ext_count` bugs) and the full Harte sweep as the safety net, matching
+every other structural change in this project's history.
+
+**(D) The reused BIU interfaces are 33.7% of A4's area and completely
+untouched by any bounded fix so far** (aside from the cache BRAM mapping,
+already landed). Fixing anything here means crossing scope decision 1 —
+"the BIU is reused, not rewritten" — which was a deliberate choice to keep
+`rtl/`'s own ~280-phase verification intact and not pay for re-deriving
+pin-level correctness in a second place. `CLAUDE.md`'s own "100 MHz
+programme" paragraph already flagged one candidate inside this boundary —
+a synchronous-termination (STERM) bus fast path, cutting the measured
+~14.3 ticks/access toward the 12-tick protocol floor — as "a higher-
+priority candidate... pending sign-off since it spends the protocol-exact
+decision." That sign-off was never given. This is a real option but a
+bigger one: it would need its own fork of the BIU (mirroring how `rtlp/`
+itself forked from `rtl/`) rather than editing the shared module, since
+`rtl/`'s own gate depends on the BIU's timing being unchanged.
+
+**(E) Tooling added this session**: `make area-pbiu` (mirrors `area-p`,
+but targets `mh030p_biu_top` — the A4 configuration's own real per-module
+area, not the abstract-bus top `area-p` already covered). Use it instead
+of re-deriving the ad-hoc `module_area.py` invocation this session needed.
+
+## 8. The honest answer to "why isn't this reaching 100 MHz"
+
+Every bounded, low-risk lever this programme has found and could safely
+pull (B above) has been pulled, including one (bit-field) that looked
+exactly like a winner by analogy and wasn't. What's left is either (C) a
+genuinely-scoped but nontrivial decoder merge with a *known, bounded*
+payoff that still falls short of 100 MHz on its own, or (D) a much bigger
+decision to stop treating the BIU as frozen — which is not something to
+start without the user explicitly re-opening scope decision 1. There is
+no remaining option in this catalog that is simultaneously cheap, proven,
+and sufficient to reach 100 MHz. The realistic choices are: declare the
+originally-approved 25-50 MHz target met and stop; invest a session in (C)
+for a bounded, estimated 30-35 MHz ceiling; or explicitly re-scope to
+include the BIU and accept that as a materially larger, separately-planned
+effort.

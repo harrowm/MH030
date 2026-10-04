@@ -1219,8 +1219,15 @@ of `mh030p_mul`'s DSPs are named `u_dut.u_ifu.req_epoch_*`; use `make area-p`
 *anti*-correlated with the clock (packing the register file and prefetch queue cut 18%
 of area and lost 1.67 MHz -- reverted). What works is removing a large
 **always-evaluating arithmetic block** from the timing graph: divider 5.8x, cache BRAM
-+37%, shifter +35%. Next candidate of that shape: `eu_bitfield` (1,459 cells). See
-`plan.md`'s own "Sequential shifter" section.
++37%, shifter +35%. **Corrected by a later session**: `eu_bitfield` (1,459 cells) was
+the obvious next candidate of this shape and was built, proven equivalent (50,688-vector
+sweep), and measured (`rtlp/mh030p_bitfield.sv`, not instantiated) -- it did NOT pay
+(29.16 -> 28.29 MHz, 7 of 9 seeds lower, unresolved-leaning-negative), because unlike the
+shifter it traded its variable shifters for 324 new flip-flops (9 32-bit registers) and
+still left a combinational output mux, so it spent the depth back on the way out. `rtl/`
+keeps the combinational `eu_bitfield.sv`. See `plan.md`'s own "Sequential bit-field unit:
+built, proven, measured, not adopted" section, and `docs/mh030p_architecture.md` for the
+full, current catalog of what has and hasn't paid off in this programme.
 
 **MH030-P throughput + full-format work (a later session)**: **`make bench`**
 (`tests/bench1.s`, loops with real memory traffic, result-checked) is the

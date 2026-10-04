@@ -1377,6 +1377,23 @@ area-p:
 	    write_json $(SIM)/areap.json' -l $(SIM)/areap_yosys.log > /dev/null
 	@python3 scripts/module_area.py $(SIM)/areap.json
 
+# Same as area-p, but for mh030p_biu_top (the A4 configuration -- real BIU,
+# real caches) instead of the abstract-bus mh030p_top. area-p alone cannot
+# answer "how big is biu_cache_if/biu_mmu_if in the configuration that
+# actually matters for a real FPGA build" -- this was done ad hoc with a
+# throwaway invocation once (docs/mh030p_architecture.md's area table);
+# this target makes it repeatable.
+.PHONY: area-pbiu
+area-pbiu:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(MH030P_BIU_SRCS) > $(SIM)/areapbiu.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/areapbiu.v mh030p_biu_top \
+	    wrap_fmax $(SIM)/areapbiu_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/areapbiu.v $(SIM)/areapbiu_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax -noflatten; \
+	    write_json $(SIM)/areapbiu.json' -l $(SIM)/areapbiu_yosys.log > /dev/null
+	@python3 scripts/module_area.py $(SIM)/areapbiu.json
+
 SEEDS ?= 9
 .PHONY: fmax-p-sweep
 fmax-p-sweep:
