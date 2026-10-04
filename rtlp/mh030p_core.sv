@@ -654,7 +654,19 @@ module mh030p_core (
     reg         exc_taken;
 
 
+    // MOVEM manages its own bus sequencing entirely through mvm_done
+    // (ex_other_stall's own dedicated term below) -- excluded here because
+    // mem_got only ever latches on a real mem_ack, and a MOVEM with an
+    // all-clear register mask dispatches ZERO bus cycles. mem_got then never
+    // sets even once, so this generic term stayed true forever after
+    // mvm_done, hanging the one Harte vector that happens to encode mask=0.
+    // Every mask with at least one set bit masked this: mem_got latches on
+    // the FIRST real transfer and (since nothing clears it mid-instruction)
+    // stays set for the rest of the walk, so it was already true by the time
+    // mvm_done landed -- confirmed via a direct trace (MOVEM.l #,(A2) with
+    // mask=0, which never acks and spins with ex_other_stall stuck high).
     wire ex_wait_mem = ex_valid && (ex_uop.reads_mem || ex_uop.writes_mem)
+                    && (ex_uop.uclass != UC_MOVEM)
                     && (ex_m2m_2rd ? (bcdm_ph != 2'd3)
                         : ex_rmw   ? !rmw_done : !mem_got);
 
@@ -1159,11 +1171,14 @@ module mh030p_core (
     // PC-relative addressing uses the address of the extension word that
     // CARRIES the displacement/index as its own base -- normally pc+2, since
     // that word is the first (and only) one. A static bit op's own bit-number
-    // word is a LEADING extension word ahead of the EA's own, pushing the
-    // real displacement/index word out to pc+4 instead -- confirmed via a
-    // direct trace (BTST #n,(d16,PC) read 2 bytes short of the expected
-    // target, exactly one word off, before this fix).
-    wire [31:0] ag_pc_lead = ((ag_uop.uclass == UC_BITOP) && (ag_uop.subop == 4'd1))
+    // word, or MOVEM's own register-mask word, is a LEADING extension word
+    // ahead of the EA's own, pushing the real displacement/index word out to
+    // pc+4 instead -- confirmed via a direct trace (BTST #n,(d16,PC) read 2
+    // bytes short of the expected target, exactly one word off, before this
+    // fix; MOVEM (d16,PC)/(d8,PC,Xn) showed the identical one-word-short
+    // shape, previously investigated and left unresolved).
+    wire [31:0] ag_pc_lead = (((ag_uop.uclass == UC_BITOP) && (ag_uop.subop == 4'd1))
+                           || (ag_uop.uclass == UC_MOVEM))
                            ? 32'd2 : 32'd0;
     // ea_bs is full format's BASE SUPPRESS: the base register (or the PC, for a
     // PC-relative form) is simply not added, which is how `(bd,Xn)` and a bare
