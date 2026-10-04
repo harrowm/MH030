@@ -1049,6 +1049,19 @@ with ~74k spare FFs and 204 spare BRAMs to spend. Most verification transfers
 unchanged (Harte compares architectural state only; `buscmp.py` compares the bus
 *transaction sequence*, not cycle timing).
 
+**CORRECTED (2026-10-04)**: this "25-50 MHz, not 100 MHz" framing predates
+spelling out the `clk_4x`-to-real-bus-speed conversion anywhere (it was
+always implicit in this file's own Clock Strategy section at the top — "4×
+the external bus frequency" — just never applied to the target numbers).
+Converted, even the TOP of the original 25-50 MHz band is only 12.5 MHz of
+real bus-equivalent speed, still below the slowest 68030 Motorola ever
+shipped (16 MHz). **100 MHz `clk_4x` (= 25 MHz bus-equivalent) is the
+actual minimum needed to match the slowest real 68030, so it is the
+standing target now, not a later stretch goal.** See
+`docs/mh030p_architecture.md`'s §2 for the full conversion table and §8-9
+for a concrete staged plan toward it, superseding every "100 MHz is a
+stretch/optional goal" framing elsewhere in this file.
+
 **MH030-P P0 (IMPLEMENTED AND VERIFIED)**: `scripts/measure_fmax.py` (new —
 there was no timing target before, and the wrong recipe had already cost two
 measurements; `run` uses the KNOWN-GOOD unrestricted `synth_lattice`, `analyze`

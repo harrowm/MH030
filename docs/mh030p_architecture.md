@@ -1,34 +1,45 @@
-# MH030-P architecture and Fmax opportunities
+# MH030-P architecture and the path to 100 MHz
 
-This document exists because the Fmax/100MHz programme (see `plan.md`'s own
-dated sections and `CLAUDE.md`'s "100 MHz programme" paragraph) had started
-re-deriving things a prior session already measured, and one stale claim
-(`eu_bitfield` as an untried candidate) nearly got re-attempted after it had
-already been built, measured, and found not to pay off. This is the
-consolidated, current-as-of-2026-10-04 picture: what `rtlp/` actually is,
-what has been measured, what worked, what didn't, and what's honestly left
-to try. It does not replace `plan.md`'s own session-by-session history —
-that remains the record of *how* each number was reached — but it is where
-to start before proposing a new Fmax change, so the next session spends its
-time on something genuinely unexplored.
+This document exists because the Fmax programme (see `plan.md`'s own dated
+sections) had started re-deriving things a prior session already measured,
+and one stale claim (`eu_bitfield` as an untried candidate) nearly got
+re-attempted after it had already been built, measured, and found not to
+pay off. This is the consolidated, current-as-of-2026-10-04 picture: what
+`rtlp/` actually is, what has been measured, what worked, what didn't, and
+a concrete staged plan for the real target. It does not replace `plan.md`'s
+own session-by-session history — that remains the record of *how* each
+number was reached — but it is where to start before proposing a new Fmax
+change, so the next session spends its time on something genuinely
+unexplored.
+
+**The target, stated plainly up front**: 100 MHz `clk_4x` is not a stretch
+goal. §2 works out why: it is the clock rate this design needs just to
+match the *slowest* 68030 Motorola ever shipped (25 MHz external bus). That
+is the real bar, not an aspirational one, and it is well above anything
+measured so far.
 
 ## 1. What `rtlp/` is, and why it exists
 
 `rtl/` is a cycle-accurate MC68030 model: pin-exact, verified against the
 real manual over ~280 phases, and it works — but its one combinational
 decode/execute cone cannot be pipelined without a rewrite, and it measures
-~13.6-14.2 MHz on a real ECP5-85K. `rtlp/` is a parallel, from-scratch
-pipelined core built to answer one question: what Fmax does a genuinely
-staged design reach, with `rtl/` kept frozen and green as the golden
-reference. Four scope decisions were made before any RTL was written (all
-still binding, see `project_mh030_pipelined_rewrite_planning.md`):
+~13.6-14.2 MHz `clk_4x` on a real ECP5-85K. `rtlp/` is a parallel,
+from-scratch pipelined core built to answer one question: what Fmax does a
+genuinely staged design reach, with `rtl/` kept frozen and green as the
+golden reference. Four scope decisions were made before any RTL was
+written (see `project_mh030_pipelined_rewrite_planning.md`):
 
 1. **Bus fidelity: protocol-exact, timing-free.** Every pin, every S-state,
    every stagger stays exactly as the manual specifies; the *spacing
    between* bus cycles may differ. This is the one signed-off divergence.
 2. **A parallel core**, not an in-place rewrite — `rtl/` stays the oracle.
-3. **Target 25-50 MHz `clk_4x`**, not 100 MHz. (The 100 MHz figure came
-   later, as a separate, more aggressive stretch goal — see §6.)
+3. **Target 25-50 MHz `clk_4x`.** This was the original band approved
+   before the clock-rate/real-chip-speed relationship (§2) was spelled out
+   explicitly anywhere. Converted to real terms (§2), even the TOP of that
+   band (50 MHz `clk_4x` → 12.5 MHz bus-equivalent) is still below the
+   slowest real 68030. **This document corrects that framing**: the actual
+   requirement is 100 MHz `clk_4x` (§2), and that is now the standing
+   target, not a later or optional stretch goal.
 4. **Integer core first**, MMU/caches staged in later.
 
 Two configurations share everything above the bus:
@@ -36,21 +47,60 @@ Two configurations share everything above the bus:
 | top module | what's underneath | measured role |
 |---|---|---|
 | `mh030p_top` | `mh030p_arb` — a single-tick abstract bus | what every rtlp-only gate/testbench drives; the pipeline was built and tuned against this |
-| `mh030p_biu_top` | `rtl/m68030_biu` — the real, verified BIU, real pins, real S-states, DSACK, bursts, both genuine 68030 caches | "plan A4" — the configuration that actually matters for a real FPGA build |
+| `mh030p_biu_top` | `rtl/m68030_biu` — the real, verified BIU, real pins, real S-states, DSACK, bursts, both genuine 68030 caches | "plan A4" — the configuration that actually matters for a real FPGA build, and the one every number in this document means unless stated otherwise |
 
 Both instantiate the identical `mh030p_cpu` (fetch unit + core + the peek
-decoder, see §3) — nothing above the bus differs between them.
+decoder, see §4) — nothing above the bus differs between them.
 
-## 2. Module hierarchy
+## 2. Clock convention: `clk_4x` vs. a real chip's rated speed
+
+Every Fmax number this project has ever quoted — 24.71 MHz, 27.36 MHz,
+27.25 MHz, the "100 MHz" figure itself — is a **`clk_4x`** number: the
+*internal* clock, run at 4× the external bus frequency, per this project's
+own standing clock strategy (`CLAUDE.md`'s "Design Constraints" section —
+"Run the Verilog design at 4× the external bus frequency... This gives 4
+clean ticks per external clock cycle"). This convention is baked into the
+reused BIU (`m68030_biu` and everything under it), and the A4 configuration
+drives that BIU directly, so for `mh030p_biu_top` the conversion is exact
+and unconditional: **divide `clk_4x` by 4 to get the number directly
+comparable to a real 68030's datasheet speed grade.** (The abstract-bus
+`mh030p_top` config has no real external bus at all — there is nothing to
+convert there; it's a different measurement for a different purpose, see
+§6.)
+
+| | `clk_4x` | ÷4 = real-bus-equivalent |
+|---|---|---|
+| `rtl/` reference core, real FPGA measurement | ~13.6-14.2 MHz | ~3.4-3.6 MHz |
+| `rtlp/` A4, current (this session) | 27.25 MHz | **~6.8 MHz** |
+| Real MC68030, slowest production part | — | **16 MHz** |
+| Real MC68030, common mid-range parts | — | 20, 25 MHz |
+| Real MC68030, fastest production parts | — | 33, 40, 50 MHz |
+| **This project's real target: match the slowest real chip** | **100 MHz** | **25 MHz** |
+
+So: matching the *slowest 68030 Motorola ever sold* needs **100 MHz
+`clk_4x`**, not 50. The current build, at 27.25 MHz `clk_4x` (~6.8 MHz
+bus-equivalent), is roughly **3.7x** short of that, and it is already
+slower in real terms than the slowest real chip by more than 2x.
+
+One honest mitigating factor, not a reason to discount the gap: `rtlp/` is
+genuinely pipelined and does more useful work per bus cycle than `rtl/`
+does once caches are on (fewer idle ticks between transactions — see
+`make bench`'s own tick counts in `plan.md`). So "6.8 MHz bus-equivalent"
+slightly understates real throughput versus a naive clock-for-clock
+comparison. It does not change the answer to "what clock does this chip
+run at," which is the question §2's table answers directly, and which is
+the number that matters for "is this as fast as a real 25 MHz 68030."
+
+## 3. Module hierarchy
 
 ```
 mh030p_top (abstract bus)  /  mh030p_biu_top (A4, real BIU)
 └── mh030p_cpu
-    ├── mh030p_decode  (u_peek)   -- ext_words only, see §3.2
+    ├── mh030p_decode  (u_peek)   -- ext_words only, see §4.2
     ├── mh030p_ifu     (u_ifu)    -- 8-word prefetch queue, redirect/epoch handling
     └── mh030p_core    (u_core)
         ├── mh030p_decode (u_dec) -- the real decoder, ID stage
-        ├── mh030p_regfile (u_rf) -- 4 read ports, 3 write ports, §4
+        ├── mh030p_regfile (u_rf) -- 4 read ports, 3 write ports, §5
         ├── eu_alu        -- reused from rtl/ verbatim, combinational
         ├── mh030p_shift  -- SEQUENTIAL (rewritten from rtl/eu_shifter.sv)
         ├── eu_mul_div    -- reused from rtl/ (MUL_ENABLE=0 here)
@@ -65,9 +115,9 @@ mh030p_arb       -- abstract-bus-only arbiter (fetch vs data, data wins)
 
 `mh030p_bitfield.sv` exists in the tree and is **not instantiated anywhere**
 — it's a finished, proven-equivalent (50,688-vector sweep) sequential
-bit-field unit that was measured and found not to pay off. See §5.3.
+bit-field unit that was measured and found not to pay off. See §6.3.
 
-## 3. Pipeline: four stages, each a real register boundary
+## 4. Pipeline: four stages, each a real register boundary
 
 ```
 ID    decode (combinational) -> registered uop; regfile addresses issued
@@ -86,7 +136,7 @@ one ~6,200-line `always_comb` driving EX in the same tick); and there is no
 zero-gap/`preview_ok` dispatch mechanism, so no 17-way ack-dependent mux
 sitting in the middle of the longest path.
 
-### 3.1 The AG/EX split (2026-10-04, `~/.claude/plans/golden-puzzling-music.md`)
+### 4.1 The AG/EX split (2026-10-04, `~/.claude/plans/golden-puzzling-music.md`)
 
 Originally AG did three things in one cycle: the forwarding mux, the EA
 adder, and the `mem_addr`/mem-field dispatch mux. The EA adder and dispatch
@@ -100,10 +150,19 @@ autoincrement commit) against the ordinary WB/MOVEM/exception commits by
 priority, silently dropping whichever lost — real whenever a retiring
 register-only instruction (`moveq #0,d1`) was immediately followed by a
 post/pre-incrementing memory instruction. Fixed with a genuine, dedicated
-third write port (see §4). Full writeup: `plan.md`'s "AG/EX EA-adder split"
-section.
+third write port (see §5).
 
-### 3.2 The two-decoder problem — the single biggest structural finding in this file
+**In hindsight, measured against §8's priority order below, this was done
+out of the recommended sequence.** It is "Stage 3" work (core-side cone
+splitting) in the staged plan §8 presents, and that plan explicitly demotes
+Stage 3 below Stages 1/2 because the BIU and the decoder chain bind first —
+which is exactly what happened: the split measured flat (27.36→27.25 MHz,
+within noise) because it didn't touch the cone that was actually dominant
+(§4.2). The work itself is sound and the bug fix was real and necessary;
+the lesson is to re-profile and confirm what's dominant *before* choosing
+which stage to attack next, not after.
+
+### 4.2 The two-decoder problem — the single biggest structural finding in this file
 
 `mh030p_cpu.sv` instantiates **two** full `mh030p_decode` instances:
 
@@ -122,13 +181,13 @@ would be a genuine combinational loop — but it never addressed `u_dec`'s
 own dependence on `u_peek`'s output, which is the real serial pass.
 
 **This was investigated in full once already** (plan.md's "Stage 1
-investigation" section, predates the current session). An isolated probe
-(`tb/extw_probe.sv`, `make fmax-extw`) proved the depth is real, not a
-`-noflatten`-DCE artifact (driving the probe from progressively smaller
-sub-expressions found the cost is diffuse across EA-mode/immediate-sizing
-*arithmetic*, not the ~25-arm priority chain everyone assumed — a balanced
-`case` recovers only ~4 ns of the ~24 ns). The investigation's own
-conclusion was blunt about scope:
+investigation" section, 2026-09-28). An isolated probe (`tb/extw_probe.sv`,
+`make fmax-extw`) proved the depth is real, not a `-noflatten`-DCE artifact
+(driving the probe from progressively smaller sub-expressions found the
+cost is diffuse across EA-mode/immediate-sizing *arithmetic*, not the
+~25-arm priority chain everyone assumed — a balanced `case` recovers only
+~4 ns of the ~24 ns). The investigation's own conclusion was blunt about
+scope:
 
 > What Stage 1 actually requires is not a patch. To remove the serial pass
 > the core's decoder must normalise `ext` itself from `ext_raw`... Done
@@ -141,20 +200,19 @@ So the session that followed (the one actually called "Stage 1" in
 `ext_words_fast_full_o` as an independent shallow decoder, straight from
 raw opcode-bit wires, bit-exact-verified against the real decoder across
 all 65,536 opcodes. That shipped (+10.7% design-wide, 24.71→27.36 MHz) and
-was explicitly scoped as *not* the full fix — "even a perfect `ext_words`
-at 100+ MHz... unlocks roughly 25 → 30-35 MHz, not more."
+was explicitly scoped from the start as *not* the full fix, and *not*
+sufficient alone even if it worked perfectly — see §8.
 
 **Both decoders still exist today, unmerged.** A `-noflatten` cross-check
 this session (2026-10-04, after the AG/EX split) found `u_peek` is *still*
 the single largest attributed cost in the A4 configuration's worst path
 (~19 ns, ~45% of the total, consistent across 2 independent seeds) — not a
-new regression, just the same already-quantified residual the Stage 1
-session knowingly left in place. **The merge — one decoder, with `ext`
-normalised internally from `ext_raw` and `ext_words` hoisted ahead of the
-main classification — remains the correct, already-scoped, not-yet-built
-fix for this specific structural cost.** See §6.1.
+new regression, just the same already-quantified residual the 2026-09-28
+investigation found and the Stage 1 session knowingly left in place. The
+merge remains the correct, already-scoped, not-yet-built fix for this
+specific structural cost — it is "Stage 1, part 2" in §8's plan.
 
-## 4. Register file (`mh030p_regfile.sv`)
+## 5. Register file (`mh030p_regfile.sv`)
 
 16×32, registered reads (the structural reason this core needs a
 forwarding network at all — `rtl/eu_regfile.sv` reads combinationally,
@@ -189,7 +247,7 @@ producer sees the producer's commit from the *current* cycle's `wb_*`; an
 instruction two behind needs the *previous* cycle's commit, since by the
 time it reaches EX the current `wb_*` has already moved on).
 
-## 5. Functional units: reuse vs. rebuild
+## 6. Functional units: reuse vs. rebuild
 
 The project's one proven Fmax lever — confirmed across every real win —
 is **removing a large, always-evaluating combinational block from the
@@ -197,7 +255,7 @@ timing graph**, not restructuring one in place. Three units got this
 treatment; two others were reused verbatim because the lever didn't pay
 for them.
 
-### 5.1 Sequential shifter (`mh030p_shift.sv`) — adopted
+### 6.1 Sequential shifter (`mh030p_shift.sv`) — adopted
 
 `rtl/eu_shifter.sv` is combinational, ~14 variable-distance barrel
 shifters, 2,084 cells, re-evaluating every cycle regardless of whether the
@@ -205,7 +263,7 @@ current instruction is a shift. The replacement steps one bit per tick
 with a single fixed 1-bit shifter, 220 cells, almost no new state.
 **21.60 → 29.16 MHz.** The single largest proven win in this programme.
 
-### 5.2 Sequential divider (inside `eu_mul_div`, `MUL_ENABLE=0` here)
+### 6.2 Sequential divider (inside `eu_mul_div`, `MUL_ENABLE=0` here)
 
 Same shape, applied earlier (standalone-core era): one 32-bit
 compare+subtract per tick, 32 ticks, replacing four independent
@@ -216,7 +274,7 @@ the ECP5 DSPs — `MUL_ENABLE=0` on the reused `eu_mul_div` instance prunes
 its own combinational multiply arms so this core doesn't build multiply
 hardware twice.
 
-### 5.3 Sequential bit-field unit (`mh030p_bitfield.sv`) — **built, measured, NOT adopted**
+### 6.3 Sequential bit-field unit (`mh030p_bitfield.sv`) — **built, measured, NOT adopted**
 
 The obvious next candidate of the same shape: `eu_bitfield` is
 combinational, 1,459 cells, with five variable-distance shifters and a
@@ -240,14 +298,14 @@ again on the way out. **Do not re-attempt this without a version that
 keeps materially less state** — that's the module's own documented
 condition for revisiting it, not a vague "try harder."
 
-### 5.4 `eu_alu`, `eu_bitops`, `eu_bcd` — reused verbatim, correctly
+### 6.4 `eu_alu`, `eu_bitops`, `eu_bcd` — reused verbatim, correctly
 
 592, ~0 (folded into bitops path), and 117 combinational cells
 respectively. Too small to matter, and `eu_alu` in particular "genuinely
 must be single-cycle" (plan.md's own phrasing) — there's no always-
 evaluating waste to remove.
 
-### 5.5 Register-file / prefetch-queue area packing — tried, reverted, not a speed lever
+### 6.5 Register-file / prefetch-queue area packing — tried, reverted, not a speed lever
 
 A separate effort (write-first bypass redundancy removal on ports C/D,
 serialising EXG/LINK/UNLK through one write port, a head-pointer circular
@@ -265,7 +323,7 @@ baseline whose own 9-seed spread is 21.81-23.13 MHz — inside the noise
 floor, not a measured regression, reverted because it showed no benefit
 either, not because it was shown worse.
 
-## 6. Current measured state (2026-10-04)
+## 7. Current measured state (2026-10-04)
 
 **Methodology note, binding for anything in this section and beyond**:
 `fmax-pbiu-sweep` (flattened synthesis, 9 seeds) is the tracked metric.
@@ -278,32 +336,34 @@ attribution — single-cell or the coarser "module walk" percentage style —
 must be cross-checked with at least one `-noflatten` seed before it is
 used to justify a new conclusion.** `-noflatten` itself is not perfectly
 trustworthy either (weaker cross-module dead-code elimination can inflate
-a mostly-unused module's own apparent weight — true of `u_peek`, see §3.2
+a mostly-unused module's own apparent weight — true of `u_peek`, see §4.2
 — though in that specific case an independent isolated-probe measurement
 already confirmed the depth is real, not inflated). See
 `feedback_flattened_attribution_needs_noflatten_crosscheck.md`.
 
-### 6.1 Fmax
+### 7.1 Fmax
 
-- **A4 (`mh030p_biu_top`), flattened, tracked sweep**: **27.25 MHz mean**
-  (9 seeds, range 25.10-29.33), effectively flat against the prior 27.36
-  MHz baseline (Stage 1's own win) — inside the documented ~1-2 MHz noise
-  floor for this sweep.
+- **A4 (`mh030p_biu_top`), flattened, tracked sweep**: **27.25 MHz `clk_4x`
+  mean** (9 seeds, range 25.10-29.33) — **~6.8 MHz real-bus-equivalent**
+  (§2) — effectively flat against the prior 27.36 MHz baseline (Stage 1's
+  own win), inside the documented ~1-2 MHz noise floor for this sweep.
 - **A4, `-noflatten` (2 seeds, cross-check only, not the tracked metric)**:
   ~23.4 MHz both seeds, worst path consistently `u_ifu → u_peek → u_ifu →
-  u_core.u_dec → u_core → u_core.u_rf` — i.e. §3.2's two-decoder chain,
-  still present, still dominant, matching Stage 1's own already-published
-  ~20-24 ns isolated cost for this exact cone.
+  u_core.u_dec → u_core → u_core.u_rf` — i.e. §4.2's two-decoder chain,
+  still present, still dominant, matching the 2026-09-28 investigation's
+  own already-published ~20-24 ns isolated cost for this exact cone.
+- **The reused BIU, standalone, no core at all** (`m68030_biu` alone):
+  **27.78 MHz `clk_4x`** (1 seed, 2026-09-28). This is the number that
+  matters most for what's next — see §8.
 - **Abstract-bus `mh030p_top`** (no real BIU, no caches — the config the
   pipeline itself was tuned against): 29.16 MHz with the sequential
-  shifter; this is a different, smaller design than A4 and not directly
-  comparable to the numbers above.
-- **The originally-approved target band (25-50 MHz) is already met** by
-  the tracked A4 number. **The 100 MHz figure is a separate, later,
-  more aggressive ask that has not been met and currently has no proven
-  path to it** — see §7.
+  shifter; this is a different, smaller design than A4, has no real
+  external bus to convert against, and is not directly comparable to the
+  numbers above.
+- **100 MHz `clk_4x` (25 MHz bus-equivalent, §2) is the real target and
+  has not been met.** The current build is ~3.7x short of it.
 
-### 6.2 Area (real, `-noflatten`, A4 configuration — `make area-pbiu`)
+### 7.2 Area (real, `-noflatten`, A4 configuration — `make area-pbiu`)
 
 Per-module-*definition* combinational cell counts (not per-instance: a
 module instantiated twice, like `mh030p_decode`, is counted once here —
@@ -328,85 +388,155 @@ double it for `mh030p_decode`'s true live cost, since both `u_peek` and
 | `mh030p_shift` | 206 | 0.4% | 54 |
 | `eu_bcd` (reused rtl/) | 117 | 0.2% | 0 |
 
-Two things worth noting that aren't a call to action:
+Two things worth noting that aren't, on their own, a call to action:
 
 - **`mh030p_regfile` is nearly as large as the entire rest of the pipelined
-  core.** This is *not* a fresh lever — §5.5 already tried shrinking it
+  core.** This is *not* a fresh lever — §6.5 already tried shrinking it
   (packing the write-first bypass, serialising the second write port) and
   measured it Fmax-*negative*. Its size comes from four read ports each
   carrying a 16-way array select plus a 3-level write-port bypass check,
   not from waste.
 - **The reused BIU interfaces (`biu_mmu_if`+`biu_cache_if`+`biu_icache_if`)
   are 33.7% of A4's own area combined**, larger than `mh030p_core` and
-  `mh030p_regfile` together. They are explicitly out of bounds for a
-  bounded Fmax fix under scope decision 1 (§1) — touching them means
-  revisiting "the BIU is reused, not rewritten," a materially bigger
-  decision, not a quick win. See §7.
+  `mh030p_regfile` together. §8 explains why this is now the central
+  target, not a boundary to avoid.
 
-## 7. Opportunities, honestly ranked
+## 8. The path to 100 MHz: an already-staged plan, partially executed
 
-**(A) Already done, if the real goal is the originally-approved target.**
-27.25 MHz sits inside the 25-50 MHz band from scope decision 3. If that
-was the actual bar, this is a stopping point, not a gap.
+A full investigation on 2026-09-28 (`plan.md`'s "Measured baseline for the
+100 MHz target" section) already answered "what would it take," in detail,
+with real measurements. It was never finished — the session that did it
+moved to other priorities (a correctness pass, then the AG/EX split) before
+reaching its own Stage 2. Restated here as the current roadmap, with status
+updated for everything that's happened since.
 
-**(B) The proven "remove a combinational block" lever is exhausted for
-`rtlp/`'s own code.** Divider ✓, shifter ✓, cache BRAM ✓ (shared with
-`rtl/`, already landed), `ext_words`' own arithmetic ✓ (partially, see C).
-Bit-field ✗ (tried, measured negative, don't redo without a lower-state
-design). ALU/BCD/bitops: too small to matter, ALU must stay single-cycle.
-**There is no known, unexplored instance of this lever left to pull.**
+**The central fact, unchanged since 2026-09-28**: the reused BIU's own
+standalone ceiling is **27.78 MHz `clk_4x`**, measured with no core
+attached at all. The current full A4 design measures **27.25 MHz** — i.e.
+**the core has already caught up to within 2% of the BIU's own limit.**
+This is the single most important number in this document: it means no
+amount of further core-side optimisation (decoder merge, deeper pipelining,
+anything in §4-§6) can gain more than about half a MHz before the BIU
+itself becomes the hard wall. Reaching 100 MHz is arithmetically impossible
+without raising that 27.78 MHz ceiling, full stop.
 
-**(C) The real, already-scoped, not-yet-attempted structural fix: merge
-`u_peek` and `u_core.u_dec` into one decoder.** §3.2 traces this in full.
-A prior session already worked out exactly what it requires (hoist
-`ext_words` computation ahead of the main classification, normalise `ext`
-from `ext_raw` internally, delete the now-redundant `u_peek` instance
-entirely) and explicitly deferred it as "a real refactor of the most
-intricate file in `rtlp/`... not the cheap one this plan assumed." Nothing
-has changed that assessment — it's still the correct fix, still unbuilt,
-still comparable in scope/risk to the AG/EX split (which took a full
-session). The honest expected payoff, per the same prior investigation,
-is bounded: "even a perfect `ext_words`... unlocks roughly 25 → 30-35 MHz,
-not more" — i.e. this alone does not reach 100 MHz either, but it's the
-only concretely-scoped lever left that hasn't been pulled. Any attempt
-MUST start with `tb/uop_decode_equiv_tb.sv` (already compares `ext_words`
-against `mh030p_decode`'s own output, the correct oracle per the prior
-investigation — *not* the reference decoder, which has its own known
-`ext_count` bugs) and the full Harte sweep as the safety net, matching
-every other structural change in this project's history.
+### Stage 1 — the decoder merge (§4.2) — scoped, not built
 
-**(D) The reused BIU interfaces are 33.7% of A4's area and completely
-untouched by any bounded fix so far** (aside from the cache BRAM mapping,
-already landed). Fixing anything here means crossing scope decision 1 —
-"the BIU is reused, not rewritten" — which was a deliberate choice to keep
-`rtl/`'s own ~280-phase verification intact and not pay for re-deriving
-pin-level correctness in a second place. `CLAUDE.md`'s own "100 MHz
-programme" paragraph already flagged one candidate inside this boundary —
-a synchronous-termination (STERM) bus fast path, cutting the measured
-~14.3 ticks/access toward the 12-tick protocol floor — as "a higher-
-priority candidate... pending sign-off since it spends the protocol-exact
-decision." That sign-off was never given. This is a real option but a
-bigger one: it would need its own fork of the BIU (mirroring how `rtlp/`
-itself forked from `rtl/`) rather than editing the shared module, since
-`rtl/`'s own gate depends on the BIU's timing being unchanged.
+Expected ceiling if done alone, per the original investigation: **~28 MHz**
+— because the BIU binds immediately afterward. Worth doing regardless,
+because it removes a real, quantified ~19 ns structural cost and because
+every later stage needs the front end not to be the thing reintroducing a
+bottleneck once the BIU is faster. **Not sufficient by itself; do not
+expect this stage alone to move the tracked number much**, per its own
+2026-09-28 estimate, now corroborated by this session's `-noflatten`
+finding that it's still exactly as costly as predicted.
 
-**(E) Tooling added this session**: `make area-pbiu` (mirrors `area-p`,
-but targets `mh030p_biu_top` — the A4 configuration's own real per-module
-area, not the abstract-bus top `area-p` already covered). Use it instead
-of re-deriving the ad-hoc `module_area.py` invocation this session needed.
+### Stage 2 — fork the BIU into `rtlp/`, then cut `biu_cycle_gen`'s FSM depth
 
-## 8. The honest answer to "why isn't this reaching 100 MHz"
+**The decision to do this was already taken on 2026-09-28**
+(`project_mh030_pipelined_rewrite_planning.md`: "Fork the BIU into `rtlp/`.
+`rtl/` stays frozen... BIU fixes will have to be applied twice; nothing
+already verified is put at risk.") **but the work itself was never
+started.** `rtlp/` today has only an *adapter* (`mh030p_biu_top.sv`) that
+drives `rtl/`'s own `m68030_biu` unmodified — no forked copy exists yet.
 
-Every bounded, low-risk lever this programme has found and could safely
-pull (B above) has been pulled, including one (bit-field) that looked
-exactly like a winner by analogy and wasn't. What's left is either (C) a
-genuinely-scoped but nontrivial decoder merge with a *known, bounded*
-payoff that still falls short of 100 MHz on its own, or (D) a much bigger
-decision to stop treating the BIU as frozen — which is not something to
-start without the user explicitly re-opening scope decision 1. There is
-no remaining option in this catalog that is simultaneously cheap, proven,
-and sufficient to reach 100 MHz. The realistic choices are: declare the
-originally-approved 25-50 MHz target met and stop; invest a session in (C)
-for a bounded, estimated 30-35 MHz ceiling; or explicitly re-scope to
-include the BIU and accept that as a materially larger, separately-planned
-effort.
+**Why this does not require re-litigating scope decision 1** (bus
+fidelity): `biu_cycle_gen` is "a ~100-state FSM whose next-state and
+pin-output decode are wide and flat" (2.16:1 LUT:FF, not a deep cone) — the
+candidate fixes are one-hot state encoding, registering pin outputs one
+tick later, and splitting next-state decode by cycle type. **None of these
+change which S-state asserts which pin, or how many S-states a cycle takes
+— they change how fast the FSM decides, not what it decides.** A pin
+registered one tick later than its triggering state, with the state
+sequence itself unchanged, is still protocol-exact. This is a genuinely
+different category of change from Stage 2b below.
+
+Expected ceiling, per the original estimate: Stages 1-2 together reach
+**30-40 MHz**. This is the next concrete, scoped piece of work, and it is
+the first one that actually attacks the real current ceiling rather than
+something already below it.
+
+### Stage 2b — synchronous-termination (STERM) fast path — NEEDS EXPLICIT SIGN-OFF
+
+Potentially the single biggest lever on the board, and different in kind
+from Stage 2: **this one does spend the "protocol-exact, timing-free" bus
+fidelity decision**, because it changes the real tick cost of a bus cycle
+(the 68030's own STERM mechanism gives a synchronous 2-clock cycle instead
+of the normal 3-clock asynchronous one). Measured motivation: a real bus
+access currently costs ~14.3 ticks against a 12-tick protocol floor, and
+231 transactions in the `make bench` workload consume 3,310 of 8,603 total
+ticks — the bus protocol itself, not the clock or the decode chain, is the
+single largest consumer of time in that benchmark. Cutting this toward the
+protocol floor was estimated to take `bench2` from 8,603 to roughly 5,900
+ticks (1.46x) *and compound with every clock-rate gain from Stages 1-2*.
+
+**Given this session's reframing of 100 MHz as the required target, not a
+stretch goal, this sign-off question needs to be asked directly rather than
+left flagged indefinitely: do you want to spend the protocol-exact-timing
+decision for this fast path?** It was deliberately left unspent through
+three prior sessions that each had the chance to raise it. Saying yes here
+unlocks the single largest estimated single-item win in this whole plan;
+saying no caps the realistic ceiling at whatever Stages 1-2-3-4 reach on
+protocol-timing alone (see §9).
+
+### Stage 3 — the core's own 5.17:1 cone ratio — partially done, demoted
+
+Splitting AG into address-mux-then-adder and EX into operand-select-then-
+ALU/shifter/BCD/bitfield, giving the CCR/flag network its own stage. The
+AG/EX EA-adder split (§4.1) is a first, real instance of this — done, but
+measured flat, because (as now confirmed) it wasn't the dominant cost at
+the time. **The original plan explicitly demotes this stage below Stage
+2b**, because a deeper pipeline costs ticks (more stages = more latency per
+instruction), so it must be judged on `Fmax / ticks` via `make bench`
+alongside every sweep, never on the clock number alone. Worth continuing
+once Stages 1-2(-2b) have moved the ceiling high enough that the core's own
+remaining depth is genuinely what's binding — re-profile with
+`-noflatten` before choosing the next specific split, rather than guessing.
+
+### Stage 4 — routing locality
+
+Deferred until after 1-3: the A4 worst path currently splits ~74-80%
+routing / ~20-25% logic, but that's mostly a *symptom* of long combinational
+chains giving the placer nothing local to work with, not an independent
+problem. Revisit once Stages 1-3 have shortened the chains; floorplan
+constraints and re-checking ABC9 mapping choices belong here, not before.
+
+### Stage 5 — re-decide the target against real measurements
+
+With Stages 1-4 actually measured, either 100 MHz is in reach on this FPGA
+or it demonstrably is not, and the choice becomes informed rather than
+estimated: accept whatever real number results, spend more cycles per
+instruction deliberately to buy clock, or move to a different device
+family. See §9 for what the existing evidence already suggests about this.
+
+## 9. Honest ceiling estimate, stated plainly
+
+The 2026-09-28 investigation gave an estimate, flagged explicitly as an
+estimate rather than a measurement, and it should be repeated here exactly
+rather than softened:
+
+> Stages 1-2 reach 30-40 MHz with reasonable confidence; Stages 3-5
+> plausibly reach 45-65 MHz for an effort comparable to Track 1-3 [the
+> ~20-phase `rtl/` zero-gap-dispatch programme]. **100 MHz I would not
+> commit to on ECP5 at all.**
+
+Two things would change that answer, named explicitly by the same
+investigation: a different FPGA family (ECP5 is a 40 nm, 2014-era part; a
+Lattice Nexus/CertusPro or a Xilinx Artix-7 would make 100 MHz far more
+attainable on comparable logic), or deliberately accepting more cycles per
+instruction to buy clock rate (trading `Fmax` for `Fmax/ticks` in the
+other direction — the opposite of what every stage above tries to do, but
+a legitimate lever if the clock number itself is the hard requirement).
+
+This estimate has been wrong in both directions before in this exact
+project — a pivot-decision estimate predicted 3-5 MHz for the next bounded
+fix and one delivered 14.24 MHz — so it is reported as a prior, not a
+verdict, and the staged gates in §8 exist precisely to replace it with
+real measurements rather than resolve the question by estimation. But
+given the target is now fixed rather than negotiable, the honest statement
+is: **getting to 100 MHz on this exact FPGA, with this exact architecture,
+is not something the best existing analysis in this project is confident
+about** — proceeding means either accepting that uncertainty and running
+the staged gates to find out for real, or treating one of the two listed
+alternatives (different device, or more cycles per instruction) as part
+of the plan from the start rather than a fallback.
