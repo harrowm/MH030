@@ -1214,12 +1214,31 @@ module mh030p_core (
 
     wire [31:0] ea_adj_idx = (ag_uop.ea_mode == UEA_AN_PRE) ? ea_adj : ag_idx;
 
+    // A memory-to-memory move with an indexed destination whose own Xn
+    // happens to BE the source's own auto-incrementing register: real 68k
+    // silicon fully evaluates the source (read + step) before the
+    // destination's own EA, so Xn is read POST-step -- but ag_d's own
+    // register-file read landed in the SAME cycle as the step itself, before
+    // ag_an_upd's commit reaches the file, so it read the OLD value. Confirmed
+    // via a direct trace: MOVE.b (A3)+,(d8,A7,A3) wrote one byte short of the
+    // expected destination, exactly the auto-increment step, with the
+    // register file's own post-increment value otherwise correct. ag_an_val
+    // is exactly that post-step value, computed combinationally and reused
+    // here instead of re-deriving it -- hoisted above ag_an_upd itself
+    // (which this doesn't need) only to keep this a plain forward
+    // continuous-assign chain Icarus is happy to elaborate.
+    wire [31:0] ag_an_val = (ag_uop.ea_mode == UEA_AN_POST) ? (ag_b + ea_step)
+                                                            : (ag_b - ea_step);
+    wire ag_dst_idx_is_src_an = (ag_uop.dst_ea_idx_reg == ag_uop.ea_reg)
+                             && ((ag_uop.ea_mode == UEA_AN_POST)
+                              || (ag_uop.ea_mode == UEA_AN_PRE));
+    wire [31:0] ag_d_eff = ag_dst_idx_is_src_an ? ag_an_val : ag_d;
     // The DESTINATION's index term, scaled here in AG where the adder already
     // lives, and carried into EX as one value. EX adds it to the destination
     // base; re-deriving it there would need a second scaling shifter for no
     // benefit.
     wire [31:0] ag_dxn  = ag_uop.dst_ea_idx_long
-                          ? ag_d : {{16{ag_d[15]}}, ag_d[15:0]};
+                          ? ag_d_eff : {{16{ag_d_eff[15]}}, ag_d_eff[15:0]};
     wire [31:0] ag_didx = ((ag_uop.dst_ea_mode == UEA_AN_IDX)
                            && !ag_uop.dst_ea_is)
                           ? (ag_dxn << ag_uop.dst_ea_idx_scale) : 32'h0;
@@ -1254,8 +1273,6 @@ module mh030p_core (
                   && !stall_ex && !stall_ag && !redirect
                   && ((ag_uop.ea_mode == UEA_AN_POST)
                    || (ag_uop.ea_mode == UEA_AN_PRE));
-    wire [31:0] ag_an_val = (ag_uop.ea_mode == UEA_AN_POST) ? (ag_b + ea_step)
-                                                            : (ag_b - ea_step);
 
     // ── AG -> EX, plus the registered bus request ───────────────────────────
     reg [31:0] ex_a, ex_b;

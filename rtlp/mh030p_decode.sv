@@ -1210,7 +1210,18 @@ module mh030p_decode (
                 // Source
                 if (ea_src_ok) begin
                     uop.src_kind    = ea_is_imm ? US_IMM : US_MEM;
-                    uop.imm         = ext;
+                    // Same position-aware extraction the group-0 ALU-immediate
+                    // fix needed, and the same bug: the immediate is the
+                    // LEADING word(s), with the destination's own EA word(s)
+                    // (ea_slot_is_dst, below) following -- a plain `ext`
+                    // smeared the two together whenever the destination
+                    // itself needed an extension word (indexed, (d16,An)).
+                    // Confirmed via a direct trace: MOVE.b #imm,(d8,A0,Xn)
+                    // wrote the destination's own index word's byte instead
+                    // of the real immediate.
+                    uop.imm         = (f_move_siz == UZ_LONG)
+                        ? {xword(3'd0, ea_words_total), xword(3'd1, ea_words_total)}
+                        : {16'h0, xword(3'd0, ea_words_total)};
                     uop.ea_mode     = ea_mode_w;
                     uop.ea_reg      = rn_src_an;
                     uop.reads_mem   = !ea_is_imm;
