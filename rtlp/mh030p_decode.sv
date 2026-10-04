@@ -535,6 +535,25 @@ module mh030p_decode (
                     v = 3'd1 + ea_words(ea_mode_w);
                 else if (g0_is_dynbit && ea_is_alt_mem)
                     v = ea_words(ea_mode_w);
+                // BTST Dn,(d16/d8,PC,Xn) and BTST Dn,#imm: the one dynamic
+                // bit op legal against PC-relative/immediate "memory" (read-
+                // only), mirroring the two new decode branches above this
+                // fast path has to agree with -- a stale mismatch here (this
+                // function predicting 0 via the generic fallback below while
+                // the real decoder below claims 1) fed the wrong half of
+                // `ext` to the real decoder and wrecked the displacement.
+                else if (g0_is_dynbit && (b_op == 2'b00)
+                         && ((ea_mode_w == UEA_PC_D16)
+                          || (ea_mode_w == UEA_PC_IDX)))
+                    v = ea_words(ea_mode_w);
+                else if (g0_is_dynbit && (b_op == 2'b00) && ea_is_imm)
+                    v = 3'd1;
+                // BTST #n,(d16/d8,PC,Xn): the static counterpart, one extra
+                // word for the bit number on top of the EA's own.
+                else if (g0_is_statbit && (b_op == 2'b00)
+                         && ((ea_mode_w == UEA_PC_D16)
+                          || (ea_mode_w == UEA_PC_IDX)))
+                    v = 3'd1 + ea_words(ea_mode_w);
                 else if (g0_is_statbit && ea_is_alt_mem)
                     v = 3'd1 + ea_words(ea_mode_w);
                 else if ((g0_is_dynbit || g0_is_statbit) && src_is_dn)
@@ -735,7 +754,17 @@ module mh030p_decode (
             4'h0: begin
                 if ((g0_is_dynbit && ea_is_alt_mem) || (g0_is_statbit && ea_is_alt_mem)
                     || g0_is_cmp2 || g0_is_cas || g0_is_moves
-                    || (g0_is_alu_imm && ea_is_alt_mem && f_ss_valid))
+                    || (g0_is_alu_imm && ea_is_alt_mem && f_ss_valid)
+                    // BTST Dn/#n,(d16/d8,PC,Xn): see ext_words_fast's own
+                    // matching additions above -- needed here too so the
+                    // full-format addendum (fff_sff) is computed against the
+                    // real index word rather than declining to look at all.
+                    || (g0_is_dynbit && (b_op == 2'b00)
+                        && ((ea_mode_w == UEA_PC_D16)
+                         || (ea_mode_w == UEA_PC_IDX)))
+                    || (g0_is_statbit && (b_op == 2'b00)
+                        && ((ea_mode_w == UEA_PC_D16)
+                         || (ea_mode_w == UEA_PC_IDX))))
                     ea_mode_eff_fast = ea_mode_w;
                 else
                     ea_mode_eff_fast = UEA_NONE;
@@ -1001,6 +1030,67 @@ module mh030p_decode (
                 uop.writes_reg  = 1'b0;
                 uop.updates_ccr = (b_op == 2'b00);
                 uop.x_unchanged = 1'b1;
+            end else if (g0_is_dynbit && (b_op == 2'b00)
+                         && ((ea_mode_w == UEA_PC_D16)
+                          || (ea_mode_w == UEA_PC_IDX))) begin
+                // BTST Dn,(d16/d8,PC,Xn): the one bit op of the 4 legal against
+                // PC-relative memory, since it never writes back -- ea_is_alt_mem
+                // above deliberately excludes PC-relative for the other three,
+                // which is why this is its own branch rather than a widened
+                // guard on the one above.
+                uop.uclass      = UC_BITOP;
+                uop.unit        = UU_BIT;
+                uop.alu_op      = {2'b00, b_op};
+                uop.siz         = UZ_BYTE;
+                uop.subop       = 4'd0;
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_dn;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_dynbit && (b_op == 2'b00) && ea_is_imm) begin
+                // BTST Dn,#imm: legal for the same read-only reason, and the
+                // tested value is the extension word itself -- already fetched
+                // as part of ordinary instruction decode, so no separate bus
+                // cycle the way a real memory destination needs (ea_mode stays
+                // NONE). Stashed in uop.imm, which the dynamic form otherwise
+                // never uses since its bit number comes from Dn, not a word.
+                uop.uclass      = UC_BITOP;
+                uop.unit        = UU_BIT;
+                uop.alu_op      = {2'b00, b_op};
+                uop.siz         = UZ_BYTE;
+                uop.subop       = 4'd0;
+                uop.src_kind    = US_DREG;
+                uop.src_reg     = rn_dn;
+                uop.dst_kind    = US_MEM;
+                uop.imm         = {24'h0, ext[7:0]};
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
+            end else if (g0_is_statbit && (b_op == 2'b00)
+                         && ((ea_mode_w == UEA_PC_D16)
+                          || (ea_mode_w == UEA_PC_IDX))) begin
+                // BTST #n,(d16/d8,PC,Xn): the static-bit-number counterpart of
+                // the dynamic PC-relative branch above, for the same read-only
+                // reason. The bit-number word is still the LEADING extension
+                // word (index 0), exactly as the alterable-memory static
+                // branch below -- see its own comment for why a plain `ext`
+                // can't be used here either.
+                uop.uclass      = UC_BITOP;
+                uop.unit        = UU_BIT;
+                uop.alu_op      = {2'b00, b_op};
+                uop.siz         = UZ_BYTE;
+                uop.src_kind    = US_IMM;
+                uop.imm         = {16'h0, xword(3'd0, ea_words(ea_mode_w) + 3'd1)};
+                uop.subop       = 4'd1;
+                uop.dst_kind    = US_MEM;
+                uop.ea_mode     = ea_mode_w;
+                uop.ea_reg      = rn_src_an;
+                uop.reads_mem   = 1'b1;
+                uop.updates_ccr = 1'b1;
+                uop.x_unchanged = 1'b1;
             end else if (g0_is_statbit && ea_is_alt_mem) begin
                 // Static bit ops on memory are byte-sized and leave both the
                 // writeback and the flags to the RMW FSM.
@@ -1009,7 +1099,19 @@ module mh030p_decode (
                 uop.alu_op      = {2'b00, b_op};
                 uop.siz         = UZ_BYTE;
                 uop.src_kind    = US_IMM;
-                uop.imm         = ext;
+                // The bit-number word is the LEADING extension word (index 0),
+                // with the EA's own word(s) following it -- but ext's own two
+                // halves swap which physical half holds index 0 depending on
+                // the TOTAL word count (see xword's own comment), so a plain
+                // `ext` (both halves) smeared the bit number together with the
+                // EA's own index/displacement word whenever the EA itself
+                // needed an extension word (indexed, (d16,An), abs). Confirmed
+                // via a direct trace: BTST #,(d8,A0,Xn) computed bit_num from
+                // the INDEX word's own low bits instead of the real bit-number
+                // word, and ALSO fed the same garbled value into the EA index
+                // register, producing a wrong effective address at the same
+                // time.
+                uop.imm         = {16'h0, xword(3'd0, ea_words(ea_mode_w) + 3'd1)};
                 uop.subop       = 4'd1;          // static: one immediate word
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
@@ -2083,9 +2185,18 @@ module mh030p_decode (
                           // the dynamic forms take it from a register. Neither
                           // was counted, so even BTST #n,Dn -- a two-word
                           // instruction -- reported zero.
+                          //
+                          // BTST Dn,#imm is its own case on top of that: ea_mode
+                          // is deliberately NONE (no real addressing mode, see
+                          // the decode branch) but dst_kind==US_MEM flags that
+                          // the extension word carrying the tested value still
+                          // has to be drained, which ea_words(NONE) reports as
+                          // zero.
                           : (uop.uclass == UC_BITOP)
                             ? (((uop.subop == 4'd1) ? 3'd1 : 3'd0)
-                               + ea_words(ea_mode_w))
+                               + ea_words(ea_mode_w)
+                               + (((uop.ea_mode == UEA_NONE)
+                                   && (uop.dst_kind == US_MEM)) ? 3'd1 : 3'd0))
                           // STOP's operand is the SR value to load.
                           : ((uop.uclass == UC_NOP) && (uop.subop == 4'd2))
                             ? 3'd1

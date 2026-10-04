@@ -309,6 +309,15 @@ module mh030p_core (
                            // to miss the bit tests after covering TST.
                            || (dec_uop.reads_mem && !dec_uop.writes_mem
                                && !dec_uop.writes_reg && dec_ea_ok)
+                           // BTST Dn,#imm: no EA at all (ea_mode is NONE by
+                           // design, see mh030p_decode.sv) and no bus cycle --
+                           // the destination check below demands a register,
+                           // which this doesn't have either, so dec_ea_ok alone
+                           // can't cover it the way the clause above covers a
+                           // real memory destination.
+                           || ((dec_uop.uclass == UC_BITOP)
+                               && (dec_uop.dst_kind == US_MEM)
+                               && !dec_uop.reads_mem)
                            || (dec_is_movep && dec_ea_ok)
                            // MOVEC only; MOVES (sub-op 0) needs the alternate
                            // function codes to mean something first.
@@ -1147,13 +1156,22 @@ module mh030p_core (
     // the next instruction, and not the instruction address itself.
     wire ag_pc_rel = (ag_uop.ea_mode == UEA_PC_D16)
                   || (ag_uop.ea_mode == UEA_PC_IDX);
+    // PC-relative addressing uses the address of the extension word that
+    // CARRIES the displacement/index as its own base -- normally pc+2, since
+    // that word is the first (and only) one. A static bit op's own bit-number
+    // word is a LEADING extension word ahead of the EA's own, pushing the
+    // real displacement/index word out to pc+4 instead -- confirmed via a
+    // direct trace (BTST #n,(d16,PC) read 2 bytes short of the expected
+    // target, exactly one word off, before this fix).
+    wire [31:0] ag_pc_lead = ((ag_uop.uclass == UC_BITOP) && (ag_uop.subop == 4'd1))
+                           ? 32'd2 : 32'd0;
     // ea_bs is full format's BASE SUPPRESS: the base register (or the PC, for a
     // PC-relative form) is simply not added, which is how `(bd,Xn)` and a bare
     // `(bd)` are expressed. Brief format never sets it.
     wire [31:0] ea_base = ((ag_uop.ea_mode == UEA_ABS_W)
                         || (ag_uop.ea_mode == UEA_ABS_L)) ? 32'h0
                         : ag_uop.ea_bs                    ? 32'h0
-                        : ag_pc_rel                       ? ag_pc2
+                        : ag_pc_rel                       ? (ag_pc2 + ag_pc_lead)
                                                           : ag_b;
     // Predecrement applies to the address used THIS cycle; postincrement
     // does not.
@@ -1479,6 +1497,12 @@ module mh030p_core (
     wire ex_is_bf = ex_valid && (ex_uop.uclass == UC_BITFIELD);
     wire ex_mem_operand = ex_uop.reads_mem && !ex_uop.writes_mem
                        && (ex_uop.dst_kind == US_MEM);
+    // BTST Dn,#imm: the tested value is the extension word decode stashed in
+    // ex_uop.imm, not a real memory operand (see mh030p_decode.sv's own
+    // g0_is_dynbit && ea_is_imm branch) -- ex_mem_operand above requires
+    // reads_mem, which this deliberately has none of.
+    wire ex_is_btst_imm = (ex_uop.uclass == UC_BITOP)
+                       && (ex_uop.dst_kind == US_MEM) && !ex_uop.reads_mem;
     wire [3:0] ex_a_sel = ex_is_cas ? ex_uop.dst_reg
                         : ex_is_movep ? ex_uop.imm[3:0]
                         : ex_is_bf ? ex_uop.imm[15:12]
@@ -1617,6 +1641,7 @@ module mh030p_core (
     wire [31:0] ex_dst = ex_m2m           ? mem_hold
                        : ex_rmw_op        ? mem_hold
                        : ex_mem_operand   ? mem_hold
+                       : ex_is_btst_imm   ? ex_uop.imm
                        : dst_is_src_areg  ? ex_src_an_post
                        : ex_uop.reads_mem ? ex_a_u
                                           : ex_b_u;
