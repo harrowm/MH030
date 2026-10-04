@@ -6633,29 +6633,64 @@ improvement -- report both halves honestly.** `make fmax-pbiu-sweep
 SEEDS=9`: **27.25 MHz mean (range 25.10-29.33)** against the 27.36 MHz
 baseline (range 25.15-28.77) -- effectively flat, well inside
 [[feedback_fmax_noise_floor]]'s own documented ~1-2 MHz noise floor for
-this exact sweep. Re-profiling all 9 `--report` JSONs with
-`scripts/measure_fmax.py analyze`, however, shows a real, consistent
-structural change the mean number alone hides: **`u_cpu.u_core` (the
-exact chain this split targeted) no longer appears as the dominant module
-in ANY of the 9 seeds** -- a reversal of the prior measurement (8 of 9
-seeds dominated by `u_core`, up to 94.5%). Every seed's worst path is now
-attributed entirely to `u_dut.u_biu.u_cache`/`u_biu.u_cache.data_d`/
-`u_biu.u_icache.data_i` -- the REUSED `rtl/` BIU's cache interface,
-carried into the A4 configuration unmodified and never tuned for `rtlp/`'s
-own aggressive Fmax target. This is the textbook shape this programme has
-seen before (`ext_words`'s own Stage 1 win did not move the mean by its
-full isolated-cone amount either, because P&R noise and the next-biggest
-contender both move at once) -- the split did exactly what it was
-designed to do, structurally, and the reason it didn't show up as a mean
-win is that the NEXT bottleneck (the cache interface) was already close
-enough in magnitude to take over immediately, not that the fix was
-ineffective. **The 100 MHz target is now 3.67x away (27.25 vs 100). Next
-candidate, following this programme's own established pattern (isolate
-the cone before optimizing,
-[[feedback_isolate_cone_before_optimizing]]): a dedicated probe around
-`biu_cache_if.sv`'s own D-cache control/address path, the same technique
-Phase A used for `data_d`'s BRAM mapping and this session used for the EA
-adder -- not yet built.** No RTL change should follow from this finding
-without that isolation step, per this programme's own repeated lesson
-that local restructuring without first isolating the cone has a poor hit
-rate ([[feedback_sequentialise_always_evaluating_blocks]]).
+this exact sweep.
+
+**CORRECTION (same session, a later pass): the module-attribution
+conclusion drawn from that sweep was WRONG, and the error is itself an
+important, generalizable finding -- see
+[[feedback_flattened_attribution_needs_noflatten_crosscheck]].** The
+first pass re-profiled the 9 `--report` JSONs from the FLATTENED sweep
+above with `scripts/measure_fmax.py analyze` and concluded `u_cpu.u_core`
+no longer dominates any seed, with the worst path attributed entirely to
+`u_dut.u_biu.u_cache`/`data_d`/`u_icache.data_i`. **This did not survive a
+`-noflatten` cross-check.** `make fmax-pbiu-noflat SEED=4` and `SEED=1`
+(module boundaries genuinely trustworthy there, unlike the flattened
+build) both show the SAME, completely different worst path: `u_cpu.u_ifu`
+(clk-to-q on `instr`) -> `u_cpu.u_peek` (44-46 hops, **19.11-19.12 ns,
+44.7-44.9% of the ~42.6 ns total, consistent to two decimal places across
+both independent seeds**) -> back through `u_cpu.u_ifu` -> `u_core.u_dec`
+-> `u_core` -> `u_core.u_rf` (setup on `rd_a_data`). `u_biu.u_cache` does
+not appear in either noflat seed's worst path at all. The flattened
+build's own "no u_core" conclusion was real in one narrow sense (ABC9's
+nearest-surviving-ancestor naming genuinely doesn't call the dominant
+cells `u_core` in that build) but the inference drawn from it --
+"therefore the bottleneck moved to the cache" -- was false; the true
+dominant contributor (`u_peek`) was simply attributed to the wrong module
+name by the flattening, the same failure mode already documented once
+for `mh030p_mul`'s DSPs (named `u_ifu.req_epoch_*`) but not previously
+known to extend to ordinary module-prefix "module walk" attribution, only
+to single-cell naming. **Do not trust a flattened sweep's module
+attribution for a NEW conclusion without a `-noflatten` cross-check on at
+least one seed first** -- this is now a standing requirement for this
+programme, not just a one-off caveat.
+
+**The real finding is not new, and is not actionable without a different
+kind of fix.** `mh030p_cpu.sv`'s own header comment (lines 73-91,
+predating this session) already documents exactly this chain: `u_peek`
+(a full `mh030p_decode` instance, kept alive solely to produce
+`ext_words_fast_full_o`/Stage 1's own rewrite) must settle before
+`u_ifu`'s `drain`/`have_all` can decide how many words the real decode
+(`u_core.u_dec`) gets to see this cycle, which gates the regfile's own
+read-address mux one hop further on -- all serial within one clock
+period. The measured 19.11-19.12 ns matches Stage 1's own already-
+published isolated-cone number for the COMPLETE/full-format case almost
+exactly (CLAUDE.md's Stage 1 writeup: "~49-50 MHz/~20 ns (complete, with
+the full-format addendum, 1.19x -- smaller because that addendum is
+genuinely serial after the brief count)"). Stage 1 already concluded this
+remaining cost is "genuinely serial" and did not promise to remove it
+from the critical path, only to make the computation itself cheaper (it
+did: from the old two-full-decoder-pass shape, 78% of the path/151 of 179
+hops, down to this). **This is Stage 1's own known, already-quantified
+floor showing up end-to-end, not a new bottleneck** -- the "u_core no
+longer dominates" claim is retracted; `u_peek`'s cost was there all
+along, just mis-attributed. The 100 MHz target is 4.28x away at the real,
+noflat-measured ~23.4 MHz for this specific build (SEED=4/1 noflat
+numbers; the flattened 27.25 MHz mean remains the tracked sweep metric
+since `-noflatten` is not the standard measurement recipe, only a
+cross-check). **No new probe was built and no RTL change is proposed from
+this investigation** -- shrinking `ext_words_fast_full_o` further, or
+breaking its same-cycle serial dependency on `u_ifu`'s own drain decision
+(e.g. by computing it a cycle ahead against an already-buffered
+prefetch-queue word, genuinely retiming rather than just cheapening the
+arithmetic), is a materially different kind of change than Stage 1's own
+shallow-decoder rewrite and has not been scoped.

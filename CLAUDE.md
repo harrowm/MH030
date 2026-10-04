@@ -1501,23 +1501,45 @@ abstract-bus 6617, was 6616; A4 caches-off 24294, UNCHANGED -- this
 workload is bus-latency-bound so the new 1-cycle front-end latency is
 fully absorbed; A4 caches-on 8751, was 8603). **Fmax: `make
 fmax-pbiu-sweep SEEDS=9` measured 27.25 MHz mean (range 25.10-29.33)
-against the 27.36 MHz baseline -- flat, inside the documented noise floor.
-But re-profiling all 9 seeds shows a real structural win the mean hides:
-`u_cpu.u_core` (this exact chain) no longer dominates ANY of the 9 seeds'
-worst paths** (previously 8 of 9, up to 94.5%) -- **every seed's worst
-path now attributes entirely to the reused `rtl/` BIU's cache interface
-(`u_biu.u_cache`/`data_d`/`u_icache.data_i`), never tuned for `rtlp/`'s own
-Fmax target. That is the next candidate, pending its own isolated probe**
-(mirroring `tb/extw_probe.sv`'s technique) -- not yet built. 100 MHz target
-now 3.67x away. See `plan.md`'s own "AG/EX EA-adder split" section for the
-full writeup including the Phase 0 probe measurements and the exact
-root-cause trace of the write-port bug.
+against the 27.36 MHz baseline -- flat, inside the documented noise floor.**
+
+**CORRECTION (same session, a later pass): the module-attribution
+conclusion originally drawn here was WRONG.** It claimed `u_cpu.u_core`
+no longer dominates any of the 9 seeds and that the worst path had moved
+to the reused `rtl/` BIU's cache interface (`u_biu.u_cache`/`data_d`/
+`u_icache.data_i`) -- based on re-profiling the FLATTENED sweep's own
+`--report` JSONs, which this correction shows is not safe to trust for a
+new conclusion. A `-noflatten` cross-check (`make fmax-pbiu-noflat`,
+SEED=4 and SEED=1, where module boundaries are genuinely trustworthy
+rather than inherited ancestor names) found a completely different,
+consistent-across-both-seeds worst path instead: `u_cpu.u_ifu` ->
+`u_cpu.u_peek` (19.11-19.12 ns, ~44.8% of ~42.6 ns total, both seeds) ->
+back through `u_ifu` -> `u_core.u_dec` -> `u_core` -> `u_core.u_rf`.
+`u_biu.u_cache` appears in neither. This is not a new bottleneck: it
+matches Stage 1's own already-published isolated-cone cost for
+`ext_words_fast_full_o`'s complete/full-format case (~20 ns) almost
+exactly, and `mh030p_cpu.sv`'s own header comment already documents why
+it's structurally serial (u_peek must settle before the IFU's drain
+decision, which gates the real decoder, which gates the regfile address
+mux, all in one cycle). Stage 1 never claimed to remove this from the
+end-to-end critical path, only to make the computation itself cheaper --
+it did. **Standing lesson for this programme**:
+[[feedback_flattened_attribution_needs_noflatten_crosscheck]] -- a
+flattened sweep's module-prefix attribution must be cross-checked with at
+least one `-noflatten` seed before trusting any NEW conclusion drawn from
+it, not just for single-cell naming (the earlier `mh030p_mul` DSP case)
+but for the "module walk" attribution style this programme has used
+throughout the Fmax programme. No new probe was built and no RTL change
+is proposed from this corrected finding -- see `plan.md`'s own "AG/EX
+EA-adder split" section for the full writeup, including the original
+(now-retracted) claim, the cross-check, and why `ext_words_fast_full_o`'s
+remaining cost isn't actionable by Stage 1's own technique a second time.
 
 **Current state**: `make test` 43/43, `make lint-drivers` clean, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50, `make bench`
 all four arms passing (two `rtl/` + two `rtlp` A4, see the table above),
-`make fmax-pbiu-sweep` 27.25 MHz (9 seeds, flat vs 27.36 but a confirmed
-structural shift off `u_core` -- see the AG/EX split entry above), `make
+`make fmax-pbiu-sweep` 27.25 MHz (9 seeds; the real worst-path driver is
+`u_peek`, not `u_core` or the cache -- see the correction above), `make
 fmax-extw` 41.70 MHz (one cone,
 see the 100 MHz programme note below -- the 100 MHz target is open, not closed). Full 124-suite Tom Harte sweep **for `rtl/`**: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
