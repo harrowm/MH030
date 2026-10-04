@@ -23,7 +23,7 @@ module extw_fast_full_probe (
 
     uop_t u;
     wire [2:0] fast_w, full_w;
-    mh030p_decode u_d (.instr(instr_r), .ext(extraw_r), .ext_raw(extraw_r),
+    mh030p_decode u_d (.instr(instr_r), .ext_raw(extraw_r),
                        .q3(q3_r), .q4(16'h0), .uop(u), .ext_words_fast_o(fast_w),
                        .ext_words_fast_full_o(full_w));
 

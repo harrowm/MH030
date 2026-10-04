@@ -50,16 +50,22 @@ module mh030p_core (
 
     // Instruction feed. A real IF stage is P3; for now the instruction is
     // presented directly so the pipeline below can be measured and tested.
+    // `ext` (the normalised extension word) is no longer a port here --
+    // u_dec now computes it internally from ext_raw (Stage 1 decoder
+    // merge, docs/mh030p_architecture.md) -- only the raw queue words are
+    // needed.
     input  wire [15:0] instr,
-    input  wire [31:0] ext,
-    // Unnormalised extension words, passed straight through to the decoder --
-    // see the note on its own ext_raw port for why the full-format check cannot
-    // read them from `ext`.
     input  wire [31:0] ext_raw,
     input  wire [15:0] q3,
     input  wire [15:0] q4,
     input  wire        instr_valid,
     output wire        instr_ready,   // core can accept an instruction this cycle
+    // How many extension words the instruction currently being offered
+    // needs, straight from u_dec's own ext_words_fast_full_o -- the caller
+    // (mh030p_cpu.sv) needs this to decide how many words to drain from
+    // the prefetch queue before instr_valid/have_all even applies, which
+    // is why it must be available independently of instr_ready/stalling.
+    output wire [2:0]  dec_ext_words_o,
 
     // Program counter and redirect. There is no fetch unit yet, so the caller
     // supplies the address of the instruction it is offering and the core
@@ -110,10 +116,10 @@ module mh030p_core (
     mh030p_decode u_dec (
         .ext_raw (ext_raw),
         .instr (instr),
-        .ext   (ext),
         .q3    (q3),
         .q4    (q4),
-        .uop   (dec_uop)
+        .uop   (dec_uop),
+        .ext_words_fast_full_o (dec_ext_words_o)
     );
 
     // Only register-direct work is executed in this phase. Anything else

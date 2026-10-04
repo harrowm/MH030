@@ -64,60 +64,54 @@ module mh030p_cpu (
 );
 
     wire [15:0] if_instr, if_q3, if_q4;
-    wire [31:0] if_ext, if_ext_raw;
+    wire [31:0] if_ext_raw;
     wire [2:0]  if_avail;
     wire        redirect;
     wire [31:0] redirect_pc;
     wire        core_ready;
 
-    // Decode the offered opcode once, here, purely to learn how many
-    // extension words it needs: the fetch unit cannot know that, and the core
-    // needs the words before it can decode. One shared decoder instance would
-    // be tidier but would create a loop through the core's own decode.
-    //
-    // ext_raw, NOT ext. The fetch unit's `ext` is muxed BY ext_words (a single
-    // extension word is normalised into the low half), so feeding it here
-    // closes a combinational cycle through this decoder. It is a false cycle --
-    // ext_words is a function of the opcode alone -- but place-and-route
-    // unrolls it anyway and charges two passes through the decoder to one
-    // clock: 78% of the core's worst path, 151 of its 179 hops, before this.
-    // ext_words itself comes from u_peek's own ext_words_fast_full_o, NOT
-    // peek.ext_words -- the shallow, from-scratch replacement (plan.md's
-    // "Stage 1" ext_words work), verified bit-exact against peek.ext_words
-    // across all 65,536 opcodes and the 8 full-format shapes
-    // (tb/uop_decode_equiv_tb.sv) before this swap. It reaches the same raw
-    // opcode-bit wires the classifier reaches, in parallel with it, instead
-    // of reading uop.ext_words -- an output of the whole classification --
-    // which is what made this decoder pass the dominant cone on this path.
-    uop_t peek;
-    wire [2:0] peek_ext_words;
-    mh030p_decode u_peek (
-        .instr(if_instr), .ext(if_ext_raw), .ext_raw(if_ext_raw),
-        .q3(if_q3), .q4(if_q4), .uop(peek), .ext_words_fast_full_o(peek_ext_words)
-    );
+    // How many extension words the offered opcode needs, straight from
+    // u_core's own u_dec instance (mh030p_core.sv's dec_ext_words_o,
+    // itself u_dec's ext_words_fast_full_o) -- the fetch unit needs this
+    // to decide how many words to drain before instr_valid/have_all even
+    // applies, so it must be available independently of core_ready/
+    // stalling. This used to come from a SECOND, external mh030p_decode
+    // instance ("u_peek") that existed purely to learn ext_words one cycle
+    // ahead of the core's own decode -- two full decoder passes in one
+    // clock, 78% of the core's worst path per the original investigation.
+    // The "Stage 1 decoder merge" (docs/mh030p_architecture.md) removes
+    // that duplicate instance entirely: mh030p_decode now normalises its
+    // own `ext` internally from ext_raw (see its own header), so u_core's
+    // single u_dec instance can serve both this module's own drain
+    // decision and the core's real classification. Not a combinational
+    // loop: dec_ext_words_o depends only on instr/ext_raw/q3/q4, never on
+    // instr_valid, so feeding it into instr_valid here is a plain forward
+    // dependency, not a cycle.
+    wire [2:0] core_ext_words;
 
     // Issue only once the whole instruction is in the queue.
-    wire have_all = (if_avail >= (3'd1 + peek_ext_words));
+    wire have_all = (if_avail >= (3'd1 + core_ext_words));
     wire issue    = have_all && core_ready;
-    wire [2:0] drain = issue ? (3'd1 + peek_ext_words) : 3'd0;
+    wire [2:0] drain = issue ? (3'd1 + core_ext_words) : 3'd0;
 
     mh030p_ifu u_ifu (
         .clk_4x(clk_4x), .rst_n(rst_n),
         .if_req(if_req), .if_addr(if_addr),
         .if_rdata(if_rdata), .if_ack(if_ack),
         .redirect(redirect), .redirect_pc(redirect_pc),
-        .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
+        .instr(if_instr), .ext_raw(if_ext_raw), .q3(if_q3),
         .q4(if_q4),
         .words_avail(if_avail), .pc_out(if_pc),
-        .drain(drain), .ext_words(peek_ext_words)
+        .drain(drain)
     );
 
     mh030p_core u_core (
         .clk_4x(clk_4x), .rst_n(rst_n),
-        .instr(if_instr), .ext(if_ext), .ext_raw(if_ext_raw), .q3(if_q3),
+        .instr(if_instr), .ext_raw(if_ext_raw), .q3(if_q3),
         .q4(if_q4),
         .ipl(ipl),
         .instr_valid(have_all), .instr_ready(core_ready),
+        .dec_ext_words_o(core_ext_words),
         .pc_in(if_pc), .redirect(redirect), .redirect_pc(redirect_pc),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .mem_siz(mem_siz), .mem_wdata(mem_wdata),

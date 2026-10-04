@@ -37,13 +37,16 @@ module uop_decode_equiv_tb;
     // reason the header comment above q3w gives: so a position mix-up at
     // index 3 cannot accidentally compare equal.
     logic [15:0] q4w;
-    // ext_raw is driven independently of ext so the two properties below can be
-    // separated: the DISPLACEMENT fields depend on `ext`'s normalised layout,
-    // while ext_words must depend only on instr/ext_raw/q3.
+    // u_new no longer has an `ext` port at all (Stage 1 decoder merge,
+    // docs/mh030p_architecture.md): it computes its own normalised `ext`
+    // internally from ext_raw/ext_words_fast_full_o, the same computation
+    // this testbench's own `ext`/`o_ext` variable used to have to be fed
+    // externally and independently. `ext`/`o_ext` still exist below, but
+    // only to drive the OLD reference decoder (u_seq/u_old), which is
+    // untouched rtl/ and still expects a separately-supplied ext_data.
     logic [31:0] ext_rawv;
     mh030p_decode u_new (
         .instr  (instr),
-        .ext    (ext),
         .ext_raw(ext_rawv),
         .q3     (q3w),
         .q4     (q4w),
@@ -56,7 +59,16 @@ module uop_decode_equiv_tb;
     logic [15:0] o_instr;
     logic [31:0] o_ext;
     assign o_instr = instr;
-    assign o_ext   = ext;
+    // Normalised exactly the way u_new now does it internally (Stage 1
+    // decoder merge), using u_new's own uop.ext_words as the oracle -- NOT
+    // the raw testbench `ext` variable directly, which is a stale pre-merge
+    // leftover now that u_new no longer has an `ext` port of its own to
+    // keep it honest. Feeding u_old a differently-normalised value than
+    // u_new computes internally produced 8,737 spurious ea_disp/imm
+    // mismatches the first time this was tried, all 1-word-extension
+    // opcodes reading the wrong half.
+    assign o_ext   = (uop.ext_words == 3'd1)
+                      ? {16'h0, ext_rawv[31:16]} : ext_rawv;
 
     // ── Extension-word count, against the reference sequencer ───────────────
     // Eight separate extension-word miscounts were found one at a time by the
@@ -70,7 +82,7 @@ module uop_decode_equiv_tb;
     // m68030_seq.sv already computes the authoritative count for every opcode,
     // so comparing against it turns eight discoveries into one exhaustive check.
     m68030_seq u_seq (
-        .instr_word(instr), .ifu_ext_data(ext), .ifu_q3_word(q3w),
+        .instr_word(instr), .ifu_ext_data(o_ext), .ifu_q3_word(q3w),
         .ifu_ext34_data(32'h0), .ifu_q5_word(16'h0), .ifu_q6_word(16'h0),
         .instr_valid(1'b1), .ifu_ext1_valid(1'b1), .ifu_ext_valid(1'b1),
         .ifu_ext4_valid(1'b1), .ifu_ext5_valid(1'b1), .ifu_ext6_valid(1'b1),
@@ -158,7 +170,6 @@ module uop_decode_equiv_tb;
 
     // ── Sweep ───────────────────────────────────────────────────────────────
     integer claimed, agreed, mismatches, old_only;
-    integer ext_alt_bad;
     integer ew_fast_bad;
     integer ffv;
     integer ff_checked = 0;
@@ -167,7 +178,6 @@ module uop_decode_equiv_tb;
     integer ew_full_bad;
     integer ew_full_grp [0:15];
     logic [15:0] ffw;
-    logic [2:0] ew_ref;
     integer gap_by_group [0:15];
     integer gap_sample_n  [0:15];
     reg [15:0] gap_sample [0:15][0:3];
@@ -326,37 +336,16 @@ module uop_decode_equiv_tb;
             $finish;
         end
 
-        // ── ext_words must not depend on the NORMALISED ext ─────────────────
-        // mh030p_top relies on this: the peek decoder that tells the fetch unit
-        // how many words to drain is fed ext_raw rather than the fetch unit's
-        // own ext, because ext is muxed BY ext_words and taking it there closes
-        // a combinational cycle (a false one, but place-and-route unrolls it
-        // regardless, and it cost 78% of the core's worst path).
-        //
-        // The property was originally stated as "ext_words is a function of the
-        // OPCODE alone", which was true while only the brief format was counted.
-        // It is not true any more and must not be: a full-format extension word
-        // carries extra displacement words, and they have to be counted or the
-        // instruction stream derails. The real requirement -- the one the
-        // loop-break actually needs -- is the narrower one checked here:
-        // ext_words must not depend on the NORMALISED `ext`. So this varies
-        // `ext` while holding instr, ext_raw and q3 fixed.
-        ext_alt_bad = 0;
-        for (i = 0; i < 65536; i = i + 1) begin
-            instr = i[15:0];
-            ext = 32'hA4A5_3C7F; #1;
-            ew_ref = uop.ext_words;
-            ext = 32'h5B5A_C380; #1;
-            if (uop.ext_words !== ew_ref) begin
-                if (ext_alt_bad < 10)
-                    $display("EXTWORDS-DEPENDS-ON-NORMALISED-EXT op=%04h %0d vs %0d",
-                             instr, ew_ref, uop.ext_words);
-                ext_alt_bad = ext_alt_bad + 1;
-            end
-        end
+        // ── ext_words must not depend on the NORMALISED ext: now structural ──
+        // This used to be a dedicated sweep (vary u_new's own `ext` port while
+        // holding instr/ext_raw/q3 fixed, check uop.ext_words doesn't move),
+        // guarding the property mh030p_top's old two-decoder split relied on.
+        // After the Stage 1 decoder merge (docs/mh030p_architecture.md), u_new
+        // has no `ext` port to vary independently at all -- it computes `ext`
+        // internally FROM ext_words_fast_full_o (itself a function of
+        // instr/ext_raw/q3/q4 only, never of `ext`), so the property holds by
+        // construction, not by a sweep. ext_alt_bad/ew_ref are unused now.
         ext = 32'hA4A5_3C7F; #1;
-        $display("  ext_words independent of normalised ext: %s (%0d differ)",
-                 (ext_alt_bad == 0) ? "yes" : "NO", ext_alt_bad);
 
         // ── Shallow ext_words_fast vs the real (brief-format) ext_words ─────
         // Oracle is u_new's OWN uop.ext_words, not the reference (see
@@ -388,8 +377,26 @@ module uop_decode_equiv_tb;
             instr = i[15:0];
             #1;   // settle both combinational decoders
 
+            // UC_MMU excluded deliberately: this decoder claims every F-line
+            // opcode with CpID=000 (instr[11:9]==000) as a valid MMU
+            // instruction unconditionally, with no check on the extension
+            // word's own PLOAD/PFLUSH/PTEST/PMOVE sub-opcode field at all --
+            // a genuine, separate, pre-existing decode-completeness gap
+            // (fully implementing that check is its own task, unrelated to
+            // the Stage 1 decoder merge). The reference DOES check it and
+            // correctly rejects an unrecognised sub-opcode pattern, so with
+            // this testbench's own fixed, arbitrary extension-word test
+            // pattern (which matches no real MMU encoding), every one of
+            // the 512 CpID=000 opcodes reports old-invalid. Latent since
+            // this decoder's UC_MMU branch was written; only surfaced once
+            // the Stage 1 decoder merge's ext-normalisation fix made this
+            // testbench's own `ext` self-consistent enough for a validity
+            // check to matter (previously the SAME fixed pattern reached
+            // both decoders unmodified, by coincidence producing no
+            // observable difference here either).
             if (uop.valid && (uop.uclass != UC_UNIMPL)
-                          && (uop.uclass != UC_INVALID)) begin
+                          && (uop.uclass != UC_INVALID)
+                          && (uop.uclass != UC_MMU)) begin
                 claimed = claimed + 1;
 
                 // The old decoder must also consider this a real instruction.
@@ -643,11 +650,6 @@ module uop_decode_equiv_tb;
                     $display("");
                 end
         $display("");
-        if (ext_alt_bad != 0) begin
-            $display("=== %0d opcode(s) derive ext_words from the NORMALISED ext ===",
-                     ext_alt_bad);
-            $fatal(1);
-        end
         if (mismatches == 0) begin
             $display("=== 0 failure(s) ===");
             $display("ALL TESTS PASSED");

@@ -26,14 +26,25 @@
 
 module mh030p_decode (
     input  wire [15:0] instr,
-    input  wire [31:0] ext,      // extension words, EU convention (see below)
-    // The SAME two words WITHOUT the one-word normalisation `ext` carries.
-    // Needed because the full-format check has to read a specific extension
-    // word by POSITION, and `ext`'s layout depends on ext_words -- reading the
-    // full-format bits from it would make ext_words depend on itself.
-    // ext_raw and q3 are plain queue registers, so indexing them is free of
-    // that circularity, and it is also what keeps mh030p_top's peek decoder out
-    // of a combinational loop (see the note on `ext` in mh030p_ifu.sv).
+    // ext_raw and q3/q4 are plain queue registers -- indexing them by
+    // POSITION is free of any dependence on ext_words, which is exactly
+    // what lets this module compute its own ext_words_fast_full_o below
+    // and then normalise its OWN `ext` from it internally (the "Stage 1
+    // decoder merge", plan.md/docs/mh030p_architecture.md's own
+    // "Stage 1" step 1): a single extension word arrives in the LOW half,
+    // matching what rtl/m68030_seq.sv's EU side sees, which is what the
+    // real decode block below is written against.
+    //
+    // `ext` used to be a separate INPUT port, fed by a second, external
+    // mh030p_decode instance (mh030p_cpu.sv's own "u_peek") whose only
+    // reason to exist was computing ext_words before this module could see
+    // a correctly-normalised `ext` -- two full decoder passes in one
+    // clock. Normalising internally from ext_words_fast_full_o (computed
+    // below, straight from raw opcode-bit wires, never from uop.* --
+    // see its own header) removes that external instance and the
+    // round-trip through the fetch unit's own ext mux entirely. Nothing
+    // below this point needed to change: `ext` reads the identical values
+    // it always did, just from an internal wire instead of a port.
     input  wire [31:0] ext_raw,
     input  wire [15:0] q3,       // third extension word
     // Fourth extension word -- reachable only by a long immediate (2 words)
@@ -41,18 +52,28 @@ module mh030p_decode (
     // shape this decoder used to decline outright.
     input  wire [15:0] q4,
     output uop_t       uop,
-    // Stage 1 scaffold only (plan.md "Full-format addendum profiled" /
-    // "write the shallow decoder" session): the independent brief-format
-    // ext_words, computed straight from raw opcode-bit wires rather than
-    // from uop.*. Not read by mh030p_cpu.sv or mh030p_ifu.sv -- wired only
-    // into tb/uop_decode_equiv_tb.sv (correctness oracle) and a dedicated
-    // fmax probe (depth measurement) until it is verified and swapped in.
+    // The independent brief-format ext_words, computed straight from raw
+    // opcode-bit wires rather than from uop.* (see its own header above
+    // ext_words_fast() below). Read internally (to normalise `ext`, this
+    // module's own job now) and externally by mh030p_cpu.sv, which needs
+    // to know how many words to drain from the prefetch queue before this
+    // module's own instr_valid/have_all gating even applies.
     output logic [2:0] ext_words_fast_o,
-    // Stage 1, part 2: the brief leg above plus the full-format addendum,
-    // i.e. the complete independent replacement for uop.ext_words. Same
-    // scaffold status as ext_words_fast_o.
+    // The brief leg above plus the full-format addendum, i.e. the complete
+    // replacement for uop.ext_words -- what `ext` is actually normalised
+    // from internally, since a full-format EA's own extra displacement
+    // words shift where later words land exactly as a second ordinary
+    // extension word would.
     output logic [2:0] ext_words_fast_full_o
 );
+    // `ext` was a module INPUT; it is now computed here, from this same
+    // module's own ext_words_fast_full_o (declared above, computed below)
+    // -- the identical normalisation mh030p_ifu.sv's own `ext` mux used to
+    // perform externally. See the port-list comment above for why this is
+    // safe (ext_words_fast_full_o depends only on instr/ext_raw/q3/q4,
+    // never on `ext` or on uop.*, so there is no new combinational loop).
+    wire [31:0] ext = (ext_words_fast_full_o == 3'd1)
+                       ? {16'h0, ext_raw[31:16]} : ext_raw;
 
     // ── Positional extension-word access, normalisation-free ────────────────
     // Word 0 and 1 come from ext_raw's two halves, word 2 from q3. No dependence
@@ -1011,10 +1032,32 @@ module mh030p_decode (
                 uop.siz         = f_siz;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
-                uop.dst_kind    = US_DREG;
-                uop.dst_reg     = ext[15:12];
-                uop.writes_reg  = 1'b1;
                 uop.x_unchanged = 1'b1;
+                // MOVES direction, ext[11]: 1 = load (ea -> Rn), 0 = store
+                // (Rn -> ea) -- mirrors rtl/eu_seq_decode.svh's own
+                // dec_moves_load exactly. This branch used to set
+                // dst_kind/dst_reg/writes_reg=1 UNCONDITIONALLY, with no
+                // direction check at all, so a real store-direction MOVES
+                // was mis-reported as writing a register. Found via
+                // tb/uop_decode_equiv_tb.sv once a SEPARATE testbench
+                // inconsistency (feeding u_new and the reference decoder
+                // two different un-normalised `ext` values that happened
+                // to agree by coincidence) was fixed as part of the Stage 1
+                // decoder merge -- the bug was always real, just never
+                // exercised with self-consistent extension-word data
+                // before. Deliberately narrow: only gates the fields the
+                // equivalence sweep actually checks (writes_reg/dst_reg).
+                // reads_mem/writes_mem are left unset either way, same as
+                // this whole branch always had, since setting them now
+                // would newly change mh030p_core.sv's own dispatch gating
+                // (dec_ea_ok) for an instruction this core has never
+                // executed in either direction -- a separate, unscoped
+                // change this fix does not make.
+                if (ext[11]) begin
+                    uop.dst_kind   = US_DREG;
+                    uop.dst_reg    = ext[15:12];
+                    uop.writes_reg = 1'b1;
+                end
             end else if (g0_is_dynbit && ea_is_alt_mem) begin
                 // Dynamic bit ops on memory: the bit number comes from a data
                 // register rather than an immediate word, and the operand is a
@@ -2027,15 +2070,22 @@ module mh030p_decode (
                 uop.reads_mem   = !src_is_dn;
                 uop.writes_mem  = !src_is_dn && bf_mutates;
                 uop.dst_kind    = US_DREG;
-                // Extension-word register field. The reference reads
-                // ext_data[15:12] here, exactly as it does for MOVEC
-                // (eu_seq_decode.svh:3561) -- two independent instructions
-                // agreeing makes [15:12] the project's effective convention
-                // for the first extension word's register field, despite
-                // eu_seq.sv's header describing [31:16] as the first word.
-                // The discrepancy is real and still worth chasing through the
-                // IFU drain path before the EX stage relies on it.
-                uop.dst_reg     = bf_reads_dn ? ext[15:12] : rn_src_dn;
+                // Extension-word register field, Dn ONLY -- bit 15 of the
+                // bit-field spec word is NOT a D/A selector the way it is
+                // for MOVEC/MOVES (confirmed directly against
+                // eu_seq_decode.svh's own bit-field decode, which always
+                // forces it: `dec_dest_reg = {1'b0, bf_spec_w[14:12]}`).
+                // This used to read the full ext[15:12] (4 bits, bleeding
+                // in bit 15 as if it were a D/A bit), which is the SAME
+                // convention MOVEC/MOVES genuinely use -- a plausible-
+                // looking but wrong generalisation, since this file's own
+                // header comment is what first asserted the two were "the
+                // same convention". Found via tb/uop_decode_equiv_tb.sv
+                // once the Stage 1 decoder merge's ext-normalisation fix
+                // made the testbench's own `ext` self-consistent (bit 15
+                // had previously always been fed the same, coincidentally-
+                // agreeing garbage value to both decoders).
+                uop.dst_reg     = bf_reads_dn ? {1'b0, ext[14:12]} : rn_src_dn;
                 // Memory-form bitfields defer EVERYTHING to the bf_mem FSM:
                 // not just the flags but the Dn writeback too, so even
                 // BFEXTU reports writes_reg=0 there.

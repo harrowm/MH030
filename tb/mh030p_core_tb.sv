@@ -64,7 +64,7 @@ module mh030p_core_tb;
 
     mh030p_core dut (
         .clk_4x(clk_4x), .rst_n(rst_n),
-        .instr(instr), .ext(ext), .ext_raw(ext_raw), .q3(q3), .q4(q4),
+        .instr(instr), .ext_raw(ext_raw), .q3(q3), .q4(q4),
         .instr_valid(instr_valid), .instr_ready(instr_ready),
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_rw(mem_rw),
         .pc_in(pc_in), .redirect(redirect), .redirect_pc(redirect_pc),

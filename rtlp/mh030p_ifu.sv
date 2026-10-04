@@ -7,16 +7,16 @@
 // plus its extension words to decode. A taken branch flushes the queue and
 // restarts at the target.
 //
-// EXTENSION-WORD CONVENTION. `ext` follows what the EU actually sees in rtl/,
-// which is NOT the raw {q1,q2} the old IFU emits -- rtl/m68030_seq.sv:1160
-// normalises it, and a SINGLE extension word arrives in the LOW half:
-//
-//     ext_words == 1 -> {16'h0, word1}
-//     ext_words >= 2 -> {word1, word2}
-//
-// Reproducing that here rather than inventing a cleaner layout is deliberate:
-// mh030p_decode.sv reads its displacements and register fields at those exact
-// positions, having been corrected once already for getting this wrong.
+// EXTENSION-WORD CONVENTION. This unit publishes only the RAW queue words
+// (ext_raw/q3/q4); it used to also publish a NORMALISED `ext` (a single
+// extension word moved into the low half, matching what rtl/m68030_seq.sv's
+// EU side sees), muxed here from an externally-supplied ext_words. That
+// normalisation now happens inside mh030p_decode.sv itself (the "Stage 1
+// decoder merge", docs/mh030p_architecture.md) -- this unit no longer needs
+// to know ext_words at all, only ext_words_fast_full_o's role in deciding
+// `drain`, which mh030p_cpu.sv still computes from mh030p_core.sv's own
+// dec_ext_words_o. Removing the mux here also removes one of the two
+// decoder-chain round-trips that used to sit on the critical path.
 //
 // The queue does not know how many words an instruction needs -- only decode
 // does. So this unit publishes how many words are AVAILABLE and the core
@@ -45,12 +45,9 @@ module mh030p_ifu (
     input  wire        redirect,
     input  wire [31:0] redirect_pc,
 
-    // To decode.
+    // To decode. Raw queue words only -- see the header for why the
+    // normalised `ext` this unit used to also publish is gone.
     output wire [15:0] instr,
-    output wire [31:0] ext,
-    // The same two words WITHOUT the one-word normalisation, for whoever needs
-    // to decode the offered opcode before ext_words is known. See the note on
-    // ext below: taking the normalised `ext` there closes a combinational loop.
     output wire [31:0] ext_raw,
     output wire [15:0] q3,
     // Fourth extension word, for the one combination that genuinely needs it:
@@ -61,10 +58,7 @@ module mh030p_ifu (
     output wire [31:0] pc_out,
 
     // From the core: words consumed this cycle.
-    input  wire [2:0]  drain,
-    // How many extension words the instruction being offered needs, so the
-    // low-half convention above can be applied.
-    input  wire [2:0]  ext_words
+    input  wire [2:0]  drain
 );
 
     localparam QD = 8;
@@ -92,7 +86,7 @@ module mh030p_ifu (
     // The structural argument for preferring the shift is still worth keeping,
     // even though the measurement cannot confirm it: the shift network
     // terminates at FLIP-FLOPS, which have a whole clock to settle, whereas a
-    // head pointer puts a variable eight-way read mux on instr/ext/q3 --
+    // head pointer puts a variable eight-way read mux on instr/ext_raw/q3 --
     // directly in front of the decoder, the one consumer with no slack to
     // spare. And the logic-depth proxy is not evidence either way, because it
     // counts levels to each endpoint without knowing which endpoints have
@@ -107,19 +101,6 @@ module mh030p_ifu (
     assign words_avail = (count > 3'd7) ? 3'd7 : count[2:0];
     assign pc_out      = head_pc;
 
-    // See the header: one extension word arrives in the LOW half.
-    //
-    // NOTE THE DEPENDENCE ON ext_words, and what it means for anyone decoding
-    // the offered opcode to LEARN ext_words: taking this signal closes a
-    // combinational cycle -- decode -> ext_words -> this mux -> decode. It
-    // settles in simulation, because ext_words is a function of the opcode
-    // alone, so the cycle is false; but a false cycle is still a cycle to
-    // place-and-route, which unrolls it and charges two passes through the
-    // decoder to one clock. Measured at 78% of the whole core's worst path.
-    // ext_raw exists so that decode can be driven from something the mux does
-    // not depend on. tb/uop_decode_equiv_tb.sv checks the property this relies
-    // on -- ext_words identical for differing ext -- across all 65,536 opcodes.
-    assign ext     = (ext_words == 3'd1) ? {16'h0, q[1]} : {q[1], q[2]};
     assign ext_raw = {q[1], q[2]};
 
     // A fetch launched before a redirect must have its data discarded, or it

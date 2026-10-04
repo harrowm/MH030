@@ -31,7 +31,7 @@ module extw_probe (
         else begin instr_r<=instr_i; extraw_r<=extraw_i; q3_r<=q3_i; end
 
     uop_t u;
-    mh030p_decode u_d (.instr(instr_r), .ext(extraw_r), .ext_raw(extraw_r),
+    mh030p_decode u_d (.instr(instr_r), .ext_raw(extraw_r),
                        .q3(q3_r), .q4(16'h0), .uop(u));
 
     always_ff @(posedge clk_4x or negedge rst_n)
