@@ -6381,3 +6381,135 @@ session's own throwaway Python snippets, not preserved as a script but
 trivial to redo against two `run_harte_batch.py` log files) after every
 change, no exceptions -- that discipline is what caught the `ag_an_upd`
 regression immediately instead of it shipping silently.
+
+### MH030-P correctness pass CLOSED (a later session, continuing from the table above)
+
+Worked the remaining table top-to-bottom, biggest group first, same
+methodology, one commit per fix with a full per-suite diff + `make
+test`/`make lint-drivers`/`make bench` gate every time. **Final result:
+`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0` -- bit-identical to `rtl/`'s own
+score**, including the same 2 permanently-unfixable ASL.b corpus-data
+vectors (Phase 87, confirmed a Tom Harte corpus error, not an RTL bug).
+Closes this section's own standing user instruction ("continue to improve
+until the new code matches the old code") in full.
+
+**TAS Dn (1,195 fail -> 0)**: register-direct TAS (0x4AC0-0x4AC7) fell
+through undecoded entirely -- `g4_is_tas` required real memory and the
+generic Dn-ALU fallback never matched it either (its own `b76=11` fails
+`f_ss_valid`). New `g4_is_tas_dn` decode branch; widened `dec_executable`'s
+TAS/CAS clause to accept `dst_kind==US_DREG` as an alternative to
+`dec_ea_ok`; fixed `tas_orig`/`tas_res` to read/preserve `ex_b_u`/`ex_dst`
+instead of `mem_hold`/zeroing the upper 24 bits (there is no memory read to
+hold for a register destination).
+
+**LINK A7 (1,005 -> 0)**: LINK An pushes the OLD An value, except when
+An IS A7 itself, where real silicon pushes the STACK POINTER AFTER its own
+decrement (a documented 68k quirk) -- the decoder's `mem_wdata` mux used
+`ag_b` (the pre-decrement value) unconditionally. Fixed with a
+`dst_reg==4'd15` special case pushing `ag_c-4` instead (the same value
+already computed for the new SP).
+
+**PEA/JSR indexed EA (851 + 526/275 timeout -> 0)**: a push (PEA/JSR)
+always forces the register file's C port to read A7 for `-(A7)`, which
+collided with an INDEXED EA's own need for the C port to read its index
+register -- for `(d8,An,Xn)` this made the instruction silently
+undispatchable (decode's own `dec_ea_class_ok` explicitly excluded it);
+for `(d8,PC,Xn)` it dispatched but read A7's value as the index, producing
+a wrong address. Fixed by routing a push's own index register through the
+otherwise-unused A port instead of C (A is never touched by a push's write
+data), mirrored across `dec_push_idx`/`ag_push_idx`/`ag_xn_src` the way
+every other `_sel` pair in this file must agree.
+
+**Leading-extension-word bug class (BTST/BCHG/BCLR/BSET 1,126 fail + 279
+timeout -> 0, then the group-0 ALU-immediate family -- EOR/CMP/AND/OR/SUB/
+ADD .b and .w, 918 fail -> 0, then MOVE's own immediate source -- MOVE.b/w
+113 fail -> 0)**: found and fixed independently three times before the
+shape was recognized and named -- see
+`~/.claude/projects/-Users-malcolm-MH030/memory/feedback_leading_extension_word_bug_class.md`.
+A plain `uop.imm = ext` read smears a LEADING bit-number/immediate word
+together with a DIFFERENT, later extension word the destination's own EA
+needs, because `ext`'s two halves swap which physical half holds "word 0"
+depending on total word count. Fixed throughout with the already-existing
+`xword(0, tot)`/`xword(1, tot)` position-aware helpers. The dynamic/static
+BTST forms also needed genuinely NEW decode branches for PC-relative and
+immediate EA (the one bit op of the four legal there, since it's
+read-only) -- previously entirely undecoded, silently skipped as an
+unexecutable bubble (confirmed via a direct Icarus trace: no bus cycle, no
+register write, PC just advances past it).
+
+**The `rtlp`-specific "fast" shallow EA-mode/ext_words predictor**
+(`ext_words_fast()`/`ea_mode_eff_fast()`, used by `mh030p_cpu.sv`'s
+`u_peek` to lay out the IFU's raw `ext` register AHEAD of the real decode)
+had no matching branches for the newly-added BTST PC-relative/immediate
+cases -- it silently fell through to a 0-word guess, so the IFU arranged
+`ext` assuming the wrong total and the real decoder then read the wrong
+physical half even with its own `ext_words` count correct. This is what
+actually fixed the PC-relative forms' wrong effective address; the decode
+branch alone wasn't sufficient. Added matching branches to both functions.
+
+**PC-relative base needs a per-family lead adjustment (part of the BTST
+fix above, then separately for MOVEM)**: `ag_pc2` (PC+2) is only the right
+base when the displacement is the FIRST extension word. A leading
+bit-number or mask word pushes it to PC+4. New `ag_pc_lead` term (+2 for
+UC_BITOP subop==1, later widened to UC_MOVEM) added to `ea_base`'s
+PC-relative arm.
+
+**MOVEM.w/.l (100 + 107/1 timeout -> 0)**: two bugs. (1) The SAME
+PC-relative lead-word bug as BTST -- this is what the PRIOR session's own
+"transfer N gets transfer N-1's data" symptom actually was (every transfer
+read one word short, which looks exactly like an off-by-one in the
+mask/stepping logic even though that logic was already correct, as the
+prior session's own exhaustive check found). (2) A genuinely separate
+hang: MOVEM with an all-clear register mask (0x0000, "transfer nothing")
+dispatches zero bus cycles, so `ex_wait_mem`'s generic `mem_got` gate
+never sets and stays true forever even after MOVEM's own `mvm_done` state
+machine correctly finishes. Every nonzero mask masked this (mem_got
+latches on the first real transfer and nothing clears it mid-instruction).
+Fixed by excluding `UC_MOVEM` from `ex_wait_mem` entirely -- it already
+manages its own sequencing via `mvm_done`.
+
+**The abs.L + long-immediate 4-word gap (EOR/OR/AND/SUB/CMP/ADD .l, 25
+fail -> 0)**: a documented, not newly-discovered, structural limit --
+`xword`/`rawword` only reached 3 extension words (`ext`'s two halves plus
+`q3`), but a long immediate (2 words) feeding an absolute-long EA (2 more)
+needs 4. The IFU's own prefetch queue is already 8 deep; `q4` (`=q[4]`)
+was simply never exposed as a decoder input. Threaded a new `q4` port
+through `mh030p_ifu.sv` -> `mh030p_cpu.sv` -> `mh030p_core.sv` ->
+`mh030p_decode.sv`, extended both word-access helpers with a 4th case, and
+widened `ea_disp_valid` from `<=3` to `<=4`. Every other `mh030p_decode`
+instantiation (3 Fmax probes, the standalone core testbench, the
+65536-opcode equivalence sweep) needed the new required port wired too.
+
+**MOVE mem-to-mem index self-hazard (18 of MOVE.b's own remaining 76 ->
+0)**: a genuine operand-evaluation-order hazard, not a decode bug --
+when a memory-to-memory MOVE's destination index register (Xn) happens to
+BE the source's own auto-incrementing register ((An)+/-(An)), real 68k
+silicon fully evaluates the source (including its own step) before
+reading Xn for the destination. This core's index-register read (`ag_d`)
+lands in the same AG cycle as the step itself, before the step's own
+same-cycle commit reaches the register file, so it read the PRE-step
+value -- one byte/word short. Fixed with a narrow bypass
+(`ag_dst_idx_is_src_an`) reusing `ag_an_val` (already computed
+combinationally for the commit path) in place of the raw port-D read when
+this specific register coincidence applies.
+
+**CHK #imm,Dn (21 timeout -> 0, the very last gap)**: not a wrong value --
+`uop.imm` was never assigned AT ALL for the immediate-bound form, despite
+`src_kind` correctly saying `US_IMM`. The bound was always 0, causing far
+more traps than real hardware and apparently landing every affected vector
+in an exception-sequencing state this core doesn't cleanly recover from.
+Fixed by adding the missing `uop.imm = ext` (safe as a plain read here,
+unlike the leading-word cases above, because CHK's own EA field IS the
+immediate when `ea_is_imm` -- there is no second, separate EA concurrently
+consuming words to collide with).
+
+**Final gate, same as every fix above**: `make test` 43/43 (`uop_equiv`
+clean throughout, including after the `q4` port addition), `make
+lint-drivers` clean, full 124-suite Harte sweep `PASS 702142 FAIL 2
+SKIP 281221 TIMEOUT 0`, `make bench` all four arms' `EXECCYCLES`/D0-checks
+unchanged throughout (none of these fixes touch dispatch timing for
+previously-working instruction shapes). **This closes the correctness
+pass. The Fmax/100MHz programme is unaffected and remains paused exactly
+where the pivot session left it** -- see
+`project_mh030_pipelined_rewrite_planning.md`'s own "Session checkpoint"
+pointer if that work resumes.
