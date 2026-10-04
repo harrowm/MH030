@@ -1148,7 +1148,19 @@ module mh030p_decode (
                 uop.alu_op      = g0_alu_op;
                 uop.siz         = f_siz;
                 uop.src_kind    = US_IMM;
-                uop.imm         = ext;
+                // The immediate is the LEADING extension word(s) (one for
+                // byte/word, two for long), with the EA's own word(s)
+                // following -- the same shape, and the same bug, the static
+                // bit-number word had: a plain `ext` (both halves
+                // unconditionally) smeared the immediate together with the
+                // EA's own index/displacement word whenever the EA itself
+                // needed one (indexed, (d16,An), abs). Confirmed via a direct
+                // trace: EORI.b #imm,(d16,An) wrote the EA's own displacement
+                // word's byte instead of the real immediate.
+                uop.imm         = (f_siz == UZ_LONG)
+                    ? {xword(3'd0, ea_words(ea_mode_w) + 3'd2),
+                       xword(3'd1, ea_words(ea_mode_w) + 3'd2)}
+                    : {16'h0, xword(3'd0, ea_words(ea_mode_w) + 3'd1)};
                 uop.dst_kind    = US_MEM;
                 uop.ea_mode     = ea_mode_w;
                 uop.ea_reg      = rn_src_an;
