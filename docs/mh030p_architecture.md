@@ -602,15 +602,46 @@ per-family extension-word-position arithmetic that made `ext_words`
 itself expensive before Stage 1's shallow rewrite — not a priority-chain
 inefficiency, real computed depth.
 
-**Not yet fixed.** The analogous fix — a "shallow `ea_idx_reg`" shortcut
-computed straight from raw opcode/extension-word bits in parallel with
-classification, rather than through the cascading `ew_lead`/`ew_dst_at`/
-`ew_tot` chain — is a comparable-scope undertaking to the entire
-`ext_words_fast()` rewrite from Stage 1 (new independent logic, a
-65,536-opcode equivalence sweep, bit-exact verification before swapping
-in), not a quick patch. Flagged for explicit scoping and sign-off before
-attempting, matching this project's own standing discipline for changes
-of this size.
+**Fixed (2026-10-04)**: `ea_idx_reg_fast_o` added to `mh030p_decode.sv`,
+reusing Stage 1's own `fff_lead`/`fff_dstat`/`ext_words_fast_full_o`
+infrastructure almost entirely — the only new piece was `ea_slot_is_dst`'s
+own shallow equivalent, itself a function of already-shallow wires
+(`f_group`/`ea_dst_is_mem`/`ea_src_ok`/`ea_is_imm`). Two real bugs found
+and fixed while driving the equivalence sweep to bit-exactness across
+*every* opcode (not just already-indexed ones, the gap that let both
+slip through at first): (1) the first version computed a value
+unconditionally instead of gating on "is this EA actually indexed",
+leaking nonzero extension-word bits into `mh030p_core.sv`'s `rd_c_sel`
+fallback for non-indexed opcodes — empirically harmless for every pattern
+Harte/`make bench` exercise (that fallback's other consumers are dead for
+non-indexed cases) but wrong by construction; (2) the gate's own mode
+signal was wrong on a second attempt (`fff_deam`, which mirrors the
+*separate* `uop.dst_ea_mode`/`dst_ea_idx_reg` mem-to-mem fields, not
+`uop.ea_mode`/`ea_idx_reg`) — `fff_eam` alone is correct, since
+`ea_mode_eff_fast()` already resolves to the destination's own mode for
+the immediate-source/indexed-destination MOVE case. Swapped into
+`mh030p_core.sv`'s `rd_a_sel`/`rd_c_sel` muxes. Full gate clean: `make
+test` 43/43, `make lint-drivers` clean, full Harte sweep bit-identical
+(`PASS 702142 FAIL 2`), `make bench` EXECCYCLES unchanged (6617/24294/8751).
+
+**Measured: 27.45 → 27.66 MHz mean** (9 seeds: 28.19, 27.49, 27.25, 27.53,
+28.43, 27.77, 27.20, 28.08, 27.04; range 27.04-28.43 MHz) — a small,
+within-the-documented-noise-floor gain. Diminishing returns on this
+decoder-depth line of attack: `ext_words` (Stage 1) was the big win
+(+2.65 MHz), the CAS latch (Stage 3) was a modest win (+0.96 MHz), and
+`ea_idx_reg` is smaller still (+0.21 MHz). **User decision (2026-10-04):
+stop chasing single-digit-MHz core-decode fixes here — the programme
+needs 10+ MHz moves, not a few. Next: a fresh `-noflatten` trace against
+the current build to find what actually dominates now, before assuming
+it's the BIU's own state encoding — this project's own track record
+(`[[feedback_sequentialise_always_evaluating_blocks]]`) is that removing a
+large always-evaluating combinational block has been the only lever that
+reliably pays off; a bare state re-encoding is the same *shape* of "local
+restructuring" that has failed every other time it's been tried here
+(register-file packing, bit-field sequentialization), and ABC9's own
+logic-level optimization typically erases source-level encoding choices
+during synthesis regardless, so it should not be assumed to help without
+first measuring what's actually there.
 
 **Every further core-side split still costs ticks** (more pipeline stages
 = more latency per instruction), so each one must be judged on

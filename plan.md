@@ -6869,3 +6869,85 @@ patch. Flagged for explicit scoping and sign-off before attempting. See
 
 No RTL changed this entry -- measurement only, mirroring `make test`/
 `make lint-drivers` confirmed unaffected (new standalone probe file).
+
+### MH030-P Stage 3 ea_idx_reg fix: shallow re-derivation, measured, diminishing returns (2026-10-04)
+
+Implemented the "shallow `ea_idx_reg`" shortcut the prior entry flagged
+and deferred: `ea_idx_reg_fast_o` in `mh030p_decode.sv`, reusing Stage
+1's own `fff_lead`/`fff_dstat`/`ext_words_fast_full_o` infrastructure
+almost entirely -- the only genuinely new piece, `ea_slot_is_dst`'s own
+shallow equivalent, turned out to already be a function of shallow wires
+(`f_group`/`ea_dst_is_mem`/`ea_src_ok`/`ea_is_imm`), so the whole fix was
+much smaller than the "comparable scope to the entire `ext_words_fast()`
+rewrite" estimate.
+
+Two real bugs found while driving `tb/uop_decode_equiv_tb.sv`'s own
+`ea_idx_reg_fast` check to bit-exactness across *every* opcode (not just
+already-indexed ones -- the first version of this check only compared
+when `uop.ea_mode` was already `UEA_AN_IDX`/`UEA_PC_IDX`, which is exactly
+the scope that let both bugs through at first):
+
+1. The first `ea_idx_reg_fast_o` computed its value unconditionally.
+   `uop.ea_idx_reg` is only ever written inside the real decoder's own
+   `if ((uop.ea_mode==UEA_AN_IDX)||(uop.ea_mode==UEA_PC_IDX))` gate
+   (mh030p_decode.sv ~2489), staying at `uop_clear()`'s `4'h0` default
+   otherwise -- the fast version had no such gate, so for non-indexed
+   opcodes it leaked whatever extension-word bits happened to sit at that
+   position. `mh030p_core.sv`'s own `rd_c_sel` fallback arm
+   (`dec_needs_sp ? 4'd15 : dec_uop.ea_idx_reg`) reads this for EVERY
+   non-CAS/non-MOVEM/non-push-SP instruction, so the leak fed a wrong
+   register number into `ag_c`/`ex_sp`'s own forwarding data for most of
+   the opcode space. Caught by widening the sweep, not by `make
+   bench`/Harte -- both came back bit-identical before AND after this fix,
+   because the only consumers of that fallback value for non-indexed
+   cases (`ag_xn_src` via `ag_push_idx`, `ex_sp` via push/link) are
+   already gated to the indexed/SP cases elsewhere, so the leaked data was
+   architecturally dead on every path those two suites actually exercise.
+   Fixed properly anyway, since dead-today is not a correctness guarantee
+   for tomorrow, and this project's own standard is bit-exactness, not
+   "no observed consequence yet."
+2. The fix for (1) gated on `fff_deam` (`dst_ea_mode_eff_fast()`) whenever
+   the slot was the destination -- reasoning "the destination's own slot
+   needs the destination's own effective mode." Wrong: `fff_deam` mirrors
+   `uop.dst_ea_mode`/`dst_ea_idx_reg`, a *separate* pair of fields the
+   real decoder only populates for a genuine memory-to-memory move (both
+   operands have their own EA) -- a different mechanism from the one this
+   fix targets entirely. `uop.ea_idx_reg`'s own gate always checks
+   `uop.ea_mode` alone, and `ea_mode_eff_fast()` (`fff_eam`) already
+   resolves to the destination's own mode for the immediate-source/
+   indexed-destination MOVE case (its own `move_ok1_e && ea_dst_is_mem &&
+   (!ea_src_ok || ea_is_imm)` branch), so no second mode signal was ever
+   needed -- `fff_eam` alone is correct for every case.
+
+Swapped into `mh030p_core.sv`'s `rd_a_sel`/`rd_c_sel` muxes in place of
+`dec_uop.ea_idx_reg`. Full gate clean: `make test` 43/43, `make
+lint-drivers` clean, full Harte sweep bit-identical to baseline (`PASS
+702142 FAIL 2 SKIP 281221 TIMEOUT 0`, confirmed via two separate runs,
+one against each bug-fix stage), `make bench` `EXECCYCLES` unchanged
+across all four arms (6617/24294/8751, matching the already-recorded
+post-AG/EX-split baseline exactly -- the apparent "regression" first
+suspected here was a stale pre-AG/EX-split baseline comparison, not a
+real behavior change).
+
+**Measured: 27.45 -> 27.66 MHz mean** (9 seeds: 28.19, 27.49, 27.25,
+27.53, 28.43, 27.77, 27.20, 28.08, 27.04; range 27.04-28.43). A small,
+within-the-documented-noise-floor gain -- diminishing returns on this
+line of attack: `ext_words` (+2.65 MHz) > CAS latch (+0.96 MHz) >
+`ea_idx_reg` (+0.21 MHz).
+
+**User decision (2026-10-04): stop chasing single-digit-MHz core-decode
+fixes. The programme needs 10+ MHz moves, not a few -- assume this fix is
+good and move to bigger targets.** Also: future sweeps should use 3 seeds,
+not 9, for faster iteration while scoping candidates; reserve the full
+9-seed sweep for confirming a candidate that already looks like a real
+structural win. Next step: a fresh `-noflatten` trace against the current
+build to find what actually dominates now, before assuming it's the BIU's
+own state encoding (the Stage 2 FSM rewrite, still deferred) -- this
+project's own track record is that removing a large always-evaluating
+combinational block has been the only Fmax lever that reliably pays off
+(divider, shifter, cache BRAM, `ext_words`, the CAS latch), while every
+*local restructuring* attempt has failed (register-file packing, the
+sequential bit-field unit), and a bare state re-encoding is the same shape
+of change -- ABC9's own logic optimization typically erases source-level
+encoding choices during synthesis anyway, so it should not be assumed to
+help without first measuring what is actually on the critical path.

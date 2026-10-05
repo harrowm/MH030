@@ -113,13 +113,28 @@ module mh030p_core (
 
     // ── Decode (combinational) ──────────────────────────────────────────────
     uop_t dec_uop;
+    // Shallow re-derivation of dec_uop.ea_idx_reg, computed in parallel with
+    // the main classifier straight from opcode/extension-word bits (same
+    // shape as ext_words_fast_full_o above). Profiling found dec_uop's own
+    // ea_idx_reg field is the dominant cost in the rd_a_sel/rd_c_sel muxes
+    // below (tb/udec_rdsel_probe.sv: ~18.7 ns alone, vs ~17.3 ns for the
+    // WHOLE mux) -- it was cascading through ew_lead/ew_dst_at/ew_tot the
+    // same way ext_words itself used to. Verified bit-exact against
+    // dec_uop.ea_idx_reg across all 65,536 opcodes x 8 full-format shapes
+    // (tb/uop_decode_equiv_tb.sv, "ea_idx_reg_fast" check, 0 differ) before
+    // being substituted below. Only the two *_sel reads on this (ID-stage,
+    // purely combinational off dec_uop) cone are replaced; ag_a_sel/
+    // ag_c_sel's own mirrors read ag_uop.ea_idx_reg, which is already a
+    // registered pipeline copy and so is not on this path.
+    wire [3:0] dec_ea_idx_reg_fast;
     mh030p_decode u_dec (
         .ext_raw (ext_raw),
         .instr (instr),
         .q3    (q3),
         .q4    (q4),
         .uop   (dec_uop),
-        .ext_words_fast_full_o (dec_ext_words_o)
+        .ext_words_fast_full_o (dec_ext_words_o),
+        .ea_idx_reg_fast_o (dec_ea_idx_reg_fast)
     );
 
     // Only register-direct work is executed in this phase. Anything else
@@ -1103,7 +1118,7 @@ module mh030p_core (
         .rd_a_sel (dec_is_cas ? dec_uop.dst_reg
                    : dec_is_movep ? dec_uop.imm[3:0]
                    : dec_is_bf ? dec_uop.imm[15:12]
-                   : dec_push_idx ? dec_uop.ea_idx_reg
+                   : dec_push_idx ? dec_ea_idx_reg_fast
                    : (dec_uop.dst_ea_mode != UEA_NONE) ? dec_uop.dst_ea_reg
                    : dec_mem_operand ? dec_uop.src_reg
                    : (dec_uop.reads_mem && !dec_uop.writes_mem)
@@ -1116,7 +1131,7 @@ module mh030p_core (
         // transfer. Those two never overlap.
         .rd_c_sel (ex_is_movem ? mvm_reg
                    : dec_is_cas   ? dec_uop.imm[3:0]
-                   : dec_needs_sp ? 4'd15 : dec_uop.ea_idx_reg),
+                   : dec_needs_sp ? 4'd15 : dec_ea_idx_reg_fast),
         .rd_a_data(rf_a),
         .rd_b_data(rf_b),
         .rd_d_sel (dec_uop.dst_ea_idx_reg),

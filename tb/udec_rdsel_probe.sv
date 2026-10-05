@@ -34,12 +34,29 @@
 // ea_idx_reg traces to `sxw = xword(ea_slot_is_dst ? ew_dst_at : ew_lead,
 // ew_tot)` (mh030p_decode.sv) -- the SAME shape of cascading, per-family
 // extension-word-position arithmetic that made ext_words itself expensive
-// before Stage 1's shallow rewrite. Not yet fixed: an analogous "shallow
-// ea_idx_reg" shortcut, computed straight from raw opcode/extension-word
-// bits rather than through the cascading ew_lead/ew_dst_at/ew_tot
-// classification, would be a comparable-scope undertaking to that
-// rewrite, not a quick patch -- flagged for explicit scoping, not
-// attempted here. See docs/mh030p_architecture.md section 8.
+// before Stage 1's shallow rewrite.
+//
+// FIXED (same session): a shallow ea_idx_reg_fast_o was added to
+// mh030p_decode.sv, reusing Stage 1's own fff_lead/fff_dstat/
+// ext_words_fast_full_o infrastructure almost entirely -- the only new
+// piece was ea_slot_is_dst's own shallow equivalent, itself a function of
+// already-shallow wires (f_group/ea_dst_is_mem/ea_src_ok/ea_is_imm). Two
+// real bugs found and fixed while verifying bit-exactness against
+// uop.ea_idx_reg across all 65,536 opcodes x 8 full-format shapes
+// (tb/uop_decode_equiv_tb.sv): (1) the first version computed a value
+// unconditionally instead of gating on "is this EA actually indexed",
+// leaking nonzero extension-word bits into mh030p_core.sv's rd_c_sel
+// fallback for non-indexed opcodes (empirically harmless for every
+// pattern Harte/bench exercise, since that fallback's consumers are dead
+// for non-indexed cases, but wrong by construction); (2) the gate's own
+// mode signal was wrong on a second attempt (fff_deam, which mirrors the
+// SEPARATE uop.dst_ea_mode/dst_ea_idx_reg mem-to-mem fields, not
+// uop.ea_mode/ea_idx_reg) -- fff_eam alone is correct, since
+// ea_mode_eff_fast() already resolves to the destination's own mode for
+// the immediate-source/indexed-destination MOVE case. Swapped into
+// mh030p_core.sv's rd_a_sel/rd_c_sel muxes in place of dec_uop.ea_idx_reg.
+// See docs/mh030p_architecture.md section 8 and plan.md for the full
+// writeup and measured Fmax result.
 module udec_rdsel_probe (
     input  wire        clk_4x,
     input  wire        rst_n,

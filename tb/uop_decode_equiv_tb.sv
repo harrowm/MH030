@@ -177,6 +177,8 @@ module uop_decode_equiv_tb;
     integer ff_grp [0:15];
     integer ew_full_bad;
     integer ew_full_grp [0:15];
+    integer eidx_bad;
+    integer eidx_grp [0:15];
     logic [15:0] ffw;
     integer gap_by_group [0:15];
     integer gap_sample_n  [0:15];
@@ -231,7 +233,9 @@ module uop_decode_equiv_tb;
         // asymmetric against the low half.
         for (ffv = 0; ffv < 16; ffv = ffv + 1) ff_grp[ffv] = 0;
         for (ffv = 0; ffv < 16; ffv = ffv + 1) ew_full_grp[ffv] = 0;
+        for (ffv = 0; ffv < 16; ffv = ffv + 1) eidx_grp[ffv] = 0;
         ew_full_bad = 0;
+        eidx_bad = 0;
         ext = 32'hA4A5_3C7F;
         ext_rawv = 32'hA4A5_3C7F;
         q3w = 16'h5A91;
@@ -376,6 +380,28 @@ module uop_decode_equiv_tb;
         for (i = 0; i < 65536; i = i + 1) begin
             instr = i[15:0];
             #1;   // settle both combinational decoders
+
+            // ea_idx_reg_fast_o vs uop.ea_idx_reg, BRIEF format (this loop's
+            // own fixed ext pattern has bit 8 clear) -- the 8-shape
+            // full-format loop further below covers the full-format case,
+            // this covers the far more common brief one. Compared for EVERY
+            // opcode, not just indexed ones: a first version of this check
+            // was scoped to "only when indexed", which passed 0-differ while
+            // the real decoder's own gating bug (ea_idx_reg_fast_o computed
+            // unconditionally instead of defaulting to 0 like uop.ea_idx_reg
+            // does for every non-indexed mode) went undetected and leaked
+            // into mh030p_core.sv's rd_c_sel fallback, caught only by a real
+            // EXECCYCLES drift in `make bench`. Comparing unconditionally
+            // against uop.ea_idx_reg (which is itself 0 whenever uop_clear()
+            // was never overridden) makes that gating a first-class part of
+            // what this sweep verifies.
+            if (u_new.ea_idx_reg_fast_o !== uop.ea_idx_reg) begin
+                if (eidx_bad < 20)
+                    $display("EAIDXREG-FAST-MISMATCH-BRIEF op=%04h fast=%0d real=%0d",
+                             instr, u_new.ea_idx_reg_fast_o, uop.ea_idx_reg);
+                eidx_bad = eidx_bad + 1;
+                eidx_grp[i[15:12]] = eidx_grp[i[15:12]] + 1;
+            end
 
             // UC_MMU excluded deliberately: this decoder claims every F-line
             // opcode with CpID=000 (instr[11:9]==000) as a valid MMU
@@ -601,6 +627,27 @@ module uop_decode_equiv_tb;
                     ew_full_bad = ew_full_bad + 1;
                     ew_full_grp[i[15:12]] = ew_full_grp[i[15:12]] + 1;
                 end
+                // ea_idx_reg_fast_o (Stage 3, docs/mh030p_architecture.md
+                // section 8) vs uop.ea_idx_reg -- the REAL decoder's own
+                // output, same "u_new is the oracle, not the reference"
+                // reasoning as ext_words_fast_full_o above. Compared for
+                // EVERY opcode, not just indexed ones -- mh030p_core.sv's
+                // rd_c_sel fallback arm reads this value unconditionally for
+                // every non-CAS/non-MOVEM/non-push-SP instruction, so a
+                // version of ea_idx_reg_fast_o that only matched when
+                // indexed (and leaked whatever extension-word bits sat at
+                // that position otherwise, instead of uop.ea_idx_reg's own
+                // 0 default) passed this check at a narrower scope while
+                // still being wrong -- caught only by a real EXECCYCLES
+                // drift in `make bench`, not by this sweep. See the
+                // always_comb block's own comment in mh030p_decode.sv.
+                if (u_new.ea_idx_reg_fast_o !== uop.ea_idx_reg) begin
+                    if (eidx_bad < 20)
+                        $display("EAIDXREG-FAST-MISMATCH op=%04h ffv=%0d fast=%0d real=%0d",
+                                 instr, ffv, u_new.ea_idx_reg_fast_o, uop.ea_idx_reg);
+                    eidx_bad = eidx_bad + 1;
+                    eidx_grp[i[15:12]] = eidx_grp[i[15:12]] + 1;
+                end
             end
         end
         ext = 32'hA4A5_3C7F; ext_rawv = 32'hA4A5_3C7F; q3w = 16'h5A91; q4w = 16'h6B82; #1;
@@ -615,6 +662,12 @@ module uop_decode_equiv_tb;
         $write("    disagreements by opcode group:");
         for (ffv = 0; ffv < 16; ffv = ffv + 1)
             if (ew_full_grp[ffv] != 0) $write("  %1h:%0d", ffv[3:0], ew_full_grp[ffv]);
+        $display("");
+        $display("  ea_idx_reg_fast (all opcodes, 8 shapes, indexed EAs only) vs real: %s (%0d differ)",
+                 (eidx_bad == 0) ? "yes" : "NO", eidx_bad);
+        $write("    disagreements by opcode group:");
+        for (ffv = 0; ffv < 16; ffv = ffv + 1)
+            if (eidx_grp[ffv] != 0) $write("  %1h:%0d", ffv[3:0], eidx_grp[ffv]);
         $display("");
         // REPORTING ONLY, deliberately. The reference is NOT trustworthy here:
         // for MOVE with an indexed EA at BOTH ends it counts 2 words in brief

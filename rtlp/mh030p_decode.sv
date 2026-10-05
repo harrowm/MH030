@@ -64,7 +64,15 @@ module mh030p_decode (
     // from internally, since a full-format EA's own extra displacement
     // words shift where later words land exactly as a second ordinary
     // extension word would.
-    output logic [2:0] ext_words_fast_full_o
+    output logic [2:0] ext_words_fast_full_o,
+    // Stage 3 (docs/mh030p_architecture.md section 8): the independent,
+    // shallow replacement for uop.ea_idx_reg -- see its own always_comb
+    // below for the derivation. Always a valid number regardless of
+    // whether the current opcode's own effective EA mode is actually
+    // indexed; consumers (mh030p_core.sv's rd_a_sel/rd_c_sel muxes) already
+    // gate on that themselves before using it, the same convention
+    // ext_words_fast_o/_full_o already established.
+    output logic [3:0] ea_idx_reg_fast_o
 );
     // `ext` was a module INPUT; it is now computed here, from this same
     // module's own ext_words_fast_full_o (declared above, computed below)
@@ -912,6 +920,66 @@ module mh030p_decode (
         ext_words_fast_full_o = ext_words_fast_o
                                + (fff_sff ? ff_extra(fff_srcw) : 3'd0)
                                + (fff_dff ? ff_extra(fff_dstw) : 3'd0);
+    end
+
+    // ── Shallow ea_idx_reg (Stage 3, docs/mh030p_architecture.md section 8) ──
+    // Isolated and profiled via tb/udec_rdsel_probe.sv: ea_idx_reg alone
+    // measured ~18.7 ns, nearly as expensive as the ENTIRE rd_a_sel mux
+    // that reads it (~17.3 ns) -- it traces to the real decode block's own
+    // `sxw = xword(ea_slot_is_dst ? ew_dst_at : ew_lead, ew_tot)`
+    // (further below), the same shape of cascading, per-family
+    // extension-word-position arithmetic that made ext_words itself
+    // expensive before this file's own Stage 1 rewrite.
+    //
+    // The fix reuses THAT rewrite's own infrastructure almost entirely:
+    // fff_lead/fff_dstat/ext_words_fast_full_o above are already exactly
+    // ew_lead/ew_dst_at/ew_tot, computed from raw opcode-bit wires in
+    // parallel with classification. The only genuinely new piece is
+    // ea_slot_is_dst's own shallow equivalent -- real decode block sets it
+    // inside a deep procedural branch (group 1/2/3 MOVE, destination is
+    // memory, source needs no EA of its own), but the CONDITION itself is
+    // already a function of raw, shallow wires (f_group/ea_dst_is_mem/
+    // ea_src_ok/ea_is_imm, all declared well before the decode block
+    // runs), so restating it here needs no new classification at all.
+    // GATING, not just position, must mirror the real decoder exactly: it
+    // writes uop.ea_idx_reg ONLY when uop.ea_mode itself is AN_IDX/PC_IDX
+    // (line ~2489 below), otherwise leaving uop_clear()'s 4'h0 default
+    // untouched. A first version of this block computed eidx_sxw_fast
+    // unconditionally -- bit-exact whenever the mode WAS indexed (the only
+    // case a first version of tb/uop_decode_equiv_tb.sv's "ea_idx_reg_fast"
+    // check covered), but for every NON-indexed opcode it leaked whatever
+    // extension-word bits happened to sit at that position instead of 0.
+    // rd_c_sel's own fallback arm in mh030p_core.sv reads this value for
+    // EVERY non-CAS/non-MOVEM/non-push-SP instruction, not just indexed
+    // ones, so the leak silently fed a wrong register number into
+    // ag_c/ex_sp's own forwarding data -- caught by a real EXECCYCLES drift
+    // in `make bench` (6616->6617, 8603->8751), not by the decoder sweep,
+    // since that sweep only ever compared the already-indexed case.
+    //
+    // A second attempt gated on fff_deam (dst_ea_mode_eff_fast) whenever
+    // ea_slot_is_dst_fast was set, reasoning "the destination's own slot
+    // needs the destination's own effective mode" -- wrong: fff_deam
+    // mirrors uop.dst_ea_mode, a DIFFERENT field that the real decoder only
+    // populates for a genuine memory-to-memory move (both operands have
+    // their own EA; see uop.dst_ea_idx_reg/rd_d_sel, an entirely separate
+    // path from this one). The field this block tracks, uop.ea_idx_reg, is
+    // always gated on uop.ea_mode alone -- which ea_mode_eff_fast() (fff_eam)
+    // already computes correctly for EVERY case, including immediate-source/
+    // indexed-destination MOVE (its own move_ok1_e && ea_dst_is_mem &&
+    // (!ea_src_ok || ea_is_imm) branch resolves itself to ea_dst_mode_w,
+    // i.e. the destination's mode, for exactly that case) -- so no second
+    // mode signal is needed here at all, only fff_eam.
+    logic ea_slot_is_dst_fast;
+    logic [15:0] eidx_sxw_fast;
+    always_comb begin
+        ea_slot_is_dst_fast = ((f_group == 4'h1) || (f_group == 4'h2)
+                                || (f_group == 4'h3))
+                           && ea_dst_is_mem && (!ea_src_ok || ea_is_imm);
+        eidx_sxw_fast = xword(ea_slot_is_dst_fast ? fff_dstat : fff_lead,
+                               ext_words_fast_full_o);
+        ea_idx_reg_fast_o = ((fff_eam == UEA_AN_IDX)
+                           || (fff_eam == UEA_PC_IDX))
+                           ? eidx_sxw_fast[15:12] : 4'h0;
     end
 
     // ── Decode ──────────────────────────────────────────────────────────────
