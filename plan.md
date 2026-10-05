@@ -6757,3 +6757,28 @@ already-decided work that Stage 2b and any future BIU-side fix depend on,
 so it is not wasted even though it will not move the tracked Fmax number
 until the core-internal chain found here is also addressed. See
 `docs/mh030p_architecture.md` section 8 for the full staging note.
+
+### MH030-P Stage 2 fork DONE; Stage 2/3 re-ordered by user decision (2026-10-04)
+
+Forked the BIU into `rtlp/` (`rtlp/mh030p_biu.sv` + `rtlp/mh030p_biu_cycle_gen.sv`,
+`rtl/m68030_biu.sv`/`biu_cycle_gen.sv` completely untouched, every other
+submodule reused unforked) -- commit `934b052`. Verified behaviourally
+identical: `make test` 43/43, `make lint-drivers` clean, `make bench` all
+four arms with `EXECCYCLES` byte-identical.
+
+Before starting the actual FSM depth restructuring (the reason for the
+fork), flagged to the user that the prior commit's own measurement
+(`instr_ready`→`u_alu`→`mem_addr`, entirely inside `u_core`, dominant
+across 2 `-noflatten` seeds) means the BIU is not currently the binding
+constraint -- its own 27.78 MHz standalone ceiling is already above the
+26.49 MHz full design. Restructuring `biu_cycle_gen`'s 117-state FSM
+encoding now would be real regression risk on the most protocol-critical
+file in the project for a currently-unmeasurable payoff.
+
+**User decision: do Stage 3 (core pipelining) next, defer the FSM
+rewrite until Stage 3's own re-measurement confirms the BIU has become
+the limiter.** `docs/mh030p_architecture.md` section 8 updated to record
+this re-ordering. The fork stays in place either way. See the "Stage 3"
+section there for the specific target (`instr_ready`'s own stall-gating
+tree, the unexpected `u_alu` detour needing its own trace before a split
+is designed).

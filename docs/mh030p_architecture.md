@@ -473,19 +473,21 @@ registered one tick later than its triggering state, with the state
 sequence itself unchanged, is still protocol-exact. This is a genuinely
 different category of change from Stage 2b below.
 
-**Status note (2026-10-04, post-Stage-1 measurement): proceeding to this
-stage next per the user's own explicit sequencing instruction ("start
-phase 1 then move to 2 and 3"), not because fresh measurement currently
-points at the BIU** — §7.1's own finding shows the core, not the BIU, is
-the current binding constraint, which argues for Stage 3 on the evidence
-alone. Forking the BIU is still real, necessary, already-decided work
-(Stage 2b and any future BIU-side fix depend on the fork existing first),
-so doing it now is not wasted even though it will not move the tracked
-Fmax number until the core-side chain found in Stage 1's own measurement
-is also addressed. The original "Stages 1-2 reach 30-40 MHz" estimate
-should be read with this caveat: it assumed the BIU would already be
-binding by this point, which this session's own measurement shows is not
-yet true.
+**Status (2026-10-04): the fork itself is DONE** (`rtlp/mh030p_biu.sv` +
+`rtlp/mh030p_biu_cycle_gen.sv`, verified behaviourally identical — `make
+test` 43/43, `make bench` all four arms with `EXECCYCLES` byte-identical).
+**The FSM depth restructuring is explicitly DEFERRED, by direct user
+decision after seeing §7.1's own finding**: the BIU's own 27.78 MHz
+standalone ceiling is already *above* the current full design's 26.49 MHz,
+so restructuring `biu_cycle_gen` right now would spend real regression
+risk on the most complex, protocol-critical file in the project for a
+currently-unmeasurable payoff — the core, not the BIU, is what's binding.
+**Re-ordered: Stage 3 (below) goes next, and this FSM work resumes once
+Stage 3's own re-measurement confirms the BIU has actually become the
+limiter**, rather than following the original 1→2→3 sequence literally
+against evidence that it's not yet Stage 2's turn. The fork stays in place
+either way — it's real, necessary, already-decided work (Stage 2b and any
+future BIU-side fix depend on it existing), just not blocking Stage 3.
 
 ### Stage 2b — synchronous-termination (STERM) fast path — NEEDS EXPLICIT SIGN-OFF
 
@@ -510,19 +512,36 @@ unlocks the single largest estimated single-item win in this whole plan;
 saying no caps the realistic ceiling at whatever Stages 1-2-3-4 reach on
 protocol-timing alone (see §9).
 
-### Stage 3 — the core's own 5.17:1 cone ratio — partially done, demoted
+### Stage 3 — the core's own `instr_ready`→`mem_addr` chain — NEXT, moved up
 
 Splitting AG into address-mux-then-adder and EX into operand-select-then-
 ALU/shifter/BCD/bitfield, giving the CCR/flag network its own stage. The
 AG/EX EA-adder split (§4.1) is a first, real instance of this — done, but
 measured flat, because (as now confirmed) it wasn't the dominant cost at
-the time. **The original plan explicitly demotes this stage below Stage
-2b**, because a deeper pipeline costs ticks (more stages = more latency per
-instruction), so it must be judged on `Fmax / ticks` via `make bench`
-alongside every sweep, never on the clock number alone. Worth continuing
-once Stages 1-2(-2b) have moved the ceiling high enough that the core's own
-remaining depth is genuinely what's binding — re-profile with
-`-noflatten` before choosing the next specific split, rather than guessing.
+the time. **The original plan demoted this stage below Stage 2b on the
+assumption the BIU would already be binding by this point — that
+assumption did not hold (§7.1), so this stage is promoted ahead of
+Stage 2's FSM work instead**, by direct user decision.
+
+**The specific target, now identified by direct measurement rather than
+estimate**: `instr_ready` (the AG/EX stall-gating decision in
+`mh030p_core.sv`) → a detour through `u_alu` → `mem_addr` (the registered
+bus-dispatch address), confirmed consistent across two `-noflatten` seeds
+(§7.1). `instr_ready` is `!stall_ex && !stall_ag`, which itself depends on
+`ag_base_busy`, every `ex_wait_*` term, and the exception/stall state —
+a wide OR/AND tree gating whether the NEXT instruction's own dispatch
+(including `mem_addr`'s own write-enable) can proceed. The `u_alu` detour
+is unexpected and needs tracing before any split is designed — it is not
+obviously on the stall-decision's own critical dependency path, so
+confirming WHY it's in this specific chain (rather than assuming) is the
+right first step, matching this project's own "verify, don't guess"
+discipline.
+
+**This still costs ticks (more pipeline stages = more latency per
+instruction)**, so it must be judged on `Fmax / ticks` via `make bench`
+alongside every sweep, never on the clock number alone — exactly as the
+original plan intended, just reordered ahead of Stage 2's FSM work rather
+than after it.
 
 ### Stage 4 — routing locality
 
