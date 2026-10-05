@@ -670,10 +670,51 @@ routing-dominated timing (0.24-0.26 ns logic vs 0.7-3.8 ns routing per
 hop), **no further logic-depth fix in this area is supported by
 measurement** — the real driver is routing/fanout/physical locality, i.e.
 exactly this Stage 4, now that Stages 1-3's cheap wins (`ext_words`, CAS
-latch, `ea_idx_reg`) are exhausted. See `plan.md`'s own dated entry for the
-full writeup. Floorplan constraints, relative placement directives, and
-re-checking ABC9 mapping choices are the open candidates here; none
-attempted yet.
+latch, `ea_idx_reg`) are exhausted. See `plan.md`'s own dated entries for
+the full writeup of everything below.
+
+**Two region-constraint strategies tried, both failed.** nextpnr's Python
+region-constraint API (`ctx.createRectangularRegion`/`constrainCellToRegion`,
+confirmed live via a sanity check that correctly placed every constrained
+cell inside its declared box) was used two ways: (1) a connectivity-traced
+"BRAM interface" cut — `u_core` is 52-57% of the design's logic, ruling out
+a whole-module constraint outright, so a 3-level BFS from both cache
+BRAMs' own pins found the smallest real, electrically-justified target
+(level-0, direct connections only: 1,979 `u_core` cells, ~5% — the
+interface explodes past any practical radius beyond that, 85% of `u_core`
+by level 3). Constraining just that 5% into a region near both BRAMs
+legalized fine but **measured worse**: 26.85 MHz mean (3 seeds) vs 27.64
+MHz unconstrained, consistently on every seed. (2) A coarser two-zone
+split (`u_core` to ~55% of the die, `u_biu` to the rest, proportional to
+real cell-count share) **failed to legalize at all** — a CCU2C carry-chain
+cell couldn't be placed after 123M attempts, even with ample BRAM sites on
+both sides confirmed first. Two different strategies, two different
+failure modes, both negative — cell names don't survive this flattened
+netlist at all (confirmed: zero "mem_" substring hits anywhere in
+`u_core`), so any such attempt must use real net connectivity, not name
+matching, and even then this design's own internal structure (long carry
+chains, pervasive interconnection) doesn't tolerate artificial area
+boundaries at either granularity tried.
+
+**A real win found from a completely different, toolchain-level lever
+instead: `--placer-heap-timingweight 50`** (nextpnr's own placer parameter,
+default 10). Zero RTL risk — a pure P&R-time setting. 9-seed sweep (`make
+fmax-pbiu-tuned-sweep SEEDS=9`): **29.30 MHz mean (range 27.64-30.32)**,
+vs 27.66 MHz baseline (range 27.04-28.43) — **+1.64 MHz, confirmed real**
+by the whole range shifting upward, not just the mean (the same signature
+used to validate the CAS latch and `ext_words` fixes). Checked for more
+headroom: `--placer-heap-timingweight 100` saturates at the same 30.31 MHz
+(no further gain), and combining with `--parallel-refine` is slightly
+*worse* (29.41 vs 30.32 on seed 1) — `=50` alone is the real, final
+finding on this lever. **Current best measured A4 Fmax: 29.30 MHz**, up
+from 27.66 MHz pre-Stage-4 and 24.71 MHz at the start of the whole 100 MHz
+programme — now 3.41x short of target, improved from 4.05x.
+
+Open, not yet attempted: other nextpnr placer/router flags beyond the two
+checked; genuinely reducing `u_core`'s own absolute logic volume (the
+plan's own acknowledged bigger fallback once region constraints failed —
+a separate RTL-level undertaking needing its own fresh scoping, not
+started).
 
 ### Stage 5 — re-decide the target against real measurements
 

@@ -1381,9 +1381,71 @@ fmax-pbiu:
 	    synth_lattice -family ecp5 -top wrap_fmax; \
 	    write_json $(SIM)/fmaxpb.json' -l $(SIM)/fmaxpb_yosys.log > /dev/null
 	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxpb.json \
-	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail \
+	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail $(PLACERFLAGS) \
 	    --report $(SIM)/fmaxpb_report-$(SEED).json 2>&1 \
 	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop"
+
+# Stage 4 (docs/mh030p_architecture.md section 8): confirms a nextpnr
+# placer-parameter tuning lead found 2026-10-05 after region constraints
+# (fmax-pbiu-region) measured negative -- --placer-heap-timingweight 50
+# (default 10) showed +1.58 MHz mean over 3 seeds, still within this
+# project's own documented noise floor at that sample size. PLACERFLAGS
+# lets fmax-pbiu-sweep itself be reused for this (`make fmax-pbiu-sweep
+# PLACERFLAGS="--placer-heap-timingweight 50"`); this target/sweep pair
+# exists only as a convenience default for exactly that flag.
+.PHONY: fmax-pbiu-tuned
+fmax-pbiu-tuned: PLACERFLAGS = --placer-heap-timingweight 50
+fmax-pbiu-tuned:
+	@$(MAKE) -s fmax-pbiu SEED=$(SEED) PLACERFLAGS="$(PLACERFLAGS)"
+
+.PHONY: fmax-pbiu-tuned-sweep
+fmax-pbiu-tuned-sweep:
+	@rm -f $(SIM)/fmax_pbiu_tuned_sweep.txt
+	@for s in $$(seq 1 $(SEEDS)); do \
+	    v=$$($(MAKE) -s fmax-pbiu-tuned SEED=$$s 2>&1 \
+	         | grep -E "Max frequency" | tail -1 \
+	         | grep -oE "[0-9.]+ MHz" | head -1 | cut -d' ' -f1); \
+	    echo "seed $$s: $$v MHz"; echo "$$v" >> $(SIM)/fmax_pbiu_tuned_sweep.txt; \
+	done
+	@python3 -c "import sys; v=[float(x) for x in open('$(SIM)/fmax_pbiu_tuned_sweep.txt')]; \
+	    v.sort(); n=len(v); \
+	    print('n=%d  mean=%.2f  min=%.2f  max=%.2f  range=%.2f MHz' \
+	          % (n, sum(v)/n, v[0], v[-1], v[-1]-v[0]))"
+
+# Stage 4 (docs/mh030p_architecture.md section 8): same netlist as
+# fmax-pbiu, but with a --pre-place Python script applying a targeted
+# nextpnr region constraint (see scripts/region_constrain.py). REGIONSCRIPT
+# defaults to a no-op so `make fmax-pbiu-region` with no override reproduces
+# fmax-pbiu's own baseline exactly, for an apples-to-apples comparison.
+REGIONSCRIPT ?= scripts/region_noop.py
+.PHONY: fmax-pbiu-region
+fmax-pbiu-region:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl $(MH030P_BIU_SRCS) > $(SIM)/fmaxpbr.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/fmaxpbr.v mh030p_biu_top \
+	    wrap_fmax $(SIM)/fmaxpbr_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/fmaxpbr.v $(SIM)/fmaxpbr_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/fmaxpbr.json' -l $(SIM)/fmaxpbr_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/fmaxpbr.json \
+	    --seed $(SEED) --freq $(FREQ) --timing-allow-fail \
+	    --pre-place $(REGIONSCRIPT) \
+	    --report $(SIM)/fmaxpbr_report-$(SEED).json 2>&1 \
+	    | grep -E "Max frequency|Total LUT4s|TRELLIS_FF|combinational loop|ERROR"
+
+.PHONY: fmax-pbiu-region-sweep
+fmax-pbiu-region-sweep:
+	@rm -f $(SIM)/fmax_pbiu_region_sweep.txt
+	@for s in $$(seq 1 $(SEEDS)); do \
+	    v=$$($(MAKE) -s fmax-pbiu-region SEED=$$s REGIONSCRIPT=$(REGIONSCRIPT) 2>&1 \
+	         | grep -E "Max frequency" | tail -1 \
+	         | grep -oE "[0-9.]+ MHz" | head -1 | cut -d' ' -f1); \
+	    echo "seed $$s: $$v MHz"; echo "$$v" >> $(SIM)/fmax_pbiu_region_sweep.txt; \
+	done
+	@python3 -c "import sys; v=[float(x) for x in open('$(SIM)/fmax_pbiu_region_sweep.txt')]; \
+	    v.sort(); n=len(v); \
+	    print('n=%d  mean=%.2f  min=%.2f  max=%.2f  range=%.2f MHz' \
+	          % (n, sum(v)/n, v[0], v[-1], v[-1]-v[0]))"
 
 # -noflatten variant of fmax-pbiu, for TRUSTWORTHY per-module critical-path
 # attribution (plain fmax-pbiu flattens, so a merged cell's name can carry an
@@ -1480,6 +1542,7 @@ area-pbiu:
 	@python3 scripts/module_area.py $(SIM)/areapbiu.json
 
 SEEDS ?= 9
+PLACERFLAGS ?=
 .PHONY: fmax-p-sweep
 fmax-p-sweep:
 	@rm -f $(SIM)/fmax_sweep.txt

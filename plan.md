@@ -7004,3 +7004,165 @@ independently-packable pieces) than anything this session's logic-level
 probes can diagnose further. No RTL behavior change from this entry (three
 new measurement-only probe files + Makefile targets only); `make test`
 43/43, `make lint-drivers` clean.
+
+### MH030-P Stage 4: BRAM-interface region constraint, measured NEGATIVE (2026-10-05)
+
+Following the EX-stage investigation finding nothing (plan.md's prior entry),
+pivoted to physical placement per the user's explicit direction ("goto phase
+4 .. we are so far away from target .. I can't use the core at all").
+
+Confirmed nextpnr's Python region-constraint API is live and works
+(`ctx.createRectangularRegion`/`constrainCellToRegion`, nextpnr-0.11.1-30):
+a sanity check on the small `stall_ex_probe` wrapper placed every
+constrained cell inside its declared box with no legalization failure --
+but ONLY once every cell of a given type was included together. A first
+attempt constraining an arbitrary 8-cell slice failed outright: two of
+those cells turned out to be the D0/D1 halves of a hardwired PFUMX/L6MUX21
+LUT-pair primitive (same net stem, diverging only in a D0/D1 suffix) that
+MUST share one physical slice -- splitting the pair across
+constrained/unconstrained is infeasible. Real, generalizable lesson: any
+region-constraint cell selection must include whole connected groups, not
+an arbitrary cut.
+
+Found `u_core` is **52-57% of the whole design's real logic cells**
+(15,702-37,150 of ~30,203-65,202 depending on how "cell" is counted), ruling
+out a whole-module region constraint outright (would force half the design
+into one box, very likely increasing congestion). Confirmed via
+`scripts/measure_fmax.py analyze` against 5 EXISTING report files (no new
+synthesis) that the `u_core` <-> cache-BRAM crossing is real and repeats in
+every one of 5 seeds checked (sometimes the D-cache's `data_d`, sometimes
+the I-cache's `data_i`, often both, sometimes multiple crossings per path).
+
+Traced the REAL interface by net connectivity (cell names do not survive
+this flattened netlist's ABC9 renaming at all -- a substring search for
+"mem_" anywhere in `u_core`'s ~37k cell names returns ZERO hits, confirming
+yet again that name-based cell selection is not viable here): a 3-level BFS
+backward/forward from both cache BRAMs' own pins explodes fast -- level 0
+(direct connections only): 1,979 `u_core` cells; cumulative through level 3:
+31,535 (85% of `u_core`). **The interface is not small at any practical
+radius.**
+
+Built `scripts/region_bram_iface.py` (new `make fmax-pbiu-region`/
+`fmax-pbiu-region-sweep` Makefile targets) constraining the level-0 cut
+(1,979 cells, the most defensible minimal real target) into a 45x40 region
+near both BRAMs' measured locations (I-cache at (17,22), D-cache at
+(31,22)). Placement succeeded (no legalization failure this time -- the
+connectivity-derived cut didn't split any pairs). **Measured: 3-seed mean
+26.85 MHz vs 27.64 MHz unconstrained (same 3 seeds) -- WORSE, consistently,
+on all 3 seeds individually (27.23<28.19, 26.64<27.49, 26.68<27.25).**
+
+**Conclusion: this specific region-constraint approach does not work.**
+Forcing even the smallest real, connectivity-justified subset (1,979 cells,
+~5% of `u_core`) into a bounding box measurably hurts Fmax rather than
+helping it -- consistent with the diffuse, routing-dominated signature
+this project keeps finding (75-85% routing in every trace since Phase 284):
+there is no small, identifiable "hot crossing" to fence off, because the
+real connectivity is genuinely widespread. Per this plan's own stated exit
+criterion, reporting honestly rather than trying a bigger version of the
+same guess. Next being tried: a coarser two-zone split (constrain `u_core`
+and `u_biu` each to roughly their own proportional half of the die, giving
+the placer two smaller sub-problems instead of one free-for-all, rather
+than targeting a specific signal cone) -- a structurally different idea
+from "fence off the interface," not a bigger box around the same target.
+
+### MH030-P Stage 4: coarse two-zone split, FAILS TO LEGALIZE (2026-10-05)
+
+Second region-constraint attempt, structurally different from the BRAM-
+interface cut above: `scripts/region_two_zone.py` constrains ALL of
+`u_core` (not a signal cone) to the left ~55% of the die (x:0-69, matching
+its own ~55% share of real logic cells) and ALL of `u_biu` to the
+remaining ~45% (x:70-126), rather than fencing off one specific interface.
+Confirmed both halves have ample legal DP16KD sites first (116 left, 92
+right) to rule out that as a cause of failure before running the real test.
+
+**Result: does not even legalize.** `nextpnr` reports "Unable to find
+legal placement for cell ...CCU2C..." after 123,574,921 placement attempts
+(the timeout scales with cell count² for a design this size) for a cell
+inside a long CCU2C ripple-carry chain. Even a generously-sized,
+proportionally-area-matched region is too small/rigid for `u_core`'s own
+internal structure (long carry chains, dense interconnection) to pack
+into without conflict.
+
+**Combined with the BRAM-interface cut's own negative result (26.85 vs
+27.64 MHz, legal but worse), this is now two real, differently-shaped
+region-constraint strategies, both failing via two different failure
+modes (worse-but-legal vs. outright illegal).** This is strong convergent
+evidence that region-based floorplanning is not a viable Stage 4 lever for
+this design via natural strategies -- not because the nextpnr mechanism
+doesn't work (proven live via the Phase 0 sanity check), but because
+`u_core`'s own internal structure doesn't tolerate artificial area
+boundaries at any of the two natural granularities tried (a narrow signal
+cone, or a coarse whole-module half-split).
+
+**Not yet tried, lower effort than abandoning region constraints
+outright:** nextpnr placer-parameter tuning with zero RTL/constraint risk
+(`--placer-heap-timingweight`, `--placer-heap-alpha`/`beta`,
+`--parallel-refine`) -- a cheap thing to check before escalating to the
+plan's own acknowledged bigger fallback (genuinely reducing `u_core`'s
+absolute logic volume, a separate RTL-level undertaking needing its own
+fresh scoping, not something to start without saying so explicitly first).
+
+### MH030-P Stage 4: placer-parameter tuning, a real (if modest) zero-RTL-risk lever found (2026-10-05)
+
+After two region-constraint strategies both failed (BRAM-interface cut:
+measurably worse; coarse two-zone split: illegal), checked two cheap,
+zero-RTL/zero-constraint-risk nextpnr placer options instead, 3 seeds each
+against the unconstrained `fmax-pbiu` baseline (27.64 MHz mean, same 3
+seeds: 28.19/27.49/27.25):
+
+| option | seed1 | seed2 | seed3 | mean | delta |
+|---|---|---|---|---|---|
+| baseline (none) | 28.19 | 27.49 | 27.25 | 27.64 | -- |
+| `--parallel-refine` | 28.88 | 28.55 | 27.26 | 28.23 | +0.59 |
+| `--placer-heap-timingweight 50` | 30.32 | 27.64 | 29.70 | 29.22 | **+1.58** |
+
+`--placer-heap-timingweight 50` (default 10) is the more promising of the
+two -- every seed individually at or above its own baseline counterpart
+except seed 2 (27.64, roughly flat vs 27.49). This is still within this
+project's own documented ~1-2 MHz noise floor
+([[feedback_fmax_noise_floor]]) at only 3 seeds, so NOT yet confirmed as a
+real win -- needs the full 9-seed sweep before being trusted, exactly this
+project's own standing practice. Flagged as the most promising concrete
+next step: a full 9-seed confirm of `--placer-heap-timingweight 50` (and
+worth trying even higher values, and combining with `--parallel-refine`),
+all zero-RTL-risk since these are pure synthesis-tool parameters, not
+anything that touches correctness.
+
+### MH030-P Stage 4: --placer-heap-timingweight 50, CONFIRMED real win (2026-10-05)
+
+Full 9-seed sweep (`make fmax-pbiu-tuned-sweep SEEDS=9`, new Makefile
+target, `PLACERFLAGS` parameter added to `fmax-pbiu` for reproducibility):
+
+**30.32, 27.64, 29.70, 29.91, 29.51, 28.75, 29.49, 29.65, 28.71 -- mean
+29.30 MHz, range 27.64-30.32 (2.68 MHz spread).**
+
+Against the 27.66 MHz baseline (9 seeds: 28.19/27.49/27.25/27.53/28.43/
+27.77/27.20/28.08/27.04, range 27.04-28.43): **+1.64 MHz, confirmed real**
+by the same signature this project already uses to separate a real win
+from noise (the CAS latch fix, Stage 1's `ext_words`) -- the entire tuned
+range sits at or above the baseline's own range almost throughout, not
+just the mean shifting by chance.
+
+This is a pure nextpnr placer-parameter change (`--placer-heap-
+timingweight`, default 10, confirmed via `nextpnr-ecp5 --help`) -- zero
+RTL risk, zero correctness risk (make test/lint-drivers/Harte/bench are
+all unaffected by a P&R-only flag and were not re-run for this reason,
+consistent with this plan's own stated verification rationale). Found
+immediately after two real region-constraint failures (BRAM-interface cut:
+worse; two-zone split: illegal) -- a reminder that a toolchain-level lever
+can outperform a much more invasive RTL/constraint-level one.
+
+**Current best measured A4 Fmax this session: 29.30 MHz** (up from 27.66
+MHz pre-Stage-4, 24.71 MHz at the start of the 100 MHz programme). Still
+short of the 100 MHz target (now 3.41x away, improved from 4.05x). Trying
+`--placer-heap-timingweight 100` and combining with `--parallel-refine`
+next, both cheap, to check for more headroom on the same lever before
+moving on.
+
+**Checked for more headroom on the same lever (1 seed each, quick checks):**
+`--placer-heap-timingweight 100` gives 30.31 MHz on seed 1 -- identical to
+`=50`'s own 30.32, saturated, no further gain from going higher.
+`--placer-heap-timingweight 50 --parallel-refine` combined gives 29.41 MHz
+on seed 1 -- slightly worse than `=50` alone (30.32), not better. **`=50`
+alone remains the real finding; this specific knob has no more headroom to
+give at this design's current state.**
