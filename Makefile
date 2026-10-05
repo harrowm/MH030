@@ -162,6 +162,13 @@ $(SIM)/harte_p: rtlp/mh030p_top.sv rtlp/mh030p_cpu.sv rtlp/mh030p_arb.sv rtlp/mh
 # peripheral. This is the configuration that measures what the A4 contract
 # actually costs, so it needs BIU_SRCS as well as the rtlp sources -- but NOT
 # m68030_seq/eu/exc/mmu, since the pipelined core replaces all four.
+#
+# Stage 2 BIU fork (docs/mh030p_architecture.md section 8): rtlp/mh030p_biu.sv
+# and rtlp/mh030p_biu_cycle_gen.sv replace rtl/m68030_biu.sv and
+# rtl/biu_cycle_gen.sv here ONLY -- every other biu_*.sv submodule in
+# BIU_SRCS stays the rtl/ original, reused unchanged. rtl/'s own targets
+# (TOP_SRCS, biu_int, etc.) still use rtl/m68030_biu.sv/biu_cycle_gen.sv
+# directly via BIU_SRCS itself, untouched by this filter.
 MH030P_BIU_SRCS := rtlp/mh030p_biu_top.sv rtlp/mh030p_cpu.sv \
                    rtlp/mh030p_ifu.sv rtlp/mh030p_core.sv \
                    rtlp/mh030p_regfile.sv rtlp/mh030p_decode.sv \
@@ -169,7 +176,8 @@ MH030P_BIU_SRCS := rtlp/mh030p_biu_top.sv rtlp/mh030p_cpu.sv \
                    rtl/opcode_fields.sv rtl/eu_alu.sv rtl/eu_shifter.sv \
                    rtl/eu_mul_div.sv rtl/eu_bitops.sv rtl/eu_bcd.sv \
                    rtl/eu_bitfield.sv \
-                   rtl/m68030_biu.sv $(BIU_SRCS)
+                   rtlp/mh030p_biu.sv rtlp/mh030p_biu_cycle_gen.sv \
+                   $(filter-out rtl/biu_cycle_gen.sv,$(BIU_SRCS))
 
 $(SIM)/mh030p_biu: $(MH030P_BIU_SRCS) rtlp/mh030p_uop.svh \
                    tb/mh030p_biu_tb.sv | $(SIM)

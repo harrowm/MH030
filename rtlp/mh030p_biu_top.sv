@@ -237,7 +237,11 @@ module mh030p_biu_top #(
     assign mem_ack   = eu_ack_w    && !eu_ack_seen_r;
     assign if_ack    = ifu_ack_raw && !ifu_ack_seen_r;
 
-    m68030_biu #(
+    // Stage 2 BIU fork (docs/mh030p_architecture.md section 8): mh030p_biu
+    // (rtlp/mh030p_biu.sv), not rtl/'s own m68030_biu directly -- see that
+    // file's own header for exactly what's forked (just this wrapper plus
+    // biu_cycle_gen) versus reused unchanged from rtl/ (everything else).
+    mh030p_biu #(
         .RSTOUT_CLKS       (124),
         .TIMEOUT_CLKS      (128),
         .POWERON_RSTO_CLKS (POWERON_RSTO_CLKS)
