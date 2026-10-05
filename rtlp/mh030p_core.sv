@@ -618,6 +618,10 @@ module mh030p_core (
     // Declared here for the single always_ff that drives the memory port; the
     // comparison it depends on only exists once the ALU has run.
     wire cas_skip_wr;
+    // CAS's own compare result, latched one cycle after mem_got rather than
+    // read live from the ALU (Stage 3, docs/mh030p_architecture.md section
+    // 8) -- see the dedicated always_ff declaring these below for why.
+    reg  cas_cmp_done_r, cas_eq_r;
 
     // Register-file read data; declared here because the MOVEM sequencer
     // below repurposes the C port.
@@ -1609,7 +1613,20 @@ module mh030p_core (
                      // writing back whatever shf_result (still the shifter's
                      // stale/reset value) happened to hold -- which is how
                      // every memory-form shift ended up writing all-zero.
-                     && (!ex_is_shf || (shf_started && !shf_busy))) begin
+                     && (!ex_is_shf || (shf_started && !shf_busy))
+                     // Same shape, for CAS: cas_cmp_done_r (Stage 3, docs/
+                     // mh030p_architecture.md section 8) gates this branch
+                     // on the REGISTERED compare result landing one cycle
+                     // after mem_got, not the live ALU output -- the live
+                     // alu_z was feeding this SAME shared dispatch mux every
+                     // other instruction's own commit also uses, putting the
+                     // ALU's own combinational depth on the critical path
+                     // for instructions that aren't even CAS (confirmed by
+                     // direct -noflatten trace). !cas_skip_wr above already
+                     // reads cas_eq_r (registered), so this term only needs
+                     // to hold the branch off until that value actually
+                     // exists.
+                     && (!ex_is_cas || cas_cmp_done_r)) begin
             // Read captured: turn the same address around as a write of the
             // ALU result. The address is already in mem_addr, so only the
             // direction and data change.
@@ -2353,10 +2370,15 @@ module mh030p_core (
           (ex_uop.siz == UZ_BYTE) ? {ex_a_u[31:8],  mem_hold[7:0]}
         : (ex_uop.siz == UZ_WORD) ? {ex_a_u[31:16], mem_hold[15:0]}
                                   : mem_hold;
+    // alu_z read LIVE here (not cas_eq_r): this wire is purely the input to
+    // the registered decision below, never consumed directly by the shared
+    // mem_addr/mem_rw dispatch mux. cas_skip_wr/ex_commit/wb_writes all use
+    // cas_eq_r (the registered, one-cycle-later value) instead, which is
+    // the entire point of the fix -- see cas_cmp_done_r's own always_ff.
     wire cas_eq = alu_z;
-    assign cas_skip_wr = ex_is_cas && mem_got && !cas_eq;
+    assign cas_skip_wr = ex_is_cas && cas_cmp_done_r && !cas_eq_r;
 
-    assign ex_commit = ex_is_cas ? (cas_eq ? ex_sp : cas_rd_sized)
+    assign ex_commit = ex_is_cas ? (cas_eq_r ? ex_sp : cas_rd_sized)
                      : ex_movep_rd              ? mvp_result
                      : ex_movec_rd              ? movec_rd_val
                      : ex_is_bf                 ? bf_result
@@ -2408,8 +2430,9 @@ module mh030p_core (
                        || (ex_is_link && ex_uop.writes_reg)
                        || ex_movep_rd
                        // A CAS that did not match commits the operand into Dc
-                       // and writes no memory at all.
-                       || (ex_is_cas && mem_got && !cas_eq);
+                       // and writes no memory at all. cas_eq_r (registered),
+                       // not live cas_eq -- see cas_cmp_done_r's own always_ff.
+                       || (ex_is_cas && cas_cmp_done_r && !cas_eq_r);
             // MOVE <ea>,CCR and MOVE <ea>,SR write the status register
             // DIRECTLY, in EX. Letting the ordinary WB flag update run as well
             // would land a cycle later and overwrite the transferred value
@@ -2728,6 +2751,31 @@ module mh030p_core (
         end
     end
 
+    // CAS's own compare result (Stage 3, docs/mh030p_architecture.md
+    // section 8): latched one cycle after mem_got instead of read live from
+    // the ALU. A direct -noflatten critical-path trace found alu_z feeding
+    // cas_skip_wr, which gates a branch of the SAME shared always_ff that
+    // commits mem_addr/mem_rw for every other instruction too -- so the
+    // ALU's own combinational depth was bleeding into the dispatch path for
+    // instructions that aren't CAS at all. Structurally identical to
+    // trap_decided's own one-shot decision latch above, and to the
+    // memory-form shift's own (shf_started && !shf_busy) gate on the branch
+    // below: the real quantity (here, the compare) isn't ready in the same
+    // cycle as mem_got, so wait one more cycle rather than reading it live.
+    // Costs CAS one extra tick -- acceptable, the same trade this project
+    // already made for CHK/CMP2/TRAPcc's own exception decision.
+    always_ff @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n) begin
+            cas_cmp_done_r <= 1'b0;
+            cas_eq_r       <= 1'b0;
+        end else if (!stall_ex) begin
+            cas_cmp_done_r <= 1'b0;          // instruction leaving EX
+        end else if (ex_is_cas && mem_got && !cas_cmp_done_r) begin
+            cas_cmp_done_r <= 1'b1;
+            cas_eq_r       <= alu_z;
+        end
+    end
+
     always_ff @(posedge clk_4x or negedge rst_n) begin
         if (!rst_n) begin
             rmw_wr_issued <= 1'b0;
@@ -2744,9 +2792,12 @@ module mh030p_core (
             // blocking the real dispatch, since it also checks
             // !rmw_wr_issued, with no write ever landing and stall_ex never
             // clearing. Found as a real hang immediately after the dispatch
-            // branch's own shf_busy fix landed.
+            // branch's own shf_busy fix landed. The same agreement now also
+            // applies to cas_cmp_done_r (Stage 3): added for the identical
+            // reason, not independently re-derived.
             if (mem_got && !rmw_wr_issued
-                && (!ex_is_shf || (shf_started && !shf_busy))) begin
+                && (!ex_is_shf || (shf_started && !shf_busy))
+                && (!ex_is_cas || cas_cmp_done_r)) begin
                 rmw_wr_issued <= 1'b1;
                 // A CAS mismatch never issues the write, so it must retire the
                 // sequence here or the stall would never clear.

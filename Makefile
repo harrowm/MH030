@@ -600,6 +600,19 @@ bench: $(SIM)/cosim_grp $(SIM)/cosim_p $(SIM)/mh030p_biu tests/bench1.hex tests/
 	    +cycles=120000 +expected_d0=000007E0 2>&1 \
 	    | grep -E "^EXECCYCLES|^BUSTXN|D0 correct|^FAIL"
 
+# Dedicated CAS correctness regression for the Stage 3 fix
+# (docs/mh030p_architecture.md section 8): cas_eq/cas_skip_wr moved from a
+# live ALU read to a registered decision one cycle after mem_got. CAS has
+# zero Harte coverage (68020+-only) and tb/mh030p_core_tb.sv has no CAS case
+# at all, so this is the only regression this specific fix gets. Checks
+# D0=0 (both the match and mismatch cases' own Z flag, Dc and memory
+# outcomes) -- see tests/cas_stage3.s's own header for the exact cases.
+.PHONY: test-cas-stage3
+test-cas-stage3: $(SIM)/cosim_p tests/cas_stage3.hex
+	@$(VVP) $(SIM)/cosim_p +hexfile=tests/cas_stage3.hex +grp=cas_stage3 \
+	    +cycles=2000 +expected_d0=00000000 2>&1 \
+	    | grep -E "^EXECCYCLES|^PASS|^FAIL"
+
 .PHONY: cosim_p
 cosim_p: $(patsubst %,buscmp-p-%,$(PCOSIM_TARGETS))
 
