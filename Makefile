@@ -1242,6 +1242,53 @@ fmax-udec-rdsel:
 	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
 	    | grep -E "Max frequency"
 
+# Isolates stall_ex's own combinational cone (mh030p_core.sv), the real
+# RTL-confirmed gate feeding both `redirect` and mem_wdata's dispatch mux --
+# see tb/stall_ex_probe.sv for why this replaces the -noflatten hop-naming
+# guess. Same wrapper shape as fmax-extw.
+.PHONY: fmax-stall-ex
+fmax-stall-ex:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl tb/stall_ex_probe.sv > $(SIM)/stallex.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/stallex.v stall_ex_probe \
+	    wrap_fmax $(SIM)/stallex_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/stallex.v $(SIM)/stallex_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/stallex.json' -l $(SIM)/stallex_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/stallex.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
+# Isolates the ex_n/ex_z/ex_v/ex_c/ex_x flag-select mux's own cone
+# (mh030p_core.sv) -- see tb/ex_flags_probe.sv.
+.PHONY: fmax-ex-flags
+fmax-ex-flags:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl tb/ex_flags_probe.sv > $(SIM)/exflags.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/exflags.v ex_flags_probe \
+	    wrap_fmax $(SIM)/exflags_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/exflags.v $(SIM)/exflags_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/exflags.json' -l $(SIM)/exflags_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/exflags.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
+# Isolates the redirect/redirect_pc cone (mh030p_core.sv) -- see
+# tb/redirect_probe.sv.
+.PHONY: fmax-redirect
+fmax-redirect:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl tb/redirect_probe.sv > $(SIM)/redir.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/redir.v redirect_probe \
+	    wrap_fmax $(SIM)/redir_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/redir.v $(SIM)/redir_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/redir.json' -l $(SIM)/redir_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/redir.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
 # Fmax of the Stage 1 shallow ext_words_fast_o cone -- same wrapper shape as
 # fmax-extw, for a direct before/after comparison. See tb/extw_fast_probe.sv.
 .PHONY: fmax-extw-fast

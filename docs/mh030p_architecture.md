@@ -650,11 +650,30 @@ number alone.
 
 ### Stage 4 — routing locality
 
-Deferred until after 1-3: the A4 worst path currently splits ~74-80%
-routing / ~20-25% logic, but that's mostly a *symptom* of long combinational
-chains giving the placer nothing local to work with, not an independent
-problem. Revisit once Stages 1-3 have shortened the chains; floorplan
-constraints and re-checking ABC9 mapping choices belong here, not before.
+**Promoted from "deferred" to "the real next target" (2026-10-05).** A
+`-noflatten` trace after the `ea_idx_reg` fix reported a worst path inside
+`u_core` with hop names mentioning `bit_z`/`bf_c`/`shf_busy`/`redirect_pc`/
+`mem_wdata`, initially read as "branch-condition evaluation chains through
+every execution unit's flags." A direct RTL trace disproved that reading
+(`cond_true` reads the *registered* `ccr_live`, one cycle behind; no RTL
+wire connects `bf_c` to `shf_busy` or `stall_ex`) — **hop-by-hop signal
+names in a `-noflatten` report are not reliable evidence of real dataflow
+even within one module**, extending
+`feedback_flattened_attribution_needs_noflatten_crosscheck` (previously
+module-level only) to signal-level naming too. Three isolated probes built
+for the real RTL-confirmed candidates (`tb/stall_ex_probe.sv`,
+`tb/ex_flags_probe.sv`, `tb/redirect_probe.sv` — `make fmax-stall-ex`/
+`fmax-ex-flags`/`fmax-redirect`) all came back cheap: 187.79 / 153.68 /
+155.30 MHz (~5.3-6.8 ns), nowhere near the ~17-30 ns `ext_words`/
+`ea_idx_reg` actually cost. Combined with the raw hop log's own
+routing-dominated timing (0.24-0.26 ns logic vs 0.7-3.8 ns routing per
+hop), **no further logic-depth fix in this area is supported by
+measurement** — the real driver is routing/fanout/physical locality, i.e.
+exactly this Stage 4, now that Stages 1-3's cheap wins (`ext_words`, CAS
+latch, `ea_idx_reg`) are exhausted. See `plan.md`'s own dated entry for the
+full writeup. Floorplan constraints, relative placement directives, and
+re-checking ABC9 mapping choices are the open candidates here; none
+attempted yet.
 
 ### Stage 5 — re-decide the target against real measurements
 

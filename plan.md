@@ -6951,3 +6951,56 @@ sequential bit-field unit), and a bare state re-encoding is the same shape
 of change -- ABC9's own logic optimization typically erases source-level
 encoding choices during synthesis anyway, so it should not be assumed to
 help without first measuring what is actually on the critical path.
+
+### MH030-P: EX-stage critical-path investigation, Phase 0 — all three candidates cheap, stopping per plan (2026-10-05)
+
+Following the `ea_idx_reg` fix (27.45 -> 27.66 MHz, diminishing returns), a
+fresh `-noflatten` trace (2 seeds, consistent) found the worst path entirely
+inside `u_core`, with hop names mentioning `bit_z`/`bf_c`/`shf_busy`/
+`redirect_pc`/`mem_wdata`. Initially read as "branch-condition evaluation
+chains through every execution unit's flags" -- a dedicated fact-finding
+pass (full plan at `~/.claude/plans/golden-puzzling-music.md`) against the
+real RTL disproved that reading: `cond_true` reads `ccr_live`, which is
+`wb_upd_ccr ? wb_ccr : ccr_r` -- both **registered**, holding the *previous*
+instruction's already-committed flags. `bit_z`/`bf_c` feed only `ex_z`/
+`ex_c`'s mux, whose sole destination is `wb_ccr`'s own D-input (a register),
+not `cond_true` this same cycle. No RTL wire connects `bf_c` to `shf_busy`
+or to `stall_ex` either. **The hop-by-hop names in a `-noflatten` report are
+not reliable evidence of real RTL dataflow even within one module** --
+extending this project's own `feedback_flattened_attribution_needs_
+noflatten_crosscheck` lesson (previously module-level only) to signal/cell
+naming within a single module too.
+
+The one RTL-confirmed real route from a "slow unit" into both `redirect`
+and `mem_wdata`'s dispatch is `shf_busy` -> `ex_wait_shf` -> `ex_other_stall`
+-> `stall_ex`, which gates both. Built three isolated register-in/register-
+out probes (same pattern as `tb/extw_probe.sv`/`tb/udec_rdsel_probe.sv`),
+each reproducing the real expression verbatim from registered stand-in
+inputs:
+
+- `tb/stall_ex_probe.sv` (`make fmax-stall-ex`): **187.79 MHz, ~5.3 ns.**
+- `tb/ex_flags_probe.sv` (`make fmax-ex-flags`): **153.68 MHz, ~6.5 ns.**
+- `tb/redirect_probe.sv` (`make fmax-redirect`): **155.30 MHz, ~6.4 ns.**
+
+All three are cheap -- nowhere near the ~17-30 ns range `ext_words`/
+`ea_idx_reg`'s own isolated probes measured for the two fixes that actually
+worked this session. Also checked the `mem_wdata` always_ff's own 11-arm
+priority chain (lines ~1437-1666) by inspection: each condition is a single
+cheap term against an already-registered flag, the same shape `ext_words`'
+own 25-arm priority chain was already shown NOT to be the real cost for (a
+balanced `case` recovered only ~4 ns there) -- not expected to hide a 10+
+MHz opportunity, and not separately probed given that precedent.
+
+**Conclusion, per this plan's own stated exit criterion: stopping here.**
+None of the three real, RTL-confirmed candidates is individually expensive
+enough to explain the measured full-design hop costs. Combined with the raw
+hop log's own routing-dominated timing (0.24-0.26 ns logic vs 0.7-3.8 ns
+routing per hop, both seeds), the real driver is very likely
+**routing/fanout/physical locality (Stage 4 in `docs/
+mh030p_architecture.md` §8), not logic depth in any candidate this
+investigation could find** -- a genuinely different kind of fix (floorplan
+constraints, relative placement, or splitting `u_core` into smaller,
+independently-packable pieces) than anything this session's logic-level
+probes can diagnose further. No RTL behavior change from this entry (three
+new measurement-only probe files + Makefile targets only); `make test`
+43/43, `make lint-drivers` clean.
