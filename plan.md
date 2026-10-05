@@ -6829,3 +6829,43 @@ restructuring remains deferred since the BIU is still not the binding
 constraint (27.78 MHz standalone vs 27.45 MHz full design -- closer than
 before, but `u_dec`'s own ~22 ns is still the thing actually gating
 dispatch).
+
+### MH030-P Stage 3 investigation: u_dec's own depth isolated and profiled, ea_idx_reg found dominant (2026-10-04)
+
+New `tb/udec_rdsel_probe.sv` / `make fmax-udec-rdsel`, same register-in/
+register-out technique as `tb/extw_probe.sv`: isolates the chain the
+post-CAS-fix `-noflatten` trace found dominant (`u_dec`'s own
+classification through the register file's `rd_a_sel` address mux,
+stopping short of the regfile's own array read).
+
+**Measured: 57.71 MHz (~17.3 ns) in isolation** -- somewhat faster than
+the ~22 ns the full-design trace attributed to `u_dec`, consistent with
+real fan-out on `dec_uop`'s own many other consumers rather than a
+`-noflatten` DCE artifact. Profiled by driving the probe from
+progressively smaller sub-expressions (same technique that found
+`ext_words`' own real cost):
+
+| sub-expression | Fmax | ns |
+|---|---|---|
+| `uclass` alone | 149.37 MHz | ~6.7 |
+| `dst_reg` alone | 103.86 MHz | ~9.6 |
+| `src_reg` alone | 126.57 MHz | ~7.9 |
+| `ea_idx_reg` alone | 53.44 MHz | ~18.7 |
+| full `rd_a_sel` mux | 57.71 MHz | ~17.3 |
+
+**`ea_idx_reg` alone is nearly as expensive as the whole mux.** Traces to
+`sxw = xword(ea_slot_is_dst ? ew_dst_at : ew_lead, ew_tot)` in
+`mh030p_decode.sv` -- the same shape of cascading, per-family
+extension-word-position arithmetic that made `ext_words` itself expensive
+before Stage 1's shallow rewrite.
+
+**Not yet fixed.** A "shallow `ea_idx_reg`" shortcut (computed straight
+from raw bits in parallel with classification, mirroring
+`ext_words_fast()` exactly) is a comparable-scope undertaking to that
+entire Stage 1 rewrite -- new independent logic, a 65,536-opcode
+equivalence sweep, bit-exact verification before swap-in -- not a quick
+patch. Flagged for explicit scoping and sign-off before attempting. See
+`docs/mh030p_architecture.md` section 8 for the full writeup.
+
+No RTL changed this entry -- measurement only, mirroring `make test`/
+`make lint-drivers` confirmed unaffected (new standalone probe file).

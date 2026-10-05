@@ -1225,6 +1225,23 @@ fmax-extw:
 	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
 	    | grep -E "Max frequency"
 
+# Stage 3 (docs/mh030p_architecture.md section 8): isolates u_dec's own
+# classification cone through the register file's own rd_a_sel address
+# mux, the chain a -noflatten trace found dominant after the CAS latch fix
+# took u_alu off the critical path. Same technique as fmax-extw.
+fmax-udec-rdsel:
+	@mkdir -p $(SIM)
+	@sv2v -I rtlp -I rtl rtlp/mh030p_decode.sv rtl/opcode_fields.sv \
+	    tb/udec_rdsel_probe.sv > $(SIM)/udecrs.v
+	@python3 scripts/gen_fmax_wrapper.py $(SIM)/udecrs.v udec_rdsel_probe \
+	    wrap_fmax $(SIM)/udecrs_wrap.v
+	@$(YOSYS_OSS) -p 'read_verilog $(SIM)/udecrs.v $(SIM)/udecrs_wrap.v; \
+	    synth_lattice -family ecp5 -top wrap_fmax; \
+	    write_json $(SIM)/udecrs.json' -l $(SIM)/udecrs_yosys.log > /dev/null
+	@$(NEXTPNR_OSS) --85k --package CABGA381 --json $(SIM)/udecrs.json \
+	    --seed $(SEED) --freq 200 --timing-allow-fail 2>&1 \
+	    | grep -E "Max frequency"
+
 # Fmax of the Stage 1 shallow ext_words_fast_o cone -- same wrapper shape as
 # fmax-extw, for a direct before/after comparison. See tb/extw_fast_probe.sv.
 .PHONY: fmax-extw-fast

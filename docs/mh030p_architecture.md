@@ -573,12 +573,44 @@ This is structurally the identical shape of problem §4.2 already solved
 once for the FRONT decoder (`u_peek`) — a decoder being too deep — now
 exposed in the SOLE remaining decoder instance, once everything that used
 to sit alongside it (the second decoder, then the ALU detour) has been
-removed one layer at a time. **Not yet investigated and no probe built**;
-the right next step, per this project's own established discipline, is
-to isolate this specific cone (mirroring `tb/extw_probe.sv`'s technique)
-before guessing at a fix, the same way `ext_words`' own real cost (diffuse
-arithmetic, not the priority chain) was only found by measuring, not
-assuming.
+removed one layer at a time.
+
+**Isolated and profiled (2026-10-04, `tb/udec_rdsel_probe.sv`, `make
+fmax-udec-rdsel`)**: this cone — `u_dec`'s own classification through the
+register file's `rd_a_sel` address mux (the exact chain the `-noflatten`
+trace found, stopping just short of the regfile's own array read) —
+measures **57.71 MHz (~17.3 ns) in isolation**, somewhat faster than the
+~22 ns the full-design trace attributed to `u_dec`, consistent with real
+fan-out/loading on `dec_uop`'s own many other consumers in the full
+design rather than a `-noflatten` DCE artifact (the computation itself is
+genuinely most of the cost). Driving the probe from progressively smaller
+sub-expressions, the same technique that found `ext_words`' own real
+cost:
+
+| sub-expression | Fmax | ns |
+|---|---|---|
+| `uclass` alone | 149.37 MHz | ~6.7 |
+| `dst_reg` alone | 103.86 MHz | ~9.6 |
+| `src_reg` alone | 126.57 MHz | ~7.9 |
+| **`ea_idx_reg` alone** | **53.44 MHz** | **~18.7** |
+| full `rd_a_sel` mux | 57.71 MHz | ~17.3 |
+
+**`ea_idx_reg` alone is nearly as expensive as the entire mux** — it
+dominates. It traces to `sxw = xword(ea_slot_is_dst ? ew_dst_at :
+ew_lead, ew_tot)` in `mh030p_decode.sv`: the SAME shape of cascading,
+per-family extension-word-position arithmetic that made `ext_words`
+itself expensive before Stage 1's shallow rewrite — not a priority-chain
+inefficiency, real computed depth.
+
+**Not yet fixed.** The analogous fix — a "shallow `ea_idx_reg`" shortcut
+computed straight from raw opcode/extension-word bits in parallel with
+classification, rather than through the cascading `ew_lead`/`ew_dst_at`/
+`ew_tot` chain — is a comparable-scope undertaking to the entire
+`ext_words_fast()` rewrite from Stage 1 (new independent logic, a
+65,536-opcode equivalence sweep, bit-exact verification before swapping
+in), not a quick patch. Flagged for explicit scoping and sign-off before
+attempting, matching this project's own standing discipline for changes
+of this size.
 
 **Every further core-side split still costs ticks** (more pipeline stages
 = more latency per instruction), so each one must be judged on
