@@ -6782,3 +6782,50 @@ this re-ordering. The fork stays in place either way. See the "Stage 3"
 section there for the specific target (`instr_ready`'s own stall-gating
 tree, the unexpected `u_alu` detour needing its own trace before a split
 is designed).
+
+### MH030-P Stage 3 first fix: CAS compare latched, measured +Fmax, u_alu confirmed off critical path (2026-10-04)
+
+Root cause (found via direct `-noflatten` trace after Stage 1): `cas_eq =
+alu_z` (CAS's own live ALU-derived compare result) feeds `cas_skip_wr`,
+which gates a branch of the SAME shared `always_ff` that commits
+`mem_addr`/`mem_rw` for every instruction's own dispatch -- so the ALU's
+combinational depth was bleeding into the critical path for instructions
+that aren't even CAS.
+
+Fix (commit `e1404a2`): `cas_cmp_done_r`/`cas_eq_r` latch the compare
+result one cycle after `mem_got` instead of reading `alu_z` live,
+mirroring this file's own `trap_decided` and memory-form-shift `shf_busy`
+precedents exactly, including the matching gate needed in the
+`rmw_wr_issued`/`rmw_done` latch per an explicit prior-documented
+precedent about that exact failure mode (found once already for the
+shift case). New dedicated regression `tests/cas_stage3.s` (`make
+test-cas-stage3`, CAS has zero Harte coverage) confirms both match and
+mismatch stay correct and shows the expected +1-tick-per-CAS cost
+(161->163 EXECCYCLES for 2 back-to-back CAS instances). Full gate clean:
+`make test` 43/43, `make lint-drivers` clean, full Harte sweep
+bit-identical (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`), `make bench`
+all four arms unchanged (CAS isn't used by bench1/bench2).
+
+**Measured: 26.49 -> 27.45 MHz mean** (9 seeds: 26.65, 27.55, 27.70,
+28.68, 27.93, 27.90, 26.15, 28.50, 25.98; range 25.98-28.68) -- the whole
+range shifted upward versus the pre-fix 24.88-27.50, not just the mean, a
+real-looking improvement though still within the documented noise floor.
+A `-noflatten` cross-check (2 seeds, consistent: 26.40/25.98 MHz)
+confirms `u_alu` is genuinely gone from the critical path.
+
+**Next target, identified by direct measurement**: `u_ifu.instr` ->
+`u_core.u_dec` (~22 ns, ~58%, 44-46 hops, consistent both seeds) ->
+`u_core.u_rf` -- the SOLE remaining decoder's own classification depth,
+the same shape of problem already solved once for the front decoder
+(`u_peek`) before the Stage 1 merge, now exposed with nothing else
+stacked on top of it. Not yet investigated; no probe built. See
+`docs/mh030p_architecture.md` section 8 for the full writeup.
+
+**Session trajectory so far, mean values only**: 24.71 -> 27.36 MHz
+(prior session, Stage 1 `ext_words` rewrite) -> 26.49 MHz (this session,
+full decoder merge) -> 27.45 MHz (this session, CAS latch fix). Stage 2
+(BIU fork) is done with zero behavioural change; its own FSM depth
+restructuring remains deferred since the BIU is still not the binding
+constraint (27.78 MHz standalone vs 27.45 MHz full design -- closer than
+before, but `u_dec`'s own ~22 ns is still the thing actually gating
+dispatch).

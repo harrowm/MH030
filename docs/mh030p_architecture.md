@@ -364,10 +364,30 @@ already confirmed the depth is real, not inflated). See
   apparently unreachable without addressing this core-internal chain
   first. This is closer to Stage 3's own territory (core-side AG/EX/CCR
   pipelining) than Stage 2 (the BIU). See §8's own updated staging note.
+- **A4, flattened, tracked sweep, POST-Stage-3-CAS-fix (2026-10-04, commit
+  `e1404a2`)**: **27.45 MHz mean** (9 seeds: 26.65, 27.55, 27.70, 28.68,
+  27.93, 27.90, 26.15, 28.50, 25.98; range 25.98-28.68) — up from the
+  26.49 MHz pre-fix mean, and notably the WHOLE range shifted upward (old
+  min 24.88 → new min 25.98), not just the mean — a real-looking
+  improvement, though still within shouting distance of the documented
+  ~1-2 MHz noise floor for this sweep.
+- **A4, `-noflatten`, POST-Stage-3-CAS-fix (2 seeds, consistent: 26.40 MHz
+  seed 4 / 25.98 MHz seed 1)**: **`u_core.u_alu` is confirmed GONE from the
+  critical path** — the fix worked exactly as designed. The worst path is
+  now `u_ifu.instr` → `u_core.u_dec` (21.82-22.61 ns, 57.6-58.7% of the
+  total, 44-46 hops — the real decoder's own classification depth, with
+  nothing else now stacked on top of it) → `u_core` → `u_core.u_rf.rd_a_data`.
+  This is structurally the SAME shape of problem §4.2 already solved for
+  the front decoder (`u_peek`) before the Stage 1 merge — a decoder being
+  too deep — now showing up in the SOLE remaining decoder instance, once
+  everything else that used to sit in front of or alongside it (the second
+  decoder instance, then the ALU) has been removed. Not yet investigated;
+  no probe built.
 - **The reused BIU, standalone, no core at all** (`m68030_biu` alone):
   **27.78 MHz `clk_4x`** (1 seed, 2026-09-28, not yet re-measured this
   session). Still the eventual ceiling once the core-internal chain above
-  is addressed, just not the CURRENT binding constraint.
+  is addressed, just not the CURRENT binding constraint — `u_dec`'s own
+  ~22 ns is still well short of it.
 - **Abstract-bus `mh030p_top`** (no real BIU, no caches — the config the
   pipeline itself was tuned against): 29.16 MHz with the sequential
   shifter; this is a different, smaller design than A4, has no real
@@ -512,36 +532,58 @@ unlocks the single largest estimated single-item win in this whole plan;
 saying no caps the realistic ceiling at whatever Stages 1-2-3-4 reach on
 protocol-timing alone (see §9).
 
-### Stage 3 — the core's own `instr_ready`→`mem_addr` chain — NEXT, moved up
+### Stage 3 — core-internal critical paths — first fix DONE, next target identified
 
-Splitting AG into address-mux-then-adder and EX into operand-select-then-
-ALU/shifter/BCD/bitfield, giving the CCR/flag network its own stage. The
-AG/EX EA-adder split (§4.1) is a first, real instance of this — done, but
-measured flat, because (as now confirmed) it wasn't the dominant cost at
-the time. **The original plan demoted this stage below Stage 2b on the
-assumption the BIU would already be binding by this point — that
-assumption did not hold (§7.1), so this stage is promoted ahead of
-Stage 2's FSM work instead**, by direct user decision.
+The original plan's own "split AG into address-mux-then-adder, split EX
+into operand-select-then-ALU/shifter/BCD/bitfield" framing. The AG/EX
+EA-adder split (§4.1) was a first instance, done earlier but measured
+flat since it wasn't the dominant cost at the time. **The original plan
+demoted this stage below Stage 2b on the assumption the BIU would already
+be binding by this point — that assumption did not hold (§7.1), so this
+stage was promoted ahead of Stage 2's FSM work instead**, by direct user
+decision.
 
-**The specific target, now identified by direct measurement rather than
-estimate**: `instr_ready` (the AG/EX stall-gating decision in
-`mh030p_core.sv`) → a detour through `u_alu` → `mem_addr` (the registered
-bus-dispatch address), confirmed consistent across two `-noflatten` seeds
-(§7.1). `instr_ready` is `!stall_ex && !stall_ag`, which itself depends on
-`ag_base_busy`, every `ex_wait_*` term, and the exception/stall state —
-a wide OR/AND tree gating whether the NEXT instruction's own dispatch
-(including `mem_addr`'s own write-enable) can proceed. The `u_alu` detour
-is unexpected and needs tracing before any split is designed — it is not
-obviously on the stall-decision's own critical dependency path, so
-confirming WHY it's in this specific chain (rather than assuming) is the
-right first step, matching this project's own "verify, don't guess"
-discipline.
+**First concrete fix: DONE and measured (2026-10-04, commit `e1404a2`).**
+Direct `-noflatten` trace found `instr_ready` → a detour through `u_alu`
+→ `mem_addr`, root-caused to `cas_eq = alu_z` (CAS's own live ALU-derived
+compare result) feeding `cas_skip_wr`, which gates a branch of the SAME
+shared `always_ff` that commits `mem_addr`/`mem_rw` for every
+instruction's own dispatch — so the ALU's combinational depth was
+bleeding into the critical path for instructions that aren't even CAS.
+Fixed by latching the compare result one cycle after `mem_got`
+(`cas_cmp_done_r`/`cas_eq_r`), mirroring this file's own existing
+`trap_decided` and memory-form-shift `shf_busy` precedents exactly,
+including the matching gate needed in the `rmw_wr_issued`/`rmw_done`
+latch per an explicit prior-documented precedent about that exact failure
+mode. New dedicated regression (`tests/cas_stage3.s`, `make
+test-cas-stage3` — CAS has zero Harte coverage) confirms both match and
+mismatch cases stay correct and shows the expected +1-tick-per-CAS cost.
+Full gate clean (`make test` 43/43, `make lint-drivers` clean, Harte
+bit-identical, `make bench` unchanged — CAS isn't used by bench1/bench2).
 
-**This still costs ticks (more pipeline stages = more latency per
-instruction)**, so it must be judged on `Fmax / ticks` via `make bench`
-alongside every sweep, never on the clock number alone — exactly as the
-original plan intended, just reordered ahead of Stage 2's FSM work rather
-than after it.
+**Measured**: 26.49 → **27.45 MHz mean** (9 seeds, range shifted entirely
+upward: 24.88-27.50 → 25.98-28.68). A `-noflatten` cross-check (2 seeds,
+consistent) confirms `u_alu` is genuinely gone from the critical path —
+the fix worked exactly as intended.
+
+**Next target, identified not guessed**: with the ALU gone, the worst
+path is now `u_ifu.instr` → `u_core.u_dec` (~22 ns, ~58% of the total,
+44-46 hops, consistent across both `-noflatten` seeds) → `u_core.u_rf`.
+This is structurally the identical shape of problem §4.2 already solved
+once for the FRONT decoder (`u_peek`) — a decoder being too deep — now
+exposed in the SOLE remaining decoder instance, once everything that used
+to sit alongside it (the second decoder, then the ALU detour) has been
+removed one layer at a time. **Not yet investigated and no probe built**;
+the right next step, per this project's own established discipline, is
+to isolate this specific cone (mirroring `tb/extw_probe.sv`'s technique)
+before guessing at a fix, the same way `ext_words`' own real cost (diffuse
+arithmetic, not the priority chain) was only found by measuring, not
+assuming.
+
+**Every further core-side split still costs ticks** (more pipeline stages
+= more latency per instruction), so each one must be judged on
+`Fmax / ticks` via `make bench` alongside every sweep, never on the clock
+number alone.
 
 ### Stage 4 — routing locality
 
