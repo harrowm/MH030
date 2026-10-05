@@ -1555,11 +1555,94 @@ EA-adder split" section for the full writeup, including the original
 (now-retracted) claim, the cross-check, and why `ext_words_fast_full_o`'s
 remaining cost isn't actionable by Stage 1's own technique a second time.
 
+**Session of 2026-10-05: Stage 3 closed (ea_idx_reg), EX-stage branch/flag
+logic investigated and found NOT the bottleneck, Stage 4 (physical
+placement) opened and yields the session's biggest win.** Three items, in
+order:
+
+1. **Stage 3's last decoder-depth fix, `ea_idx_reg_fast_o`** (mirrors the
+   `ext_words` shallow-rewrite shape from Stage 1): `rd_a_sel`/`rd_c_sel`
+   in `mh030p_core.sv` read `dec_uop.ea_idx_reg` (slow, cascading through
+   `ew_lead`/`ew_dst_at`/`ew_tot`) directly; replaced with a shallow
+   `ea_idx_reg_fast_o` in `mh030p_decode.sv` reusing Stage 1's own
+   `fff_lead`/`fff_dstat`/`ext_words_fast_full_o` infrastructure. Two real
+   bugs found and fixed while driving the equivalence sweep to bit-
+   exactness across EVERY opcode (not just already-indexed ones, the gap
+   that let both through at first): an ungated computation leaking
+   extension-word bits into non-indexed opcodes (architecturally dead on
+   every path Harte/bench exercise, but wrong by construction), then a
+   wrong mode signal (`fff_deam`, the SEPARATE mem-to-mem `dst_ea_mode`
+   field, instead of `fff_eam`). Full gate clean, Harte bit-identical.
+   **Measured: 27.45 -> 27.66 MHz mean (9 seeds), a small, diminishing-
+   returns win** (`ext_words` +2.65 > CAS latch +0.96 > this +0.21) --
+   user-directed stop on this line of attack ("we need to move by 10+
+   MHz") in favor of a bigger structural target.
+
+2. **A `-noflatten` trace's hop NAMES led to a wrong hypothesis, caught
+   before any RTL change.** The trace reported a worst path inside
+   `u_core` naming `bit_z`/`bf_c`/`shf_busy`/`redirect_pc`/`mem_wdata`,
+   read as "branch-condition evaluation chains through every execution
+   unit's flags." Direct RTL inspection disproved it: `cond_true` reads
+   the REGISTERED `ccr_live` (`wb_ccr`/`ccr_r`, one cycle behind), not a
+   live same-cycle value, and no RTL wire connects `bf_c` to `shf_busy` or
+   `stall_ex` at all. Three isolated probes built for the real candidates
+   (`tb/stall_ex_probe.sv`, `tb/ex_flags_probe.sv`, `tb/redirect_probe.sv`
+   -- `make fmax-stall-ex`/`fmax-ex-flags`/`fmax-redirect`) all measured
+   cheap (5.3-6.8 ns), confirming the hop names were a synthesis-naming
+   artifact. **Generalizes `feedback_flattened_attribution_needs_
+   noflatten_crosscheck` past cross-module attribution: even a
+   `-noflatten` report's per-hop SIGNAL names, within a single module, are
+   not reliable evidence of real dataflow** -- read the RTL and build an
+   isolated probe before designing a fix from a hop-by-hop name sequence,
+   no matter how clean the story looks.
+
+3. **Stage 4 (physical placement), the session's real win, opened per
+   explicit user direction** ("goto phase 4 .. we are so far away from
+   target .. I can't use the core at all .. don't offer to stop"). Two
+   nextpnr Python region-constraint strategies (API confirmed live and
+   working via a sanity check) both FAILED: a connectivity-traced cut of
+   the smallest real target (`u_core` cells with a direct net connection
+   to either cache BRAM's own pins -- cell names do not survive this
+   flattened netlist's ABC9 renaming at all, a "mem_" substring search
+   across `u_core`'s ~37k cells returns zero hits, so connectivity tracing
+   via `net.driver`/`net.users` was required, not name matching; even the
+   narrowest real cut, direct connections only, is 1,979 of 37,150 `u_core`
+   cells and explodes to 85% within 3 hops) legalized fine but measured
+   consistently WORSE (26.85 vs 27.64 MHz, 3 seeds); a coarser `u_core`/
+   `u_biu` two-zone split (proportional to each module's own ~55%/~45%
+   share of real logic cells) FAILED TO LEGALIZE outright (a CCU2C carry-
+   chain cell had no legal placement after 123M attempts). Root cause:
+   `u_core` is 52-57% of the whole design's real logic -- too large and
+   internally interconnected for an artificial area boundary at either
+   granularity tried. A sibling gotcha found along the way, worth knowing
+   for any future attempt: ECP5's PFUMX/L6MUX21 fuse two sibling LUT4
+   cells into one hardwired slice-level mux, so constraining an arbitrary
+   subset that splits such a pair is infeasible -- any manual selection
+   must include whole connected groups. **What worked instead:
+   `nextpnr-ecp5 --placer-heap-timingweight 50`** (default 10), a pure
+   placer-parameter flag, zero RTL risk. 9-seed sweep (new `make
+   fmax-pbiu-tuned-sweep` target, `PLACERFLAGS` Makefile variable):
+   **29.30 MHz mean (range 27.64-30.32) vs 27.66 MHz baseline -- +1.64
+   MHz, confirmed real** (whole range shifted upward, the same signature
+   used to validate every other real fix this project has found).
+   Saturates at `=100` (no further gain); combining with
+   `--parallel-refine` measures slightly worse. See `[[feedback_region_
+   constraints_vs_placer_tuning]]` (project memory) for the full
+   generalizable lesson, and `docs/mh030p_architecture.md` section 8 /
+   `plan.md`'s 2026-10-05 entries for the complete numeric writeup.
+   **Current best measured A4 Fmax: 29.30 MHz, 3.41x short of the 100 MHz
+   target** (was 4.05x at the programme's start). Open: other placer/
+   router flags beyond the two checked; genuinely reducing `u_core`'s own
+   absolute logic volume (a separate, larger RTL undertaking needing its
+   own fresh scoping). **User's standing instruction: keep going, do not
+   suggest stopping or declaring the current number "good enough."**
+
 **Current state**: `make test` 43/43, `make lint-drivers` clean, `make
 cosim_grp` 8/8, `make cosim_memind` 33/33, `make dat-synth` 50/50, `make bench`
 all four arms passing (two `rtl/` + two `rtlp` A4, see the table above),
-`make fmax-pbiu-sweep` 27.25 MHz (9 seeds; the real worst-path driver is
-`u_peek`, not `u_core` or the cache -- see the correction above), `make
+`make fmax-pbiu-tuned-sweep SEEDS=9` (with `--placer-heap-timingweight 50`)
+29.30 MHz mean, 9 seeds -- the current best measured A4 number, see the
+2026-10-05 session summary immediately above for the full path there. `make
 fmax-extw` 41.70 MHz (one cone,
 see the 100 MHz programme note below -- the 100 MHz target is open, not closed). Full 124-suite Tom Harte sweep **for `rtl/`**: `PASS 702142 FAIL 2` (the documented
 ASL.b corpus anomaly) `SKIP 281221 TIMEOUT 0`, unchanged since Phase 112 (only the SKIP/PASS
