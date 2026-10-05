@@ -343,25 +343,38 @@ already confirmed the depth is real, not inflated). See
 
 ### 7.1 Fmax
 
-- **A4 (`mh030p_biu_top`), flattened, tracked sweep**: **27.25 MHz `clk_4x`
-  mean** (9 seeds, range 25.10-29.33) — **~6.8 MHz real-bus-equivalent**
-  (§2) — effectively flat against the prior 27.36 MHz baseline (Stage 1's
-  own win), inside the documented ~1-2 MHz noise floor for this sweep.
-- **A4, `-noflatten` (2 seeds, cross-check only, not the tracked metric)**:
-  ~23.4 MHz both seeds, worst path consistently `u_ifu → u_peek → u_ifu →
-  u_core.u_dec → u_core → u_core.u_rf` — i.e. §4.2's two-decoder chain,
-  still present, still dominant, matching the 2026-09-28 investigation's
-  own already-published ~20-24 ns isolated cost for this exact cone.
+- **A4 (`mh030p_biu_top`), flattened, tracked sweep, POST-Stage-1
+  (2026-10-04, commit `e06c722`)**: **26.49 MHz `clk_4x` mean** (9 seeds,
+  range 24.88-27.50) — **~6.6 MHz real-bus-equivalent** (§2) — flat to
+  slightly down against the pre-Stage-1 27.25 MHz baseline, inside the
+  documented ~1-2 MHz noise floor. **Stage 1 (merging the two decoder
+  instances) did not move the tracked mean measurably.**
+- **A4, `-noflatten`, POST-Stage-1 (2 seeds, cross-check, not the tracked
+  metric)**: 23.57 MHz (seed 4) / 23.65 MHz (seed 1) — consistent across
+  both seeds. **The worst path is no longer the two-decoder chain** (§4.2's
+  `u_peek`/`u_dec` chain is gone, confirmed structurally and in this
+  measurement). **It is now entirely internal to `u_cpu.u_core`**: `
+  instr_ready` (the AG/EX stall-gating decision) → a detour through
+  `u_core.u_alu` → back into `u_core`'s own logic → `mem_addr` (the
+  registered bus-dispatch address), 65 hops, ~83-84% attributed to
+  `u_core` itself. **This directly contradicts the 2026-09-28 plan's own
+  prediction that the BIU's 27.78 MHz standalone ceiling would bind almost
+  immediately after Stage 1** — it has not: the core itself is still the
+  binding constraint, with real headroom below the BIU's own ceiling
+  apparently unreachable without addressing this core-internal chain
+  first. This is closer to Stage 3's own territory (core-side AG/EX/CCR
+  pipelining) than Stage 2 (the BIU). See §8's own updated staging note.
 - **The reused BIU, standalone, no core at all** (`m68030_biu` alone):
-  **27.78 MHz `clk_4x`** (1 seed, 2026-09-28). This is the number that
-  matters most for what's next — see §8.
+  **27.78 MHz `clk_4x`** (1 seed, 2026-09-28, not yet re-measured this
+  session). Still the eventual ceiling once the core-internal chain above
+  is addressed, just not the CURRENT binding constraint.
 - **Abstract-bus `mh030p_top`** (no real BIU, no caches — the config the
   pipeline itself was tuned against): 29.16 MHz with the sequential
   shifter; this is a different, smaller design than A4, has no real
   external bus to convert against, and is not directly comparable to the
   numbers above.
 - **100 MHz `clk_4x` (25 MHz bus-equivalent, §2) is the real target and
-  has not been met.** The current build is ~3.7x short of it.
+  has not been met.** The current build is ~3.8x short of it.
 
 ### 7.2 Area (real, `-noflatten`, A4 configuration — `make area-pbiu`)
 
@@ -410,26 +423,35 @@ moved to other priorities (a correctness pass, then the AG/EX split) before
 reaching its own Stage 2. Restated here as the current roadmap, with status
 updated for everything that's happened since.
 
-**The central fact, unchanged since 2026-09-28**: the reused BIU's own
+**The central fact as understood on 2026-09-28**: the reused BIU's own
 standalone ceiling is **27.78 MHz `clk_4x`**, measured with no core
-attached at all. The current full A4 design measures **27.25 MHz** — i.e.
-**the core has already caught up to within 2% of the BIU's own limit.**
-This is the single most important number in this document: it means no
-amount of further core-side optimisation (decoder merge, deeper pipelining,
-anything in §4-§6) can gain more than about half a MHz before the BIU
-itself becomes the hard wall. Reaching 100 MHz is arithmetically impossible
-without raising that 27.78 MHz ceiling, full stop.
+attached at all, and the pre-Stage-1 A4 design measured 27.25 MHz, within
+2% of it — so the BIU was expected to bind almost immediately once the
+core-side decoder cost was removed. **This has not held up.**
 
-### Stage 1 — the decoder merge (§4.2) — scoped, not built
+### Stage 1 — the decoder merge (§4.2) — DONE (2026-10-04, commit `e06c722`)
 
-Expected ceiling if done alone, per the original investigation: **~28 MHz**
-— because the BIU binds immediately afterward. Worth doing regardless,
-because it removes a real, quantified ~19 ns structural cost and because
-every later stage needs the front end not to be the thing reintroducing a
-bottleneck once the BIU is faster. **Not sufficient by itself; do not
-expect this stage alone to move the tracked number much**, per its own
-2026-09-28 estimate, now corroborated by this session's `-noflatten`
-finding that it's still exactly as costly as predicted.
+Implemented as scoped: `u_peek` deleted, `mh030p_decode` normalises `ext`
+internally. Found and fixed two real, previously-latent decode bugs the
+merge exposed (MOVES direction never checked; bit-field register field
+read 4 bits instead of 3) — see §4.2 and the commit message. Full
+verification gate clean (`make test` 43/43, Harte bit-identical, `make
+bench` EXECCYCLES unchanged on all four arms).
+
+**Measured result: 26.49 MHz mean (9 seeds), flat to slightly down versus
+the 27.25 MHz pre-Stage-1 baseline — not the ~28 MHz the 2026-09-28
+estimate predicted, and the reason is itself the important finding.** A
+`-noflatten` cross-check (2 seeds, consistent) shows the two-decoder chain
+is genuinely gone, exactly as designed — but **the BIU did NOT become the
+new binding constraint**. The real worst path is entirely internal to
+`u_cpu.u_core`: `instr_ready` (the AG/EX stall-gating decision) → a detour
+through `u_core.u_alu` → `mem_addr` (the registered bus-dispatch address).
+See §7.1 for the full measurement. **The 2026-09-28 plan's own sequencing
+(decoder merge, then the BIU) was reasoned from the BEST EVIDENCE
+AVAILABLE AT THE TIME, and that evidence has now been superseded by a
+direct measurement** — the core's own stall/dispatch logic, not the BIU,
+is what's currently binding, which points at Stage 3's own territory
+(core-side AG/EX/CCR pipelining) rather than Stage 2.
 
 ### Stage 2 — fork the BIU into `rtlp/`, then cut `biu_cycle_gen`'s FSM depth
 
@@ -451,10 +473,19 @@ registered one tick later than its triggering state, with the state
 sequence itself unchanged, is still protocol-exact. This is a genuinely
 different category of change from Stage 2b below.
 
-Expected ceiling, per the original estimate: Stages 1-2 together reach
-**30-40 MHz**. This is the next concrete, scoped piece of work, and it is
-the first one that actually attacks the real current ceiling rather than
-something already below it.
+**Status note (2026-10-04, post-Stage-1 measurement): proceeding to this
+stage next per the user's own explicit sequencing instruction ("start
+phase 1 then move to 2 and 3"), not because fresh measurement currently
+points at the BIU** — §7.1's own finding shows the core, not the BIU, is
+the current binding constraint, which argues for Stage 3 on the evidence
+alone. Forking the BIU is still real, necessary, already-decided work
+(Stage 2b and any future BIU-side fix depend on the fork existing first),
+so doing it now is not wasted even though it will not move the tracked
+Fmax number until the core-side chain found in Stage 1's own measurement
+is also addressed. The original "Stages 1-2 reach 30-40 MHz" estimate
+should be read with this caveat: it assumed the BIU would already be
+binding by this point, which this session's own measurement shows is not
+yet true.
 
 ### Stage 2b — synchronous-termination (STERM) fast path — NEEDS EXPLICIT SIGN-OFF
 

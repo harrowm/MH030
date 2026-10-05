@@ -6694,3 +6694,66 @@ breaking its same-cycle serial dependency on `u_ifu`'s own drain decision
 prefetch-queue word, genuinely retiming rather than just cheapening the
 arithmetic), is a materially different kind of change than Stage 1's own
 shallow-decoder rewrite and has not been scoped.
+
+### MH030-P Stage 1 decoder merge IMPLEMENTED and MEASURED (2026-10-04, commit `e06c722`)
+
+Resumes the staged 100 MHz plan from the 2026-09-28 checkpoint above, per
+the user's explicit instruction after reframing 100 MHz as the real target
+(not a stretch goal -- see `docs/mh030p_architecture.md` section 2):
+"start phase 1 then move to 2 and 3. after each stage, test, measure and
+commit." Full writeup lives in `docs/mh030p_architecture.md` sections 4.2,
+7.1 and 8; this entry is the dated pointer.
+
+**Implemented as scoped**: deleted `mh030p_cpu.sv`'s own `u_peek`
+`mh030p_decode` instance (which existed solely to compute `ext_words` one
+cycle ahead of the real decoder -- two full decoder passes per clock).
+`mh030p_decode.sv` now computes `ext_words_fast_full_o` first and
+normalises its own `ext` internally from it, so the module needs no
+external `ext` input at all. `mh030p_core.sv` exposes `u_dec`'s own
+`ext_words_fast_full_o` as a new output (`dec_ext_words_o`) so
+`mh030p_cpu.sv` can still compute `have_all`/`drain` without a second
+decoder instance -- not a combinational loop, since that signal depends
+only on `instr`/`ext_raw`/`q3`/`q4`, never on `instr_valid`.
+
+**Two real, previously-latent decode bugs found and fixed**, exposed by
+the merge once a testbench inconsistency (`tb/uop_decode_equiv_tb.sv`
+feeding `u_new` and the reference decoder two DIFFERENT un-normalised
+`ext` values that happened to agree by coincidence before the merge) was
+itself fixed: MOVES direction (`ext[11]`) was never checked --
+`writes_reg` was hardcoded to 1 unconditionally, so a store-direction
+MOVES (Rn->ea) was mis-reported as writing a register; and bit-field's own
+register-field read the full `ext[15:12]` (4 bits, bleeding in bit 15 as
+if it were a MOVEC/MOVES-style D/A selector, a wrong generalisation this
+file's own header comment had asserted) instead of the Dn-only 3-bit field
+the reference always uses. A third, separate, pre-existing gap (UC_MMU's
+own sub-opcode validity never checked against the extension word) was
+found, documented, and excluded from the equivalence sweep rather than
+fixed, since it is unrelated to the merge and its own scope.
+
+**Full gate clean**: `make test` 43/43, `make lint-drivers` clean,
+`tb/uop_decode_equiv_tb.sv` 0 mismatches, full 124-suite Harte sweep
+bit-identical to baseline (`PASS 702142 FAIL 2 SKIP 281221 TIMEOUT 0`),
+`make bench` all four arms with `EXECCYCLES` byte-identical to before
+(23665/8929/6617/24294/8751) -- confirming zero behavioural change.
+
+**Measured: 26.49 MHz mean (9 seeds, range 24.88-27.50), flat to slightly
+down versus the 27.25 MHz pre-Stage-1 baseline.** This is NOT the ~28 MHz
+the 2026-09-28 estimate predicted, and a `-noflatten` cross-check (2
+seeds, consistent: 23.57/23.65 MHz) shows why: the two-decoder chain is
+genuinely gone from the critical path, exactly as designed, but **the
+reused BIU did not become the new binding constraint the way the
+2026-09-28 plan expected.** The real worst path is now entirely internal
+to `u_cpu.u_core`: `instr_ready` (the AG/EX stall-gating decision) →
+`u_core.u_alu` → `mem_addr` (the registered bus-dispatch address), 65
+hops, ~83-84% attributed to `u_core` across both seeds. This points at
+Stage 3's own territory (core-side AG/EX/CCR pipelining), not Stage 2 (the
+BIU) -- a real, measured contradiction of the earlier plan's own
+sequencing rationale, recorded here rather than silently overridden.
+
+**Proceeding to Stage 2 next regardless**, per the user's own explicit,
+already-given sequencing instruction, not because fresh measurement
+currently points at the BIU -- forking the BIU is still necessary,
+already-decided work that Stage 2b and any future BIU-side fix depend on,
+so it is not wasted even though it will not move the tracked Fmax number
+until the core-internal chain found here is also addressed. See
+`docs/mh030p_architecture.md` section 8 for the full staging note.
